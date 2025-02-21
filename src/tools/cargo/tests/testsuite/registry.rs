@@ -863,11 +863,10 @@ fn relying_on_a_yank_is_bad_http() {
     relying_on_a_yank_is_bad(str![[r#"
 [UPDATING] `dummy-registry` index
 [ERROR] failed to select a version for the requirement `baz = "=0.0.2"`
-candidate versions found which didn't match: 0.0.1
+  version 0.0.2 is yanked
 location searched: `dummy-registry` index (which is replacing registry `crates-io`)
 required by package `bar v0.0.1`
     ... which satisfies dependency `bar = "*"` of package `foo v0.0.1 ([ROOT]/foo)`
-perhaps a crate was updated and forgotten to be re-vendored?
 
 "#]]);
 }
@@ -877,11 +876,10 @@ fn relying_on_a_yank_is_bad_git() {
     relying_on_a_yank_is_bad(str![[r#"
 [UPDATING] `dummy-registry` index
 [ERROR] failed to select a version for the requirement `baz = "=0.0.2"`
-candidate versions found which didn't match: 0.0.1
+  version 0.0.2 is yanked
 location searched: `dummy-registry` index (which is replacing registry `crates-io`)
 required by package `bar v0.0.1`
     ... which satisfies dependency `bar = "*"` of package `foo v0.0.1 ([ROOT]/foo)`
-perhaps a crate was updated and forgotten to be re-vendored?
 
 "#]]);
 }
@@ -924,7 +922,8 @@ fn yanks_in_lockfiles_are_ok_http() {
 "#]],
         str![[r#"
 [UPDATING] `dummy-registry` index
-[ERROR] no matching package named `bar` found
+[ERROR] failed to select a version for the requirement `bar = "*"`
+  version 0.0.1 is yanked
 location searched: `dummy-registry` index (which is replacing registry `crates-io`)
 required by package `foo v0.0.1 ([ROOT]/foo)`
 
@@ -941,7 +940,8 @@ fn yanks_in_lockfiles_are_ok_git() {
 "#]],
         str![[r#"
 [UPDATING] `dummy-registry` index
-[ERROR] no matching package named `bar` found
+[ERROR] failed to select a version for the requirement `bar = "*"`
+  version 0.0.1 is yanked
 location searched: `dummy-registry` index (which is replacing registry `crates-io`)
 required by package `foo v0.0.1 ([ROOT]/foo)`
 
@@ -993,7 +993,8 @@ fn yanks_in_lockfiles_are_ok_for_other_update_http() {
 "#]],
         str![[r#"
 [UPDATING] `dummy-registry` index
-[ERROR] no matching package named `bar` found
+[ERROR] failed to select a version for the requirement `bar = "*"`
+  version 0.0.1 is yanked
 location searched: `dummy-registry` index (which is replacing registry `crates-io`)
 required by package `foo v0.0.1 ([ROOT]/foo)`
 
@@ -1016,7 +1017,8 @@ fn yanks_in_lockfiles_are_ok_for_other_update_git() {
 "#]],
         str![[r#"
 [UPDATING] `dummy-registry` index
-[ERROR] no matching package named `bar` found
+[ERROR] failed to select a version for the requirement `bar = "*"`
+  version 0.0.1 is yanked
 location searched: `dummy-registry` index (which is replacing registry `crates-io`)
 required by package `foo v0.0.1 ([ROOT]/foo)`
 
@@ -2914,7 +2916,9 @@ fn ignore_invalid_json_lines_git() {
 
 fn ignore_invalid_json_lines() {
     Package::new("foo", "0.1.0").publish();
-    Package::new("foo", "0.1.1").invalid_json(true).publish();
+    Package::new("foo", "0.1.1")
+        .invalid_index_line(true)
+        .publish();
     Package::new("foo", "0.2.0").publish();
 
     let p = project()
@@ -2936,6 +2940,103 @@ fn ignore_invalid_json_lines() {
         .build();
 
     p.cargo("check").run();
+}
+
+#[cargo_test]
+fn invalid_json_lines_error() {
+    Package::new("foo", "0.1.0")
+        .rust_version("1.0")
+        .schema_version(2)
+        .publish();
+    Package::new("foo", "0.1.1")
+        // Bad name field, too corrupt to use
+        .invalid_index_line(true)
+        .publish();
+    Package::new("foo", "0.1.2")
+        // Bad version field, too corrupt to use
+        .index_line(
+            r#"{"cksum":"7ca5fc2301ad96ade45356faf53225aea36437d99930bbfa951155c01faecf79","deps":[],"features":{},"links":null,"name":"foo","vers":"bad","yanked":false,"rust_version":"1.2345","v":1000000000}"#,
+        )
+        .publish();
+    Package::new("foo", "0.1.3")
+        // Bad field, report rust version
+        .index_line(
+            r#"{"cksum":"7ca5fc2301ad96ade45356faf53225aea36437d99930bbfa951155c01faecf79","deps":[],"features":"bad","links":null,"name":"foo","vers":"0.1.3","yanked":false,"rust_version":"1.2345","v":1000000000}"#,
+        )
+        .publish();
+    Package::new("foo", "0.1.4")
+        // Bad field, report schema
+        .index_line(
+            r#"{"cksum":"7ca5fc2301ad96ade45356faf53225aea36437d99930bbfa951155c01faecf79","deps":[],"features":"bad","links":null,"name":"foo","vers":"0.1.4","yanked":false,"v":1000000000}"#,
+        )
+        .publish();
+    Package::new("foo", "0.1.5")
+        // Bad field, report error
+        .index_line(
+            r#"{"cksum":"7ca5fc2301ad96ade45356faf53225aea36437d99930bbfa951155c01faecf79","deps":[],"features":"bad","links":null,"name":"foo","vers":"0.1.5","yanked":false}"#,
+        )
+        .publish();
+    Package::new("foo", "0.1.6")
+        // Bad field with bad rust version, report schema
+        .index_line(
+            r#"{"cksum":"7ca5fc2301ad96ade45356faf53225aea36437d99930bbfa951155c01faecf79","deps":[],"features":"bad","links":null,"name":"foo","vers":"0.1.6","yanked":false,"rust_version":"bad","v":1000000000}"#,
+        )
+        .publish();
+    Package::new("foo", "0.1.7")
+        // Bad field with bad rust version and schema, report error
+        .index_line(
+            r#"{"cksum":"7ca5fc2301ad96ade45356faf53225aea36437d99930bbfa951155c01faecf79","deps":[],"features":"bad","links":null,"name":"foo","vers":"0.1.7","yanked":false,"rust_version":"bad","v":"bad"}"#,
+        )
+        .publish();
+    Package::new("foo", "0.2.0").publish();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "a"
+                version = "0.5.0"
+                edition = "2015"
+                authors = []
+
+                [dependencies]
+                foo = "0.1.1"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("generate-lockfile")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[ERROR] failed to select a version for the requirement `foo = "^0.1.1"`
+  version 0.1.3 requires cargo 1.2345
+  version 0.1.4 requires a Cargo version that supports index version 1000000000
+  version 0.1.5's index entry is invalid
+  version 0.1.6 requires a Cargo version that supports index version 1000000000
+  version 0.1.7's index entry is invalid
+location searched: `dummy-registry` index (which is replacing registry `crates-io`)
+required by package `a v0.5.0 ([ROOT]/foo)`
+
+"#]])
+        .run();
+    p.cargo("generate-lockfile")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[ERROR] failed to select a version for the requirement `foo = "^0.1.1"`
+  version 0.1.3 requires cargo 1.2345
+  version 0.1.4 requires a Cargo version that supports index version 1000000000
+  version 0.1.5's index entry is invalid
+  version 0.1.6 requires a Cargo version that supports index version 1000000000
+  version 0.1.7's index entry is invalid
+location searched: `dummy-registry` index (which is replacing registry `crates-io`)
+required by package `a v0.5.0 ([ROOT]/foo)`
+
+"#]])
+        .run();
 }
 
 #[cargo_test]
@@ -3200,6 +3301,7 @@ fn ignores_unknown_index_version(expected: impl IntoData) {
 
 #[cargo_test]
 fn unknown_index_version_error() {
+    Package::new("bar", "0.0.1").publish();
     // If the version field is not understood, it is ignored.
     Package::new("bar", "1.0.1")
         .schema_version(u32::MAX)
@@ -3225,7 +3327,57 @@ fn unknown_index_version_error() {
         .with_status(101)
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
-[ERROR] no matching package named `bar` found
+[ERROR] failed to select a version for the requirement `bar = "^1.0"`
+  version 1.0.1 requires a Cargo version that supports index version 4294967295
+location searched: `dummy-registry` index (which is replacing registry `crates-io`)
+required by package `foo v0.1.0 ([ROOT]/foo)`
+
+"#]])
+        .run();
+    p.cargo("generate-lockfile")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[ERROR] failed to select a version for the requirement `bar = "^1.0"`
+  version 1.0.1 requires a Cargo version that supports index version 4294967295
+location searched: `dummy-registry` index (which is replacing registry `crates-io`)
+required by package `foo v0.1.0 ([ROOT]/foo)`
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn unknown_index_version_with_msrv_error() {
+    Package::new("bar", "0.0.1").publish();
+    // If the version field is not understood, it is ignored.
+    Package::new("bar", "1.0.1")
+        .schema_version(u32::MAX)
+        .rust_version("1.2345")
+        .publish();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "2015"
+
+                [dependencies]
+                bar = "1.0"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("generate-lockfile")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[ERROR] failed to select a version for the requirement `bar = "^1.0"`
+  version 1.0.1 requires cargo 1.2345
 location searched: `dummy-registry` index (which is replacing registry `crates-io`)
 required by package `foo v0.1.0 ([ROOT]/foo)`
 
@@ -3242,7 +3394,7 @@ fn protocol() {
 [ERROR] unsupported registry protocol `invalid` (defined in environment variable `CARGO_REGISTRIES_CRATES_IO_PROTOCOL`)
 
 "#]])
-        .run()
+        .run();
 }
 
 #[cargo_test]
@@ -3253,7 +3405,7 @@ fn http_requires_trailing_slash() {
 [ERROR] sparse registry url must end in a slash `/`: sparse+https://invalid.crates.io/test
 
 "#]])
-        .run()
+        .run();
 }
 
 // Limit the test to debug builds so that `__CARGO_TEST_MAX_UNPACK_SIZE` will take affect.

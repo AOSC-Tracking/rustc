@@ -114,7 +114,7 @@ fn simple_git() {
     cargo_process("build").cwd(&paths::root().join("foo")).run();
 }
 
-#[cargo_test(requires_hg)]
+#[cargo_test(requires = "hg")]
 fn simple_hg() {
     cargo_process("new --lib foo --edition 2015 --vcs hg").run();
 
@@ -393,7 +393,7 @@ fn new_with_edition_2018() {
 fn new_default_edition() {
     cargo_process("new foo").run();
     let manifest = fs::read_to_string(paths::root().join("foo/Cargo.toml")).unwrap();
-    assert!(manifest.contains("edition = \"2021\""));
+    assert!(manifest.contains("edition = \"2024\""));
 }
 
 #[cargo_test]
@@ -407,7 +407,7 @@ fn new_with_bad_edition() {
         .run();
 }
 
-#[cargo_test]
+#[cargo_test(nightly, reason = "edition2024 hasn't hit stable yet")]
 fn lockfile_constant_during_new() {
     cargo_process("new foo").run();
 

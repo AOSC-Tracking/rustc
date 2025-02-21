@@ -89,9 +89,6 @@ will check for output files:
   [Normalization](#normalization)).
 - `dont-check-compiler-stderr` — Ignores stderr from the compiler.
 - `dont-check-compiler-stdout` — Ignores stdout from the compiler.
-- `compare-output-lines-by-subset` — Checks that the output contains the
-  contents of the stored output files by lines opposed to checking for strict
-  equality.
 
 UI tests run with `-Zdeduplicate-diagnostics=no` flag which disables rustc's
 built-in diagnostic deduplication mechanism. This means you may see some
@@ -143,7 +140,8 @@ Sometimes these built-in normalizations are not enough. In such cases, you may
 provide custom normalization rules using `normalize-*` directives, e.g.
 
 ```rust,ignore
-//@ normalize-stdout-test: "foo" -> "bar"
+//@ normalize-stdout: "foo" -> "bar"
+//@ normalize-stderr: "foo" -> "bar"
 //@ normalize-stderr-32bit: "fn\(\) \(32 bits\)" -> "fn\(\) \($$PTR bits\)"
 //@ normalize-stderr-64bit: "fn\(\) \(64 bits\)" -> "fn\(\) \($$PTR bits\)"
 ```
@@ -169,11 +167,6 @@ usage example.
 
 [mrs]: https://github.com/rust-lang/rust/blob/master/tests/ui/transmute/main.rs
 [`main.stderr`]: https://github.com/rust-lang/rust/blob/master/tests/ui/transmute/main.stderr
-
-Besides `normalize-stderr-32bit` and `-64bit`, one may use any target
-information or stage supported by [`ignore-X`](directives.md#ignoring-tests) here
-as well (e.g. `normalize-stderr-windows` or simply `normalize-stderr-test` for
-unconditional replacement).
 
 ## Error annotations
 

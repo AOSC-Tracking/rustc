@@ -601,14 +601,7 @@ feature on
 fn rebuild_tests_if_lib_changes() {
     let p = project()
         .file("src/lib.rs", "pub fn foo() {}")
-        .file(
-            "tests/foo.rs",
-            r#"
-                extern crate foo;
-                #[test]
-                fn test() { foo::foo(); }
-            "#,
-        )
+        .file("tests/foo-test.rs", "extern crate foo;")
         .build();
 
     p.cargo("build").run();
@@ -617,18 +610,15 @@ fn rebuild_tests_if_lib_changes() {
     sleep_ms(1000);
     p.change_file("src/lib.rs", "");
 
-    p.cargo("build -v").run();
-    p.cargo("test -v")
-        .with_status(101)
+    p.cargo("build").run();
+    p.cargo("test -v --test foo-test")
         .with_stderr_data(str![[r#"
 [DIRTY] foo v0.0.1 ([ROOT]/foo): the dependency foo was rebuilt ([TIME_DIFF_AFTER_LAST_BUILD])
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `rustc --crate-name foo [..]
-[RUNNING] `rustc --crate-name foo [..]
-error[E0425]: cannot find function `foo` in crate `foo`
-...
-[ERROR] could not compile `foo` (test "foo") due to 1 previous error
-...
+[RUNNING] `rustc --crate-name foo_test [..]`
+[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `[ROOT]/foo/target/debug/deps/foo_test-[HASH][EXE]`
+
 "#]])
         .run();
 }
@@ -963,7 +953,7 @@ new desc
 
 "#]])
         .with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the metadata changed
+[DIRTY] foo v0.0.1 ([ROOT]/foo): the environment variable CARGO_PKG_DESCRIPTION changed
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc [..]
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -1347,7 +1337,6 @@ fn changing_rustflags_is_cached() {
     p.cargo("build -v")
         .env("RUSTFLAGS", "-C linker=cc")
         .with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the rustflags changed
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc [..]
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -1357,9 +1346,7 @@ fn changing_rustflags_is_cached() {
 
     p.cargo("build -v")
         .with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the rustflags changed
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `rustc [..] src/lib.rs [..]
+[FRESH] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -1367,9 +1354,44 @@ fn changing_rustflags_is_cached() {
     p.cargo("build -v")
         .env("RUSTFLAGS", "-C linker=cc")
         .with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the rustflags changed
+[FRESH] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn changing_rustc_extra_flags_is_cached() {
+    let p = project().file("src/lib.rs", "").build();
+
+    // This isn't ever cached, we always have to recompile
+    p.cargo("rustc")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    p.cargo("rustc -v -- -C linker=cc")
+        .with_stderr_data(str![[r#"
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc [..]
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+
+    p.cargo("rustc -v")
+        .with_stderr_data(str![[r#"
+[FRESH] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    p.cargo("rustc -v -- -C linker=cc")
+        .with_stderr_data(str![[r#"
+[FRESH] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -2091,49 +2113,114 @@ fn simulated_docker_deps_stay_cached() {
 
 #[cargo_test]
 fn metadata_change_invalidates() {
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-            [package]
-            name = "foo"
-            version = "0.1.0"
-            edition = "2015"
-            "#,
-        )
-        .file("src/lib.rs", "")
-        .build();
+    // (key, value, value-updated, env-var-name)
+    let scenarios = [
+        (
+            "description",
+            r#""foo""#,
+            r#""foo_updated""#,
+            "CARGO_PKG_DESCRIPTION",
+        ),
+        (
+            "homepage",
+            r#""foo""#,
+            r#""foo_updated""#,
+            "CARGO_PKG_HOMEPAGE",
+        ),
+        (
+            "repository",
+            r#""foo""#,
+            r#""foo_updated""#,
+            "CARGO_PKG_REPOSITORY",
+        ),
+        (
+            "license",
+            r#""foo""#,
+            r#""foo_updated""#,
+            "CARGO_PKG_LICENSE",
+        ),
+        (
+            "license-file",
+            r#""foo""#,
+            r#""foo_updated""#,
+            "CARGO_PKG_LICENSE_FILE",
+        ),
+        (
+            "authors",
+            r#"["foo"]"#,
+            r#"["foo_updated"]"#,
+            "CARGO_PKG_AUTHORS",
+        ),
+        (
+            "rust-version",
+            r#""1.0.0""#,
+            r#""1.0.1""#,
+            "CARGO_PKG_RUST_VERSION",
+        ),
+        ("readme", r#""foo""#, r#""foo_updated""#, "CARGO_PKG_README"),
+    ];
+    let base_cargo_toml = r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "2015"
+                "#;
 
-    p.cargo("build").run();
+    let p = project().build();
+    for (key, value, value_updated, env_var) in scenarios {
+        p.change_file("Cargo.toml", base_cargo_toml);
+        p.change_file(
+            "src/main.rs",
+            &format!(
+                r#"
+            fn main() {{
+                let output = env!("{env_var}");
+                println!("{{output}}");
+            }}
+            "#
+            ),
+        );
 
-    for attr in &[
-        "authors = [\"foo\"]",
-        "description = \"desc\"",
-        "homepage = \"https://example.com\"",
-        "repository =\"https://example.com\"",
-    ] {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .append(true)
-            .open(p.root().join("Cargo.toml"))
-            .unwrap();
-        writeln!(file, "{}", attr).unwrap();
-        p.cargo("build")
-            .with_stderr_data(str![[r#"
+        // Compile the first time
+        p.cargo("build").run();
+
+        // Update the manifest, rebuild, and verify the build was invalided
+        p.change_file("Cargo.toml", &format!("{base_cargo_toml}\n{key} = {value}"));
+        p.cargo("build -v")
+            .with_stderr_data(format!(
+                r#"[DIRTY] foo v0.1.0 ([ROOT]/foo): the environment variable {env_var} changed
 [COMPILING] foo v0.1.0 ([ROOT]/foo)
+[RUNNING] `rustc [..]
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+"#
+            ))
+            .run();
+
+        // Remove references to the metadata and rebuild
+        p.change_file(
+            "src/main.rs",
+            r#"
+            fn main() {
+                println!("foo");
+            }
+            "#,
+        );
+        p.cargo("build").run();
+
+        // Update the manifest value and verify the build is NOT invalidated.
+        p.change_file(
+            "Cargo.toml",
+            &format!("{base_cargo_toml}\n{key} = {value_updated}"),
+        );
+
+        p.cargo("build -v")
+            .with_stderr_data(str![[r#"
+[FRESH] foo v0.1.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
             .run();
     }
-    p.cargo("build -v")
-        .with_stderr_data(str![[r#"
-[FRESH] foo v0.1.0 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    assert_eq!(p.glob("target/debug/deps/libfoo-*.rlib").count(), 1);
 }
 
 #[cargo_test]
@@ -2527,8 +2614,7 @@ LLVM version: 9.0
         let output = p
             .cargo("check --message-format=json")
             .env("RUSTC", compiler.bin(version))
-            .exec_with_output()
-            .unwrap();
+            .run();
         // Collect the filenames generated.
         let mut artifacts: Vec<_> = std::str::from_utf8(&output.stdout)
             .unwrap()

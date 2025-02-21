@@ -11,7 +11,7 @@ exclude = [
 ]
 
 [workspace.package]
-rust-version = "1.79"  # MSRV:3
+rust-version = "1.81"  # MSRV:3
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/rust-lang/cargo"
@@ -24,19 +24,19 @@ anstyle = "1.0.8"
 anyhow = "1.0.86"
 base64 = "0.22.1"
 blake3 = "1.5.2"
-build-rs = { version = "0.2.0", path = "crates/build-rs" }
+build-rs = { version = "0.3.0", path = "crates/build-rs" }
 bytesize = "1.3"
 cargo = { path = "" }
 cargo-credential = { version = "0.4.2", path = "credential/cargo-credential" }
 cargo-credential-libsecret = { version = "0.4.7", path = "credential/cargo-credential-libsecret" }
 cargo-credential-macos-keychain = { version = "0.4.7", path = "credential/cargo-credential-macos-keychain" }
 cargo-credential-wincred = { version = "0.4.7", path = "credential/cargo-credential-wincred" }
-cargo-platform = { path = "crates/cargo-platform", version = "0.1.5" }
-cargo-test-macro = { version = "0.3.0", path = "crates/cargo-test-macro" }
-cargo-test-support = { version = "0.6.0", path = "crates/cargo-test-support" }
+cargo-platform = { path = "crates/cargo-platform", version = "0.2.0" }
+cargo-test-macro = { version = "0.4.0", path = "crates/cargo-test-macro" }
+cargo-test-support = { version = "0.7.0", path = "crates/cargo-test-support" }
 cargo-util = { version = "0.2.14", path = "crates/cargo-util" }
 cargo-util-schemas = { version = "0.7.0", path = "crates/cargo-util-schemas" }
-cargo_metadata = "0.18.1"
+cargo_metadata = "0.19.0"
 clap = "4.5.20"
 clap_complete = { version = "4.5.35", features = ["unstable-dynamic"] }
 color-print = "0.3.6"
@@ -49,7 +49,7 @@ filetime = "0.2.23"
 flate2 = { version = "1.0.30", default-features = false, features = ["zlib"] }
 git2 = "0.19.0"
 git2-curl = "0.20.0"
-gix = { version = "0.67.0", default-features = false, features = ["blocking-http-transport-curl", "progress-tree", "parallel", "dirwalk"] }
+gix = { version = "0.69.1", default-features = false, features = ["blocking-http-transport-curl", "progress-tree", "parallel", "dirwalk"] }
 glob = "0.3.1"
 handlebars = { version = "6.0.0", features = ["dir_source"] }
 hex = "0.4.3"
@@ -82,6 +82,7 @@ rand = "0.8.5"
 regex = "1.10.5"
 rusqlite = { version = "0.32.0", features = ["bundled"] }
 rustc-hash = "2.0.0"
+rustc-stable-hash = "0.1.1"
 rustfix = { version = "0.9.0", path = "crates/rustfix" }
 same-file = "1.0.6"
 schemars = "0.8.21"
@@ -97,6 +98,7 @@ sha2 = "0.10.8"
 shell-escape = "0.1.5"
 similar = "2.6.0"
 supports-hyperlinks = "3.0.0"
+supports-unicode = "3.0.0"
 snapbox = { version = "0.6.20", features = ["diff", "dir", "term-svg", "regex", "json"] }
 tar = { version = "0.4.42", default-features = false }
 tempfile = "3.10.1"
@@ -133,10 +135,10 @@ self_named_module_files = "warn"
 
 [package]
 name = "cargo"
-version = "0.85.0"
+version = "0.86.0"
 edition.workspace = true
 license.workspace = true
-rust-version = "1.82"  # MSRV:1
+rust-version = "1.83"  # MSRV:1
 homepage = "https://doc.rust-lang.org/cargo/index.html"
 repository.workspace = true
 documentation = "https://docs.rs/cargo"
@@ -193,6 +195,7 @@ rand.workspace = true
 regex.workspace = true
 rusqlite.workspace = true
 rustc-hash.workspace = true
+rustc-stable-hash.workspace = true
 rustfix.workspace = true
 same-file.workspace = true
 semver.workspace = true
@@ -203,6 +206,7 @@ serde_json = { workspace = true, features = ["raw_value"] }
 sha1.workspace = true
 shell-escape.workspace = true
 supports-hyperlinks.workspace = true
+supports-unicode.workspace = true
 tar.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
@@ -215,7 +219,6 @@ unicase.workspace = true
 unicode-width.workspace = true
 url.workspace = true
 walkdir.workspace = true
-supports-unicode = "3.0.0"
 
 [target.'cfg(target_has_atomic = "64")'.dependencies]
 tracing-chrome.workspace = true

@@ -358,13 +358,24 @@ To avoid merges as per the [No-Merge Policy](#no-merge-policy), you may want to 
 to ensure that Git doesn't create merge commits when `git pull`ing, without
 needing to pass `--ff-only` or `--rebase` every time.
 
-You can also `git push --force-with-lease` from master to keep your fork's master in sync with
-upstream.
+You can also `git push --force-with-lease` from master to double-check that your
+feature branches are in sync with their state on the Github side.
 
 ## Advanced Rebasing
 
 ### Squash your commits
 
+"Squashing" commits into each other causes them to be merged into a single
+commit. Both the upside and downside of this is that it simplifies the history.
+On the one hand, you lose track of the steps in which changes were made, but
+the history becomes easier to work with.
+
+If there are no conflicts and you are just squashing to clean up the history,
+use `git rebase --interactive --keep-base master`. This keeps the fork point
+of your PR the same, making it easier to review the diff of what happened
+across your rebases.
+
+Squashing can also be useful as part of conflict resolution.
 If your branch contains multiple consecutive rewrites of the same code, or if
 the rebase conflicts are extremely severe, you can use
 `git rebase --interactive master` to gain more control over the process. This
@@ -375,16 +386,11 @@ Alternatively, you can sacrifice the commit history like this:
 
 ```
 # squash all the changes into one commit so you only have to worry about conflicts once
-git rebase -i $(git merge-base master HEAD)  # and squash all changes along the way
+git rebase -i --keep-base master  # and squash all changes along the way
 git rebase master
 # fix all merge conflicts
 git rebase --continue
 ```
-
-"Squashing" commits into each other causes them to be merged into a single
-commit. Both the upside and downside of this is that it simplifies the history.
-On the one hand, you lose track of the steps in which changes were made, but
-the history becomes easier to work with.
 
 You also may want to squash just the last few commits together, possibly
 because they only represent "fixups" and not real changes. For example,
@@ -596,6 +602,35 @@ $ git submodule foreach git reset --hard
 ```
 
 and then try `git submodule update` again.
+
+### Deinit git submodules
+
+If that doesn't work, you can try to deinit all git submodules...
+
+```
+git submodule deinit -f --all
+```
+
+Unfortunately sometimes your local git submodules configuration can become
+completely messed up for some reason.
+
+### Overcoming `fatal: not a git repository: <submodule>/../../.git/modules/<submodule>`
+
+Sometimes, for some forsaken reason, you might run into
+
+```text
+fatal: not a git repository: src/gcc/../../.git/modules/src/gcc
+```
+
+In this situation, for the given submodule path, i.e. `<submodule_path> =
+src/gcc` in this example, you need to:
+
+1. `rm -rf <submodule_path>/.git`
+2. `rm -rf .git/modules/<submodule_path>/config`
+3. `rm -rf .gitconfig.lock` if somehow the `.gitconfig` lock is orphaned.
+
+Then do something like `./x fmt` to have bootstrap manage the submodule
+checkouts for you.
 
 ## Ignoring commits during `git blame`
 

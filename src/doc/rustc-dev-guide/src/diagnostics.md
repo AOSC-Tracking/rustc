@@ -387,10 +387,11 @@ example-example-error = oh no! this is an error!
 
 In addition to telling the user exactly _why_ their code is wrong, it's
 oftentimes furthermore possible to tell them how to fix it. To this end,
-`Diag` offers a structured suggestions API, which formats code
+[`Diag`][diag] offers a structured suggestions API, which formats code
 suggestions pleasingly in the terminal, or (when the `--error-format json` flag
 is passed) as JSON for consumption by tools like [`rustfix`][rustfix].
 
+[diag]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_errors/struct.Diag.html
 [rustfix]: https://github.com/rust-lang/rustfix
 
 Not all suggestions should be applied mechanically, they have a degree of
@@ -412,7 +413,7 @@ contexts:
 some heuristics for verbosity are met)
 - shown as a `help` sub-diagnostic with no content (used for cases where the
 suggestion is obvious from the text, but we still want to let tools to apply
-them))
+them)
 - not shown (used for _very_ obvious cases, but we still want to allow tools to
 apply them)
 

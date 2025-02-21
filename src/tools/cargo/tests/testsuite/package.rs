@@ -1101,6 +1101,20 @@ to proceed despite this and include the uncommitted changes, pass the `--allow-d
 
 "#]])
         .run();
+
+    // cd to `src` and cargo report relative paths.
+    p.cargo("package")
+        .cwd(p.root().join("src"))
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] 1 files in the working directory contain changes that were not yet committed into git:
+
+../Cargo.toml
+
+to proceed despite this and include the uncommitted changes, pass the `--allow-dirty` flag
+
+"#]])
+        .run();
 }
 
 #[cargo_test]
@@ -1154,6 +1168,261 @@ src/lib.rs
 
 "#]])
         .run();
+}
+
+#[cargo_test]
+fn vcs_status_check_for_each_workspace_member() {
+    // Cargo checks VCS status separately for each workspace member.
+    // This ensure one file changed in a package won't affect the other.
+    // Since the dirty bit in .cargo_vcs_info.json is just for advisory purpose,
+    // We may change the meaning of it in the future.
+    let (p, repo) = git::new_repo("foo", |p| {
+        p.file(
+            "Cargo.toml",
+            r#"
+                [workspace]
+                members = ["isengard", "mordor"]
+            "#,
+        )
+        .file("hobbit", "...")
+        .file(
+            "isengard/Cargo.toml",
+            r#"
+                [package]
+                name = "isengard"
+                edition = "2015"
+                homepage = "saruman"
+                description = "saruman"
+                license = "MIT"
+            "#,
+        )
+        .file("isengard/src/lib.rs", "")
+        .file(
+            "mordor/Cargo.toml",
+            r#"
+                [package]
+                name = "mordor"
+                edition = "2015"
+                homepage = "sauron"
+                description = "sauron"
+                license = "MIT"
+            "#,
+        )
+        .file("mordor/src/lib.rs", "")
+    });
+    git::commit(&repo);
+
+    p.change_file(
+        "Cargo.toml",
+        r#"
+            [workspace]
+            members = ["isengard", "mordor"]
+            [workspace.package]
+            edition = "2021"
+        "#,
+    );
+    // Dirty file outside won't affect packaging.
+    p.change_file("hobbit", "changed!");
+    p.change_file("mordor/src/lib.rs", "changed!");
+    p.change_file("mordor/src/main.rs", "fn main() {}");
+
+    // Ensure dirty files be reported only for one affected package.
+    p.cargo("package --workspace --no-verify")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[PACKAGING] isengard v0.0.0 ([ROOT]/foo/isengard)
+[PACKAGED] 5 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[ERROR] 2 files in the working directory contain changes that were not yet committed into git:
+
+mordor/src/lib.rs
+mordor/src/main.rs
+
+to proceed despite this and include the uncommitted changes, pass the `--allow-dirty` flag
+
+"#]])
+        .run();
+
+    // Ensure only dirty package be recorded as dirty.
+    p.cargo("package --workspace --no-verify --allow-dirty")
+        .with_stderr_data(str![[r#"
+[PACKAGING] isengard v0.0.0 ([ROOT]/foo/isengard)
+[PACKAGED] 5 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] mordor v0.0.0 ([ROOT]/foo/mordor)
+[PACKAGED] 6 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+
+"#]])
+        .run();
+
+    let f = File::open(&p.root().join("target/package/isengard-0.0.0.crate")).unwrap();
+    validate_crate_contents(
+        f,
+        "isengard-0.0.0.crate",
+        &[
+            ".cargo_vcs_info.json",
+            "Cargo.toml",
+            "Cargo.toml.orig",
+            "src/lib.rs",
+            "Cargo.lock",
+        ],
+        [(
+            ".cargo_vcs_info.json",
+            // No change within `isengard/`, so not dirty at all.
+            str![[r#"
+{
+  "git": {
+    "sha1": "[..]"
+  },
+  "path_in_vcs": "isengard"
+}
+"#]]
+            .is_json(),
+        )],
+    );
+
+    let f = File::open(&p.root().join("target/package/mordor-0.0.0.crate")).unwrap();
+    validate_crate_contents(
+        f,
+        "mordor-0.0.0.crate",
+        &[
+            ".cargo_vcs_info.json",
+            "Cargo.toml",
+            "Cargo.toml.orig",
+            "src/lib.rs",
+            "src/main.rs",
+            "Cargo.lock",
+        ],
+        [(
+            ".cargo_vcs_info.json",
+            // Dirty bit is recorded.
+            str![[r#"
+{
+  "git": {
+    "dirty": true,
+    "sha1": "[..]"
+  },
+  "path_in_vcs": "mordor"
+}
+"#]]
+            .is_json(),
+        )],
+    );
+}
+
+#[cargo_test]
+fn dirty_file_outside_pkg_root_considered_dirty() {
+    if !symlink_supported() {
+        return;
+    }
+    let main_outside_pkg_root = paths::root().join("main.rs");
+    let (p, repo) = git::new_repo("foo", |p| {
+        p.file(
+            "Cargo.toml",
+            r#"
+                [workspace]
+                members = ["isengard"]
+                resolver = "2"
+                [workspace.package]
+                edition = "2015"
+            "#,
+        )
+        .file("lib.rs", r#"compile_error!("you shall not pass")"#)
+        .file("LICENSE", "before")
+        .file("README.md", "before")
+        .file(
+            "isengard/Cargo.toml",
+            r#"
+                [package]
+                name = "isengard"
+                edition.workspace = true
+                homepage = "saruman"
+                description = "saruman"
+                license-file = "../LICENSE"
+            "#,
+        )
+        .symlink("lib.rs", "isengard/src/lib.rs")
+        .symlink("README.md", "isengard/README.md")
+        .file(&main_outside_pkg_root, "fn main() {}")
+        .symlink(&main_outside_pkg_root, "isengard/src/main.rs")
+    });
+    git::commit(&repo);
+
+    // Changing files outside pkg root under situations below should be treated
+    // as dirty. `cargo package` is expected to fail on VCS stastus check.
+    //
+    // * Changes in files outside package root that source files symlink to
+    p.change_file("README.md", "after");
+    p.change_file("lib.rs", "pub fn after() {}");
+    // * Changes in files outside pkg root that `license-file`/`readme` point to
+    p.change_file("LICENSE", "after");
+    // * When workspace inheritance is involved and changed
+    p.change_file(
+        "Cargo.toml",
+        r#"
+            [workspace]
+            members = ["isengard"]
+            resolver = "2"
+            [workspace.package]
+            edition = "2021"
+        "#,
+    );
+    // Changes in files outside git workdir won't affect vcs status check
+    p.change_file(
+        &main_outside_pkg_root,
+        r#"fn main() { eprintln!("after"); }"#,
+    );
+
+    // Ensure dirty files be reported.
+    p.cargo("package --workspace --no-verify")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] 2 files in the working directory contain changes that were not yet committed into git:
+
+LICENSE
+README.md
+
+to proceed despite this and include the uncommitted changes, pass the `--allow-dirty` flag
+
+"#]])
+        .run();
+
+    p.cargo("package --workspace --no-verify --allow-dirty")
+        .with_stderr_data(str![[r#"
+[PACKAGING] isengard v0.0.0 ([ROOT]/foo/isengard)
+[PACKAGED] 8 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+
+"#]])
+        .run();
+
+    let cargo_toml = str![[r##"
+...
+[package]
+edition = "2021"
+...
+
+"##]];
+
+    let f = File::open(&p.root().join("target/package/isengard-0.0.0.crate")).unwrap();
+    validate_crate_contents(
+        f,
+        "isengard-0.0.0.crate",
+        &[
+            ".cargo_vcs_info.json",
+            "Cargo.toml",
+            "Cargo.toml.orig",
+            "src/lib.rs",
+            "src/main.rs",
+            "Cargo.lock",
+            "LICENSE",
+            "README.md",
+        ],
+        [
+            ("src/lib.rs", str!["pub fn after() {}"]),
+            ("src/main.rs", str![r#"fn main() { eprintln!("after"); }"#]),
+            ("README.md", str!["after"]),
+            ("LICENSE", str!["after"]),
+            ("Cargo.toml", cargo_toml),
+        ],
+    );
 }
 
 #[cargo_test]
@@ -3143,7 +3412,7 @@ path = "src/lib.rs"
 }
 
 fn verify_packaged_status_line(
-    output: std::process::Output,
+    output: cargo_test_support::RawOutput,
     num_files: usize,
     uncompressed_size: u64,
     compressed_size: u64,
@@ -3228,7 +3497,7 @@ version = "0.0.1"
         + main_rs_contents.len()
         + cargo_toml_contents.len()
         + cargo_lock_contents.len()) as u64;
-    let output = p.cargo("package").exec_with_output().unwrap();
+    let output = p.cargo("package").run();
 
     assert!(p.root().join("target/package/foo-0.0.1.crate").is_file());
     p.cargo("package -l")
@@ -3333,7 +3602,7 @@ version = "0.0.1"
         + cargo_lock_contents.len()
         + bar_txt_contents.len()) as u64;
 
-    let output = p.cargo("package").exec_with_output().unwrap();
+    let output = p.cargo("package").run();
     assert!(p.root().join("target/package/foo-0.0.1.crate").is_file());
     p.cargo("package -l")
         .with_stdout_data(str![[r#"
@@ -3452,7 +3721,7 @@ version = "0.0.1"
         + cargo_lock_contents.len()
         + bar_txt_contents.len() * 2) as u64;
 
-    let output = p.cargo("package").exec_with_output().unwrap();
+    let output = p.cargo("package").run();
     assert!(p.root().join("target/package/foo-0.0.1.crate").is_file());
     p.cargo("package -l")
         .with_stdout_data(str![[r#"
@@ -3923,7 +4192,7 @@ See https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for
 [PACKAGED] 6 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
 
 "#]])
-        .run()
+        .run();
 }
 
 #[cargo_test]
@@ -6056,20 +6325,21 @@ fn workspace_with_local_dep_already_published_nightly() {
     p.cargo("package -Zpackage-workspace")
         .masquerade_as_nightly_cargo(&["package-workspace"])
         .replace_crates_io(reg.index_url())
-        .with_status(101)
         .with_stderr_data(
             str![[r#"
 [PACKAGING] dep v0.1.0 ([ROOT]/foo/dep)
 [PACKAGING] main v0.0.1 ([ROOT]/foo/main)
 [UPDATING] crates.io index
-[ERROR] failed to prepare local package for uploading
-
-Caused by:
-  failed to get `dep` as a dependency of package `main v0.0.1 ([ROOT]/foo/main)`
-
-Caused by:
-  found a package in the remote registry and the local overlay: dep@0.1.0
 [PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[VERIFYING] dep v0.1.0 ([ROOT]/foo/dep)
+[COMPILING] dep v0.1.0 ([ROOT]/foo/target/package/dep-0.1.0)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[VERIFYING] main v0.0.1 ([ROOT]/foo/main)
+[UNPACKING] dep v0.1.0 (registry `[ROOT]/foo/target/package/tmp-registry`)
+[COMPILING] dep v0.1.0
+[COMPILING] main v0.0.1 ([ROOT]/foo/target/package/main-0.0.1)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]]
             .unordered(),
@@ -6719,4 +6989,125 @@ See https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for
 
 "#]])
         .run();
+}
+
+#[cargo_test]
+#[cfg(unix)]
+fn simple_with_fifo() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "2015"
+            "#,
+        )
+        .file("src/main.rs", "fn main() {}")
+        .build();
+
+    std::process::Command::new("mkfifo")
+        .current_dir(p.root())
+        .arg(p.root().join("blocks-when-read"))
+        .status()
+        .expect("a FIFO can be created");
+
+    // Avoid actual blocking even in case of failure, assuming that what it lists here
+    // would also be read eventually.
+    p.cargo("package -l")
+        .with_stdout_data(str![[r#"
+Cargo.lock
+Cargo.toml
+Cargo.toml.orig
+src/main.rs
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn git_core_symlinks_false() {
+    if !symlink_supported() {
+        return;
+    }
+
+    let git_project = git::new("bar", |p| {
+        p.file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "bar"
+                description = "bar"
+                license = "MIT"
+                edition = "2021"
+                documentation = "foo"
+            "#,
+        )
+        .file("src/lib.rs", "//! This is a module")
+        .symlink("src/lib.rs", "symlink-lib.rs")
+        .symlink_dir("src", "symlink-dir")
+    });
+
+    let url = git_project.root().to_url().to_string();
+
+    let p = project().build();
+    let root = p.root();
+    // Remove the default project layout,
+    // so we can git-fetch from git_project under the same directory
+    fs::remove_dir_all(&root).unwrap();
+    fs::create_dir_all(&root).unwrap();
+    let repo = git::init(&root);
+
+    let mut cfg = repo.config().unwrap();
+    cfg.set_bool("core.symlinks", false).unwrap();
+
+    // let's fetch from git_project so it respects our core.symlinks=false config.
+    repo.remote_anonymous(&url)
+        .unwrap()
+        .fetch(&["HEAD"], None, None)
+        .unwrap();
+    let rev = repo
+        .find_reference("FETCH_HEAD")
+        .unwrap()
+        .peel_to_commit()
+        .unwrap();
+    repo.reset(rev.as_object(), git2::ResetType::Hard, None)
+        .unwrap();
+
+    p.cargo("package --allow-dirty")
+        .with_stderr_data(str![[r#"
+[WARNING] found symbolic links that may be checked out as regular files for git repo at `[ROOT]/foo/`
+This might cause the `.crate` file to include incorrect or incomplete files
+[NOTE] to avoid this, set the Git config `core.symlinks` to `true`
+...
+[PACKAGING] bar v0.0.0 ([ROOT]/foo)
+[PACKAGED] 7 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[VERIFYING] bar v0.0.0 ([ROOT]/foo)
+[COMPILING] bar v0.0.0 ([ROOT]/foo/target/package/bar-0.0.0)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+
+    let f = File::open(&p.root().join("target/package/bar-0.0.0.crate")).unwrap();
+    validate_crate_contents(
+        f,
+        "bar-0.0.0.crate",
+        &[
+            "Cargo.lock",
+            "Cargo.toml",
+            "Cargo.toml.orig",
+            "src/lib.rs",
+            // We're missing symlink-dir/lib.rs in the `.crate` file.
+            "symlink-dir",
+            "symlink-lib.rs",
+            ".cargo_vcs_info.json",
+        ],
+        [
+            // And their contents are incorrect.
+            ("symlink-dir", str!["[ROOT]/bar/src"]),
+            ("symlink-lib.rs", str!["[ROOT]/bar/src/lib.rs"]),
+        ],
+    );
 }

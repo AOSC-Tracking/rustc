@@ -18,6 +18,8 @@
 //! [wiki_avx]: https://en.wikipedia.org/wiki/Advanced_Vector_Extensions
 //! [wiki_fma]: https://en.wikipedia.org/wiki/Fused_multiply-accumulate
 
+use core::hint::unreachable_unchecked;
+
 use crate::core_arch::{simd::*, x86::*};
 use crate::intrinsics::simd::*;
 
@@ -33,8 +35,7 @@ use stdarch_test::assert_instr;
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm256_abs_epi32(a: __m256i) -> __m256i {
     let a = a.as_i32x8();
-    let zero = i32x8::splat(0);
-    let r = simd_select::<m32x8, _>(simd_lt(a, zero), simd_neg(a), a);
+    let r = simd_select::<m32x8, _>(simd_lt(a, i32x8::ZERO), simd_neg(a), a);
     transmute(r)
 }
 
@@ -47,8 +48,7 @@ pub unsafe fn _mm256_abs_epi32(a: __m256i) -> __m256i {
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm256_abs_epi16(a: __m256i) -> __m256i {
     let a = a.as_i16x16();
-    let zero = i16x16::splat(0);
-    let r = simd_select::<m16x16, _>(simd_lt(a, zero), simd_neg(a), a);
+    let r = simd_select::<m16x16, _>(simd_lt(a, i16x16::ZERO), simd_neg(a), a);
     transmute(r)
 }
 
@@ -61,8 +61,7 @@ pub unsafe fn _mm256_abs_epi16(a: __m256i) -> __m256i {
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm256_abs_epi8(a: __m256i) -> __m256i {
     let a = a.as_i8x32();
-    let zero = i8x32::splat(0);
-    let r = simd_select::<m8x32, _>(simd_lt(a, zero), simd_neg(a), a);
+    let r = simd_select::<m8x32, _>(simd_lt(a, i8x32::ZERO), simd_neg(a), a);
     transmute(r)
 }
 
@@ -167,19 +166,23 @@ pub unsafe fn _mm256_alignr_epi8<const IMM8: i32>(a: __m256i, b: __m256i) -> __m
     static_assert_uimm_bits!(IMM8, 8);
     // If palignr is shifting the pair of vectors more than the size of two
     // lanes, emit zero.
-    if IMM8 > 32 {
-        return _mm256_set1_epi8(0);
+    if IMM8 >= 32 {
+        return _mm256_setzero_si256();
     }
     // If palignr is shifting the pair of input vectors more than one lane,
     // but less than two lanes, convert to shifting in zeroes.
     let (a, b) = if IMM8 > 16 {
-        (_mm256_set1_epi8(0), a)
+        (_mm256_setzero_si256(), a)
     } else {
         (a, b)
     };
 
     let a = a.as_i8x32();
     let b = b.as_i8x32();
+
+    if IMM8 == 16 {
+        return transmute(a);
+    }
 
     let r: i8x32 = match IMM8 % 16 {
         0 => simd_shuffle!(
@@ -310,7 +313,7 @@ pub unsafe fn _mm256_alignr_epi8<const IMM8: i32>(a: __m256i, b: __m256i) -> __m
                 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62,
             ],
         ),
-        _ => b,
+        _ => unreachable_unchecked(),
     };
     transmute(r)
 }
@@ -471,7 +474,7 @@ pub unsafe fn _mm256_blend_epi16<const IMM8: i32>(a: __m256i, b: __m256i) -> __m
 #[cfg_attr(test, assert_instr(vpblendvb))]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm256_blendv_epi8(a: __m256i, b: __m256i, mask: __m256i) -> __m256i {
-    let mask: i8x32 = simd_lt(mask.as_i8x32(), i8x32::splat(0));
+    let mask: i8x32 = simd_lt(mask.as_i8x32(), i8x32::ZERO);
     transmute(simd_select(mask, b.as_i8x32(), a.as_i8x32()))
 }
 
@@ -484,8 +487,7 @@ pub unsafe fn _mm256_blendv_epi8(a: __m256i, b: __m256i, mask: __m256i) -> __m25
 #[cfg_attr(test, assert_instr(vpbroadcastb))]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm_broadcastb_epi8(a: __m128i) -> __m128i {
-    let zero = _mm_setzero_si128();
-    let ret = simd_shuffle!(a.as_i8x16(), zero.as_i8x16(), [0_u32; 16]);
+    let ret = simd_shuffle!(a.as_i8x16(), i8x16::ZERO, [0_u32; 16]);
     transmute::<i8x16, _>(ret)
 }
 
@@ -498,8 +500,7 @@ pub unsafe fn _mm_broadcastb_epi8(a: __m128i) -> __m128i {
 #[cfg_attr(test, assert_instr(vpbroadcastb))]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm256_broadcastb_epi8(a: __m128i) -> __m256i {
-    let zero = _mm_setzero_si128();
-    let ret = simd_shuffle!(a.as_i8x16(), zero.as_i8x16(), [0_u32; 32]);
+    let ret = simd_shuffle!(a.as_i8x16(), i8x16::ZERO, [0_u32; 32]);
     transmute::<i8x32, _>(ret)
 }
 
@@ -514,8 +515,7 @@ pub unsafe fn _mm256_broadcastb_epi8(a: __m128i) -> __m256i {
 #[cfg_attr(test, assert_instr(vbroadcastss))]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm_broadcastd_epi32(a: __m128i) -> __m128i {
-    let zero = _mm_setzero_si128();
-    let ret = simd_shuffle!(a.as_i32x4(), zero.as_i32x4(), [0_u32; 4]);
+    let ret = simd_shuffle!(a.as_i32x4(), i32x4::ZERO, [0_u32; 4]);
     transmute::<i32x4, _>(ret)
 }
 
@@ -530,8 +530,7 @@ pub unsafe fn _mm_broadcastd_epi32(a: __m128i) -> __m128i {
 #[cfg_attr(test, assert_instr(vbroadcastss))]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm256_broadcastd_epi32(a: __m128i) -> __m256i {
-    let zero = _mm_setzero_si128();
-    let ret = simd_shuffle!(a.as_i32x4(), zero.as_i32x4(), [0_u32; 8]);
+    let ret = simd_shuffle!(a.as_i32x4(), i32x4::ZERO, [0_u32; 8]);
     transmute::<i32x8, _>(ret)
 }
 
@@ -595,8 +594,7 @@ pub unsafe fn _mm256_broadcastsd_pd(a: __m128d) -> __m256d {
 #[target_feature(enable = "avx2")]
 #[stable(feature = "simd_x86_updates", since = "1.82.0")]
 pub unsafe fn _mm_broadcastsi128_si256(a: __m128i) -> __m256i {
-    let zero = _mm_setzero_si128();
-    let ret = simd_shuffle!(a.as_i64x2(), zero.as_i64x2(), [0, 1, 0, 1]);
+    let ret = simd_shuffle!(a.as_i64x2(), i64x2::ZERO, [0, 1, 0, 1]);
     transmute::<i64x4, _>(ret)
 }
 
@@ -610,8 +608,7 @@ pub unsafe fn _mm_broadcastsi128_si256(a: __m128i) -> __m256i {
 #[target_feature(enable = "avx2")]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm256_broadcastsi128_si256(a: __m128i) -> __m256i {
-    let zero = _mm_setzero_si128();
-    let ret = simd_shuffle!(a.as_i64x2(), zero.as_i64x2(), [0, 1, 0, 1]);
+    let ret = simd_shuffle!(a.as_i64x2(), i64x2::ZERO, [0, 1, 0, 1]);
     transmute::<i64x4, _>(ret)
 }
 
@@ -648,8 +645,7 @@ pub unsafe fn _mm256_broadcastss_ps(a: __m128) -> __m256 {
 #[cfg_attr(test, assert_instr(vpbroadcastw))]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm_broadcastw_epi16(a: __m128i) -> __m128i {
-    let zero = _mm_setzero_si128();
-    let ret = simd_shuffle!(a.as_i16x8(), zero.as_i16x8(), [0_u32; 8]);
+    let ret = simd_shuffle!(a.as_i16x8(), i16x8::ZERO, [0_u32; 8]);
     transmute::<i16x8, _>(ret)
 }
 
@@ -662,8 +658,7 @@ pub unsafe fn _mm_broadcastw_epi16(a: __m128i) -> __m128i {
 #[cfg_attr(test, assert_instr(vpbroadcastw))]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm256_broadcastw_epi16(a: __m128i) -> __m256i {
-    let zero = _mm_setzero_si128();
-    let ret = simd_shuffle!(a.as_i16x8(), zero.as_i16x8(), [0_u32; 16]);
+    let ret = simd_shuffle!(a.as_i16x8(), i16x8::ZERO, [0_u32; 16]);
     transmute::<i16x16, _>(ret)
 }
 
@@ -917,7 +912,7 @@ pub unsafe fn _mm256_cvtepu8_epi64(a: __m128i) -> __m256i {
 pub unsafe fn _mm256_extracti128_si256<const IMM1: i32>(a: __m256i) -> __m128i {
     static_assert_uimm_bits!(IMM1, 1);
     let a = a.as_i64x4();
-    let b = _mm256_undefined_si256().as_i64x4();
+    let b = i64x4::ZERO;
     let dst: i64x2 = simd_shuffle!(a, b, [[0, 1], [2, 3]][IMM1 as usize]);
     transmute(dst)
 }
@@ -1005,7 +1000,7 @@ pub unsafe fn _mm_i32gather_epi32<const SCALE: i32>(
     offsets: __m128i,
 ) -> __m128i {
     static_assert_imm8_scale!(SCALE);
-    let zero = _mm_setzero_si128().as_i32x4();
+    let zero = i32x4::ZERO;
     let neg_one = _mm_set1_epi32(-1).as_i32x4();
     let offsets = offsets.as_i32x4();
     let slice = slice as *const i8;
@@ -1054,7 +1049,7 @@ pub unsafe fn _mm256_i32gather_epi32<const SCALE: i32>(
     offsets: __m256i,
 ) -> __m256i {
     static_assert_imm8_scale!(SCALE);
-    let zero = _mm256_setzero_si256().as_i32x8();
+    let zero = i32x8::ZERO;
     let neg_one = _mm256_set1_epi32(-1).as_i32x8();
     let offsets = offsets.as_i32x8();
     let slice = slice as *const i8;
@@ -1187,7 +1182,7 @@ pub unsafe fn _mm_i32gather_epi64<const SCALE: i32>(
     offsets: __m128i,
 ) -> __m128i {
     static_assert_imm8_scale!(SCALE);
-    let zero = _mm_setzero_si128().as_i64x2();
+    let zero = i64x2::ZERO;
     let neg_one = _mm_set1_epi64x(-1).as_i64x2();
     let offsets = offsets.as_i32x4();
     let slice = slice as *const i8;
@@ -1236,7 +1231,7 @@ pub unsafe fn _mm256_i32gather_epi64<const SCALE: i32>(
     offsets: __m128i,
 ) -> __m256i {
     static_assert_imm8_scale!(SCALE);
-    let zero = _mm256_setzero_si256().as_i64x4();
+    let zero = i64x4::ZERO;
     let neg_one = _mm256_set1_epi64x(-1).as_i64x4();
     let offsets = offsets.as_i32x4();
     let slice = slice as *const i8;
@@ -1372,7 +1367,7 @@ pub unsafe fn _mm_i64gather_epi32<const SCALE: i32>(
     offsets: __m128i,
 ) -> __m128i {
     static_assert_imm8_scale!(SCALE);
-    let zero = _mm_setzero_si128().as_i32x4();
+    let zero = i32x4::ZERO;
     let neg_one = _mm_set1_epi64x(-1).as_i32x4();
     let offsets = offsets.as_i64x2();
     let slice = slice as *const i8;
@@ -1421,7 +1416,7 @@ pub unsafe fn _mm256_i64gather_epi32<const SCALE: i32>(
     offsets: __m256i,
 ) -> __m128i {
     static_assert_imm8_scale!(SCALE);
-    let zero = _mm_setzero_si128().as_i32x4();
+    let zero = i32x4::ZERO;
     let neg_one = _mm_set1_epi64x(-1).as_i32x4();
     let offsets = offsets.as_i64x4();
     let slice = slice as *const i8;
@@ -1554,7 +1549,7 @@ pub unsafe fn _mm_i64gather_epi64<const SCALE: i32>(
     offsets: __m128i,
 ) -> __m128i {
     static_assert_imm8_scale!(SCALE);
-    let zero = _mm_setzero_si128().as_i64x2();
+    let zero = i64x2::ZERO;
     let neg_one = _mm_set1_epi64x(-1).as_i64x2();
     let slice = slice as *const i8;
     let offsets = offsets.as_i64x2();
@@ -1603,7 +1598,7 @@ pub unsafe fn _mm256_i64gather_epi64<const SCALE: i32>(
     offsets: __m256i,
 ) -> __m256i {
     static_assert_imm8_scale!(SCALE);
-    let zero = _mm256_setzero_si256().as_i64x4();
+    let zero = i64x4::ZERO;
     let neg_one = _mm256_set1_epi64x(-1).as_i64x4();
     let slice = slice as *const i8;
     let offsets = offsets.as_i64x4();
@@ -2052,7 +2047,7 @@ pub unsafe fn _mm256_min_epu8(a: __m256i, b: __m256i) -> __m256i {
 #[cfg_attr(test, assert_instr(vpmovmskb))]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm256_movemask_epi8(a: __m256i) -> i32 {
-    let z = i8x32::splat(0);
+    let z = i8x32::ZERO;
     let m: i8x32 = simd_lt(a.as_i8x32(), z);
     simd_bitmask::<_, u32>(m) as i32
 }
@@ -2265,7 +2260,7 @@ pub unsafe fn _mm256_permutevar8x32_epi32(a: __m256i, b: __m256i) -> __m256i {
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm256_permute4x64_epi64<const IMM8: i32>(a: __m256i) -> __m256i {
     static_assert_uimm_bits!(IMM8, 8);
-    let zero = _mm256_setzero_si256().as_i64x4();
+    let zero = i64x4::ZERO;
     let r: i64x4 = simd_shuffle!(
         a.as_i64x4(),
         zero,
@@ -2670,9 +2665,8 @@ pub unsafe fn _mm256_bslli_epi128<const IMM8: i32>(a: __m256i) -> __m256i {
         }
     }
     let a = a.as_i8x32();
-    let zero = _mm256_setzero_si256().as_i8x32();
     let r: i8x32 = simd_shuffle!(
-        zero,
+        i8x32::ZERO,
         a,
         [
             mask(IMM8, 0),
@@ -2864,7 +2858,7 @@ pub unsafe fn _mm256_srli_si256<const IMM8: i32>(a: __m256i) -> __m256i {
 pub unsafe fn _mm256_bsrli_epi128<const IMM8: i32>(a: __m256i) -> __m256i {
     static_assert_uimm_bits!(IMM8, 8);
     let a = a.as_i8x32();
-    let zero = _mm256_setzero_si256().as_i8x32();
+    let zero = i8x32::ZERO;
     let r: i8x32 = match IMM8 % 16 {
         0 => simd_shuffle!(
             a,
@@ -3143,7 +3137,7 @@ pub unsafe fn _mm256_srlv_epi64(a: __m256i, count: __m256i) -> __m256i {
 ///
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_stream_load_si256)
 #[inline]
-#[target_feature(enable = "avx,avx2")]
+#[target_feature(enable = "avx2")]
 #[cfg_attr(test, assert_instr(vmovntdqa))]
 #[stable(feature = "simd_x86_updates", since = "1.82.0")]
 pub unsafe fn _mm256_stream_load_si256(mem_addr: *const __m256i) -> __m256i {
@@ -5317,16 +5311,6 @@ mod tests {
         );
         assert_eq_m256i(r, expected);
 
-        #[rustfmt::skip]
-        let expected = _mm256_setr_epi8(
-            -1, -2, -3, -4, -5, -6, -7, -8,
-            -9, -10, -11, -12, -13, -14, -15, -16, -17,
-            -18, -19, -20, -21, -22, -23, -24, -25,
-            -26, -27, -28, -29, -30, -31, -32,
-        );
-        let r = _mm256_alignr_epi8::<16>(a, b);
-        assert_eq_m256i(r, expected);
-
         let r = _mm256_alignr_epi8::<15>(a, b);
         #[rustfmt::skip]
         let expected = _mm256_setr_epi8(
@@ -5339,6 +5323,9 @@ mod tests {
 
         let r = _mm256_alignr_epi8::<0>(a, b);
         assert_eq_m256i(r, b);
+
+        let r = _mm256_alignr_epi8::<16>(a, b);
+        assert_eq_m256i(r, a);
     }
 
     #[simd_test(enable = "avx2")]

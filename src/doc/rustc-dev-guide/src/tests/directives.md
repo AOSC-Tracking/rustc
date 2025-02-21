@@ -58,7 +58,11 @@ not be exhaustive. Directives can generally be found by browsing the
 | `aux-build`           | Build a separate crate from the named source file                                                     | All except `run-make` | Path to auxiliary `.rs` file                  |
 | `aux-crate`           | Like `aux-build` but makes available as extern prelude                                                | All except `run-make` | `<extern_prelude_name>=<path/to/aux/file.rs>` |
 | `aux-codegen-backend` | Similar to `aux-build` but pass the compiled dylib to `-Zcodegen-backend` when building the main file | `ui-fulldeps`         | Path to codegen backend file                  |
+| `proc-macro`          | Similar to `aux-build`, but for aux forces host and don't use `-Cprefer-dynamic`[^pm].                | All except `run-make` | Path to auxiliary proc-macro `.rs` file       |
 | `build_aux_docs`      | Build docs for auxiliaries as well                                                                    | All except `run-make` | N/A                                           |
+
+[^pm]: please see the Auxiliary proc-macro section in the
+    [compiletest](./compiletest.md) chapter for specifics.
 
 ### Controlling outcome expectations
 
@@ -90,11 +94,10 @@ for more details.
 | `check-run-results`               | Check run test binary `run-{pass,fail}` output snapshot                                                                  | `ui`, `crashes`, `incremental` if `run-pass` | N/A                                                                                     |
 | `error-pattern`                   | Check that output contains a regex pattern                                                                               | `ui`, `crashes`, `incremental` if `run-pass` | Regex                                                                                   |
 | `check-stdout`                    | Check `stdout` against `error-pattern`s from running test binary[^check_stdout]                                          | `ui`, `crashes`, `incremental`               | N/A                                                                                     |
-| `compare-output-lines-by-subset`  | Check output contains the contents of the snapshot by lines opposed to checking for strict equality                      | `ui`, `coverage`                             | N/A                                                                                     |
 | `normalize-stderr-32bit`          | Normalize actual stderr (for 32-bit platforms) with a rule `"<raw>" -> "<normalized>"` before comparing against snapshot | `ui`, `incremental`                          | `"<RAW>" -> "<NORMALIZED>"`, `<RAW>`/`<NORMALIZED>` is regex capture and replace syntax |
 | `normalize-stderr-64bit`          | Normalize actual stderr (for 64-bit platforms) with a rule `"<raw>" -> "<normalized>"` before comparing against snapshot | `ui`, `incremental`                          | `"<RAW>" -> "<NORMALIZED>"`, `<RAW>`/`<NORMALIZED>` is regex capture and replace syntax |
-| `normalize-stderr-test`           | Normalize actual stderr with a rule `"<raw>" -> "<normalized>"` before comparing against snapshot                        | `ui`, `incremental`                          | `"<RAW>" -> "<NORMALIZED>"`, `<RAW>`/`<NORMALIZED>` is regex capture and replace syntax |
-| `normalize-stdout-test`           | Normalize actual stdout with a rule `"<raw>" -> "<normalized>"` before comparing against snapshot                        | `ui`, `incremental`                          | `"<RAW>" -> "<NORMALIZED>"`, `<RAW>`/`<NORMALIZED>` is regex capture and replace syntax |
+| `normalize-stderr`                | Normalize actual stderr with a rule `"<raw>" -> "<normalized>"` before comparing against snapshot                        | `ui`, `incremental`                          | `"<RAW>" -> "<NORMALIZED>"`, `<RAW>`/`<NORMALIZED>` is regex capture and replace syntax |
+| `normalize-stdout`                | Normalize actual stdout with a rule `"<raw>" -> "<normalized>"` before comparing against snapshot                        | `ui`, `incremental`                          | `"<RAW>" -> "<NORMALIZED>"`, `<RAW>`/`<NORMALIZED>` is regex capture and replace syntax |
 | `dont-check-compiler-stderr`      | Don't check actual compiler stderr vs stderr snapshot                                                                    | `ui`                                         | N/A                                                                                     |
 | `dont-check-compiler-stdout`      | Don't check actual compiler stdout vs stdout snapshot                                                                    | `ui`                                         | N/A                                                                                     |
 | `run-rustfix`                     | Apply all suggestions via `rustfix`, snapshot fixed output, and check fixed output builds                                | `ui`                                         | N/A                                                                                     |
@@ -102,7 +105,7 @@ for more details.
 | `exec-env`                        | Env var to set when executing a test                                                                                     | `ui`, `crashes`                              | `<KEY>=<VALUE>`                                                                         |
 | `unset-exec-env`                  | Env var to unset when executing a test                                                                                   | `ui`, `crashes`                              | Any env var name                                                                        |
 | `stderr-per-bitwidth`             | Generate a stderr snapshot for each bitwidth                                                                             | `ui`                                         | N/A                                                                                     |
-| `forbid-output`                   | A pattern which must not appear in `cfail` output                                                                        | `incremental`                                | Regex pattern                                                                           |
+| `forbid-output`                   | A pattern which must not appear in stderr/`cfail` output                                                                 | `ui`, `incremental`                          | Regex pattern                                                                           |
 | `run-flags`                       | Flags passed to the test executable                                                                                      | `ui`                                         | Arbitrary flags                                                                         |
 | `known-bug`                       | No error annotation needed due to known bug                                                                              | `ui`, `crashes`, `incremental`               | Issue number `#123456`                                                                  |
 
@@ -179,6 +182,10 @@ settings:
   assertions.
 - `needs-rustc-debug-assertions` — ignores if rustc was not built with debug
   assertions.
+- `needs-target-has-atomic` — ignores if target does not have support for all
+  specified atomic widths, e.g. the test with `//@ needs-target-has-atomic: 8,
+  16, ptr` will only run if it supports the comma-separated list of atomic
+  widths.
 
 The following directives will check LLVM support:
 

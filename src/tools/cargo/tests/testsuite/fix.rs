@@ -869,7 +869,7 @@ fn prepare_for_already_on_latest_unstable() {
         .run();
 }
 
-#[cargo_test]
+#[cargo_test(nightly, reason = "edition2024 hasn't hit stable yet")]
 fn prepare_for_already_on_latest_stable() {
     // Stable counterpart of prepare_for_already_on_latest_unstable.
     if Edition::LATEST_UNSTABLE.is_some() {
@@ -2361,8 +2361,6 @@ fn migrate_project_to_package() {
         .file(
             "Cargo.toml",
             r#"
-cargo-features = ["edition2024"]
-
 # Before project
 [ project ] # After project header
 # After project header line
@@ -2375,7 +2373,6 @@ edition = "2021"
         .build();
 
     p.cargo("fix --edition --allow-no-vcs")
-        .masquerade_as_nightly_cargo(&["edition2024"])
         .with_stderr_data(str![[r#"
 [MIGRATING] Cargo.toml from 2021 edition to 2024
 [FIXED] Cargo.toml (1 fix)
@@ -2388,8 +2385,6 @@ edition = "2021"
     assert_e2e().eq(
         p.read_file("Cargo.toml"),
         str![[r#"
-
-cargo-features = ["edition2024"]
 
 # Before project
 [ package ] # After project header
@@ -2408,8 +2403,6 @@ fn migrate_removes_project() {
         .file(
             "Cargo.toml",
             r#"
-cargo-features = ["edition2024"]
-
 # Before package
 [ package ] # After package header
 # After package header line
@@ -2429,7 +2422,6 @@ edition = "2021"
         .build();
 
     p.cargo("fix --edition --allow-no-vcs")
-        .masquerade_as_nightly_cargo(&["edition2024"])
         .with_stderr_data(str![[r#"
 [MIGRATING] Cargo.toml from 2021 edition to 2024
 [FIXED] Cargo.toml (1 fix)
@@ -2443,8 +2435,6 @@ edition = "2021"
         p.read_file("Cargo.toml"),
         str![[r#"
 
-cargo-features = ["edition2024"]
-
 # Before package
 [ package ] # After package header
 # After package header line
@@ -2457,13 +2447,70 @@ edition = "2021"
 }
 
 #[cargo_test]
+fn migrate_removes_project_for_script() {
+    let p = project()
+        .file(
+            "foo.rs",
+            r#"
+---
+# Before package
+[ package ] # After package header
+# After package header line
+name = "foo"
+edition = "2021"
+# After package table
+
+# Before project
+[ project ] # After project header
+# After project header line
+name = "foo"
+edition = "2021"
+# After project table
+---
+
+fn main() {
+}
+"#,
+        )
+        .build();
+
+    p.cargo("-Zscript fix --edition --allow-no-vcs --manifest-path foo.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_stderr_data(str![[r#"
+[MIGRATING] foo.rs from 2021 edition to 2024
+[FIXED] foo.rs (1 fix)
+[CHECKING] foo v0.0.0 ([ROOT]/foo)
+[MIGRATING] [ROOT]/home/.cargo/target/[HASH]/foo.rs from 2021 edition to 2024
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    assert_e2e().eq(
+        p.read_file("foo.rs"),
+        str![[r#"
+
+---
+# Before package
+[ package ] # After package header
+# After package header line
+name = "foo"
+edition = "2021"
+# After project table
+---
+
+fn main() {
+}
+
+"#]],
+    );
+}
+
+#[cargo_test]
 fn migrate_rename_underscore_fields() {
     let p = project()
         .file(
             "Cargo.toml",
             r#"
-cargo-features = ["edition2024"]
-
 [workspace.dependencies]
 # Before default_features
 a = {path = "a", default_features = false}  # After default_features value
@@ -2531,7 +2578,6 @@ a = {path = "a", default_features = false}
         .build();
 
     p.cargo("fix --edition --allow-no-vcs")
-        .masquerade_as_nightly_cargo(&["edition2024"])
         .with_stderr_data(str![[r#"
 [MIGRATING] Cargo.toml from 2021 edition to 2024
 [FIXED] Cargo.toml (11 fixes)
@@ -2546,8 +2592,6 @@ a = {path = "a", default_features = false}
     assert_e2e().eq(
         p.read_file("Cargo.toml"),
         str![[r#"
-
-cargo-features = ["edition2024"]
 
 [workspace.dependencies]
 # Before default_features
@@ -2594,6 +2638,81 @@ a = {path = "a", default-features = false}
 # After build_dependencies line
 a = {path = "a", default-features = false}
 # After build_dependencies table
+
+"#]],
+    );
+}
+
+#[cargo_test]
+fn migrate_rename_underscore_fields_in_virtual_manifest() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+[workspace]
+members = ["foo"]
+resolver = "2"
+
+[workspace.dependencies]
+# Before default_features
+a = {path = "a", default_features = false}  # After default_features value
+# After default_features line
+"#,
+        )
+        .file(
+            "foo/Cargo.toml",
+            r#"
+[package]
+name = "foo"
+edition = "2021"
+"#,
+        )
+        .file("foo/src/lib.rs", "")
+        .file(
+            "a/Cargo.toml",
+            r#"
+                [package]
+                name = "a"
+                version = "0.0.1"
+                edition = "2015"
+            "#,
+        )
+        .file("a/src/lib.rs", "")
+        .build();
+
+    p.cargo("fix --edition --allow-no-vcs")
+        .with_stderr_data(str![[r#"
+[MIGRATING] Cargo.toml from 2021 edition to 2024
+[FIXED] Cargo.toml (1 fix)
+[MIGRATING] foo/Cargo.toml from 2021 edition to 2024
+[CHECKING] foo v0.0.0 ([ROOT]/foo/foo)
+[MIGRATING] foo/src/lib.rs from 2021 edition to 2024
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    assert_e2e().eq(
+        p.read_file("Cargo.toml"),
+        str![[r#"
+
+[workspace]
+members = ["foo"]
+resolver = "2"
+
+[workspace.dependencies]
+# Before default_features
+a = {path = "a", default-features = false}  # After default_features value
+# After default_features line
+
+"#]],
+    );
+    assert_e2e().eq(
+        p.read_file("foo/Cargo.toml"),
+        str![[r#"
+
+[package]
+name = "foo"
+edition = "2021"
 
 "#]],
     );
@@ -2691,7 +2810,6 @@ dep_df_false = { version = "0.1.0", default-features = false }
         .build();
 
     p.cargo("fix --all --edition --allow-no-vcs")
-        .masquerade_as_nightly_cargo(&["edition2024"])
         .with_stderr_data(
             str![[r#"
 [MIGRATING] pkg_default/Cargo.toml from 2021 edition to 2024

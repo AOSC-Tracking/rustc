@@ -156,7 +156,7 @@ fn custom_build_env_vars() {
                 authors = ["wycats@example.com"]
 
                 [features]
-                bar_feat = ["bar/foo"]
+                bar_feat = ["bar/foo", "bar/other-feature"]
 
                 [dependencies.bar]
                 path = "bar"
@@ -176,6 +176,7 @@ fn custom_build_env_vars() {
 
                 [features]
                 foo = []
+                other-feature = []
             "#,
         )
         .file("bar/src/lib.rs", "pub fn hello() {}");
@@ -213,6 +214,8 @@ fn custom_build_env_vars() {
                 let _host = env::var("HOST").unwrap();
 
                 let _feat = env::var("CARGO_FEATURE_FOO").unwrap();
+                let feat = env::var("CARGO_CFG_FEATURE").unwrap();
+                assert_eq!(feat, "foo,other-feature");
 
                 let cargo = env::var("CARGO").unwrap();
                 if env::var_os("CHECK_CARGO_IS_RUSTC").is_some() {{
@@ -3997,7 +4000,7 @@ fn warnings_emitted_when_build_script_panics() {
                 fn main() {
                     println!("cargo::warning=foo");
                     println!("cargo::warning=bar");
-                    panic!();
+                    panic!("our crate panicked");
                 }
             "#,
         )
@@ -4019,10 +4022,9 @@ Caused by:
   cargo::warning=bar
 
   --- stderr
-  thread 'main' panicked at build.rs:5:21:
-  explicit panic
-  [NOTE] run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-
+...
+[..]our crate panicked[..]
+...
 "#]])
         .run();
 }
@@ -4036,7 +4038,7 @@ fn warnings_emitted_when_dependency_panics() {
                 fn main() {
                     println!("cargo::warning=foo");
                     println!("cargo::warning=bar");
-                    panic!();
+                    panic!("dependency panicked");
                 }
             "#,
         )
@@ -4090,10 +4092,9 @@ Caused by:
   cargo::warning=bar
 
   --- stderr
-  thread 'main' panicked at [ROOT]/home/.cargo/registry/src/-[HASH]/published-0.1.0/build.rs:5:21:
-  explicit panic
-  [NOTE] run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-
+...
+[..]dependency panicked[..]
+...
 "#]])
         .run();
 }
@@ -5234,7 +5235,7 @@ fn dev_dep_with_links() {
         .file("bar/build.rs", "fn main() {}")
         .file("bar/src/lib.rs", "")
         .build();
-    p.cargo("check --tests").run()
+    p.cargo("check --tests").run();
 }
 
 #[cargo_test]

@@ -748,7 +748,8 @@ fn path_field<'a>(
     } else {
         Cow::Borrowed(crate_root)
     };
-    let relpath = pathdiff::diff_paths(&source.path, relative_to).expect("both paths are absolute");
+    let relpath = pathdiff::diff_paths(&source.path, relative_to)
+        .expect("PathSource::path and workspace path must be absolute");
     let relpath = relpath.to_str().unwrap().replace('\\', "/");
     Ok(relpath)
 }
@@ -1251,6 +1252,8 @@ mod tests {
         let mut local = LocalManifest {
             path: crate_root.clone(),
             manifest,
+            embedded: None,
+            raw: toml.to_owned(),
         };
         assert_eq!(local.manifest.to_string(), toml);
         let gctx = GlobalContext::default().unwrap();

@@ -101,7 +101,7 @@ jobs:
       - name: Install cargo-semver-checks
         run: |
           mkdir installed-bins
-          curl -Lf https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.35.0/cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz \
+          curl -Lf https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.36.0/cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz --directory=./installed-bins
           echo `pwd`/installed-bins >> $GITHUB_PATH
       - run: ci/validate-version-bump.sh
@@ -161,6 +161,8 @@ jobs:
     - run: rustup update --no-self-update stable
     - run: rustup update --no-self-update ${{ matrix.rust }} && rustup default ${{ matrix.rust }}
     - run: rustup target add ${{ matrix.other }}
+    - run: rustup target add aarch64-unknown-none # need this for build-std mock tests
+      if: startsWith(matrix.rust, 'nightly')
     - run: rustup component add rustc-dev llvm-tools-preview rust-docs
       if: startsWith(matrix.rust, 'nightly')
     - run: sudo apt update -y && sudo apt install lldb gcc-multilib libsecret-1-0 libsecret-1-dev -y

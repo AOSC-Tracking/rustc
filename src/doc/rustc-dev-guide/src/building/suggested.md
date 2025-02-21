@@ -254,6 +254,12 @@ You can also use `--keep-stage 1` when running tests. Something like this:
 - Initial test run: `./x test tests/ui`
 - Subsequent test run: `./x test tests/ui --keep-stage 1`
 
+### Iterating the standard library with `--keep-stage`
+
+If you are making changes to the standard library, you can use `./x build
+--keep-stage 0 library` to iteratively rebuild the standard library without
+rebuilding the compiler.
+
 ## Using incremental compilation
 
 You can further enable the `--incremental` flag to save additional time in
@@ -370,11 +376,9 @@ pkgs.mkShell {
 
 ## Shell Completions
 
-If you use Bash, Fish or PowerShell, you can find automatically-generated shell
+If you use Bash, Zsh, Fish or PowerShell, you can find automatically-generated shell
 completion scripts for `x.py` in
 [`src/etc/completions`](https://github.com/rust-lang/rust/tree/master/src/etc/completions).
-Zsh support will also be included once issues with
-[`clap_complete`](https://crates.io/crates/clap_complete) have been resolved.
 
 You can use `source ./src/etc/completions/x.py.<extension>` to load completions
 for your shell of choice, or `& .\src\etc\completions\x.py.ps1` for PowerShell.

@@ -696,10 +696,8 @@ fn prepare_rustc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResult
     base.inherit_jobserver(&build_runner.jobserver);
     build_deps_args(&mut base, build_runner, unit)?;
     add_cap_lints(build_runner.bcx, unit, &mut base);
-    if cargo_rustc_higher_args_precedence(build_runner) {
-        if let Some(args) = build_runner.bcx.extra_args_for(unit) {
-            base.args(args);
-        }
+    if let Some(args) = build_runner.bcx.extra_args_for(unit) {
+        base.args(args);
     }
     base.args(&unit.rustflags);
     if build_runner.bcx.gctx.cli_unstable().binary_dep_depinfo {
@@ -754,12 +752,6 @@ fn prepare_rustdoc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
 
     rustdoc.args(unit.pkg.manifest().lint_rustflags());
 
-    if !cargo_rustc_higher_args_precedence(build_runner) {
-        if let Some(args) = build_runner.bcx.extra_args_for(unit) {
-            rustdoc.args(args);
-        }
-    }
-
     let metadata = build_runner.metadata_for_doc_units[unit];
     rustdoc
         .arg("-C")
@@ -800,10 +792,8 @@ fn prepare_rustdoc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
 
     rustdoc::add_output_format(build_runner, unit, &mut rustdoc)?;
 
-    if cargo_rustc_higher_args_precedence(build_runner) {
-        if let Some(args) = build_runner.bcx.extra_args_for(unit) {
-            rustdoc.args(args);
-        }
+    if let Some(args) = build_runner.bcx.extra_args_for(unit) {
+        rustdoc.args(args);
     }
     rustdoc.args(&unit.rustdocflags);
 
@@ -1107,11 +1097,6 @@ fn build_base_args(
 
     cmd.args(unit.pkg.manifest().lint_rustflags());
     cmd.args(&profile_rustflags);
-    if !cargo_rustc_higher_args_precedence(build_runner) {
-        if let Some(args) = build_runner.bcx.extra_args_for(unit) {
-            cmd.args(args);
-        }
-    }
 
     // `-C overflow-checks` is implied by the setting of `-C debug-assertions`,
     // so we only need to provide `-C overflow-checks` if it differs from
@@ -1310,10 +1295,16 @@ fn trim_paths_args(
 /// This remap logic aligns with rustc:
 /// <https://github.com/rust-lang/rust/blob/c2ef3516/src/bootstrap/src/lib.rs#L1113-L1116>
 fn sysroot_remap(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> OsString {
-    let sysroot = &build_runner.bcx.target_data.info(unit.kind).sysroot;
     let mut remap = OsString::from("--remap-path-prefix=");
-    remap.push(sysroot);
-    remap.push("/lib/rustlib/src/rust"); // See also `detect_sysroot_src_path()`.
+    remap.push({
+        // See also `detect_sysroot_src_path()`.
+        let mut sysroot = build_runner.bcx.target_data.info(unit.kind).sysroot.clone();
+        sysroot.push("lib");
+        sysroot.push("rustlib");
+        sysroot.push("src");
+        sysroot.push("rust");
+        sysroot
+    });
     remap.push("=");
     remap.push("/rustc/");
     if let Some(commit_hash) = build_runner.bcx.rustc().commit_hash.as_ref() {
@@ -1400,14 +1391,17 @@ fn check_cfg_args(unit: &Unit) -> Vec<OsString> {
     }
     arg_feature.push("))");
 
-    // We also include the `docsrs` cfg from the docs.rs service. We include it here
-    // (in Cargo) instead of rustc, since there is a much closer relationship between
-    // Cargo and docs.rs than rustc and docs.rs. In particular, all users of docs.rs use
-    // Cargo, but not all users of rustc (like Rust-for-Linux) use docs.rs.
+    // In addition to the package features, we also include the `test` cfg (since
+    // compiler-team#785, as to be able to someday apply yt conditionaly), as well
+    // the `docsrs` cfg from the docs.rs service.
+    //
+    // We include `docsrs` here (in Cargo) instead of rustc, since there is a much closer
+    // relationship between Cargo and docs.rs than rustc and docs.rs. In particular, all
+    // users of docs.rs use Cargo, but not all users of rustc (like Rust-for-Linux) use docs.rs.
 
     vec![
         OsString::from("--check-cfg"),
-        OsString::from("cfg(docsrs)"),
+        OsString::from("cfg(docsrs,test)"),
         OsString::from("--check-cfg"),
         arg_feature,
     ]
@@ -2000,20 +1994,4 @@ fn scrape_output_path(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoR
     build_runner
         .outputs(unit)
         .map(|outputs| outputs[0].path.clone())
-}
-
-/// Provides a way to change the precedence of `cargo rustc -- <flags>`.
-///
-/// This is intended to be a short-live function.
-///
-/// See <https://github.com/rust-lang/cargo/issues/14346>
-fn cargo_rustc_higher_args_precedence(build_runner: &BuildRunner<'_, '_>) -> bool {
-    build_runner.bcx.gctx.nightly_features_allowed
-        && build_runner
-            .bcx
-            .gctx
-            .get_env("__CARGO_RUSTC_ORIG_ARGS_PRIO")
-            .ok()
-            .as_deref()
-            != Some("1")
 }

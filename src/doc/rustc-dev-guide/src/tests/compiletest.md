@@ -33,6 +33,14 @@ See the [Adding new tests](adding.md) and [Best practies](best-practices.md)
 chapters for a tutorial on creating a new test and advice on writing a good
 test, and the [Running tests](running.md) chapter on how to run the test suite.
 
+Arguments can be passed to compiletest using `--test-args` or by placing them after `--`, e.g.
+- `x test --test-args --force-rerun`
+- `x test -- --force-rerun`
+
+Additionally, bootstrap accepts several common arguments directly, e.g.
+
+`x test --no-capture --force-rerun --run --pass`.
+
 Compiletest itself tries to avoid running tests when the artifacts that are
 involved (mainly the compiler) haven't changed. You can use `x test --test-args
 --force-rerun` to rerun a test even when none of the inputs have changed.
@@ -113,20 +121,6 @@ The directives for pretty-printing tests are:
   expanded output to type check it. This is needed for a pretty-mode that does
   not expand to valid Rust, or for other situations where the expanded output
   cannot be compiled.
-- `pretty-expanded` allows a pretty test to also check that the expanded output
-  can be type checked. That is, after the steps above, it does two more steps:
-
-  > 5. Run `rustc -Zunpretty=expanded` on the original source
-  > 6. Run `rustc -Zno-codegen` on the expanded output to make sure that it can type check
-
-  This is needed because not all code can be compiled after being expanded.
-  Pretty tests should specify this if they can. An example where this cannot be
-  used is if the test includes `println!`. That macro expands to reference
-  private internal functions of the standard library that cannot be called
-  directly without the `fmt_internals` feature gate.
-
-  More history about this may be found in
-  [#23616](https://github.com/rust-lang/rust/issues/23616#issuecomment-484999901).
 - `pp-exact` is used to ensure a pretty-print test results in specific output.
   If specified without a value, then it means the pretty-print output should
   match the original source. If specified with a value, as in `//@
@@ -257,6 +251,9 @@ the debugger currently being used:
 - `rust-lldb` — ignores the test if lldb is not contain the Rust plugin. NOTE:
   The "Rust" version of LLDB doesn't exist anymore, so this will always be
   ignored. This should probably be removed.
+
+By passing the `--debugger` option to compiletest, you can specify a single debugger to run tests with.
+For example, `./x test tests/debuginfo -- --debugger gdb` will only test GDB commands.
 
 > **Note on running lldb debuginfo tests locally**
 >
@@ -586,6 +583,7 @@ There are multiple [directives](directives.md) to assist with that:
 - `aux-crate`
 - `aux-bin`
 - `aux-codegen-backend`
+- `proc-macro`
 
 `aux-build` will build a separate crate from the named source file. The source
 file should be in a directory called `auxiliary` beside the test file.
@@ -618,44 +616,60 @@ for tests in `tests/ui-fulldeps`, since it requires the use of compiler crates.
 
 ### Auxiliary proc-macro
 
-If you want a proc-macro dependency, then there currently is some ceremony
-needed.
+If you want a proc-macro dependency, then you can use the `proc-macro`
+directive. This directive behaves just like `aux-build`, i.e. that you should
+place the proc-macro test auxiliary file under a `auxiliary` folder under the
+same parent folder as the main test file. However, it also has four additional
+preset behavior compared to `aux-build` for the proc-macro test auxiliary:
 
-Place the proc-macro itself in a file like `auxiliary/my-proc-macro.rs` with the
-following structure:
+1. The aux test file is built with `--crate-type=proc-macro`.
+2. The aux test file is built without `-C prefer-dynamic`, i.e. it will not try
+   to produce a dylib for the aux crate.
+3. The aux crate is made available to the test file via extern prelude with
+   `--extern <aux_crate_name>`. Note that since UI tests default to edition
+   2015, you still need to specify `extern <aux_crate_name>` unless the main
+   test file is using an edition that is 2018 or newer if you want to use the
+   aux crate name in a `use` import.
+4. The `proc_macro` crate is made available as an extern prelude module. Same
+   edition 2015 vs newer edition distinction for `extern proc_macro;` applies.
 
-```rust,ignore
-//@ force-host
-//@ no-prefer-dynamic
+For example, you might have a test `tests/ui/cat/meow.rs` and proc-macro
+auxiliary `tests/ui/cat/auxiliary/whiskers.rs`:
 
-#![crate_type = "proc-macro"]
-
-extern crate proc_macro;
-use proc_macro::TokenStream;
-
-#[proc_macro]
-pub fn foo(input: TokenStream) -> TokenStream {
-    "".parse().unwrap()
-}
+```text
+tests/ui/cat/
+    meow.rs                 # main test file
+    auxiliary/whiskers.rs   # auxiliary
 ```
 
-The `force-host` is needed because proc-macros are loaded in the host compiler,
-and `no-prefer-dynamic` is needed to tell compiletest to not use
-`prefer-dynamic` which is not compatible with proc-macros. The `#![crate_type]`
-attribute is needed to specify the correct crate-type.
+```rs
+// tests/ui/cat/meow.rs
 
-Then in your test, you can build with `aux-build`:
+//@ proc-macro: whiskers.rs
 
-```rust,ignore
-//@ aux-build: my-proc-macro.rs
-
-extern crate my_proc_macro;
+extern crate whiskers; // needed as ui test defaults to edition 2015
 
 fn main() {
-    my_proc_macro::foo!();
+  whiskers::identity!();
 }
 ```
 
+```rs
+// tests/ui/cat/auxiliary/whiskers.rs
+
+extern crate proc_macro;
+use proc_macro::*;
+
+#[proc_macro]
+pub fn identity(ts: TokenStream) -> TokenStream {
+    ts
+}
+```
+
+> **Note**: The `proc-macro` header currently does not work with the
+> `build-aux-doc` header for rustdoc tests. In that case, you will need to use
+> the `aux-build` header, and use `#![crate_type="proc_macro"]`, and `//@
+> force-host` and `//@ no-prefer-dynamic` headers in the proc-macro.
 
 ## Revisions
 

@@ -7,7 +7,7 @@ Safe Rust guarantees an absence of data races, which are defined as:
 * one or more of them is unsynchronized
 
 A data race has Undefined Behavior, and is therefore impossible to perform in
-Safe Rust. Data races are *mostly* prevented through Rust's ownership system:
+Safe Rust. Data races are prevented *mostly* through Rust's ownership system alone:
 it's impossible to alias a mutable reference, so it's impossible to perform a
 data race. Interior mutability makes this more complicated, which is largely why
 we have the Send and Sync traits (see the next section for more on this).
@@ -60,8 +60,8 @@ thread::spawn(move || {
 println!("{}", data[idx.load(Ordering::SeqCst)]);
 ```
 
-We can cause a data race if we instead do the bound check in advance, and then
-unsafely access the data with an unchecked value:
+We can cause a race condition to violate memory safety if we instead do the bound
+check in advance, and then unsafely access the data with an unchecked value:
 
 ```rust,no_run
 use std::thread;

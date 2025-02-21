@@ -19,9 +19,8 @@ use rustc_middle::ty::layout::{HasTypingEnv, LayoutOf};
 use rustc_middle::ty::{self, GenericArgsRef, Instance, Ty, TypeVisitableExt};
 use rustc_session::Session;
 use rustc_session::config::{self, DebugInfo};
-use rustc_span::symbol::Symbol;
 use rustc_span::{
-    BytePos, Pos, SourceFile, SourceFileAndLine, SourceFileHash, Span, StableSourceFileId,
+    BytePos, Pos, SourceFile, SourceFileAndLine, SourceFileHash, Span, StableSourceFileId, Symbol,
 };
 use smallvec::SmallVec;
 use tracing::debug;
@@ -294,12 +293,12 @@ impl<'ll, 'tcx> DebugInfoCodegenMethods<'tcx> for CodegenCx<'ll, 'tcx> {
         }
 
         // Initialize fn debug context (including scopes).
-        let empty_scope = Some(DebugScope {
+        let empty_scope = DebugScope {
             dbg_scope: self.dbg_scope_fn(instance, fn_abi, Some(llfn)),
             inlined_at: None,
             file_start_pos: BytePos(0),
             file_end_pos: BytePos(0),
-        });
+        };
         let mut fn_debug_context = FunctionDebugContext {
             scopes: IndexVec::from_elem(empty_scope, &mir.source_scopes),
             inlined_function_scopes: Default::default(),

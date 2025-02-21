@@ -142,6 +142,7 @@ fn duplicate_version() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
                 license = "MIT"
                 description = "foo"
@@ -160,7 +161,6 @@ See https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for
 [PACKAGING] foo v0.0.1 ([ROOT]/foo)
 [PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
 [VERIFYING] foo v0.0.1 ([ROOT]/foo)
-[WARNING] no edition set: defaulting to the 2015 edition while the latest is 2021
 [COMPILING] foo v0.0.1 ([ROOT]/foo/target/package/foo-0.0.1)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [UPLOADING] foo v0.0.1 ([ROOT]/foo)
@@ -2015,6 +2015,20 @@ readme = false
 license = "MIT"
 repository = "foo"
 
+[features]
+foo_feature = [
+    "normal-only/cat",
+    "build-only/cat",
+    "normal-and-dev/cat",
+    "target-normal-only/cat",
+    "target-build-only/cat",
+    "target-normal-and-dev/cat",
+    "optional-dep-feature/cat",
+    "dep:optional-namespaced",
+    "optional-renamed-dep-feature10/cat",
+    "dep:optional-renamed-namespaced10",
+]
+
 [[bin]]
 name = "foo"
 path = "src/main.rs"
@@ -2056,20 +2070,6 @@ features = ["cat"]
 [build-dependencies.build-only]
 version = "1.0"
 features = ["cat"]
-
-[features]
-foo_feature = [
-    "normal-only/cat",
-    "build-only/cat",
-    "normal-and-dev/cat",
-    "target-normal-only/cat",
-    "target-build-only/cat",
-    "target-normal-and-dev/cat",
-    "optional-dep-feature/cat",
-    "dep:optional-namespaced",
-    "optional-renamed-dep-feature10/cat",
-    "dep:optional-renamed-namespaced10",
-]
 
 [target."cfg(unix)".dependencies.target-normal-and-dev]
 version = "1.0"

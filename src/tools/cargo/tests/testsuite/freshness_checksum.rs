@@ -765,14 +765,7 @@ feature on
 fn rebuild_tests_if_lib_changes() {
     let p = project()
         .file("src/lib.rs", "pub fn foo() {}")
-        .file(
-            "tests/foo.rs",
-            r#"
-                extern crate foo;
-                #[test]
-                fn test() { foo::foo(); }
-            "#,
-        )
+        .file("tests/foo-test.rs", "extern crate foo;")
         .build();
 
     p.cargo("build -Zchecksum-freshness")
@@ -784,21 +777,18 @@ fn rebuild_tests_if_lib_changes() {
 
     p.change_file("src/lib.rs", "");
 
-    p.cargo("build -Zchecksum-freshness -v")
+    p.cargo("build -Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .run();
-    p.cargo("test -Zchecksum-freshness -v")
+    p.cargo("test -Zchecksum-freshness -v --test foo-test")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_status(101)
         .with_stderr_data(str![[r#"
 [DIRTY] foo v0.0.1 ([ROOT]/foo): the dependency foo was rebuilt ([TIME_DIFF_AFTER_LAST_BUILD])
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `rustc --crate-name foo [..]
-[RUNNING] `rustc --crate-name foo [..]
-error[E0425]: cannot find function `foo` in crate `foo`
-...
-[ERROR] could not compile `foo` (test "foo") due to 1 previous error
-...
+[RUNNING] `rustc --crate-name foo_test [..]`
+[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `[ROOT]/foo/target/debug/deps/foo_test-[HASH][EXE]`
+
 "#]])
         .run();
 }
@@ -1109,7 +1099,7 @@ new desc
 
 "#]])
         .with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the metadata changed
+[DIRTY] foo v0.0.1 ([ROOT]/foo): the environment variable CARGO_PKG_DESCRIPTION changed
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc [..]
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -1519,7 +1509,6 @@ fn changing_rustflags_is_cached() {
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .env("RUSTFLAGS", "-C linker=cc")
         .with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the rustflags changed
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc [..]
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -1530,9 +1519,7 @@ fn changing_rustflags_is_cached() {
     p.cargo("build -Zchecksum-freshness -v")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the rustflags changed
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `rustc [..] src/lib.rs [..]
+[FRESH] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -1541,9 +1528,48 @@ fn changing_rustflags_is_cached() {
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .env("RUSTFLAGS", "-C linker=cc")
         .with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the rustflags changed
+[FRESH] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
+fn changing_rustc_extra_flags_is_cached() {
+    let p = project().file("src/lib.rs", "").build();
+
+    // This isn't ever cached, we always have to recompile
+    p.cargo("rustc -Zchecksum-freshness")
+        .masquerade_as_nightly_cargo(&["checksum-freshness"])
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    p.cargo("rustc -Zchecksum-freshness -v -- -C linker=cc")
+        .masquerade_as_nightly_cargo(&["checksum-freshness"])
+        .with_stderr_data(str![[r#"
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc [..]
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+
+    p.cargo("rustc -Zchecksum-freshness -v")
+        .masquerade_as_nightly_cargo(&["checksum-freshness"])
+        .with_stderr_data(str![[r#"
+[FRESH] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    p.cargo("rustc -Zchecksum-freshness -v -- -C linker=cc")
+        .masquerade_as_nightly_cargo(&["checksum-freshness"])
+        .with_stderr_data(str![[r#"
+[FRESH] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -1969,57 +1995,6 @@ fn script_fails_stay_dirty() {
 }
 
 #[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn metadata_change_invalidates() {
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-            [package]
-            name = "foo"
-            version = "0.1.0"
-            edition = "2015"
-            "#,
-        )
-        .file("src/lib.rs", "")
-        .build();
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-
-    for attr in &[
-        "authors = [\"foo\"]",
-        "description = \"desc\"",
-        "homepage = \"https://example.com\"",
-        "repository =\"https://example.com\"",
-    ] {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .append(true)
-            .open(p.root().join("Cargo.toml"))
-            .unwrap();
-        writeln!(file, "{}", attr).unwrap();
-        p.cargo("build -Zchecksum-freshness")
-            .masquerade_as_nightly_cargo(&["checksum-freshness"])
-            .with_stderr_data(str![[r#"
-[COMPILING] foo v0.1.0 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-            .run();
-    }
-    p.cargo("build -Zchecksum-freshness -v")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FRESH] foo v0.1.0 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    assert_eq!(p.glob("target/debug/deps/libfoo-*.rlib").count(), 1);
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
 fn edition_change_invalidates() {
     const MANIFEST: &str = r#"
         [package]
@@ -2435,8 +2410,7 @@ LLVM version: 9.0
             .cargo("check -Zchecksum-freshness --message-format=json")
             .masquerade_as_nightly_cargo(&["checksum-freshness"])
             .env("RUSTC", compiler.bin(version))
-            .exec_with_output()
-            .unwrap();
+            .run();
         // Collect the filenames generated.
         let mut artifacts: Vec<_> = std::str::from_utf8(&output.stdout)
             .unwrap()

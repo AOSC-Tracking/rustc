@@ -268,6 +268,7 @@ The following is an index of all built-in attributes.
   - [`must_use`] --- Generates a lint for unused values.
   - [`diagnostic::on_unimplemented`] --- Hints the compiler to emit a certain error
     message if a trait is not implemented.
+  - [`diagnostic::do_not_recommend`] --- Hints the compiler to not show a certain trait impl in error messages.
 
 - ABI, linking, symbols, and FFI
   - [`link`] --- Specifies a native library to link with an `extern` block.
@@ -293,8 +294,8 @@ The following is an index of all built-in attributes.
   - [`cold`] --- Hint that a function is unlikely to be called.
   - [`no_builtins`] --- Disables use of certain built-in functions.
   - [`target_feature`] --- Configure platform-specific code generation.
-  - [`track_caller`] - Pass the parent call location to `std::panic::Location::caller()`.
-  - [`instruction_set`] - Specify the instruction set used to generate a functions code
+  - [`track_caller`] --- Pass the parent call location to `std::panic::Location::caller()`.
+  - [`instruction_set`] --- Specify the instruction set used to generate a functions code
 
 - Documentation
   - `doc` --- Specifies documentation. See [The Rustdoc Book] for more
@@ -410,3 +411,4 @@ The following is an index of all built-in attributes.
 [function pointer]: types/function-pointer.md
 [variadic functions]: items/external-blocks.html#variadic-functions
 [`diagnostic::on_unimplemented`]: attributes/diagnostics.md#the-diagnosticon_unimplemented-attribute
+[`diagnostic::do_not_recommend`]: attributes/diagnostics.md#the-diagnosticdo_not_recommend-attribute

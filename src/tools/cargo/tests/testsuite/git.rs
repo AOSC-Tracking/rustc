@@ -2917,7 +2917,7 @@ fn failed_submodule_checkout() {
     t.join().unwrap();
 }
 
-#[cargo_test(requires_git)]
+#[cargo_test(requires = "git")]
 fn use_the_cli() {
     let project = project();
     let git_project = git::new("dep1", |project| {
@@ -3028,7 +3028,7 @@ fn templatedir_doesnt_cause_problems() {
     p.cargo("check").run();
 }
 
-#[cargo_test(requires_git)]
+#[cargo_test(requires = "git")]
 fn git_with_cli_force() {
     // Supports a force-pushed repo.
     let git_project = git::new("dep1", |project| {
@@ -3095,7 +3095,7 @@ two
         .run();
 }
 
-#[cargo_test(requires_git)]
+#[cargo_test(requires = "git")]
 fn git_fetch_cli_env_clean() {
     // This tests that git-fetch-with-cli works when GIT_DIR environment
     // variable is set (for whatever reason).
@@ -3396,7 +3396,7 @@ fn historical_lockfile_works_with_vendor() {
         .file("src/lib.rs", "")
         .build();
 
-    let output = project.cargo("vendor").exec_with_output().unwrap();
+    let output = project.cargo("vendor").run();
     project.change_file(
         ".cargo/config.toml",
         str::from_utf8(&output.stdout).unwrap(),
@@ -4069,7 +4069,7 @@ src/lib.rs
         .run();
 }
 
-#[cargo_test(public_network_test, requires_git)]
+#[cargo_test(public_network_test, requires = "git")]
 fn github_fastpath_error_message() {
     let p = project()
         .file(
@@ -4217,6 +4217,44 @@ src/lib.rs
         .with_stderr_data(str![[r#"
 [CHECKING] foo v0.5.0 ([ROOT]/bar)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+#[cfg(unix)]
+fn simple_with_fifo() {
+    let git_project = git::new("foo", |project| {
+        project
+            .file(
+                "Cargo.toml",
+                r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "2015"
+            "#,
+            )
+            .file("src/main.rs", "fn main() {}")
+    });
+
+    std::process::Command::new("mkfifo")
+        .current_dir(git_project.root())
+        .arg(git_project.root().join("blocks-when-read"))
+        .status()
+        .expect("a FIFO can be created");
+
+    // Avoid actual blocking even in case of failure, assuming that what it lists here
+    // would also be read eventually.
+    git_project
+        .cargo("package -l")
+        .with_stdout_data(str![[r#"
+.cargo_vcs_info.json
+Cargo.lock
+Cargo.toml
+Cargo.toml.orig
+src/main.rs
 
 "#]])
         .run();

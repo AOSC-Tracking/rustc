@@ -96,10 +96,6 @@
 # Source Code Representation
 
 - [Prologue](./part-3-intro.md)
-- [Command-line arguments](./cli.md)
-- [rustc_driver and rustc_interface](./rustc-driver/intro.md)
-    - [Example: Type checking](./rustc-driver/interacting-with-the-ast.md)
-    - [Example: Getting diagnostics](./rustc-driver/getting-diagnostics.md)
 - [Syntax and the AST](./syntax-intro.md)
     - [Lexing and Parsing](./the-parser.md)
     - [Macro expansion](./macro-expansion.md)
@@ -118,25 +114,34 @@
     - [MIR construction](./mir/construction.md)
     - [MIR visitor and traversal](./mir/visitor.md)
     - [MIR queries and passes: getting the MIR](./mir/passes.md)
-- [Identifiers in the Compiler](./identifiers.md)
-- [Closure expansion](./closure.md)
 - [Inline assembly](./asm.md)
+
+# Supporting Infrastructure
+
+- [Command-line arguments](./cli.md)
+- [rustc_driver and rustc_interface](./rustc-driver/intro.md)
+    - [Example: Type checking](./rustc-driver/interacting-with-the-ast.md)
+    - [Example: Getting diagnostics](./rustc-driver/getting-diagnostics.md)
+- [Errors and Lints](diagnostics.md)
+    - [Diagnostic and subdiagnostic structs](./diagnostics/diagnostic-structs.md)
+    - [Translation](./diagnostics/translation.md)
+    - [`LintStore`](./diagnostics/lintstore.md)
+    - [Error codes](./diagnostics/error-codes.md)
+    - [Diagnostic items](./diagnostics/diagnostic-items.md)
+    - [`ErrorGuaranteed`](./diagnostics/error-guaranteed.md)
 
 # Analysis
 
 - [Prologue](./part-4-intro.md)
 - [Generic parameter definitions](./generic_parameters_summary.md)
-    - [What is `ty::Generics`](./what_is_ty_generics.md)
-    - [Early vs Late bound parameters](./early-late-bound-params/early-late-bound-summary.md)
-        - [Implementation nuances of early/late bound parameters](./early-late-bound-params/early-late-bound-implementation-nuances.md)
-        - [Interactions with turbofishing](./early-late-bound-params/turbofishing-and-early-late-bound.md)
+    - [Implementation nuances of early/late bound parameters](./early-late-bound-params/early-late-bound-implementation-nuances.md)
+    - [Interactions with turbofishing](./early-late-bound-params/turbofishing-and-early-late-bound.md)
 - [The `ty` module: representing types](./ty.md)
     - [ADTs and Generic Arguments](./ty_module/generic_arguments.md)
     - [Parameter types/consts/regions](./ty_module/param_ty_const_regions.md)
     - [`EarlyBinder` and instantiating parameters](./ty_module/early_binder.md)
     - [`Binder` and Higher ranked regions](./ty_module/binders.md)
     - [Instantiating binders](./ty_module/instantiating_binders.md)
-    - [Constants in the type system](./constants.md)
 - [`TypeFolder` and `TypeFoldable`](./ty-fold.md)
 - [Parameter Environments](./param_env/param_env_summary.md)
     - [What is it?](./param_env/param_env_what_is_it.md)
@@ -190,13 +195,7 @@
         - [Closure constraints](./borrow_check/region_inference/closure_constraints.md)
         - [Error reporting](./borrow_check/region_inference/error_reporting.md)
     - [Two-phase-borrows](./borrow_check/two_phase_borrows.md)
-- [Errors and Lints](diagnostics.md)
-    - [Diagnostic and subdiagnostic structs](./diagnostics/diagnostic-structs.md)
-    - [Translation](./diagnostics/translation.md)
-    - [`LintStore`](./diagnostics/lintstore.md)
-    - [Error codes](./diagnostics/error-codes.md)
-    - [Diagnostic items](./diagnostics/diagnostic-items.md)
-    - [`ErrorGuaranteed`](./diagnostics/error-guaranteed.md)
+- [Closure capture inference](./closure.md)
 - [Async closures/"coroutine-closures"](coroutine-closures.md)
 
 # MIR to Binaries

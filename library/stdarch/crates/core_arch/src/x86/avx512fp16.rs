@@ -1,6 +1,6 @@
 use crate::arch::asm;
 use crate::core_arch::{simd::*, x86::*};
-use crate::intrinsics::simd::*;
+use crate::intrinsics::{fmaf16, simd::*};
 use crate::ptr;
 
 /// Set packed half-precision (16-bit) floating-point elements in dst with the supplied values.
@@ -239,7 +239,7 @@ pub unsafe fn _mm512_setr_ph(
 #[target_feature(enable = "avx512fp16,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm_setzero_ph() -> __m128h {
-    transmute(f16x8::splat(0.0))
+    transmute(f16x8::ZERO)
 }
 
 /// Return vector of type __m256h with all elements set to zero.
@@ -249,7 +249,7 @@ pub unsafe fn _mm_setzero_ph() -> __m128h {
 #[target_feature(enable = "avx512fp16,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm256_setzero_ph() -> __m256h {
-    transmute(f16x16::splat(0.0))
+    transmute(f16x16::ZERO)
 }
 
 /// Return vector of type __m512h with all elements set to zero.
@@ -259,7 +259,7 @@ pub unsafe fn _mm256_setzero_ph() -> __m256h {
 #[target_feature(enable = "avx512fp16")]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm512_setzero_ph() -> __m512h {
-    transmute(f16x32::splat(0.0))
+    transmute(f16x32::ZERO)
 }
 
 /// Return vector of type `__m128h` with undefined elements. In practice, this returns the all-zero
@@ -270,7 +270,7 @@ pub unsafe fn _mm512_setzero_ph() -> __m512h {
 #[target_feature(enable = "avx512fp16,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm_undefined_ph() -> __m128h {
-    transmute(f16x8::splat(0.0))
+    transmute(f16x8::ZERO)
 }
 
 /// Return vector of type `__m256h` with undefined elements. In practice, this returns the all-zero
@@ -281,7 +281,7 @@ pub unsafe fn _mm_undefined_ph() -> __m128h {
 #[target_feature(enable = "avx512fp16,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm256_undefined_ph() -> __m256h {
-    transmute(f16x16::splat(0.0))
+    transmute(f16x16::ZERO)
 }
 
 /// Return vector of type `__m512h` with undefined elements. In practice, this returns the all-zero
@@ -292,7 +292,7 @@ pub unsafe fn _mm256_undefined_ph() -> __m256h {
 #[target_feature(enable = "avx512fp16")]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm512_undefined_ph() -> __m512h {
-    transmute(f16x32::splat(0.0))
+    transmute(f16x32::ZERO)
 }
 
 /// Cast vector of type `__m128d` to type `__m128h`. This intrinsic is only used for compilation and
@@ -667,7 +667,7 @@ macro_rules! cmp_asm { // FIXME: use LLVM intrinsics
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm_cmp_ph_mask)
 #[inline]
-#[target_feature(enable = "avx512fp16,avx512vl,avx512f,sse")]
+#[target_feature(enable = "avx512fp16,avx512vl")]
 #[rustc_legacy_const_generics(2)]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm_cmp_ph_mask<const IMM5: i32>(a: __m128h, b: __m128h) -> __mmask8 {
@@ -681,7 +681,7 @@ pub unsafe fn _mm_cmp_ph_mask<const IMM5: i32>(a: __m128h, b: __m128h) -> __mmas
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm_mask_cmp_ph_mask)
 #[inline]
-#[target_feature(enable = "avx512fp16,avx512vl,avx512f,sse")]
+#[target_feature(enable = "avx512fp16,avx512vl")]
 #[rustc_legacy_const_generics(3)]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm_mask_cmp_ph_mask<const IMM5: i32>(
@@ -698,7 +698,7 @@ pub unsafe fn _mm_mask_cmp_ph_mask<const IMM5: i32>(
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm256_cmp_ph_mask)
 #[inline]
-#[target_feature(enable = "avx512fp16,avx512vl,avx512f,avx")]
+#[target_feature(enable = "avx512fp16,avx512vl")]
 #[rustc_legacy_const_generics(2)]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm256_cmp_ph_mask<const IMM5: i32>(a: __m256h, b: __m256h) -> __mmask16 {
@@ -712,7 +712,7 @@ pub unsafe fn _mm256_cmp_ph_mask<const IMM5: i32>(a: __m256h, b: __m256h) -> __m
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm256_mask_cmp_ph_mask)
 #[inline]
-#[target_feature(enable = "avx512fp16,avx512vl,avx512f,avx")]
+#[target_feature(enable = "avx512fp16,avx512vl")]
 #[rustc_legacy_const_generics(3)]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm256_mask_cmp_ph_mask<const IMM5: i32>(
@@ -729,7 +729,7 @@ pub unsafe fn _mm256_mask_cmp_ph_mask<const IMM5: i32>(
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm512_cmp_ph_mask)
 #[inline]
-#[target_feature(enable = "avx512fp16,avx512bw,avx512f")]
+#[target_feature(enable = "avx512fp16")]
 #[rustc_legacy_const_generics(2)]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm512_cmp_ph_mask<const IMM5: i32>(a: __m512h, b: __m512h) -> __mmask32 {
@@ -743,7 +743,7 @@ pub unsafe fn _mm512_cmp_ph_mask<const IMM5: i32>(a: __m512h, b: __m512h) -> __m
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm512_mask_cmp_ph_mask)
 #[inline]
-#[target_feature(enable = "avx512fp16,avx512bw,avx512f")]
+#[target_feature(enable = "avx512fp16")]
 #[rustc_legacy_const_generics(3)]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm512_mask_cmp_ph_mask<const IMM5: i32>(
@@ -762,7 +762,7 @@ pub unsafe fn _mm512_mask_cmp_ph_mask<const IMM5: i32>(
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm512_cmp_round_ph_mask)
 #[inline]
-#[target_feature(enable = "avx512fp16,avx512bw,avx512f")]
+#[target_feature(enable = "avx512fp16")]
 #[rustc_legacy_const_generics(2, 3)]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm512_cmp_round_ph_mask<const IMM5: i32, const SAE: i32>(
@@ -795,7 +795,7 @@ pub unsafe fn _mm512_cmp_round_ph_mask<const IMM5: i32, const SAE: i32>(
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm512_mask_cmp_round_ph_mask)
 #[inline]
-#[target_feature(enable = "avx512fp16,avx512bw,avx512f")]
+#[target_feature(enable = "avx512fp16")]
 #[rustc_legacy_const_generics(3, 4)]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm512_mask_cmp_round_ph_mask<const IMM5: i32, const SAE: i32>(
@@ -1098,7 +1098,7 @@ pub unsafe fn _mm_load_sh(mem_addr: *const f16) -> __m128h {
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm_mask_load_sh)
 #[inline]
-#[target_feature(enable = "avx512fp16,sse,avx512f")]
+#[target_feature(enable = "avx512fp16")]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm_mask_load_sh(src: __m128h, k: __mmask8, mem_addr: *const f16) -> __m128h {
     let mut dst = src;
@@ -1107,7 +1107,7 @@ pub unsafe fn _mm_mask_load_sh(src: __m128h, k: __mmask8, mem_addr: *const f16) 
         dst = inout(xmm_reg) dst,
         k = in(kreg) k,
         p = in(reg) mem_addr,
-        options(pure, nomem, nostack, preserves_flags)
+        options(pure, readonly, nostack, preserves_flags)
     );
     dst
 }
@@ -1117,7 +1117,7 @@ pub unsafe fn _mm_mask_load_sh(src: __m128h, k: __mmask8, mem_addr: *const f16) 
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm_maskz_load_sh)
 #[inline]
-#[target_feature(enable = "avx512fp16,sse,avx512f")]
+#[target_feature(enable = "avx512fp16")]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm_maskz_load_sh(k: __mmask8, mem_addr: *const f16) -> __m128h {
     let mut dst: __m128h;
@@ -1126,7 +1126,7 @@ pub unsafe fn _mm_maskz_load_sh(k: __mmask8, mem_addr: *const f16) -> __m128h {
         dst = out(xmm_reg) dst,
         k = in(kreg) k,
         p = in(reg) mem_addr,
-        options(pure, nomem, nostack, preserves_flags)
+        options(pure, readonly, nostack, preserves_flags)
     );
     dst
 }
@@ -1255,7 +1255,7 @@ pub unsafe fn _mm_store_sh(mem_addr: *mut f16, a: __m128h) {
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm_mask_store_sh)
 #[inline]
-#[target_feature(enable = "avx512fp16,sse,avx512f")]
+#[target_feature(enable = "avx512fp16")]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm_mask_store_sh(mem_addr: *mut f16, k: __mmask8, a: __m128h) {
     asm!(
@@ -2308,7 +2308,6 @@ pub unsafe fn _mm512_maskz_div_ph(k: __mmask32, a: __m512h, b: __m512h) -> __m51
 /// * [`_MM_FROUND_CUR_DIRECTION`] : use `MXCSR.RC` - see [`_MM_SET_ROUNDING_MODE`]
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm512_div_round_ph)
-
 #[inline]
 #[target_feature(enable = "avx512fp16")]
 #[cfg_attr(test, assert_instr(vdivph, ROUNDING = 8))]
@@ -11050,7 +11049,7 @@ macro_rules! fpclass_asm { // FIXME: use LLVM intrinsics
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm_fpclass_ph_mask)
 #[inline]
-#[target_feature(enable = "avx512fp16,avx512vl,avx512f,sse")]
+#[target_feature(enable = "avx512fp16,avx512vl")]
 #[cfg_attr(test, assert_instr(vfpclassph, IMM8 = 0))]
 #[rustc_legacy_const_generics(1)]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
@@ -11075,7 +11074,7 @@ pub unsafe fn _mm_fpclass_ph_mask<const IMM8: i32>(a: __m128h) -> __mmask8 {
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm_mask_fpclass_ph_mask)
 #[inline]
-#[target_feature(enable = "avx512fp16,avx512vl,avx512f,sse")]
+#[target_feature(enable = "avx512fp16,avx512vl")]
 #[cfg_attr(test, assert_instr(vfpclassph, IMM8 = 0))]
 #[rustc_legacy_const_generics(2)]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
@@ -11099,7 +11098,7 @@ pub unsafe fn _mm_mask_fpclass_ph_mask<const IMM8: i32>(k1: __mmask8, a: __m128h
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm256_fpclass_ph_mask)
 #[inline]
-#[target_feature(enable = "avx512fp16,avx512vl,avx512f,avx")]
+#[target_feature(enable = "avx512fp16,avx512vl")]
 #[cfg_attr(test, assert_instr(vfpclassph, IMM8 = 0))]
 #[rustc_legacy_const_generics(1)]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
@@ -11124,7 +11123,7 @@ pub unsafe fn _mm256_fpclass_ph_mask<const IMM8: i32>(a: __m256h) -> __mmask16 {
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm256_mask_fpclass_ph_mask)
 #[inline]
-#[target_feature(enable = "avx512fp16,avx512vl,avx512f,avx")]
+#[target_feature(enable = "avx512fp16,avx512vl")]
 #[cfg_attr(test, assert_instr(vfpclassph, IMM8 = 0))]
 #[rustc_legacy_const_generics(2)]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
@@ -11148,7 +11147,7 @@ pub unsafe fn _mm256_mask_fpclass_ph_mask<const IMM8: i32>(k1: __mmask16, a: __m
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm512_fpclass_ph_mask)
 #[inline]
-#[target_feature(enable = "avx512fp16,avx512bw,avx512f")]
+#[target_feature(enable = "avx512fp16")]
 #[cfg_attr(test, assert_instr(vfpclassph, IMM8 = 0))]
 #[rustc_legacy_const_generics(1)]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
@@ -11173,7 +11172,7 @@ pub unsafe fn _mm512_fpclass_ph_mask<const IMM8: i32>(a: __m512h) -> __mmask32 {
 ///
 /// [Intel's documentation](https://software.intel.com/sites/landingpage/IntrinsicsGuide/#text=_mm512_mask_fpclass_ph_mask)
 #[inline]
-#[target_feature(enable = "avx512fp16,avx512bw,avx512f")]
+#[target_feature(enable = "avx512fp16")]
 #[cfg_attr(test, assert_instr(vfpclassph, IMM8 = 0))]
 #[rustc_legacy_const_generics(2)]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
@@ -15987,7 +15986,7 @@ pub unsafe fn _mm_cvtsi128_si16(a: __m128i) -> i16 {
 #[target_feature(enable = "avx512fp16")]
 #[unstable(feature = "stdarch_x86_avx512_f16", issue = "127213")]
 pub unsafe fn _mm_cvtsi16_si128(a: i16) -> __m128i {
-    transmute(simd_insert!(i16x8::splat(0), 0, a))
+    transmute(simd_insert!(i16x8::ZERO, 0, a))
 }
 
 #[allow(improper_ctypes)]
@@ -16071,8 +16070,6 @@ extern "C" {
 
     #[link_name = "llvm.x86.avx512fp16.vfmadd.ph.512"]
     fn vfmaddph_512(a: __m512h, b: __m512h, c: __m512h, rounding: i32) -> __m512h;
-    #[link_name = "llvm.fma.f16"]
-    fn fmaf16(a: f16, b: f16, c: f16) -> f16; // TODO: use `crate::intrinsics::fmaf16` when it's available
     #[link_name = "llvm.x86.avx512fp16.vfmadd.f16"]
     fn vfmaddsh(a: f16, b: f16, c: f16, rounding: i32) -> f16;
 
