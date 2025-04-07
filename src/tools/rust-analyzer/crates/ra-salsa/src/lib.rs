@@ -79,7 +79,7 @@ pub trait Database: plumbing::DatabaseOps {
 
         let current_revision = runtime.current_revision();
         let pending_revision = runtime.pending_revision();
-        tracing::debug!(
+        tracing::trace!(
             "unwind_if_cancelled: current_revision={:?}, pending_revision={:?}",
             current_revision,
             pending_revision
@@ -610,9 +610,11 @@ where
 #[non_exhaustive]
 pub enum Cancelled {
     /// The query was operating on revision R, but there is a pending write to move to revision R+1.
+    #[non_exhaustive]
     PendingWrite,
 
     /// The query was blocked on another thread, and that thread panicked.
+    #[non_exhaustive]
     PropagatedPanic,
 }
 
@@ -682,7 +684,7 @@ impl Cycle {
     }
 
     pub(crate) fn throw(self) -> ! {
-        tracing::debug!("throwing cycle {:?}", self);
+        tracing::trace!("throwing cycle {:?}", self);
         std::panic::resume_unwind(Box::new(self))
     }
 

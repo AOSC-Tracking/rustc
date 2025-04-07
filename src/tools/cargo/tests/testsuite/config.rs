@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use cargo::core::features::{GitFeatures, GitoxideFeatures};
 use cargo::core::{PackageIdSpec, Shell};
+use cargo::util::auth::RegistryConfig;
 use cargo::util::context::{
     self, Definition, GlobalContext, JobsConfig, SslVersionConfig, StringList,
 };
@@ -2162,4 +2163,113 @@ gitoxide = \"fetch\"
             .unwrap();
         unstable_flags.gitoxide == expect
     }
+}
+
+#[cargo_test]
+fn nonmergable_lists() {
+    let root_path = paths::root().join(".cargo/config.toml");
+    write_config_at(
+        &root_path,
+        "\
+[registries.example]
+credential-provider = ['a', 'b']
+",
+    );
+
+    let foo_path = paths::root().join("foo/.cargo/config.toml");
+    write_config_at(
+        &foo_path,
+        "\
+[registries.example]
+credential-provider = ['c', 'd']
+",
+    );
+
+    let gctx = GlobalContextBuilder::new().cwd("foo").build();
+    let provider = gctx
+        .get::<Option<RegistryConfig>>(&format!("registries.example"))
+        .unwrap()
+        .unwrap()
+        .credential_provider
+        .unwrap();
+    assert_eq!(provider.path.raw_value(), "c");
+    assert_eq!(provider.args, ["d"]);
+}
+
+#[cargo_test]
+fn build_std() {
+    let gctx = GlobalContextBuilder::new()
+        .env("CARGO_UNSTABLE_BUILD_STD", "core,std,panic_abort")
+        .build();
+    let value = gctx
+        .get::<Option<cargo::core::CliUnstable>>("unstable")
+        .unwrap()
+        .unwrap()
+        .build_std
+        .unwrap();
+    assert_eq!(
+        value,
+        vec![
+            "core".to_string(),
+            "std".to_string(),
+            "panic_abort".to_string(),
+        ],
+    );
+
+    let gctx = GlobalContextBuilder::new()
+        .config_arg("unstable.build-std=['core', 'std,panic_abort']")
+        .build();
+    let value = gctx
+        .get::<Option<cargo::core::CliUnstable>>("unstable")
+        .unwrap()
+        .unwrap()
+        .build_std
+        .unwrap();
+    assert_eq!(
+        value,
+        vec![
+            "core".to_string(),
+            "std".to_string(),
+            "panic_abort".to_string(),
+        ]
+    );
+
+    let gctx = GlobalContextBuilder::new()
+        .env(
+            "CARGO_UNSTABLE_BUILD_STD_FEATURES",
+            "backtrace,panic-unwind,windows_raw_dylib",
+        )
+        .build();
+    let value = gctx
+        .get::<Option<cargo::core::CliUnstable>>("unstable")
+        .unwrap()
+        .unwrap()
+        .build_std_features
+        .unwrap();
+    assert_eq!(
+        value,
+        vec![
+            "backtrace".to_string(),
+            "panic-unwind".to_string(),
+            "windows_raw_dylib".to_string(),
+        ]
+    );
+
+    let gctx = GlobalContextBuilder::new()
+        .config_arg("unstable.build-std-features=['backtrace', 'panic-unwind,windows_raw_dylib']")
+        .build();
+    let value = gctx
+        .get::<Option<cargo::core::CliUnstable>>("unstable")
+        .unwrap()
+        .unwrap()
+        .build_std_features
+        .unwrap();
+    assert_eq!(
+        value,
+        vec![
+            "backtrace".to_string(),
+            "panic-unwind".to_string(),
+            "windows_raw_dylib".to_string(),
+        ]
+    );
 }

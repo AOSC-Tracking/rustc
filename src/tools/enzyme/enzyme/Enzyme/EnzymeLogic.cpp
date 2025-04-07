@@ -90,11 +90,9 @@
 #include "TraceGenerator.h"
 #include "Utils.h"
 
-#if LLVM_VERSION_MAJOR >= 14
 #define addAttribute addAttributeAtIndex
 #define getAttribute getAttributeAtIndex
 #define removeAttribute removeAttributeAtIndex
-#endif
 
 using namespace llvm;
 
@@ -272,6 +270,9 @@ struct CacheAnalysis {
       return false;
     }
 
+    if (hasNoCache(&li))
+      return false;
+
     if (EnzymeJuliaAddrLoad)
       if (auto PT = dyn_cast<PointerType>(li.getType()))
         if (PT->getAddressSpace() == 13)
@@ -337,10 +338,8 @@ struct CacheAnalysis {
         if (!inst2->mayWriteToMemory())
           return false;
 
-#if LLVM_VERSION_MAJOR >= 12
         if (isa<FenceInst>(inst2))
           return false;
-#endif
 
         if (unnecessaryBlocks.count(inst2->getParent())) {
           return false;
@@ -367,10 +366,8 @@ struct CacheAnalysis {
                   if (!mid->mayWriteToMemory())
                     return false;
 
-#if LLVM_VERSION_MAJOR >= 12
                   if (isa<FenceInst>(mid))
                     return false;
-#endif
 
                   if (unnecessaryBlocks.count(mid->getParent())) {
                     return false;
@@ -425,21 +422,14 @@ struct CacheAnalysis {
         continue;
       for (auto &inst : B) {
         // For each load instruction, determine if it is uncacheable.
-        if (auto op = dyn_cast<LoadInst>(&inst)) {
-          can_modref_map[op] = is_load_uncacheable(*op);
-        }
-        if (auto II = dyn_cast<IntrinsicInst>(&inst)) {
+        if (isa<LoadInst>(&inst)) {
+          can_modref_map[&inst] = is_load_uncacheable(inst);
+        } else if (isNVLoad(&inst)) {
+          can_modref_map[&inst] = false;
+        } else if (auto II = dyn_cast<IntrinsicInst>(&inst)) {
           switch (II->getIntrinsicID()) {
-          case Intrinsic::nvvm_ldu_global_i:
-          case Intrinsic::nvvm_ldu_global_p:
-          case Intrinsic::nvvm_ldu_global_f:
-          case Intrinsic::nvvm_ldg_global_i:
-          case Intrinsic::nvvm_ldg_global_p:
-          case Intrinsic::nvvm_ldg_global_f:
-            can_modref_map[II] = false;
-            break;
           case Intrinsic::masked_load:
-            can_modref_map[II] = is_load_uncacheable(*II);
+            can_modref_map[&inst] = is_load_uncacheable(inst);
             break;
           default:
             break;
@@ -465,6 +455,9 @@ struct CacheAnalysis {
       return {};
 
     if (funcName == "julia.pointer_from_objref")
+      return {};
+
+    if (funcName == "julia.gc_loaded")
       return {};
 
     if (funcName == "julia.write_barrier")
@@ -510,12 +503,7 @@ struct CacheAnalysis {
     // function to the callee.
     //   because memory location x modified after parent returns => x modified
     //   after callee returns.
-#if LLVM_VERSION_MAJOR >= 14
-    for (unsigned i = 0; i < callsite_op->arg_size(); ++i)
-#else
-    for (unsigned i = 0; i < callsite_op->getNumArgOperands(); ++i)
-#endif
-    {
+    for (unsigned i = 0; i < callsite_op->arg_size(); ++i) {
       args.push_back(callsite_op->getArgOperand(i));
 
       // If the UnderlyingObject is from one of this function's arguments, then
@@ -817,12 +805,7 @@ void calculateUnusedValuesInFunction(
               if (shouldDisableNoWrite(CI)) {
                 writeOnlyNoCapture = false;
               }
-#if LLVM_VERSION_MAJOR >= 14
-              for (size_t i = 0; i < CI->arg_size(); i++)
-#else
-              for (size_t i = 0; i < CI->getNumArgOperands(); i++)
-#endif
-              {
+              for (size_t i = 0; i < CI->arg_size(); i++) {
                 if (cur == CI->getArgOperand(i)) {
                   if (!isNoCapture(CI, i)) {
                     writeOnlyNoCapture = false;
@@ -1095,12 +1078,7 @@ void calculateUnusedValuesInFunction(
             if (shouldDisableNoWrite(CI)) {
               writeOnlyNoCapture = false;
             }
-#if LLVM_VERSION_MAJOR >= 14
-            for (size_t i = 0; i < CI->arg_size(); i++)
-#else
-            for (size_t i = 0; i < CI->getNumArgOperands(); i++)
-#endif
-            {
+            for (size_t i = 0; i < CI->arg_size(); i++) {
               if (val == CI->getArgOperand(i)) {
                 if (!isNoCapture(CI, i)) {
                   writeOnlyNoCapture = false;
@@ -1336,12 +1314,7 @@ bool shouldAugmentCall(CallInst *op, const GradientUtils *gutils) {
   if (!called || called->empty())
     modifyPrimal = true;
 
-#if LLVM_VERSION_MAJOR >= 14
-  for (unsigned i = 0; i < op->arg_size(); ++i)
-#else
-  for (unsigned i = 0; i < op->getNumArgOperands(); ++i)
-#endif
-  {
+  for (unsigned i = 0; i < op->arg_size(); ++i) {
     if (gutils->isConstantValue(op->getArgOperand(i)) && called &&
         !called->empty()) {
       continue;
@@ -1376,29 +1349,6 @@ bool shouldAugmentCall(CallInst *op, const GradientUtils *gutils) {
                << " cv: " << gutils->isConstantValue(op) << "\n";
 #endif
   return modifyPrimal;
-}
-
-static inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
-                                            ModRefInfo mri) {
-  if (mri == ModRefInfo::NoModRef)
-    return os << "nomodref";
-  else if (mri == ModRefInfo::ModRef)
-    return os << "modref";
-  else if (mri == ModRefInfo::Mod)
-    return os << "mod";
-  else if (mri == ModRefInfo::Ref)
-    return os << "ref";
-#if LLVM_VERSION_MAJOR <= 14
-  else if (mri == ModRefInfo::MustModRef)
-    return os << "mustmodref";
-  else if (mri == ModRefInfo::MustMod)
-    return os << "mustmod";
-  else if (mri == ModRefInfo::MustRef)
-    return os << "mustref";
-#endif
-  else
-    llvm_unreachable("unknown modref");
-  return os;
 }
 
 bool legalCombinedForwardReverse(
@@ -1746,29 +1696,29 @@ void clearFunctionAttributes(Function *f) {
     if (Arg.hasAttribute(Attribute::StructRet))
       Arg.removeAttr(Attribute::StructRet);
   }
-  if (f->hasFnAttribute(Attribute::OptimizeNone))
-    f->removeFnAttr(Attribute::OptimizeNone);
 
-#if LLVM_VERSION_MAJOR >= 14
-  if (f->getAttributes().getRetDereferenceableBytes())
-#else
-  if (f->getDereferenceableBytes(llvm::AttributeList::ReturnIndex))
+  Attribute::AttrKind fnattrs[] = {
+#if LLVM_VERSION_MAJOR >= 16
+    Attribute::Memory,
 #endif
-  {
-#if LLVM_VERSION_MAJOR >= 14
+    Attribute::ReadOnly,
+    Attribute::ReadNone,
+    Attribute::WriteOnly,
+    Attribute::WillReturn,
+    Attribute::OptimizeNone
+  };
+  for (auto attr : fnattrs) {
+    if (f->hasFnAttribute(attr)) {
+      f->removeFnAttr(attr);
+    }
+  }
+
+  if (f->getAttributes().getRetDereferenceableBytes()) {
     f->removeRetAttr(Attribute::Dereferenceable);
-#else
-    f->removeAttribute(llvm::AttributeList::ReturnIndex,
-                       Attribute::Dereferenceable);
-#endif
   }
 
   if (f->getAttributes().getRetAlignment()) {
-#if LLVM_VERSION_MAJOR >= 14
     f->removeRetAttr(Attribute::Alignment);
-#else
-    f->removeAttribute(llvm::AttributeList::ReturnIndex, Attribute::Alignment);
-#endif
   }
   Attribute::AttrKind attrs[] = {
 #if LLVM_VERSION_MAJOR >= 17
@@ -1781,27 +1731,14 @@ void clearFunctionAttributes(Function *f) {
     Attribute::NoAlias
   };
   for (auto attr : attrs) {
-#if LLVM_VERSION_MAJOR >= 14
     if (f->hasRetAttribute(attr)) {
       f->removeRetAttr(attr);
     }
-#else
-    if (f->hasAttribute(llvm::AttributeList::ReturnIndex, attr)) {
-      f->removeAttribute(llvm::AttributeList::ReturnIndex, attr);
-    }
-#endif
   }
   for (auto attr : {"enzyme_inactive", "enzyme_type"}) {
-#if LLVM_VERSION_MAJOR >= 14
     if (f->getAttributes().hasRetAttr(attr)) {
       f->removeRetAttr(attr);
     }
-#else
-    if (f->getAttributes().hasAttribute(llvm::AttributeList::ReturnIndex,
-                                        attr)) {
-      f->removeAttribute(llvm::AttributeList::ReturnIndex, attr);
-    }
-#endif
   }
 }
 
@@ -1990,7 +1927,7 @@ const AugmentedReturn &EnzymeLogic::CreateAugmentedPrimal(
     ArrayRef<DIFFE_TYPE> constant_args, TypeAnalysis &TA, bool returnUsed,
     bool shadowReturnUsed, const FnTypeInfo &oldTypeInfo_,
     const std::vector<bool> _overwritten_args, bool forceAnonymousTape,
-    unsigned width, bool AtomicAdd, bool omp) {
+    bool runtimeActivity, unsigned width, bool AtomicAdd, bool omp) {
 
   TimeTraceScope timeScope("CreateAugmentedPrimal", todiff->getName());
 
@@ -2007,7 +1944,7 @@ const AugmentedReturn &EnzymeLogic::CreateAugmentedPrimal(
                            returnUsed,    shadowReturnUsed,
                            oldTypeInfo,   forceAnonymousTape,
                            AtomicAdd,     omp,
-                           width};
+                           width,         runtimeActivity};
 
   if (_overwritten_args.size() != todiff->arg_size()) {
     std::string s;
@@ -2023,6 +1960,7 @@ const AugmentedReturn &EnzymeLogic::CreateAugmentedPrimal(
     if (EmitNoDerivativeError(ss.str(), todiff, context)) {
       auto newFunc = todiff;
       std::map<AugmentedStruct, int> returnMapping;
+      returnMapping[AugmentedStruct::Return] = -1;
       return insert_or_assign<AugmentedCacheKey, AugmentedReturn>(
                  AugmentedCachedFunctions, tup,
                  AugmentedReturn(newFunc, nullptr, {}, returnMapping, {}, {},
@@ -2098,7 +2036,7 @@ const AugmentedReturn &EnzymeLogic::CreateAugmentedPrimal(
       auto &aug = CreateAugmentedPrimal(
           context, todiff, retType, next_constant_args, TA, returnUsed,
           shadowReturnUsed, oldTypeInfo_, _overwritten_args, forceAnonymousTape,
-          width, AtomicAdd, omp);
+          runtimeActivity, width, AtomicAdd, omp);
 
       FunctionType *FTy =
           FunctionType::get(aug.fn->getReturnType(), dupargs,
@@ -2161,12 +2099,8 @@ const AugmentedReturn &EnzymeLogic::CreateAugmentedPrimal(
           if (!foundcalled->hasParamAttribute(i, Attribute::StructRet))
             args.push_back(arg.getType());
           else {
-#if LLVM_VERSION_MAJOR >= 12
             sretTy = foundcalled->getParamAttribute(0, Attribute::StructRet)
                          .getValueAsType();
-#else
-            sretTy = arg.getType()->getPointerElementType();
-#endif
           }
           i++;
         }
@@ -2354,7 +2288,8 @@ const AugmentedReturn &EnzymeLogic::CreateAugmentedPrimal(
   std::map<AugmentedStruct, int> returnMapping;
 
   GradientUtils *gutils = GradientUtils::CreateFromClone(
-      *this, width, todiff, TLI, TA, oldTypeInfo, retType, constant_args,
+      *this, runtimeActivity, width, todiff, TLI, TA, oldTypeInfo, retType,
+      constant_args,
       /*returnUsed*/ returnUsed, /*shadowReturnUsed*/ shadowReturnUsed,
       returnMapping, omp);
 
@@ -2384,6 +2319,9 @@ const AugmentedReturn &EnzymeLogic::CreateAugmentedPrimal(
     if (EmitNoDerivativeError(ss.str(), todiff, context)) {
       auto newFunc = gutils->newFunc;
       delete gutils;
+      IRBuilder<> b(&*newFunc->getEntryBlock().begin());
+      RequestContext context2{nullptr, &b};
+      EmitNoDerivativeError(ss.str(), todiff, context2);
       return insert_or_assign<AugmentedCacheKey, AugmentedReturn>(
                  AugmentedCachedFunctions, tup,
                  AugmentedReturn(newFunc, nullptr, {}, returnMapping, {}, {},
@@ -2419,9 +2357,13 @@ const AugmentedReturn &EnzymeLogic::CreateAugmentedPrimal(
       CA.compute_uncacheable_load_map();
   gutils->can_modref_map = &can_modref_map;
 
-  gutils->forceAugmentedReturns();
-
+  // requires is_value_needed_in_reverse, that needs unnecessaryValues
+  // sets knownRecomputeHeuristic
   gutils->computeMinCache();
+
+  // Requires knownRecomputeCache to be set as call to getContext
+  // itself calls createCacheForScope
+  gutils->forceAugmentedReturns();
 
   SmallPtrSet<const Value *, 4> unnecessaryValues;
   SmallPtrSet<const Instruction *, 4> unnecessaryInstructions;
@@ -2481,10 +2423,9 @@ const AugmentedReturn &EnzymeLogic::CreateAugmentedPrimal(
 
   AdjointGenerator maker(DerivativeMode::ReverseModePrimal, gutils,
                          constant_args, retType, getIndex, overwritten_args_map,
-                         &returnuses,
                          &AugmentedCachedFunctions.find(tup)->second, nullptr,
                          unnecessaryValues, unnecessaryInstructions,
-                         unnecessaryStores, guaranteedUnreachable, nullptr);
+                         unnecessaryStores, guaranteedUnreachable);
 
   for (BasicBlock &oBB : *gutils->oldFunc) {
     auto term = oBB.getTerminator();
@@ -2568,7 +2509,7 @@ const AugmentedReturn &EnzymeLogic::CreateAugmentedPrimal(
           IRBuilder<> BuilderZ(newri);
           Value *invertri = nullptr;
           if (gutils->isConstantValue(orig_oldval)) {
-            if (!EnzymeRuntimeActivityCheck &&
+            if (!gutils->runtimeActivity &&
                 gutils->TR.query(orig_oldval)[{-1}].isPossiblePointer()) {
               if (!isa<UndefValue>(orig_oldval) &&
                   !isa<ConstantPointerNull>(orig_oldval)) {
@@ -2607,29 +2548,13 @@ const AugmentedReturn &EnzymeLogic::CreateAugmentedPrimal(
   if (gutils->newFunc->hasFnAttribute(Attribute::OptimizeNone))
     gutils->newFunc->removeFnAttr(Attribute::OptimizeNone);
 
-#if LLVM_VERSION_MAJOR >= 14
-  if (gutils->newFunc->getAttributes().getRetDereferenceableBytes())
-#else
-  if (gutils->newFunc->getDereferenceableBytes(
-          llvm::AttributeList::ReturnIndex))
-#endif
-  {
-#if LLVM_VERSION_MAJOR >= 14
+  if (gutils->newFunc->getAttributes().getRetDereferenceableBytes()) {
     gutils->newFunc->removeRetAttr(Attribute::Dereferenceable);
-#else
-    gutils->newFunc->removeAttribute(llvm::AttributeList::ReturnIndex,
-                                     Attribute::Dereferenceable);
-#endif
   }
 
   // TODO could keep nonnull if returning value -1
   if (gutils->newFunc->getAttributes().getRetAlignment()) {
-#if LLVM_VERSION_MAJOR >= 14
     gutils->newFunc->removeRetAttr(Attribute::Alignment);
-#else
-    gutils->newFunc->removeAttribute(llvm::AttributeList::ReturnIndex,
-                                     Attribute::Alignment);
-#endif
   }
 
   llvm::Attribute::AttrKind attrs[] = {
@@ -2643,27 +2568,14 @@ const AugmentedReturn &EnzymeLogic::CreateAugmentedPrimal(
     llvm::Attribute::SExt,
   };
   for (auto attr : attrs) {
-#if LLVM_VERSION_MAJOR >= 14
     if (gutils->newFunc->hasRetAttribute(attr)) {
       gutils->newFunc->removeRetAttr(attr);
     }
-#else
-    if (gutils->newFunc->hasAttribute(llvm::AttributeList::ReturnIndex, attr)) {
-      gutils->newFunc->removeAttribute(llvm::AttributeList::ReturnIndex, attr);
-    }
-#endif
   }
   for (auto attr : {"enzyme_inactive", "enzyme_type"}) {
-#if LLVM_VERSION_MAJOR >= 14
     if (gutils->newFunc->getAttributes().hasRetAttr(attr)) {
       gutils->newFunc->removeRetAttr(attr);
     }
-#else
-    if (gutils->newFunc->getAttributes().hasAttribute(
-            llvm::AttributeList::ReturnIndex, attr)) {
-      gutils->newFunc->removeAttribute(llvm::AttributeList::ReturnIndex, attr);
-    }
-#endif
   }
 
   gutils->eraseFictiousPHIs();
@@ -2801,9 +2713,17 @@ const AugmentedReturn &EnzymeLogic::CreateAugmentedPrimal(
   auto i = nf->arg_begin(), j = NewF->arg_begin();
   while (i != nf->arg_end()) {
     VMap[i] = j;
-    if (nf->hasParamAttribute(attrIndex, Attribute::NoCapture)) {
-      NewF->addParamAttr(attrIndex, Attribute::NoCapture);
+#if LLVM_VERSION_MAJOR > 20
+    if (nf->hasParamAttribute(attrIndex, Attribute::Captures)) {
+      NewF->addParamAttr(attrIndex,
+                         nf->getParamAttribute(attrIndex, Attribute::Captures));
     }
+#else
+    if (nf->hasParamAttribute(attrIndex, Attribute::NoCapture)) {
+      NewF->addParamAttr(
+          attrIndex, nf->getParamAttribute(attrIndex, Attribute::NoCapture));
+    }
+#endif
     if (nf->hasParamAttribute(attrIndex, Attribute::NoAlias)) {
       NewF->addParamAttr(attrIndex, Attribute::NoAlias);
     }
@@ -2821,7 +2741,6 @@ const AugmentedReturn &EnzymeLogic::CreateAugmentedPrimal(
     ++attrIndex;
   }
 
-#if LLVM_VERSION_MAJOR >= 14
   for (auto attr : {"enzyme_ta_norecur"})
     if (nf->getAttributes().hasAttributeAtIndex(AttributeList::FunctionIndex,
                                                 attr)) {
@@ -2837,30 +2756,10 @@ const AugmentedReturn &EnzymeLogic::CreateAugmentedPrimal(
           AttributeList::ReturnIndex,
           nf->getAttributes().getAttribute(AttributeList::ReturnIndex, attr));
     }
-#else
-  for (auto attr : {"enzyme_ta_norecur"})
-    if (nf->getAttributes().hasAttribute(AttributeList::FunctionIndex, attr)) {
-      NewF->addFnAttr(
-          nf->getAttributes().getAttribute(AttributeList::FunctionIndex, attr));
-    }
-
-  for (auto attr :
-       {"enzyme_type", "enzymejl_parmtype", "enzymejl_parmtype_ref"})
-    if (nf->getAttributes().hasAttribute(AttributeList::ReturnIndex, attr)) {
-      NewF->addAttribute(
-          AttributeList::ReturnIndex,
-          nf->getAttributes().getAttribute(AttributeList::ReturnIndex, attr));
-    }
-#endif
 
   SmallVector<ReturnInst *, 4> Returns;
-#if LLVM_VERSION_MAJOR >= 13
   CloneFunctionInto(NewF, nf, VMap, CloneFunctionChangeType::LocalChangesOnly,
                     Returns, "", nullptr);
-#else
-  CloneFunctionInto(NewF, nf, VMap, nf->getSubprogram() != nullptr, Returns, "",
-                    nullptr);
-#endif
 
   IRBuilder<> ib(NewF->getEntryBlock().getFirstNonPHI());
 
@@ -3119,7 +3018,8 @@ const AugmentedReturn &EnzymeLogic::CreateAugmentedPrimal(
     auto GV = pair.first;
     GV->setName("_tmp");
     auto R = gutils->GetOrCreateShadowFunction(
-        context, *this, TLI, TA, todiff, pair.second, width, gutils->AtomicAdd);
+        context, *this, TLI, TA, todiff, pair.second, gutils->runtimeActivity,
+        width, gutils->AtomicAdd);
     SmallVector<std::pair<ConstantExpr *, bool>, 1> users;
     GV->replaceAllUsesWith(ConstantExpr::getPointerCast(R, GV->getType()));
     GV->eraseFromParent();
@@ -3173,7 +3073,7 @@ void createTerminator(DiffeGradientUtils *gutils, BasicBlock *oBB,
     bool floatLike = rt->isFPOrFPVectorTy();
     if (!floatLike && TR.getReturnAnalysis().Inner0().isPossiblePointer()) {
       if (gutils->isConstantValue(ret)) {
-        if (!EnzymeRuntimeActivityCheck &&
+        if (!gutils->runtimeActivity &&
             TR.query(ret)[{-1}].isPossiblePointer()) {
           if (!isa<UndefValue>(ret) && !isa<ConstantPointerNull>(ret)) {
             std::string str;
@@ -3351,6 +3251,10 @@ void createInvertedTerminator(DiffeGradientUtils *gutils,
   IRBuilder<> phibuilder(BB2);
   bool setphi = false;
 
+  // We force loads of all phi nodes at once, to ensure correct results in the
+  // case that one phi node depends on others.
+  SmallVector<std::tuple<PHINode *, Value *, Type *>, 1> phis;
+
   // Ensure phi values have their derivatives propagated
   for (auto I = oBB->begin(), E = oBB->end(); I != E; ++I) {
     PHINode *orig = dyn_cast<PHINode>(&*I);
@@ -3409,7 +3313,6 @@ void createInvertedTerminator(DiffeGradientUtils *gutils,
     }
 
     auto prediff = gutils->diffe(orig, Builder);
-
     bool handled = false;
 
     SmallVector<Instruction *, 4> activeUses;
@@ -3537,39 +3440,40 @@ void createInvertedTerminator(DiffeGradientUtils *gutils,
         }
       }
     }
-
     if (!handled) {
       gutils->setDiffe(
           orig, Constant::getNullValue(gutils->getShadowType(orig->getType())),
           Builder);
+      phis.emplace_back(orig, prediff, PNfloatType);
+    }
+  }
 
-      for (BasicBlock *opred : predecessors(oBB)) {
-        auto oval = orig->getIncomingValueForBlock(opred);
-        if (gutils->isConstantValue(oval)) {
-          continue;
-        }
+  for (auto &&[orig, prediff, PNfloatType] : phis) {
 
-        if (orig->getNumIncomingValues() == 1) {
-          gutils->addToDiffe(oval, prediff, Builder, PNfloatType);
-        } else {
-          BasicBlock *pred =
-              cast<BasicBlock>(gutils->getNewFromOriginal(opred));
-          if (replacePHIs.find(pred) == replacePHIs.end()) {
-            replacePHIs[pred] = Builder.CreatePHI(
-                Type::getInt1Ty(pred->getContext()), 1, "replacePHI");
-            if (!setphi) {
-              phibuilder.SetInsertPoint(replacePHIs[pred]);
-              setphi = true;
-            }
+    for (BasicBlock *opred : predecessors(oBB)) {
+      auto oval = orig->getIncomingValueForBlock(opred);
+      if (gutils->isConstantValue(oval)) {
+        continue;
+      }
+
+      if (orig->getNumIncomingValues() == 1) {
+        gutils->addToDiffe(oval, prediff, Builder, PNfloatType);
+      } else {
+        BasicBlock *pred = cast<BasicBlock>(gutils->getNewFromOriginal(opred));
+        if (replacePHIs.find(pred) == replacePHIs.end()) {
+          replacePHIs[pred] = Builder.CreatePHI(
+              Type::getInt1Ty(pred->getContext()), 1, "replacePHI");
+          if (!setphi) {
+            phibuilder.SetInsertPoint(replacePHIs[pred]);
+            setphi = true;
           }
-          auto dif = selectByWidth(Builder, gutils, replacePHIs[pred], prediff,
-                                   Constant::getNullValue(prediff->getType()));
-          auto addedSelects =
-              gutils->addToDiffe(oval, dif, Builder, PNfloatType);
-
-          for (auto select : addedSelects)
-            selects.push_back(select);
         }
+        auto dif = selectByWidth(Builder, gutils, replacePHIs[pred], prediff,
+                                 Constant::getNullValue(prediff->getType()));
+        auto addedSelects = gutils->addToDiffe(oval, dif, Builder, PNfloatType);
+
+        for (auto select : addedSelects)
+          selects.push_back(select);
       }
     }
   }
@@ -3669,15 +3573,18 @@ void createInvertedTerminator(DiffeGradientUtils *gutils,
 }
 
 Function *EnzymeLogic::CreatePrimalAndGradient(
-    RequestContext context, const ReverseCacheKey &&key, TypeAnalysis &TA,
+    RequestContext context, const ReverseCacheKey &&prevkey, TypeAnalysis &TA,
     const AugmentedReturn *augmenteddata, bool omp) {
 
-  TimeTraceScope timeScope("CreatePrimalAndGradient", key.todiff->getName());
+  TimeTraceScope timeScope("CreatePrimalAndGradient",
+                           prevkey.todiff->getName());
 
-  assert(key.mode == DerivativeMode::ReverseModeCombined ||
-         key.mode == DerivativeMode::ReverseModeGradient);
+  assert(prevkey.mode == DerivativeMode::ReverseModeCombined ||
+         prevkey.mode == DerivativeMode::ReverseModeGradient);
 
-  FnTypeInfo oldTypeInfo = preventTypeAnalysisLoops(key.typeInfo, key.todiff);
+  FnTypeInfo oldTypeInfo =
+      preventTypeAnalysisLoops(prevkey.typeInfo, prevkey.todiff);
+  auto key = prevkey.replaceTypeInfo(oldTypeInfo);
 
   if (key.retType != DIFFE_TYPE::CONSTANT)
     assert(!key.todiff->getReturnType()->isVoidTy());
@@ -3751,7 +3658,8 @@ Function *EnzymeLogic::CreatePrimalAndGradient(
           context, key.todiff, key.retType, key.constant_args, TA,
           key.returnUsed, key.shadowReturnUsed, key.typeInfo,
           key.overwritten_args,
-          /*forceAnonymousTape*/ false, key.width, key.AtomicAdd, omp);
+          /*forceAnonymousTape*/ false, key.runtimeActivity, key.width,
+          key.AtomicAdd, omp);
 
       SmallVector<Value *, 4> fwdargs;
       for (auto &a : NewF->args())
@@ -3792,19 +3700,22 @@ Function *EnzymeLogic::CreatePrimalAndGradient(
 
       auto revfn = CreatePrimalAndGradient(
           context,
-          (ReverseCacheKey){.todiff = key.todiff,
-                            .retType = key.retType,
-                            .constant_args = key.constant_args,
-                            .overwritten_args = key.overwritten_args,
-                            .returnUsed = false,
-                            .shadowReturnUsed = false,
-                            .mode = DerivativeMode::ReverseModeGradient,
-                            .width = key.width,
-                            .freeMemory = key.freeMemory,
-                            .AtomicAdd = key.AtomicAdd,
-                            .additionalType = tape ? tape->getType() : nullptr,
-                            .forceAnonymousTape = key.forceAnonymousTape,
-                            .typeInfo = key.typeInfo},
+          (ReverseCacheKey){
+              .todiff = key.todiff,
+              .retType = key.retType,
+              .constant_args = key.constant_args,
+              .overwritten_args = key.overwritten_args,
+              .returnUsed = false,
+              .shadowReturnUsed = false,
+              .mode = DerivativeMode::ReverseModeGradient,
+              .width = key.width,
+              .freeMemory = key.freeMemory,
+              .AtomicAdd = key.AtomicAdd,
+              .additionalType = tape ? tape->getType() : nullptr,
+              .forceAnonymousTape = key.forceAnonymousTape,
+              .typeInfo = key.typeInfo,
+              .runtimeActivity = key.runtimeActivity,
+          },
           TA, &aug, omp);
 
       SmallVector<Value *, 4> revargs;
@@ -3873,19 +3784,22 @@ Function *EnzymeLogic::CreatePrimalAndGradient(
 
       auto revfn = CreatePrimalAndGradient(
           context,
-          (ReverseCacheKey){.todiff = key.todiff,
-                            .retType = key.retType,
-                            .constant_args = next_constant_args,
-                            .overwritten_args = key.overwritten_args,
-                            .returnUsed = key.returnUsed,
-                            .shadowReturnUsed = false,
-                            .mode = DerivativeMode::ReverseModeGradient,
-                            .width = key.width,
-                            .freeMemory = key.freeMemory,
-                            .AtomicAdd = key.AtomicAdd,
-                            .additionalType = nullptr,
-                            .forceAnonymousTape = key.forceAnonymousTape,
-                            .typeInfo = key.typeInfo},
+          (ReverseCacheKey){
+              .todiff = key.todiff,
+              .retType = key.retType,
+              .constant_args = next_constant_args,
+              .overwritten_args = key.overwritten_args,
+              .returnUsed = key.returnUsed,
+              .shadowReturnUsed = false,
+              .mode = DerivativeMode::ReverseModeGradient,
+              .width = key.width,
+              .freeMemory = key.freeMemory,
+              .AtomicAdd = key.AtomicAdd,
+              .additionalType = nullptr,
+              .forceAnonymousTape = key.forceAnonymousTape,
+              .typeInfo = key.typeInfo,
+              .runtimeActivity = key.runtimeActivity,
+          },
           TA, augmenteddata, omp);
 
       {
@@ -4113,7 +4027,8 @@ Function *EnzymeLogic::CreatePrimalAndGradient(
   bool diffeReturnArg = key.retType == DIFFE_TYPE::OUT_DIFF;
 
   DiffeGradientUtils *gutils = DiffeGradientUtils::CreateFromClone(
-      *this, key.mode, key.width, key.todiff, TLI, TA, oldTypeInfo, key.retType,
+      *this, key.mode, key.runtimeActivity, key.width, key.todiff, TLI, TA,
+      oldTypeInfo, key.retType,
       augmenteddata ? augmenteddata->shadowReturnUsed : key.shadowReturnUsed,
       diffeReturnArg, key.constant_args, retVal, key.additionalType, omp);
 
@@ -4137,6 +4052,9 @@ Function *EnzymeLogic::CreatePrimalAndGradient(
     if (EmitNoDerivativeError(ss.str(), key.todiff, context)) {
       auto newFunc = gutils->newFunc;
       delete gutils;
+      IRBuilder<> b(&*newFunc->getEntryBlock().begin());
+      RequestContext context2{nullptr, &b};
+      EmitNoDerivativeError(ss.str(), key.todiff, context2);
       return newFunc;
     }
     llvm::errs() << "mod: " << *key.todiff->getParent() << "\n";
@@ -4181,8 +4099,6 @@ Function *EnzymeLogic::CreatePrimalAndGradient(
                     : CA.compute_uncacheable_load_map();
   gutils->can_modref_map = &can_modref_map;
 
-  gutils->forceAugmentedReturns();
-
   std::map<std::pair<Instruction *, CacheType>, int> mapping;
   if (augmenteddata)
     mapping = augmenteddata->tapeIndices;
@@ -4194,6 +4110,10 @@ Function *EnzymeLogic::CreatePrimalAndGradient(
   // requires is_value_needed_in_reverse, that needs unnecessaryValues
   // sets knownRecomputeHeuristic
   gutils->computeMinCache();
+
+  // Requires knownRecomputeCache to be set as call to getContext
+  // itself calls createCacheForScope
+  gutils->forceAugmentedReturns();
 
   SmallPtrSet<const Value *, 4> unnecessaryValues;
   SmallPtrSet<const Instruction *, 4> unnecessaryInstructions;
@@ -4321,12 +4241,10 @@ Function *EnzymeLogic::CreatePrimalAndGradient(
     }
   }
 
-  AdjointGenerator maker(key.mode, gutils, key.constant_args, key.retType,
-                         getIndex, overwritten_args_map,
-                         /*returnuses*/ nullptr, augmenteddata,
-                         &replacedReturns, unnecessaryValues,
-                         unnecessaryInstructions, unnecessaryStores,
-                         guaranteedUnreachable, dretAlloca);
+  AdjointGenerator maker(
+      key.mode, gutils, key.constant_args, key.retType, getIndex,
+      overwritten_args_map, augmenteddata, &replacedReturns, unnecessaryValues,
+      unnecessaryInstructions, unnecessaryStores, guaranteedUnreachable);
 
   for (BasicBlock &oBB : *gutils->oldFunc) {
     // Don't create derivatives for code that results in termination
@@ -4447,18 +4365,18 @@ Function *EnzymeLogic::CreatePrimalAndGradient(
 
       Value *tx, *ty, *tz;
       if (Arch == Triple::nvptx || Arch == Triple::nvptx64) {
-        tx = ebuilder.CreateCall(Intrinsic::getDeclaration(
+        tx = ebuilder.CreateCall(getIntrinsicDeclaration(
             gutils->newFunc->getParent(), Intrinsic::nvvm_read_ptx_sreg_tid_x));
-        ty = ebuilder.CreateCall(Intrinsic::getDeclaration(
+        ty = ebuilder.CreateCall(getIntrinsicDeclaration(
             gutils->newFunc->getParent(), Intrinsic::nvvm_read_ptx_sreg_tid_y));
-        tz = ebuilder.CreateCall(Intrinsic::getDeclaration(
+        tz = ebuilder.CreateCall(getIntrinsicDeclaration(
             gutils->newFunc->getParent(), Intrinsic::nvvm_read_ptx_sreg_tid_z));
       } else if (Arch == Triple::amdgcn) {
-        tx = ebuilder.CreateCall(Intrinsic::getDeclaration(
+        tx = ebuilder.CreateCall(getIntrinsicDeclaration(
             gutils->newFunc->getParent(), Intrinsic::amdgcn_workitem_id_x));
-        ty = ebuilder.CreateCall(Intrinsic::getDeclaration(
+        ty = ebuilder.CreateCall(getIntrinsicDeclaration(
             gutils->newFunc->getParent(), Intrinsic::amdgcn_workitem_id_y));
-        tz = ebuilder.CreateCall(Intrinsic::getDeclaration(
+        tz = ebuilder.CreateCall(getIntrinsicDeclaration(
             gutils->newFunc->getParent(), Intrinsic::amdgcn_workitem_id_z));
       } else {
         llvm_unreachable("unknown gpu architecture");
@@ -4475,7 +4393,7 @@ Function *EnzymeLogic::CreatePrimalAndGradient(
                              ? (llvm::Intrinsic::ID)Intrinsic::amdgcn_s_barrier
                              : (llvm::Intrinsic::ID)Intrinsic::nvvm_barrier0;
       instbuilder.CreateCall(
-          Intrinsic::getDeclaration(gutils->newFunc->getParent(), BarrierInst),
+          getIntrinsicDeclaration(gutils->newFunc->getParent(), BarrierInst),
           {});
       OldEntryInsts->moveAfter(entry);
       sharedBlock->moveAfter(entry);
@@ -4534,7 +4452,7 @@ Function *EnzymeLogic::CreatePrimalAndGradient(
 Function *EnzymeLogic::CreateForwardDiff(
     RequestContext context, Function *todiff, DIFFE_TYPE retType,
     ArrayRef<DIFFE_TYPE> constant_args, TypeAnalysis &TA, bool returnUsed,
-    DerivativeMode mode, bool freeMemory, unsigned width,
+    DerivativeMode mode, bool freeMemory, bool runtimeActivity, unsigned width,
     llvm::Type *additionalArg, const FnTypeInfo &oldTypeInfo_,
     const std::vector<bool> _overwritten_args,
     const AugmentedReturn *augmenteddata, bool omp) {
@@ -4559,9 +4477,9 @@ Function *EnzymeLogic::CreateForwardDiff(
       mode != DerivativeMode::ForwardModeError)
     assert(_overwritten_args.size() == todiff->arg_size());
 
-  ForwardCacheKey tup = {todiff,     retType, constant_args, _overwritten_args,
-                         returnUsed, mode,    width,         additionalArg,
-                         oldTypeInfo};
+  ForwardCacheKey tup = {
+      todiff, retType, constant_args, _overwritten_args, returnUsed,
+      mode,   width,   additionalArg, oldTypeInfo,       runtimeActivity};
 
   if (ForwardCachedFunctions.find(tup) != ForwardCachedFunctions.end()) {
     return ForwardCachedFunctions.find(tup)->second;
@@ -4759,7 +4677,8 @@ Function *EnzymeLogic::CreateForwardDiff(
   bool diffeReturnArg = false;
 
   DiffeGradientUtils *gutils = DiffeGradientUtils::CreateFromClone(
-      *this, mode, width, todiff, TLI, TA, oldTypeInfo, retType,
+      *this, mode, runtimeActivity, width, todiff, TLI, TA, oldTypeInfo,
+      retType,
       /*shadowReturn*/ retActive, diffeReturnArg, constant_args, retVal,
       additionalArg, omp);
 
@@ -4834,9 +4753,13 @@ Function *EnzymeLogic::CreateForwardDiff(
         CA.compute_uncacheable_load_map());
     gutils->can_modref_map = can_modref_map.get();
 
-    gutils->forceAugmentedReturns();
-
+    // requires is_value_needed_in_reverse, that needs unnecessaryValues
+    // sets knownRecomputeHeuristic
     gutils->computeMinCache();
+
+    // Requires knownRecomputeCache to be set as call to getContext
+    // itself calls createCacheForScope
+    gutils->forceAugmentedReturns();
 
     auto getIndex = [&](Instruction *I, CacheType u,
                         IRBuilder<> &B) -> unsigned {
@@ -4853,11 +4776,10 @@ Function *EnzymeLogic::CreateForwardDiff(
     calculateUnusedStoresInFunction(*gutils->oldFunc, unnecessaryStores,
                                     unnecessaryInstructions, gutils, TLI);
 
-    maker = new AdjointGenerator(
-        mode, gutils, constant_args, retType, getIndex, overwritten_args_map,
-        /*returnuses*/ nullptr, augmenteddata, nullptr, unnecessaryValues,
-        unnecessaryInstructions, unnecessaryStores, guaranteedUnreachable,
-        nullptr);
+    maker = new AdjointGenerator(mode, gutils, constant_args, retType, getIndex,
+                                 overwritten_args_map, augmenteddata, nullptr,
+                                 unnecessaryValues, unnecessaryInstructions,
+                                 unnecessaryStores, guaranteedUnreachable);
 
     if (additionalArg) {
       auto v = gutils->newFunc->arg_end();
@@ -4906,11 +4828,10 @@ Function *EnzymeLogic::CreateForwardDiff(
 
     calculateUnusedStoresInFunction(*gutils->oldFunc, unnecessaryStores,
                                     unnecessaryInstructions, gutils, TLI);
-    maker =
-        new AdjointGenerator(mode, gutils, constant_args, retType, nullptr, {},
-                             /*returnuses*/ nullptr, nullptr, nullptr,
-                             unnecessaryValues, unnecessaryInstructions,
-                             unnecessaryStores, guaranteedUnreachable, nullptr);
+    maker = new AdjointGenerator(mode, gutils, constant_args, retType, nullptr,
+                                 {}, nullptr, nullptr, unnecessaryValues,
+                                 unnecessaryInstructions, unnecessaryStores,
+                                 guaranteedUnreachable);
   }
 
   for (BasicBlock &oBB : *gutils->oldFunc) {
@@ -5461,19 +5382,10 @@ public:
                             llvm::SmallVectorImpl<llvm::Value *> &orig_ops) {
     using namespace llvm;
 
-    switch (ID) {
-    case Intrinsic::nvvm_ldu_global_i:
-    case Intrinsic::nvvm_ldu_global_p:
-    case Intrinsic::nvvm_ldu_global_f:
-    case Intrinsic::nvvm_ldg_global_i:
-    case Intrinsic::nvvm_ldg_global_p:
-    case Intrinsic::nvvm_ldg_global_f: {
+    if (isNVLoad(&I)) {
       auto CI = cast<ConstantInt>(I.getOperand(1));
       visitLoadLike(I, /*Align*/ MaybeAlign(CI->getZExtValue()));
       return true;
-    }
-    default:
-      break;
     }
 
     if (ID == Intrinsic::masked_store) {
@@ -5643,13 +5555,9 @@ llvm::Function *EnzymeLogic::CreateTruncateFunc(RequestContext context,
   }
 
   SmallVector<ReturnInst *, 4> Returns;
-#if LLVM_VERSION_MAJOR >= 13
   CloneFunctionInto(NewF, totrunc, originalToNewFn,
                     CloneFunctionChangeType::LocalChangesOnly, Returns, "",
                     nullptr);
-#else
-  CloneFunctionInto(NewF, totrunc, originalToNewFn, true, Returns, "", nullptr);
-#endif
 
   NewF->setLinkage(Function::LinkageTypes::InternalLinkage);
 
@@ -5734,11 +5642,6 @@ llvm::Function *EnzymeLogic::CreateBatch(RequestContext context,
       BasicBlock::Create(NewF->getContext(), "placeholders", NewF);
 
   IRBuilder<> PlaceholderBuilder(placeholderBB);
-#if LLVM_VERSION_MAJOR >= 18
-  auto It = PlaceholderBuilder.GetInsertPoint();
-  It.setHeadBit(true);
-  PlaceholderBuilder.SetInsertPoint(It);
-#endif
   PlaceholderBuilder.SetCurrentDebugLocation(DebugLoc());
   ValueToValueMapTy vmap;
   auto DestArg = NewF->arg_begin();
@@ -5759,13 +5662,9 @@ llvm::Function *EnzymeLogic::CreateBatch(RequestContext context,
   }
 
   SmallVector<ReturnInst *, 4> Returns;
-#if LLVM_VERSION_MAJOR >= 13
   CloneFunctionInto(NewF, tobatch, vmap,
                     CloneFunctionChangeType::LocalChangesOnly, Returns, "",
                     nullptr);
-#else
-  CloneFunctionInto(NewF, tobatch, vmap, true, Returns, "", nullptr);
-#endif
 
   NewF->setLinkage(Function::LinkageTypes::InternalLinkage);
 
@@ -6114,21 +6013,22 @@ llvm::Value *EnzymeLogic::CreateNoFree(RequestContext context,
     }
   }
 
+  // clang-format off
+  const char* NoFreeDemanglesStartsWith[] = {
+    "std::basic_ostream<char, std::char_traits<char>>& std::__ostream_insert<char, std::char_traits<char>>",
+    "std::basic_ostream<char, std::char_traits<char>>::operator<<",
+    "std::ostream::operator<<",
+    "std::ostream& std::ostream::_M_insert",
+    "std::basic_ostream<char, std::char_traits<char>>& std::__ostream_insert",
+  };
+  // clang-format on
+
   if (auto CI = dyn_cast<CallInst>(todiff)) {
     TargetLibraryInfo &TLI =
         PPC.FAM.getResult<TargetLibraryAnalysis>(*CI->getParent()->getParent());
     if (isAllocationFunction(getFuncNameFromCall(CI), TLI))
       return CI;
     if (auto F = CI->getCalledFunction()) {
-
-      // clang-format off
-      const char* NoFreeDemanglesStartsWith[] = {
-          "std::basic_ostream<char, std::char_traits<char>>& std::__ostream_insert<char, std::char_traits<char>>",
-          "std::basic_ostream<char, std::char_traits<char>>::operator<<",
-          "std::ostream::operator<<",
-          "std::ostream& std::ostream::_M_insert",
-      };
-      // clang-format on
 
       demangledCall = llvm::demangle(F->getName().str());
       // replace all '> >' with '>>'
@@ -6141,6 +6041,45 @@ llvm::Value *EnzymeLogic::CreateNoFree(RequestContext context,
         if (startsWith(demangledCall, Name))
           return CI;
     }
+  }
+  if (auto PN = dyn_cast<PHINode>(todiff)) {
+    Value *illegal = nullptr;
+    for (auto &op : PN->incoming_values()) {
+
+      if (auto CI = dyn_cast<CallInst>(op)) {
+        TargetLibraryInfo &TLI = PPC.FAM.getResult<TargetLibraryAnalysis>(
+            *CI->getParent()->getParent());
+        if (isAllocationFunction(getFuncNameFromCall(CI), TLI))
+          continue;
+        if (auto F = CI->getCalledFunction()) {
+
+          demangledCall = llvm::demangle(F->getName().str());
+          // replace all '> >' with '>>'
+          size_t start = 0;
+          while ((start = demangledCall.find("> >", start)) !=
+                 std::string::npos) {
+            demangledCall.replace(start, 3, ">>");
+          }
+
+          bool legal = false;
+          for (auto Name : NoFreeDemanglesStartsWith)
+            if (startsWith(demangledCall, Name)) {
+              legal = true;
+              break;
+            }
+          if (!legal) {
+            illegal = op;
+            break;
+          }
+        }
+        continue;
+      }
+      demangledCall = "";
+      illegal = op;
+      break;
+    }
+    if (!illegal)
+      return PN;
   }
 
   if (auto GV = dyn_cast<GlobalVariable>(todiff)) {
@@ -6197,6 +6136,11 @@ llvm::Value *EnzymeLogic::CreateNoFree(RequestContext context,
   llvm::raw_string_ostream ss(s);
   ss << "No create nofree of unknown value\n";
   ss << *todiff << "\n";
+  if (auto PN = dyn_cast<PHINode>(todiff)) {
+    for (auto &op : PN->incoming_values()) {
+      ss << " - " << *op << "\n";
+    }
+  }
   if (demangledCall.size()) {
     ss << " demangled (" << demangledCall << ")\n";
   }
@@ -6448,6 +6392,7 @@ llvm::Function *EnzymeLogic::CreateNoFree(RequestContext context, Function *F) {
   };
 
   StringSet<> NoFrees = {"mpfr_greater_p",
+                        "vprintf",
                         "fprintf",
                         "fputc",
                          "memchr",
@@ -6462,6 +6407,7 @@ llvm::Function *EnzymeLogic::CreateNoFree(RequestContext context, Function *F) {
                          "MPI_Allreduce",
                          "lgamma",
                          "lgamma_r",
+                         "__assertfail",
                          "__kmpc_global_thread_num",
                          "nlopt_force_stop",
                          "cudaRuntimeGetVersion"
@@ -6555,12 +6501,8 @@ llvm::Function *EnzymeLogic::CreateNoFree(RequestContext context, Function *F) {
   }
 
   SmallVector<ReturnInst *, 4> Returns;
-#if LLVM_VERSION_MAJOR >= 13
   CloneFunctionInto(NewF, F, VMap, CloneFunctionChangeType::LocalChangesOnly,
                     Returns, "", nullptr);
-#else
-  CloneFunctionInto(NewF, F, VMap, true, Returns, "", nullptr);
-#endif
 
   NewF->setVisibility(llvm::GlobalValue::DefaultVisibility);
   NewF->setLinkage(llvm::GlobalValue::InternalLinkage);

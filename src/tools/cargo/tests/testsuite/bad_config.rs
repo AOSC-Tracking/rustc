@@ -471,6 +471,29 @@ expected `}`
 }
 
 #[cargo_test]
+fn cargo_toml_missing_package_name() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+               [package]
+            "#,
+        )
+        .build();
+
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
+
+Caused by:
+  missing field `package.name`
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
 fn duplicate_binary_names() {
     let p = project()
         .file(
@@ -1814,13 +1837,13 @@ fn workspace_default_features2() {
     p.cargo("check")
         .with_stderr_data(
             str![[r#"
-[WARNING] [ROOT]/foo/workspace_only/Cargo.toml: `default_features` is deprecated in favor of `default-features` and will not work in the 2024 edition
 (in the `dep_workspace_only` dependency)
 [CHECKING] dep_package_only v0.1.0 ([ROOT]/foo/dep_package_only)
 [CHECKING] dep_workspace_only v0.1.0 ([ROOT]/foo/dep_workspace_only)
 [CHECKING] package_only v0.1.0 ([ROOT]/foo/package_only)
 [CHECKING] workspace_only v0.1.0 ([ROOT]/foo/workspace_only)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[WARNING] [ROOT]/foo/workspace_only/Cargo.toml: `default_features` is deprecated in favor of `default-features` and will not work in the 2024 edition
 
 "#]]
             .unordered(),

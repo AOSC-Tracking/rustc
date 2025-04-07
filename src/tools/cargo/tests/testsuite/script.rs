@@ -40,7 +40,7 @@ args: []
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] echo v0.0.0 ([ROOT]/foo)
+[COMPILING] echo v0.0.0 ([ROOT]/foo/echo.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/echo[EXE]`
 
@@ -63,7 +63,7 @@ args: []
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] echo v0.0.0 ([ROOT]/foo)
+[COMPILING] echo v0.0.0 ([ROOT]/foo/echo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/echo[EXE]`
 
@@ -84,11 +84,11 @@ fn path_required() {
         .with_stderr_data(str![[r#"
 [ERROR] no such command: `echo`
 
-	Did you mean `bench`?
+[HELP] a command with a similar name exists: `bench`
 
-	View all installed commands with `cargo --list`
-	Find a package to install `echo` with `cargo search cargo-echo`
-	To run the file `echo`, provide a relative path like `./echo`
+[HELP] view all installed commands with `cargo --list`
+[HELP] find a package to install `echo` with `cargo search cargo-echo`
+[HELP] To run the file `echo`, provide a relative path like `./echo`
 
 "#]])
         .run();
@@ -117,7 +117,7 @@ args: []
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] echo v0.0.0 ([ROOT]/foo)
+[COMPILING] echo v0.0.0 ([ROOT]/foo/echo.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/echo[EXE]`
 
@@ -204,7 +204,7 @@ Hello world!
 
 "#]])
         .with_stderr_data(str![[r#"
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/script[EXE]`
 
@@ -234,7 +234,7 @@ Hello world!
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/script[EXE]`
 
@@ -262,7 +262,7 @@ msg = undefined
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/script[EXE]`
 
@@ -294,7 +294,7 @@ msg = hello
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/script[EXE]`
 
@@ -422,7 +422,7 @@ line: 4
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/script[EXE]`
 
@@ -446,7 +446,7 @@ args: ["-NotAnArg"]
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/script[EXE] -NotAnArg`
 
@@ -470,7 +470,7 @@ args: ["-NotAnArg"]
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/script[EXE] -NotAnArg`
 
@@ -494,7 +494,7 @@ args: ["--help"]
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/script[EXE] --help`
 
@@ -518,7 +518,7 @@ args: []
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] s-h-w-c- v0.0.0 ([ROOT]/foo)
+[COMPILING] s-h-w-c- v0.0.0 ([ROOT]/foo/s-h.w§c!.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/s-h-w-c-[EXE]`
 
@@ -542,7 +542,7 @@ args: []
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] answer v0.0.0 ([ROOT]/foo)
+[COMPILING] answer v0.0.0 ([ROOT]/foo/42answer.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/answer[EXE]`
 
@@ -564,7 +564,7 @@ args: []
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] package v0.0.0 ([ROOT]/foo)
+[COMPILING] package v0.0.0 ([ROOT]/foo/42.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/package[EXE]`
 
@@ -582,8 +582,7 @@ fn script_like_dir() {
         .masquerade_as_nightly_cargo(&["script"])
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] no such file or subcommand `foo.rs`
-	`foo.rs` is a directory
+[ERROR] no such file or subcommand `foo.rs`: `foo.rs` is a directory
 
 "#]])
         .run();
@@ -630,7 +629,7 @@ fn did_you_mean_file() {
         .with_stdout_data("")
         .with_stderr_data(str![[r#"
 [ERROR] no such file or subcommand `foo.rs`
-	Did you mean the file `./food.rs`
+[HELP] there is a script with a similar name: `./food.rs`
 
 "#]])
         .run();
@@ -648,7 +647,7 @@ fn did_you_mean_file_stable() {
         .with_stdout_data("")
         .with_stderr_data(str![[r#"
 [ERROR] no such subcommand `foo.rs`
-	Did you mean the file `./food.rs` with `-Zscript`
+[HELP] there is a script with a similar name: `./food.rs` (requires `-Zscript`)
 
 "#]])
         .run();
@@ -664,7 +663,7 @@ fn did_you_mean_command() {
         .with_stdout_data("")
         .with_stderr_data(str![[r#"
 [ERROR] no such file or subcommand `build--manifest-path=./Cargo.toml`
-	Did you mean the command `build --manifest-path=./Cargo.toml`
+[HELP] there is a command with a similar name: `build --manifest-path=./Cargo.toml`
 
 "#]])
         .run();
@@ -680,7 +679,7 @@ fn did_you_mean_command_stable() {
         .with_stdout_data("")
         .with_stderr_data(str![[r#"
 [ERROR] no such subcommand `build--manifest-path=./Cargo.toml`
-	Did you mean the command `build --manifest-path=./Cargo.toml`
+[HELP] there is a command with a similar name: `build --manifest-path=./Cargo.toml`
 
 "#]])
         .run();
@@ -715,7 +714,7 @@ Hello world!
 [DOWNLOADING] crates ...
 [DOWNLOADED] script v1.0.0 (registry `dummy-registry`)
 [COMPILING] script v1.0.0
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/script[EXE] --help`
 
@@ -751,7 +750,7 @@ Hello world!
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
 [LOCKING] 1 package to latest Rust [..] compatible version
 [COMPILING] bar v0.0.1 ([ROOT]/foo/bar)
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/script[EXE] --help`
 
@@ -779,7 +778,7 @@ Hello world!
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/script[EXE] --help`
 
@@ -807,7 +806,7 @@ Hello world!
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/script[EXE] --help`
 
@@ -835,9 +834,409 @@ Hello world!
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/script[EXE] --help`
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn disallow_explicit_workspace() {
+    let p = cargo_test_support::project()
+        .file(
+            "script.rs",
+            r#"
+----
+package.edition = "2021"
+
+[workspace]
+----
+
+fn main() {}
+"#,
+        )
+        .build();
+
+    p.cargo("-Zscript -v script.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/script.rs`
+
+Caused by:
+  `workspace` is not allowed in embedded manifests
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn disallow_explicit_lib() {
+    let p = cargo_test_support::project()
+        .file(
+            "script.rs",
+            r#"
+----
+package.edition = "2021"
+
+[lib]
+name = "script"
+path = "script.rs"
+----
+
+fn main() {}
+"#,
+        )
+        .build();
+
+    p.cargo("-Zscript -v script.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/script.rs`
+
+Caused by:
+  `lib` is not allowed in embedded manifests
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn disallow_explicit_bin() {
+    let p = cargo_test_support::project()
+        .file(
+            "script.rs",
+            r#"
+----
+package.edition = "2021"
+
+[[bin]]
+name = "script"
+path = "script.rs"
+----
+
+fn main() {}
+"#,
+        )
+        .build();
+
+    p.cargo("-Zscript -v script.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/script.rs`
+
+Caused by:
+  `bin` is not allowed in embedded manifests
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn disallow_explicit_example() {
+    let p = cargo_test_support::project()
+        .file(
+            "script.rs",
+            r#"
+----
+package.edition = "2021"
+
+[[example]]
+name = "script"
+path = "script.rs"
+----
+
+fn main() {}
+"#,
+        )
+        .build();
+
+    p.cargo("-Zscript -v script.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/script.rs`
+
+Caused by:
+  `example` is not allowed in embedded manifests
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn disallow_explicit_test() {
+    let p = cargo_test_support::project()
+        .file(
+            "script.rs",
+            r#"
+----
+package.edition = "2021"
+
+[[test]]
+name = "script"
+path = "script.rs"
+----
+
+fn main() {}
+"#,
+        )
+        .build();
+
+    p.cargo("-Zscript -v script.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/script.rs`
+
+Caused by:
+  `test` is not allowed in embedded manifests
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn disallow_explicit_bench() {
+    let p = cargo_test_support::project()
+        .file(
+            "script.rs",
+            r#"
+----
+package.edition = "2021"
+
+[[bench]]
+name = "script"
+path = "script.rs"
+----
+
+fn main() {}
+"#,
+        )
+        .build();
+
+    p.cargo("-Zscript -v script.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/script.rs`
+
+Caused by:
+  `bench` is not allowed in embedded manifests
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn disallow_explicit_package_build() {
+    let p = cargo_test_support::project()
+        .file(
+            "script.rs",
+            r#"
+----
+[package]
+edition = "2021"
+build = "script.rs"
+----
+
+fn main() {}
+"#,
+        )
+        .build();
+
+    p.cargo("-Zscript -v script.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/script.rs`
+
+Caused by:
+  `package.build` is not allowed in embedded manifests
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn disallow_explicit_package_links() {
+    let p = cargo_test_support::project()
+        .file(
+            "script.rs",
+            r#"
+----
+[package]
+edition = "2021"
+links = "script"
+----
+
+fn main() {}
+"#,
+        )
+        .build();
+
+    p.cargo("-Zscript -v script.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/script.rs`
+
+Caused by:
+  `package.links` is not allowed in embedded manifests
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn disallow_explicit_package_autolib() {
+    let p = cargo_test_support::project()
+        .file(
+            "script.rs",
+            r#"
+----
+[package]
+edition = "2021"
+autolib = true
+----
+
+fn main() {}
+"#,
+        )
+        .build();
+
+    p.cargo("-Zscript -v script.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/script.rs`
+
+Caused by:
+  `package.autolib` is not allowed in embedded manifests
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn disallow_explicit_package_autobins() {
+    let p = cargo_test_support::project()
+        .file(
+            "script.rs",
+            r#"
+----
+[package]
+edition = "2021"
+autobins = true
+----
+
+fn main() {}
+"#,
+        )
+        .build();
+
+    p.cargo("-Zscript -v script.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/script.rs`
+
+Caused by:
+  `package.autobins` is not allowed in embedded manifests
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn disallow_explicit_package_autoexamples() {
+    let p = cargo_test_support::project()
+        .file(
+            "script.rs",
+            r#"
+----
+[package]
+edition = "2021"
+autoexamples = true
+----
+
+fn main() {}
+"#,
+        )
+        .build();
+
+    p.cargo("-Zscript -v script.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/script.rs`
+
+Caused by:
+  `package.autoexamples` is not allowed in embedded manifests
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn disallow_explicit_package_autotests() {
+    let p = cargo_test_support::project()
+        .file(
+            "script.rs",
+            r#"
+----
+[package]
+edition = "2021"
+autotests = true
+----
+
+fn main() {}
+"#,
+        )
+        .build();
+
+    p.cargo("-Zscript -v script.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/script.rs`
+
+Caused by:
+  `package.autotests` is not allowed in embedded manifests
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn disallow_explicit_package_autobenches() {
+    let p = cargo_test_support::project()
+        .file(
+            "script.rs",
+            r#"
+----
+[package]
+edition = "2021"
+autobenches = true
+----
+
+fn main() {}
+"#,
+        )
+        .build();
+
+    p.cargo("-Zscript -v script.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/script.rs`
+
+Caused by:
+  `package.autobenches` is not allowed in embedded manifests
 
 "#]])
         .run();
@@ -859,7 +1258,7 @@ args: []
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/script[EXE]`
 
@@ -886,7 +1285,7 @@ args: []
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/script[EXE]`
 
@@ -943,7 +1342,7 @@ fn cmd_check_with_embedded() {
         .with_stdout_data("")
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[CHECKING] script v0.0.0 ([ROOT]/foo)
+[CHECKING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -959,7 +1358,7 @@ fn cmd_check_with_missing_script_rs() {
         .with_status(101)
         .with_stdout_data("")
         .with_stderr_data(str![[r#"
-[ERROR] manifest path `script.rs` does not exist
+[ERROR] the manifest-path must be a path to a Cargo.toml file
 
 "#]])
         .run();
@@ -992,7 +1391,7 @@ fn cmd_build_with_embedded() {
         .with_stdout_data("")
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -1019,7 +1418,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] unittests script.rs ([ROOT]/home/.cargo/target/[HASH]/debug/deps/script-[HASH][EXE])
 
@@ -1091,7 +1490,7 @@ fn cmd_metadata_with_embedded() {
       "edition": "2024",
       "features": {},
       "homepage": null,
-      "id": "path+[ROOTURL]/foo#script@0.0.0",
+      "id": "path+[ROOTURL]/foo/script.rs#script@0.0.0",
       "keywords": [],
       "license": null,
       "license_file": null,
@@ -1129,18 +1528,18 @@ fn cmd_metadata_with_embedded() {
         "dependencies": [],
         "deps": [],
         "features": [],
-        "id": "path+[ROOTURL]/foo#script@0.0.0"
+        "id": "path+[ROOTURL]/foo/script.rs#script@0.0.0"
       }
     ],
-    "root": "path+[ROOTURL]/foo#script@0.0.0"
+    "root": "path+[ROOTURL]/foo/script.rs#script@0.0.0"
   },
   "target_directory": "[ROOT]/home/.cargo/target/[HASH]",
   "version": 1,
   "workspace_default_members": [
-    "path+[ROOTURL]/foo#script@0.0.0"
+    "path+[ROOTURL]/foo/script.rs#script@0.0.0"
   ],
   "workspace_members": [
-    "path+[ROOTURL]/foo#script@0.0.0"
+    "path+[ROOTURL]/foo/script.rs#script@0.0.0"
   ],
   "workspace_root": "[ROOT]/foo"
 }
@@ -1175,7 +1574,7 @@ fn cmd_read_manifest_with_embedded() {
   "edition": "2024",
   "features": {},
   "homepage": null,
-  "id": "path+[ROOTURL]/foo#script@0.0.0",
+  "id": "path+[ROOTURL]/foo/script.rs#script@0.0.0",
   "keywords": [],
   "license": null,
   "license_file": null,
@@ -1231,7 +1630,7 @@ args: []
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/script[EXE]`
 
@@ -1248,7 +1647,7 @@ fn cmd_tree_with_embedded() {
     p.cargo("-Zscript tree --manifest-path script.rs")
         .masquerade_as_nightly_cargo(&["script"])
         .with_stdout_data(str![[r#"
-script v0.0.0 ([ROOT]/foo)
+script v0.0.0 ([ROOT]/foo/script.rs)
 
 "#]])
         .with_stderr_data(str![[r#"
@@ -1297,8 +1696,31 @@ fn cmd_verify_project_with_embedded() {
         .run();
 }
 
-#[cargo_test]
+#[cargo_test(nightly, reason = "edition2024 hasn't hit stable yet")]
 fn cmd_pkgid_with_embedded() {
+    let p = cargo_test_support::project()
+        .file("script.rs", ECHO_SCRIPT)
+        .build();
+
+    p.cargo("-Zscript script.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .run();
+
+    p.cargo("-Zscript pkgid --manifest-path script.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_stdout_data(str![[r#"
+path+[ROOTURL]/foo/script.rs#script@0.0.0
+
+"#]])
+        .with_stderr_data(str![[r#"
+[WARNING] `package.edition` is unspecified, defaulting to `2024`
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn cmd_pkgid_with_embedded_no_lock_file() {
     let p = cargo_test_support::project()
         .file("script.rs", ECHO_SCRIPT)
         .build();
@@ -1308,7 +1730,94 @@ fn cmd_pkgid_with_embedded() {
         .with_status(101)
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[ERROR] [ROOT]/foo/script.rs is unsupported by `cargo pkgid`
+[ERROR] a Cargo.lock must exist for this command
+
+"#]])
+        .run();
+}
+
+#[cargo_test(nightly, reason = "edition2024 hasn't hit stable yet")]
+fn cmd_pkgid_with_embedded_dep() {
+    Package::new("dep", "1.0.0").publish();
+    let script = r#"#!/usr/bin/env cargo
+---
+[dependencies]
+dep = "1.0.0"
+---
+
+fn main() {
+    println!("Hello world!");
+}"#;
+    let p = cargo_test_support::project()
+        .file("script.rs", script)
+        .build();
+
+    p.cargo("-Zscript script.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .run();
+
+    p.cargo("-Zscript pkgid --manifest-path script.rs -p dep")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_stdout_data(str![[r#"
+registry+https://github.com/rust-lang/crates.io-index#dep@1.0.0
+
+"#]])
+        .with_stderr_data(str![[r#"
+[WARNING] `package.edition` is unspecified, defaulting to `2024`
+
+"#]])
+        .run();
+}
+
+#[cargo_test(nightly, reason = "edition2024 hasn't hit stable yet")]
+fn script_as_dep() {
+    let p = cargo_test_support::project()
+        .file("script.rs", ECHO_SCRIPT)
+        .file("src/lib.rs", "pub fn foo() {}")
+        .file(
+            "Cargo.toml",
+            r#"
+[package]
+name = "foo"
+version = "0.1.0"
+
+[dependencies]
+script.path = "script.rs"
+"#,
+        )
+        .build();
+
+    p.cargo("build")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[WARNING] no edition set: defaulting to the 2015 edition while the latest is 2024
+[ERROR] failed to get `script` as a dependency of package `foo v0.1.0 ([ROOT]/foo)`
+
+Caused by:
+  failed to load source for dependency `script`
+
+Caused by:
+  Unable to update [ROOT]/foo/script.rs
+
+Caused by:
+  Single file packages cannot be used as dependencies
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn cmd_install_with_embedded() {
+    let p = cargo_test_support::project()
+        .file("script.rs", ECHO_SCRIPT)
+        .build();
+
+    p.cargo("-Zscript install --path script.rs")
+        .masquerade_as_nightly_cargo(&["script"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] `[ROOT]/foo/script.rs` is not a directory. --path must point to a directory containing a Cargo.toml file.
 
 "#]])
         .run();
@@ -1370,7 +1879,7 @@ CARGO_MANIFEST_PATH: [ROOT]/foo/script.rs
 "#]])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to `2024`
-[COMPILING] script v0.0.0 ([ROOT]/foo)
+[COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/target/[HASH]/debug/script[EXE]`
 

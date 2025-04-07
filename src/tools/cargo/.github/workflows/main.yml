@@ -161,6 +161,7 @@ jobs:
     - run: rustup update --no-self-update stable
     - run: rustup update --no-self-update ${{ matrix.rust }} && rustup default ${{ matrix.rust }}
     - run: rustup target add ${{ matrix.other }}
+    - run: rustup target add wasm32-unknown-unknown
     - run: rustup target add aarch64-unknown-none # need this for build-std mock tests
       if: startsWith(matrix.rust, 'nightly')
     - run: rustup component add rustc-dev llvm-tools-preview rust-docs
@@ -205,6 +206,13 @@ jobs:
     - name: Fetch smoke test
       run: ci/fetch-smoke-test.sh
 
+  schema:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - run: rustup update stable && rustup default stable
+    - run: cargo test -p cargo-util-schemas -F unstable-schema
+
   resolver:
     runs-on: ubuntu-latest
     steps:
@@ -218,6 +226,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup update --no-self-update stable && rustup default stable
       - run: rustup target add i686-unknown-linux-gnu
+      - run: rustup target add wasm32-unknown-unknown
       - run: sudo apt update -y && sudo apt install gcc-multilib libsecret-1-0 libsecret-1-dev -y
       - run: rustup component add rustfmt || echo "rustfmt not available"
       - run: cargo test -p cargo
@@ -252,7 +261,7 @@ jobs:
     - name: Install mdbook
       run: |
         mkdir mdbook
-        curl -Lf https://github.com/rust-lang/mdBook/releases/download/v0.4.40/mdbook-v0.4.40-x86_64-unknown-linux-gnu.tar.gz | tar -xz --directory=./mdbook
+        curl -Lf https://github.com/rust-lang/mdBook/releases/download/v0.4.44/mdbook-v0.4.44-x86_64-unknown-linux-gnu.tar.gz | tar -xz --directory=./mdbook
         echo `pwd`/mdbook >> $GITHUB_PATH
     - run: cd src/doc && mdbook build --dest-dir ../../target/doc
     - name: Run linkchecker.sh

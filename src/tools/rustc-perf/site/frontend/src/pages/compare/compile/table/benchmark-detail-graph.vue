@@ -120,6 +120,7 @@ async function renderGraph(
 ) {
   const opts: GraphRenderOpts = {
     width: Math.min(window.innerWidth - 40, 465),
+    height: 300,
     renderTitle: false,
   };
   if (date !== null) {
@@ -161,11 +162,15 @@ function drawCurrentDate(opts: GraphRenderOpts, date: Date) {
       let ctx = u.ctx;
       const x = u.valToPos(date.getTime() / 1000, "x", true);
 
+      // Ignore if the width is negative
+      const width = u.bbox.width - x + u.bbox.left;
+      if (width <= 0) return;
+
       // Draw a translucent rectangle representing the region that is more
       // recent than `date`.
       ctx.save();
       ctx.fillStyle = "rgba(0, 0, 0, 0.07)";
-      ctx.rect(x, u.bbox.top, u.bbox.width - x + u.bbox.left, u.bbox.height);
+      ctx.rect(x, u.bbox.top, width, u.bbox.height);
       ctx.fill();
       ctx.restore();
     },

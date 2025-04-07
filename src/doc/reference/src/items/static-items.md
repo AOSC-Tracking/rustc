@@ -1,6 +1,5 @@
-# Static items
-
 r[items.static]
+# Static items
 
 r[items.static.syntax]
 > **<sup>Syntax</sup>**\
@@ -12,21 +11,27 @@ r[items.static.syntax]
 >   allowed semantically within `extern` blocks.
 
 r[items.static.intro]
-A *static item* is similar to a [constant], except that it represents a precise
-memory location in the program. All references to the static refer to the same
-memory location.
+A *static item* is similar to a [constant], except that it represents an allocated object in the
+program that is initialized with the initializer expression. All references and raw pointers to the
+static refer to the same allocated object.
 
 r[items.static.lifetime]
-Static items have the `static` lifetime, which outlives all
-other lifetimes in a Rust program. Static items do not call [`drop`] at the
-end of the program.
+Static items have the `static` lifetime, which outlives all other lifetimes in a Rust program.
+Static items do not call [`drop`] at the end of the program.
+
+r[items.static.storage-disjointness]
+If the `static` has a size of at least 1 byte, this allocated object is disjoint from all other such
+`static` objects as well as heap allocations and stack-allocated variables. However, the storage of
+immutable `static` items can overlap with objects that do not themselves have a unique address, such
+as [promoteds] and [`const` items][constant].
 
 r[items.static.namespace]
 The static declaration defines a static value in the [value namespace] of the module or block where it is located.
 
 r[items.static.init]
 The static initializer is a [constant expression] evaluated at compile time.
-Static initializers may refer to other statics.
+Static initializers may refer to and read from other statics.
+When reading from mutable statics, they read the initial value of that static.
 
 r[items.static.read-only]
 Non-`mut` static items that contain a type that is not [interior mutable] may
@@ -46,9 +51,8 @@ provided for free static items.
 r[items.static.safety-qualifiers]
 The `safe` and `unsafe` qualifiers are semantically only allowed when used in an [external block].
 
-## Statics & generics
-
 r[items.static.generics]
+## Statics & generics
 
 A static item defined in a generic scope (for example in a blanket or default
 implementation) will result in exactly one static item being defined, as if
@@ -96,9 +100,8 @@ blanket_impl: counter was 0
 blanket_impl: counter was 1
 ```
 
-## Mutable statics
-
 r[items.static.mut]
+## Mutable statics
 
 r[items.static.mut.intro]
 If a static item is declared with the `mut` keyword, then it is allowed to be
@@ -148,9 +151,8 @@ r[items.static.mut.sync]
 Mutable statics have the same restrictions as normal statics, except that the
 type does not have to implement the `Sync` trait.
 
-## Using Statics or Consts
-
 r[items.static.alternate]
+## Using Statics or Consts
 
 It can be confusing whether or not you should use a constant item or a static
 item. Constants should, in general, be preferred over statics unless one of the
@@ -170,3 +172,4 @@ following are true:
 [_Expression_]: ../expressions.md
 [value namespace]: ../names/namespaces.md
 [_ItemSafety_]: functions.md
+[promoteds]: ../destructors.md#constant-promotion

@@ -1,9 +1,8 @@
+r[items]
 # Items
 
-r[items]
-
 r[items.syntax]
-> **<sup>Syntax:<sup>**\
+> **<sup>Syntax:</sup>**\
 > _Item_:\
 > &nbsp;&nbsp; [_OuterAttribute_]<sup>\*</sup>\
 > &nbsp;&nbsp; &nbsp;&nbsp; _VisItem_\

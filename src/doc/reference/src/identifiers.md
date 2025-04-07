@@ -1,9 +1,8 @@
+r[ident]
 # Identifiers
 
-r[ident]
-
 r[ident.syntax]
-> **<sup>Lexer:<sup>**\
+> **<sup>Lexer:</sup>**\
 > IDENTIFIER_OR_KEYWORD :\
 > &nbsp;&nbsp; &nbsp;&nbsp; XID_Start XID_Continue<sup>\*</sup>\
 > &nbsp;&nbsp; | `_` XID_Continue<sup>+</sup>
@@ -53,17 +52,16 @@ Identifiers are restricted to the ASCII subset of [`XID_Start`] and [`XID_Contin
 * [`no_mangle`] attributed items
 * Item names in [external blocks]
 
+r[ident.normalization]
 ## Normalization
 
-r[ident.normalization]
 
 Identifiers are normalized using Normalization Form C (NFC) as defined in [Unicode Standard Annex #15][UAX15]. Two identifiers are equal if their NFC forms are equal.
 
 [Procedural][proc-macro] and [declarative][mbe] macros receive normalized identifiers in their input.
 
-## Raw identifiers
-
 r[ident.raw]
+## Raw identifiers
 
 r[ident.raw.intro]
 A raw identifier is like a normal identifier, but prefixed by `r#`. (Note that

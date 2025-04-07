@@ -182,8 +182,8 @@ fn depend_on_alt_registry_depends_on_crates_io() {
 [DOWNLOADED] bar v0.0.1 (registry `alternative`)
 [CHECKING] baz v0.0.1
 [CHECKING] bar v0.0.1 (registry `alternative`)
-[CHECKING] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
 
 "#]]
             .unordered(),
@@ -441,8 +441,8 @@ fn alt_registry_and_crates_io_deps() {
 [DOWNLOADED] alt_reg_dep v0.1.0 (registry `alternative`)
 [CHECKING] crates_io_dep v0.0.1
 [CHECKING] alt_reg_dep v0.1.0 (registry `alternative`)
-[CHECKING] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
 
 "#]]
             .unordered(),
@@ -747,8 +747,7 @@ fn bad_registry_name() {
 
   --> Cargo.toml:8:17
    |
- 8 |                   [dependencies.bar]
-   |  _________________^
+ 8 | /                 [dependencies.bar]
  9 | |                 version = "0.0.1"
 10 | |                 registry = "bad name"
    | |_____________________________________^
@@ -814,7 +813,8 @@ fn no_api() {
 "#]])
         .run();
 
-    p.cargo("login --registry alternative TOKEN")
+    p.cargo("login --registry alternative")
+        .with_stdin("TOKEN")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [ERROR] registry `alternative` does not support API commands

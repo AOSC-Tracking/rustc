@@ -948,7 +948,7 @@ fn virtual_default_member_is_not_a_member() {
         .with_status(101)
         .with_stderr_data(str![[r#"
 [ERROR] package `[ROOT]/foo/something-else` is listed in default-members but is not a member
-for workspace at [ROOT]/foo/Cargo.toml.
+for workspace at `[ROOT]/foo/Cargo.toml`.
 
 "#]])
         .run();
@@ -1731,7 +1731,7 @@ fn excluded_default_members_still_must_be_members() {
         .with_status(101)
         .with_stderr_data(str![[r#"
 [ERROR] package `[ROOT]/foo/bar` is listed in default-members but is not a member
-for workspace at [ROOT]/foo/Cargo.toml.
+for workspace at `[ROOT]/foo/Cargo.toml`.
 
 "#]])
         .run();
@@ -1968,7 +1968,7 @@ fn glob_syntax_invalid_members() {
         .with_status(101)
         .with_stderr_data(str![[r#"
 [ERROR] failed to load manifest for workspace member `[ROOT]/foo/crates/bar`
-referenced by workspace at `[ROOT]/foo/Cargo.toml`
+referenced via `crates/*` by workspace at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   failed to read `[ROOT]/foo/crates/bar/Cargo.toml`
@@ -2620,6 +2620,98 @@ fn ensure_correct_workspace_when_nested() {
         .with_stdout_data(str![[r#"
 foo v0.1.0 ([ROOT]/foo/sub/foo)
 └── bar v0.1.0 ([ROOT]/foo)
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn nonexistence_package_togother_with_workspace() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [package]
+            name = "foo"
+            version = "0.1.0"
+            authors = []
+            edition = "2021"
+
+            [workspace]
+            members = ["baz"]
+        "#,
+        )
+        .file("src/lib.rs", "")
+        .file("baz/Cargo.toml", &basic_manifest("baz", "0.1.0"))
+        .file("baz/src/lib.rs", "");
+
+    let p = p.build();
+
+    p.cargo("check --package nonexistence --workspace")
+        .with_status(101)
+        .with_stderr_data(
+            str![[r#"
+[ERROR] package(s) `nonexistence` not found in workspace `[ROOT]/foo`
+
+"#]]
+            .unordered(),
+        )
+        .run();
+    // With pattern *
+    p.cargo("check --package nonpattern* --workspace")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] package pattern(s) `nonpattern*` not found in workspace `[ROOT]/foo`
+
+"#]])
+        .run();
+
+    p.cargo("package --package nonexistence --workspace")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] package(s) `nonexistence` not found in workspace `[ROOT]/foo`
+
+"#]])
+        .run();
+    // With pattern *
+    p.cargo("package --package nonpattern* --workspace")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] package pattern(s) `nonpattern*` not found in workspace `[ROOT]/foo`
+
+"#]])
+        .run();
+
+    p.cargo("publish --dry-run --package nonexistence -Zpackage-workspace --workspace")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] package(s) `nonexistence` not found in workspace `[ROOT]/foo`
+
+"#]])
+        .masquerade_as_nightly_cargo(&["package-workspace"])
+        .run();
+    // With pattern *
+    p.cargo("publish --dry-run --package nonpattern* -Zpackage-workspace --workspace")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] package pattern(s) `nonpattern*` not found in workspace `[ROOT]/foo`
+
+"#]])
+        .masquerade_as_nightly_cargo(&["package-workspace"])
+        .run();
+
+    p.cargo("tree --package nonexistence  --workspace")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] package(s) `nonexistence` not found in workspace `[ROOT]/foo`
+
+"#]])
+        .run();
+    // With pattern *
+    p.cargo("tree --package nonpattern*  --workspace")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] package pattern(s) `nonpattern*` not found in workspace `[ROOT]/foo`
 
 "#]])
         .run();

@@ -52,7 +52,10 @@ cfg_if::cfg_if! {
     }
 }
 
+mod lru;
 mod stash;
+
+use lru::Lru;
 
 const MAPPINGS_CACHE_SIZE: usize = 4;
 
@@ -263,7 +266,7 @@ struct Cache {
     ///
     /// Note that this is basically an LRU cache and we'll be shifting things
     /// around in here as we symbolize addresses.
-    mappings: Vec<(usize, Mapping)>,
+    mappings: Lru<(usize, Mapping), MAPPINGS_CACHE_SIZE>,
 }
 
 struct Library {
@@ -338,13 +341,15 @@ fn extract_zip_path_android(path: &mystd::ffi::OsStr) -> Option<&mystd::ffi::OsS
 
 // unsafe because this is required to be externally synchronized
 pub unsafe fn clear_symbol_cache() {
-    Cache::with_global(|cache| cache.mappings.clear());
+    unsafe {
+        Cache::with_global(|cache| cache.mappings.clear());
+    }
 }
 
 impl Cache {
     fn new() -> Cache {
         Cache {
-            mappings: Vec::with_capacity(MAPPINGS_CACHE_SIZE),
+            mappings: Lru::default(),
             libraries: native_libraries(),
         }
     }
@@ -363,9 +368,11 @@ impl Cache {
         // never happen, and symbolicating backtraces would be ssssllllooooowwww.
         static mut MAPPINGS_CACHE: Option<Cache> = None;
 
-        // FIXME: https://github.com/rust-lang/backtrace-rs/issues/678
-        #[allow(static_mut_refs)]
-        f(MAPPINGS_CACHE.get_or_insert_with(Cache::new))
+        unsafe {
+            // FIXME: https://github.com/rust-lang/backtrace-rs/issues/678
+            #[allow(static_mut_refs)]
+            f(MAPPINGS_CACHE.get_or_insert_with(Cache::new))
+        }
     }
 
     fn avma_to_svma(&self, addr: *const u8) -> Option<(usize, *const u8)> {
@@ -403,31 +410,18 @@ impl Cache {
     }
 
     fn mapping_for_lib<'a>(&'a mut self, lib: usize) -> Option<(&'a mut Context<'a>, &'a Stash)> {
-        let idx = self.mappings.iter().position(|(idx, _)| *idx == lib);
+        let cache_idx = self.mappings.iter().position(|(lib_id, _)| *lib_id == lib);
 
-        // Invariant: after this conditional completes without early returning
-        // from an error, the cache entry for this path is at index 0.
-
-        if let Some(idx) = idx {
-            // When the mapping is already in the cache, move it to the front.
-            if idx != 0 {
-                let entry = self.mappings.remove(idx);
-                self.mappings.insert(0, entry);
-            }
+        let cache_entry = if let Some(idx) = cache_idx {
+            self.mappings.move_to_front(idx)
         } else {
-            // When the mapping is not in the cache, create a new mapping,
-            // insert it into the front of the cache, and evict the oldest cache
-            // entry if necessary.
-            let mapping = create_mapping(&self.libraries[lib])?;
+            // When the mapping is not in the cache, create a new mapping and insert it,
+            // which will also evict the oldest entry.
+            create_mapping(&self.libraries[lib])
+                .and_then(|mapping| self.mappings.push_front((lib, mapping)))
+        };
 
-            if self.mappings.len() == MAPPINGS_CACHE_SIZE {
-                self.mappings.pop();
-            }
-
-            self.mappings.insert(0, (lib, mapping));
-        }
-
-        let mapping = &mut self.mappings[0].1;
+        let (_, mapping) = cache_entry?;
         let cx: &'a mut Context<'static> = &mut mapping.cx;
         let stash: &'a Stash = &mapping.stash;
         // don't leak the `'static` lifetime, make sure it's scoped to just
@@ -445,57 +439,60 @@ pub unsafe fn resolve(what: ResolveWhat<'_>, cb: &mut dyn FnMut(&super::Symbol))
         // Extend the lifetime of `sym` to `'static` since we are unfortunately
         // required to here, but it's only ever going out as a reference so no
         // reference to it should be persisted beyond this frame anyway.
-        let sym = mem::transmute::<Symbol<'_>, Symbol<'static>>(sym);
+        // SAFETY: praying the above is correct
+        let sym = unsafe { mem::transmute::<Symbol<'_>, Symbol<'static>>(sym) };
         (cb)(&super::Symbol { inner: sym });
     };
 
-    Cache::with_global(|cache| {
-        let (lib, addr) = match cache.avma_to_svma(addr.cast_const().cast::<u8>()) {
-            Some(pair) => pair,
-            None => return,
-        };
+    unsafe {
+        Cache::with_global(|cache| {
+            let (lib, addr) = match cache.avma_to_svma(addr.cast_const().cast::<u8>()) {
+                Some(pair) => pair,
+                None => return,
+            };
 
-        // Finally, get a cached mapping or create a new mapping for this file, and
-        // evaluate the DWARF info to find the file/line/name for this address.
-        let (cx, stash) = match cache.mapping_for_lib(lib) {
-            Some((cx, stash)) => (cx, stash),
-            None => return,
-        };
-        let mut any_frames = false;
-        if let Ok(mut frames) = cx.find_frames(stash, addr as u64) {
-            while let Ok(Some(frame)) = frames.next() {
-                any_frames = true;
-                let name = match frame.function {
-                    Some(f) => Some(f.name.slice()),
-                    None => cx.object.search_symtab(addr as u64),
-                };
-                call(Symbol::Frame {
-                    addr: addr as *mut c_void,
-                    location: frame.location,
-                    name,
-                });
+            // Finally, get a cached mapping or create a new mapping for this file, and
+            // evaluate the DWARF info to find the file/line/name for this address.
+            let (cx, stash) = match cache.mapping_for_lib(lib) {
+                Some((cx, stash)) => (cx, stash),
+                None => return,
+            };
+            let mut any_frames = false;
+            if let Ok(mut frames) = cx.find_frames(stash, addr as u64) {
+                while let Ok(Some(frame)) = frames.next() {
+                    any_frames = true;
+                    let name = match frame.function {
+                        Some(f) => Some(f.name.slice()),
+                        None => cx.object.search_symtab(addr as u64),
+                    };
+                    call(Symbol::Frame {
+                        addr: addr as *mut c_void,
+                        location: frame.location,
+                        name,
+                    });
+                }
             }
-        }
-        if !any_frames {
-            if let Some((object_cx, object_addr)) = cx.object.search_object_map(addr as u64) {
-                if let Ok(mut frames) = object_cx.find_frames(stash, object_addr) {
-                    while let Ok(Some(frame)) = frames.next() {
-                        any_frames = true;
-                        call(Symbol::Frame {
-                            addr: addr as *mut c_void,
-                            location: frame.location,
-                            name: frame.function.map(|f| f.name.slice()),
-                        });
+            if !any_frames {
+                if let Some((object_cx, object_addr)) = cx.object.search_object_map(addr as u64) {
+                    if let Ok(mut frames) = object_cx.find_frames(stash, object_addr) {
+                        while let Ok(Some(frame)) = frames.next() {
+                            any_frames = true;
+                            call(Symbol::Frame {
+                                addr: addr as *mut c_void,
+                                location: frame.location,
+                                name: frame.function.map(|f| f.name.slice()),
+                            });
+                        }
                     }
                 }
             }
-        }
-        if !any_frames {
-            if let Some(name) = cx.object.search_symtab(addr as u64) {
-                call(Symbol::Symtab { name });
+            if !any_frames {
+                if let Some(name) = cx.object.search_symtab(addr as u64) {
+                    call(Symbol::Symtab { name });
+                }
             }
-        }
-    });
+        });
+    }
 }
 
 pub enum Symbol<'a> {

@@ -154,17 +154,13 @@ impl<'de, 'gctx> de::Deserializer<'de> for Deserializer<'gctx> {
     where
         V: de::Visitor<'de>,
     {
-        let merge = if name == "StringList" {
-            true
-        } else if name == "UnmergedStringList" {
-            false
+        if name == "StringList" {
+            let vals = self.gctx.get_list_or_string(&self.key)?;
+            let vals: Vec<String> = vals.into_iter().map(|vd| vd.0).collect();
+            visitor.visit_newtype_struct(vals.into_deserializer())
         } else {
-            return visitor.visit_newtype_struct(self);
-        };
-
-        let vals = self.gctx.get_list_or_string(&self.key, merge)?;
-        let vals: Vec<String> = vals.into_iter().map(|vd| vd.0).collect();
-        visitor.visit_newtype_struct(vals.into_deserializer())
+            visitor.visit_newtype_struct(self)
+        }
     }
 
     fn deserialize_enum<V>(
@@ -531,11 +527,11 @@ impl<'de, 'gctx> de::MapAccess<'de> for ValueDeserializer<'gctx> {
                 seed.deserialize(Tuple2Deserializer(1i32, env.as_str()))
             }
             Definition::Cli(path) => {
-                let str = path
+                let s = path
                     .as_ref()
                     .map(|p| p.to_string_lossy())
                     .unwrap_or_default();
-                seed.deserialize(Tuple2Deserializer(2i32, str))
+                seed.deserialize(Tuple2Deserializer(2i32, s))
             }
         }
     }

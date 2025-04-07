@@ -11,6 +11,7 @@ use postgres_native_tls::MakeTlsConnector;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio_postgres::GenericClient;
 use tokio_postgres::Statement;
 
@@ -24,21 +25,10 @@ impl Postgres {
 
 const CERT_URL: &str = "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem";
 
-lazy_static::lazy_static! {
-    static ref CERTIFICATE_PEMS: Vec<u8> = {
-        let client = reqwest::blocking::Client::new();
-        let resp = client
-            .get(CERT_URL)
-            .send()
-            .expect("failed to get RDS cert");
-         resp.bytes().expect("failed to get RDS cert body").to_vec()
-    };
-}
-
 async fn make_client(db_url: &str) -> anyhow::Result<tokio_postgres::Client> {
     if db_url.contains("rds.amazonaws.com") {
         let mut builder = TlsConnector::builder();
-        for cert in make_certificates() {
+        for cert in make_certificates().await {
             builder.add_root_certificate(cert);
         }
         let connector = builder.build().context("built TlsConnector")?;
@@ -75,11 +65,28 @@ async fn make_client(db_url: &str) -> anyhow::Result<tokio_postgres::Client> {
         Ok(db_client)
     }
 }
-fn make_certificates() -> Vec<Certificate> {
+async fn make_certificates() -> Vec<Certificate> {
     use x509_cert::der::pem::LineEnding;
     use x509_cert::der::EncodePem;
 
-    let certs = x509_cert::Certificate::load_pem_chain(&CERTIFICATE_PEMS[..]).unwrap();
+    static CERTIFICATE_PEMS: Mutex<Option<Vec<u8>>> = Mutex::const_new(None);
+
+    let mut guard = CERTIFICATE_PEMS.lock().await;
+    if guard.is_none() {
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(CERT_URL)
+            .send()
+            .await
+            .expect("failed to get RDS cert");
+        let certificate_pems = resp
+            .bytes()
+            .await
+            .expect("failed to get RDS cert body")
+            .to_vec();
+        *guard = Some(certificate_pems.clone());
+    }
+    let certs = x509_cert::Certificate::load_pem_chain(&guard.as_ref().unwrap()[..]).unwrap();
     certs
         .into_iter()
         .map(|cert| Certificate::from_pem(cert.to_pem(LineEnding::LF).unwrap().as_bytes()).unwrap())
@@ -271,6 +278,7 @@ static MIGRATIONS: &[&str] = &[
     alter table pstat_series drop constraint pstat_series_crate_profile_cache_statistic_key;
     alter table pstat_series add constraint test_case UNIQUE(crate, profile, scenario, backend, metric);
     "#,
+    r#"alter table pull_request_build add column backends text;"#,
 ];
 
 #[async_trait::async_trait]
@@ -729,14 +737,15 @@ where
         include: Option<&str>,
         exclude: Option<&str>,
         runs: Option<i32>,
+        backends: Option<&str>,
     ) {
         if let Err(e) = self.conn()
             .execute(
-                "insert into pull_request_build (pr, complete, requested, include, exclude, runs) VALUES ($1, false, CURRENT_TIMESTAMP, $2, $3, $4)",
-                &[&(pr as i32), &include, &exclude, &runs],
+                "insert into pull_request_build (pr, complete, requested, include, exclude, runs, backends) VALUES ($1, false, CURRENT_TIMESTAMP, $2, $3, $4, $5)",
+                &[&(pr as i32), &include, &exclude, &runs, &backends],
             )
             .await {
-            log::error!("failed to queue_pr({}, {:?}, {:?}, {:?}): {:?}", pr, include, exclude, runs, e);
+            log::error!("failed to queue_pr({}, {:?}, {:?}, {:?}, {:?}): {:?}", pr, include, exclude, runs, backends, e);
         }
     }
     async fn pr_attach_commit(
@@ -760,7 +769,7 @@ where
         let rows = self
             .conn()
             .query(
-                "select pr, bors_sha, parent_sha, include, exclude, runs, commit_date from pull_request_build
+                "select pr, bors_sha, parent_sha, include, exclude, runs, commit_date, backends from pull_request_build
                 where complete is false and bors_sha is not null
                 order by requested asc",
                 &[],
@@ -776,6 +785,7 @@ where
                 exclude: row.get(4),
                 runs: row.get(5),
                 commit_date: row.get::<_, Option<_>>(6).map(Date),
+                backends: row.get(7),
             })
             .collect()
     }
@@ -785,7 +795,7 @@ where
             .query_opt(
                 "update pull_request_build SET complete = true
                 where bors_sha = $1
-                returning pr, bors_sha, parent_sha, include, exclude, runs, commit_date",
+                returning pr, bors_sha, parent_sha, include, exclude, runs, commit_date, backends",
                 &[&sha],
             )
             .await
@@ -798,6 +808,7 @@ where
             exclude: row.get(4),
             runs: row.get(5),
             commit_date: row.get::<_, Option<_>>(6).map(Date),
+            backends: row.get(7),
         })
     }
     async fn collection_id(&self, version: &str) -> CollectionId {
@@ -1337,6 +1348,13 @@ where
             .execute("delete from artifact where name = $1", &[&info.name])
             .await
             .unwrap();
+        self.conn()
+            .execute(
+                "delete from pull_request_build where bors_sha = $1",
+                &[&info.name],
+            )
+            .await
+            .unwrap();
     }
 }
 
@@ -1365,9 +1383,9 @@ mod tests {
 
     // Makes sure we successfully parse the RDS certificates and load them into native-tls compatible
     // format.
-    #[test]
-    fn can_make_certificates() {
-        let certs = make_certificates();
+    #[tokio::test]
+    async fn can_make_certificates() {
+        let certs = make_certificates().await;
         assert!(!certs.is_empty());
     }
 }

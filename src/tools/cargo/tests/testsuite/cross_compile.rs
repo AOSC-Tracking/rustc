@@ -731,7 +731,9 @@ fn build_script_needed_for_host_and_target() {
                 use std::env;
                 fn main() {
                     let target = env::var("TARGET").unwrap();
-                    println!("cargo::rustc-flags=-L /path/to/{}", target);
+                    let root = std::env::current_dir().unwrap();
+                    let root = root.parent().unwrap().join(format!("link-{target}"));
+                    println!("cargo::rustc-flags=-L {}", root.display());
                 }
             "#,
         )
@@ -757,6 +759,8 @@ fn build_script_needed_for_host_and_target() {
         ",
         )
         .build();
+    p.root().join(format!("link-{target}")).mkdir_p();
+    p.root().join(format!("link-{}", rustc_host())).mkdir_p();
 
     p.cargo("build -v --target")
         .arg(&target)
@@ -769,11 +773,11 @@ fn build_script_needed_for_host_and_target() {
 [RUNNING] `rustc [..] d1/src/lib.rs [..] --out-dir [ROOT]/foo/target/debug/deps [..]
 [RUNNING] `rustc [..] d1/src/lib.rs [..] --out-dir [ROOT]/foo/target/[ALT_TARGET]/debug/deps [..]
 [COMPILING] d2 v0.0.0 ([ROOT]/foo/d2)
-[RUNNING] `rustc [..] d2/src/lib.rs [..] --out-dir [ROOT]/foo/target/debug/deps [..]
+[RUNNING] `rustc [..] d2/src/lib.rs [..] --out-dir [ROOT]/foo/target/debug/deps [..]-L [ROOT]/foo/link-[HOST_TARGET]`
 [COMPILING] foo v0.0.0 ([ROOT]/foo)
-[RUNNING] `rustc [..] build.rs [..] --out-dir [ROOT]/foo/target/debug/build/foo-[HASH] [..]
+[RUNNING] `rustc [..] build.rs [..] --out-dir [ROOT]/foo/target/debug/build/foo-[HASH] [..]-L [ROOT]/foo/link-[HOST_TARGET]`
 [RUNNING] `[ROOT]/foo/target/debug/build/foo-[HASH]/build-script-build`
-[RUNNING] `rustc [..] src/main.rs [..] --out-dir [ROOT]/foo/target/[ALT_TARGET]/debug/deps --target [ALT_TARGET] [..]
+[RUNNING] `rustc [..] src/main.rs [..] --out-dir [ROOT]/foo/target/[ALT_TARGET]/debug/deps --target [ALT_TARGET] [..]-L [ROOT]/foo/link-[ALT_TARGET]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]].unordered())
@@ -1256,6 +1260,41 @@ fn doctest_xcompile_linker() {
 [DOCTEST] foo
 [RUNNING] `rustdoc [..] src/lib.rs [..]
 [ERROR] doctest failed, to rerun pass `--doc`
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn always_emit_warnings_as_warnings_when_learning_target_info() {
+    if cross_compile::disabled() {
+        return;
+    }
+
+    let target = "wasm32-unknown-unknown";
+    if !cross_compile::requires_target_installed(target) {
+        return;
+    }
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                edition = "2015"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("build -v --target")
+        .env("RUSTFLAGS", "-Awarnings")
+        .arg(target)
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]-Awarnings[..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
         .run();

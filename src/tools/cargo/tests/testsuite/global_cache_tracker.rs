@@ -2004,16 +2004,7 @@ fn compatible_with_older_cargo() {
     assert_eq!(get_registry_names("src"), ["middle-1.0.0", "new-1.0.0"]);
     assert_eq!(
         get_registry_names("cache"),
-        // Duplicate crates from two different cache location
-        // because we're changing how SourceId is hashed.
-        // This change should be reverted once rust-lang/cargo#14917 lands.
-        [
-            "middle-1.0.0.crate",
-            "middle-1.0.0.crate",
-            "new-1.0.0.crate",
-            "new-1.0.0.crate",
-            "old-1.0.0.crate"
-        ]
+        ["middle-1.0.0.crate", "new-1.0.0.crate", "old-1.0.0.crate"]
     );
 
     // T-0 months: Current version, make sure it can read data from stable,
@@ -2036,10 +2027,7 @@ fn compatible_with_older_cargo() {
     assert_eq!(get_registry_names("src"), ["new-1.0.0"]);
     assert_eq!(
         get_registry_names("cache"),
-        // Duplicate crates from two different cache location
-        // because we're changing how SourceId is hashed.
-        // This change should be reverted once rust-lang/cargo#14917 lands.
-        ["middle-1.0.0.crate", "new-1.0.0.crate", "new-1.0.0.crate"]
+        ["middle-1.0.0.crate", "new-1.0.0.crate"]
     );
 }
 
@@ -2102,4 +2090,52 @@ fn forward_compatible() {
     let cos: Vec<_> = tracker.git_checkout_all().unwrap();
     assert_eq!(cos.len(), 1);
     drop(lock);
+}
+
+#[cargo_test]
+fn resilient_to_unexpected_files() {
+    // Tests that it doesn't choke on unexpected files.
+    Package::new("bar", "1.0.0").publish();
+    let git_project = git::new("from_git", |p| {
+        p.file("Cargo.toml", &basic_manifest("from_git", "1.0.0"))
+            .file("src/lib.rs", "")
+    });
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            &format!(
+                r#"
+                    [package]
+                    name = "foo"
+
+                    [dependencies]
+                    bar = "1.0.0"
+                    from_git = {{ git = '{}' }}
+                "#,
+                git_project.url()
+            ),
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("fetch -Zgc")
+        .masquerade_as_nightly_cargo(&["gc"])
+        .env("__CARGO_TEST_LAST_USE_NOW", months_ago_unix(4))
+        .run();
+
+    let root = paths::home().join(".cargo");
+    std::fs::write(root.join("registry/index/foo"), "").unwrap();
+    std::fs::write(root.join("registry/cache/foo"), "").unwrap();
+    std::fs::write(root.join("registry/src/foo"), "").unwrap();
+    std::fs::write(root.join("git/db/foo"), "").unwrap();
+    std::fs::write(root.join("git/checkouts/foo"), "").unwrap();
+
+    p.cargo("clean gc -Zgc")
+        .masquerade_as_nightly_cargo(&["gc"])
+        .with_stderr_data(str![[r#"
+[REMOVED] [FILE_NUM] files, [FILE_SIZE]B total
+
+"#]])
+        .run();
 }

@@ -1,21 +1,19 @@
-# Type coercions
-
 r[coerce]
+# Type coercions
 
 r[coerce.intro]
 **Type coercions** are implicit operations that change the type of a value.
 They happen automatically at specific locations and are highly restricted in
 what types actually coerce.
 
-r[cerce.as]
+r[coerce.as]
 Any conversions allowed by coercion can also be explicitly performed by the
 [type cast operator], `as`.
 
 Coercions are originally defined in [RFC 401] and expanded upon in [RFC 1558].
 
-## Coercion sites
-
 r[coerce.site]
+## Coercion sites
 
 r[coerce.site.intro]
 A coercion can only occur at certain coercion sites in a program; these are
@@ -109,9 +107,8 @@ it is not semicolon-terminated) is a coercion site to `U`. This includes
 blocks which are part of control flow statements, such as `if`/`else`, if
 the block has a known type.
 
-## Coercion types
-
 r[coerce.types]
+## Coercion types
 
 r[coerce.types.intro]
 Coercion is allowed between the following types:
@@ -189,13 +186,12 @@ r[coerce.types.closure]
 r[coerce.types.never]
 * `!` to any `T`
 
-### Unsized Coercions
-
 r[coerce.unsize]
+### Unsized Coercions
 
 r[coerce.unsize.intro]
 The following coercions are called `unsized coercions`, since they
-relate to converting sized types to unsized types, and are permitted in a few
+relate to converting types to unsized types, and are permitted in a few
 cases where other coercions are not, as described above. They can still happen
 anywhere else a coercion can occur.
 
@@ -210,6 +206,11 @@ r[coerce.unsize.slice]
 
 r[coerce.unsize.trait-object]
 * `T` to `dyn U`, when `T` implements `U + Sized`, and `U` is [dyn compatible].
+
+r[coerce.unsize.trait-upcast]
+* `dyn T` to `dyn U`, when `U` is one of `T`'s [supertraits].
+    * This allows dropping auto traits, i.e. `dyn T + Auto` to `dyn U` is allowed.
+    * This allows adding auto traits if the principal trait has the auto trait as a super trait, i.e. given `trait T: U + Send {}`, `dyn T` to `dyn T + Send` or to `dyn U + Send` coercions are allowed.
 
 r[coerce.unsized.composite]
 * `Foo<..., T, ...>` to `Foo<..., U, ...>`, when:
@@ -228,9 +229,8 @@ unsized coercion to `Foo<U>`.
 > has been stabilized, the traits themselves are not yet stable and therefore
 > can't be used directly in stable Rust.
 
-## Least upper bound coercions
-
 r[coerce.least-upper-bound]
+## Least upper bound coercions
 
 r[coerce.least-upper-bound.intro]
 In some contexts, the compiler must coerce together multiple types to try and
@@ -327,3 +327,4 @@ precisely.
 [`Unsize`]: std::marker::Unsize
 [`CoerceUnsized`]: std::ops::CoerceUnsized
 [method-call expressions]: expressions/method-call-expr.md
+[supertraits]: items/traits.md#supertraits

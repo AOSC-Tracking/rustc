@@ -173,15 +173,15 @@ public:
 
   void setToEntryState(PointsToSets *lattice) override;
 
-  void visitOperation(Operation *op, const PointsToSets &before,
-                      PointsToSets *after) override;
+  LogicalResult visitOperation(Operation *op, const PointsToSets &before,
+                               PointsToSets *after) override;
 
   void visitCallControlFlowTransfer(CallOpInterface call,
                                     dataflow::CallControlFlowAction action,
                                     const PointsToSets &before,
                                     PointsToSets *after) override;
 
-  void processCapturingStore(ProgramPoint dependent, PointsToSets *after,
+  void processCapturingStore(ProgramPoint *dependent, PointsToSets *after,
                              Value capturedValue, Value destinationAddress,
                              bool isMustStore = false);
 
@@ -241,9 +241,9 @@ public:
 
   void setToEntryState(AliasClassLattice *lattice) override;
 
-  void visitOperation(Operation *op,
-                      ArrayRef<const AliasClassLattice *> operands,
-                      ArrayRef<AliasClassLattice *> results) override;
+  LogicalResult visitOperation(Operation *op,
+                               ArrayRef<const AliasClassLattice *> operands,
+                               ArrayRef<AliasClassLattice *> results) override;
 
   void visitExternalCall(CallOpInterface call,
                          ArrayRef<const AliasClassLattice *> operands,

@@ -16,6 +16,7 @@ use std::time::Duration;
 use std::{str, time::Instant};
 
 use anyhow::Context;
+use chrono::Utc;
 use clap::builder::TypedValueParser;
 use clap::{Arg, Parser};
 use collector::compare::compare_artifacts;
@@ -23,7 +24,7 @@ use humansize::{format_size, BINARY};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use tabled::builder::Builder;
 use tabled::settings::object::{Columns, Rows};
-use tabled::settings::{Alignment, Border, Color, Modify};
+use tabled::settings::{Alignment, Border, Color, Modify, Width};
 use tokio::runtime::Runtime;
 
 use collector::api::next_artifact::NextArtifact;
@@ -635,11 +636,15 @@ enum Commands {
         #[command(flatten)]
         db: DbOption,
 
+        /// Metric used to compare artifacts.
+        #[arg(long)]
+        metric: Option<database::metric::Metric>,
+
         /// The name of the base artifact to be compared.
-        base: String,
+        base: Option<String>,
 
         /// The name of the modified artifact to be compared.
-        modified: String,
+        modified: Option<String>,
     },
 }
 
@@ -727,7 +732,12 @@ fn main_result() -> anyhow::Result<i32> {
 
             let mut rt = build_async_runtime();
             let mut conn = rt.block_on(pool.connection());
-            let artifact_id = ArtifactId::Tag(toolchain.id.clone());
+            let artifact_id = ArtifactId::Commit(Commit {
+                sha: toolchain.id.clone(),
+                date: Utc::now().into(),
+                r#type: CommitType::Master,
+            });
+
             rt.block_on(purge_old_data(conn.as_mut(), &artifact_id, purge.purge));
 
             let runtime_suite = rt.block_on(load_runtime_benchmarks(
@@ -876,7 +886,12 @@ fn main_result() -> anyhow::Result<i32> {
             )?;
             benchmarks.retain(|b| local.category.0.contains(&b.category()));
 
-            let artifact_id = ArtifactId::Tag(toolchain.id.clone());
+            let artifact_id = ArtifactId::Commit(Commit {
+                sha: toolchain.id.clone(),
+                date: Utc::now().into(),
+                r#type: CommitType::Master,
+            });
+
             let mut rt = build_async_runtime();
             let mut conn = rt.block_on(pool.connection());
             rt.block_on(purge_old_data(conn.as_mut(), &artifact_id, purge.purge));
@@ -946,7 +961,26 @@ fn main_result() -> anyhow::Result<i32> {
                         include,
                         exclude,
                         runs,
+                        backends: requested_backends,
                     } => {
+                        // Parse the requested backends, with LLVM as a fallback if none or no valid
+                        // ones were explicitly specified, which will be the case for the vast
+                        // majority of cases.
+                        let mut backends = vec![];
+                        if let Some(requested_backends) = requested_backends {
+                            let requested_backends = requested_backends.to_lowercase();
+                            if requested_backends.contains("llvm") {
+                                backends.push(CodegenBackend::Llvm);
+                            }
+                            if requested_backends.contains("cranelift") {
+                                backends.push(CodegenBackend::Cranelift);
+                            }
+                        }
+
+                        if backends.is_empty() {
+                            backends.push(CodegenBackend::Llvm);
+                        }
+
                         // FIXME: remove this when/if NextArtifact::Commit's include/exclude
                         // changed from Option<String> to Vec<String>
                         // to not to manually parse args
@@ -958,12 +992,10 @@ fn main_result() -> anyhow::Result<i32> {
                             }
                         };
                         let sha = commit.sha.to_string();
-                        let sysroot = Sysroot::install(
-                            sha.clone(),
-                            &target_triple,
-                            vec![CodegenBackend::Llvm],
-                        )
-                        .with_context(|| format!("failed to install sysroot for {:?}", commit))?;
+                        let sysroot = Sysroot::install(sha.clone(), &target_triple, &backends)
+                            .with_context(|| {
+                                format!("failed to install sysroot for {:?}", commit)
+                            })?;
 
                         let mut benchmarks = get_compile_benchmarks(
                             &compile_benchmark_dir,
@@ -986,7 +1018,7 @@ fn main_result() -> anyhow::Result<i32> {
                                 Profile::Opt,
                             ],
                             scenarios: Scenario::all(),
-                            backends: vec![CodegenBackend::Llvm],
+                            backends,
                             iterations: runs.map(|v| v as usize),
                             is_self_profile: self_profile.self_profile,
                             bench_rustc: bench_rustc.bench_rustc,
@@ -1159,7 +1191,7 @@ fn main_result() -> anyhow::Result<i32> {
             let last_sha = String::from_utf8(last_sha.stdout).expect("utf8");
             let last_sha = last_sha.split_whitespace().next().expect(&last_sha);
             let commit = get_commit_or_fake_it(last_sha).expect("success");
-            let mut sysroot = Sysroot::install(commit.sha, &target_triple, codegen_backends.0)?;
+            let mut sysroot = Sysroot::install(commit.sha, &target_triple, &codegen_backends.0)?;
             sysroot.preserve(); // don't delete it
 
             // Print the directory containing the toolchain.
@@ -1200,11 +1232,16 @@ Make sure to modify `{dir}/perf-config.json` if the category/artifact don't matc
             println!("Data of artifact {name} were removed");
             Ok(0)
         }
-        Commands::BenchCmp { db, base, modified } => {
+        Commands::BenchCmp {
+            db,
+            base,
+            modified,
+            metric,
+        } => {
             let pool = Pool::open(&db.db);
             let rt = build_async_runtime();
             let conn = rt.block_on(pool.connection());
-            rt.block_on(compare_artifacts(conn, base, modified))?;
+            rt.block_on(compare_artifacts(conn, metric, base, modified))?;
             Ok(0)
         }
     }
@@ -1486,6 +1523,7 @@ fn print_binary_stats(
         }
     }
 
+    table.with(Modify::new(Columns::first()).with(Width::wrap(80)));
     table.with(Modify::new(Columns::new(1..)).with(Alignment::right()));
     table.with(tabled::settings::Style::sharp());
     table.with(

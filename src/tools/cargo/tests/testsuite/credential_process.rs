@@ -88,6 +88,31 @@ You may press ctrl-c [..]
 }
 
 #[cargo_test]
+fn credential_provider_auth_failure() {
+    let _reg = registry::RegistryBuilder::new()
+        .http_index()
+        .auth_required()
+        .alternative()
+        .no_configure_token()
+        .credential_provider(&["cargo:token-from-stdout", "true"])
+        .build();
+
+    cargo_process("install libc --registry=alternative")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[UPDATING] `alternative` index
+[ERROR] token rejected for `alternative`
+You may need to log in using this registry's credential provider
+
+Caused by:
+  failed to get successful HTTP response from [..]
+  body:
+  [..]
+"#]])
+        .run();
+}
+
+#[cargo_test]
 fn basic_unsupported() {
     // Non-action commands don't support login/logout.
     let registry = registry::RegistryBuilder::new()
@@ -95,7 +120,8 @@ fn basic_unsupported() {
         .credential_provider(&["cargo:token-from-stdout", "false"])
         .build();
 
-    cargo_process("login abcdefg")
+    cargo_process("login")
+        .with_stdin("abcdefg")
         .replace_crates_io(registry.index_url())
         .with_status(101)
         .with_stderr_data(str![[r#"
@@ -132,7 +158,8 @@ fn login() {
         ])
         .build();
 
-    cargo_process("login abcdefg -- cmd3 --cmd4")
+    cargo_process("login -- cmd3 --cmd4")
+        .with_stdin("abcdefg")
         .replace_crates_io(registry.index_url())
         .with_stderr_data(str![[r#"
 [UPDATING] crates.io index
@@ -383,7 +410,8 @@ fn multiple_providers() {
     )
     .unwrap();
 
-    cargo_process("login -v abcdefg")
+    cargo_process("login -v")
+    .with_stdin("abcdefg")
         .replace_crates_io(server.index_url())
         .with_stderr_data(str![[r#"
 [UPDATING] crates.io index
@@ -429,7 +457,8 @@ fn registry_provider_overrides_global() {
     )
     .unwrap();
 
-    cargo_process("login -v abcdefg")
+    cargo_process("login -v")
+        .with_stdin("abcdefg")
         .env("CARGO_REGISTRY_CREDENTIAL_PROVIDER", "cargo:token")
         .replace_crates_io(server.index_url())
         .with_stderr_data(str![[r#"
@@ -460,7 +489,7 @@ fn both_asymmetric_and_token() {
     )
     .unwrap();
 
-    cargo_process("login -Zasymmetric-token -v abcdefg")
+    cargo_process("login -Zasymmetric-token -v").with_stdin("abcdefg")
         .masquerade_as_nightly_cargo(&["asymmetric-token"])
         .replace_crates_io(server.index_url())
         .with_stderr_data(str![[r#"
@@ -675,7 +704,8 @@ fn unsupported_version() {
         .credential_provider(&[&provider])
         .build();
 
-    cargo_process("login abcdefg")
+    cargo_process("login")
+        .with_stdin("abcdefg")
         .replace_crates_io(registry.index_url())
         .with_status(101)
         .with_stderr_data(str![[r#"
@@ -707,7 +737,8 @@ fn alias_builtin_warning() {
     )
     .unwrap();
 
-    cargo_process("login abcdefg")
+    cargo_process("login")
+        .with_stdin("abcdefg")
         .replace_crates_io(registry.index_url())
         .with_stderr_data(str![[r#"
 [UPDATING] crates.io index

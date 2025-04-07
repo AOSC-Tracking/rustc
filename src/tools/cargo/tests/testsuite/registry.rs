@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 use std::fs::{self, File};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -3097,6 +3097,79 @@ fn readonly_registry_still_works() {
     }
 }
 
+#[cargo_test(ignore_windows = "On Windows setting file attributes is a bit complicated")]
+fn unaccessible_registry_cache_still_works() {
+    Package::new("foo", "0.1.0").publish();
+    Package::new("fo2", "0.1.0").publish();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "a"
+                version = "0.5.0"
+                edition = "2015"
+                authors = []
+
+                [dependencies]
+                foo = '0.1.0'
+                fo2 = '0.1.0'
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("generate-lockfile").run();
+    p.cargo("fetch --locked").run();
+
+    let cache_path = inner_dir(&paths::cargo_home().join("registry/index")).join(".cache");
+    let f_cache_path = cache_path.join("3/f");
+
+    // Remove the permissions from the cache path that contains the "foo" crate
+    set_permissions(&f_cache_path, 0o000);
+
+    // Now run a build and make sure we properly build and warn the user
+    p.cargo("build")
+        .with_stderr_data(str![[r#"
+[WARNING] failed to write cache, path: [ROOT]/home/.cargo/registry/index/-[HASH]/.cache/3/f/fo[..], [ERROR] Permission denied (os error 13)
+[COMPILING] fo[..] v0.1.0
+[COMPILING] fo[..] v0.1.0
+[COMPILING] a v0.5.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    // make sure we add the permissions to the files afterwards so "cargo clean" can remove them (#6934)
+    set_permissions(&f_cache_path, 0o777);
+
+    #[cfg_attr(windows, allow(unused_variables))]
+    fn set_permissions(path: &Path, permissions: u32) {
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = t!(path.metadata()).permissions();
+            perms.set_mode(permissions);
+            t!(fs::set_permissions(path, perms));
+        }
+
+        #[cfg(windows)]
+        panic!("This test is not supported on windows. See the reason in the #[cargo_test] macro");
+    }
+
+    fn inner_dir(path: &Path) -> PathBuf {
+        for entry in t!(path.read_dir()) {
+            let path = t!(entry).path();
+
+            if path.is_dir() {
+                return path;
+            }
+        }
+
+        panic!("could not find inner directory of {path:?}");
+    }
+}
+
 #[cargo_test]
 fn registry_index_rejected_http() {
     let _server = setup_http();
@@ -3726,9 +3799,9 @@ internal server error
 fn rand_prefix() -> String {
     use rand::Rng;
     const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     (0..5)
-        .map(|_| CHARS[rng.gen_range(0..CHARS.len())] as char)
+        .map(|_| CHARS[rng.random_range(0..CHARS.len())] as char)
         .collect()
 }
 

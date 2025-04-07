@@ -1,9 +1,8 @@
+r[items.extern-crate]
 # Extern crate declarations
 
-r[items.extern-crate]
-
 r[items.extern-crate.syntax]
-> **<sup>Syntax:<sup>**\
+> **<sup>Syntax:</sup>**\
 > _ExternCrate_ :\
 > &nbsp;&nbsp; `extern` `crate` _CrateRef_ _AsClause_<sup>?</sup> `;`
 >
@@ -63,9 +62,8 @@ Here is an example:
 extern crate hello_world; // hyphen replaced with an underscore
 ```
 
-## Underscore Imports
-
 r[items.extern-crate.underscore]
+## Underscore Imports
 
 r[items.extern-crate.underscore.intro]
 An external crate dependency can be declared without binding its name in scope
@@ -77,9 +75,8 @@ r[items.extern-crate.underscore.macro_use]
 The [`macro_use` attribute] works as usual and imports the macro names
 into the [`macro_use` prelude].
 
-## The `no_link` attribute
-
 r[items.extern-crate.no_link]
+## The `no_link` attribute
 
 The *`no_link` attribute* may be specified on an `extern crate` item to
 prevent linking the crate into the output. This is commonly used to load a

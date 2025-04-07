@@ -635,7 +635,7 @@ fn warns_about_dirty_working_directory() {
     p.cargo("fix")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] the working directory of this package has uncommitted changes, and `cargo fix` can potentially perform destructive changes; if you'd like to suppress this error pass `--allow-dirty`, `--allow-staged`, or commit the changes to these files:
+[ERROR] the working directory of this package has uncommitted changes, and `cargo fix` can potentially perform destructive changes; if you'd like to suppress this error pass `--allow-dirty`, or commit the changes to these files:
 
   * src/lib.rs (dirty)
 
@@ -656,7 +656,7 @@ fn warns_about_staged_working_directory() {
     p.cargo("fix")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] the working directory of this package has uncommitted changes, and `cargo fix` can potentially perform destructive changes; if you'd like to suppress this error pass `--allow-dirty`, `--allow-staged`, or commit the changes to these files:
+[ERROR] the working directory of this package has uncommitted changes, and `cargo fix` can potentially perform destructive changes; if you'd like to suppress this error pass `--allow-dirty`, or commit the changes to these files:
 
   * src/lib.rs (staged)
 
@@ -677,7 +677,7 @@ fn errors_about_untracked_files() {
     p.cargo("fix")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] the working directory of this package has uncommitted changes, and `cargo fix` can potentially perform destructive changes; if you'd like to suppress this error pass `--allow-dirty`, `--allow-staged`, or commit the changes to these files:
+[ERROR] the working directory of this package has uncommitted changes, and `cargo fix` can potentially perform destructive changes; if you'd like to suppress this error pass `--allow-dirty`, or commit the changes to these files:
 
   * Cargo.toml (dirty)
   * src/ (dirty)
@@ -2479,7 +2479,7 @@ fn main() {
         .with_stderr_data(str![[r#"
 [MIGRATING] foo.rs from 2021 edition to 2024
 [FIXED] foo.rs (1 fix)
-[CHECKING] foo v0.0.0 ([ROOT]/foo)
+[CHECKING] foo v0.0.0 ([ROOT]/foo/foo.rs)
 [MIGRATING] [ROOT]/home/.cargo/target/[HASH]/foo.rs from 2021 edition to 2024
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 

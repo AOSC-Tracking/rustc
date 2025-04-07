@@ -1339,10 +1339,12 @@ fn dirty_file_outside_pkg_root_considered_dirty() {
                 license-file = "../LICENSE"
             "#,
         )
+        .file("original-dir/file", "before")
         .symlink("lib.rs", "isengard/src/lib.rs")
         .symlink("README.md", "isengard/README.md")
         .file(&main_outside_pkg_root, "fn main() {}")
         .symlink(&main_outside_pkg_root, "isengard/src/main.rs")
+        .symlink_dir("original-dir", "isengard/symlink-dir")
     });
     git::commit(&repo);
 
@@ -1352,6 +1354,7 @@ fn dirty_file_outside_pkg_root_considered_dirty() {
     // * Changes in files outside package root that source files symlink to
     p.change_file("README.md", "after");
     p.change_file("lib.rs", "pub fn after() {}");
+    p.change_file("original-dir/file", "after");
     // * Changes in files outside pkg root that `license-file`/`readme` point to
     p.change_file("LICENSE", "after");
     // * When workspace inheritance is involved and changed
@@ -1375,10 +1378,12 @@ fn dirty_file_outside_pkg_root_considered_dirty() {
     p.cargo("package --workspace --no-verify")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] 2 files in the working directory contain changes that were not yet committed into git:
+[ERROR] 4 files in the working directory contain changes that were not yet committed into git:
 
 LICENSE
 README.md
+lib.rs
+original-dir/file
 
 to proceed despite this and include the uncommitted changes, pass the `--allow-dirty` flag
 
@@ -1388,7 +1393,7 @@ to proceed despite this and include the uncommitted changes, pass the `--allow-d
     p.cargo("package --workspace --no-verify --allow-dirty")
         .with_stderr_data(str![[r#"
 [PACKAGING] isengard v0.0.0 ([ROOT]/foo/isengard)
-[PACKAGED] 8 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGED] 9 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
 
 "#]])
         .run();
@@ -1411,6 +1416,7 @@ edition = "2021"
             "Cargo.toml.orig",
             "src/lib.rs",
             "src/main.rs",
+            "symlink-dir/file",
             "Cargo.lock",
             "LICENSE",
             "README.md",
@@ -1418,6 +1424,7 @@ edition = "2021"
         [
             ("src/lib.rs", str!["pub fn after() {}"]),
             ("src/main.rs", str![r#"fn main() { eprintln!("after"); }"#]),
+            ("symlink-dir/file", str!["after"]),
             ("README.md", str!["after"]),
             ("LICENSE", str!["after"]),
             ("Cargo.toml", cargo_toml),
@@ -6416,6 +6423,78 @@ fn workspace_with_local_and_remote_deps() {
 [COMPILING] main v0.0.1 ([ROOT]/foo/target/package/main-0.0.1)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+
+"#]]
+            .unordered(),
+        )
+        .run();
+}
+
+#[cargo_test]
+fn workspace_with_dot_rs_dir() {
+    let reg = registry::init();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [workspace]
+            members = ["crates/*"]
+            "#,
+        )
+        .file(
+            "crates/foo.rs/Cargo.toml",
+            r#"
+            [package]
+            name = "foo"
+            version = "0.16.2"
+            edition = "2015"
+            authors = []
+            license = "MIT"
+            description = "main"
+            repository = "bar"
+
+            [dependencies]
+        "#,
+        )
+        .file("crates/foo.rs/src/lib.rs", "pub fn foo() {}")
+        .file(
+            "crates/bar.rs/Cargo.toml",
+            r#"
+            [package]
+            name = "bar"
+            version = "0.16.2"
+            edition = "2015"
+            authors = []
+            license = "MIT"
+            description = "main"
+            repository = "bar"
+
+            [dependencies]
+            foo = { path = "../foo.rs", version = "0.16.2" }
+        "#,
+        )
+        .file("crates/bar.rs/src/lib.rs", "pub fn foo() {}")
+        .build();
+
+    p.cargo("package -Zpackage-workspace")
+        .masquerade_as_nightly_cargo(&["package-workspace"])
+        .replace_crates_io(reg.index_url())
+        .with_stderr_data(
+            str![[r#"
+[PACKAGING] foo v0.16.2 ([ROOT]/foo/crates/foo.rs)
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] bar v0.16.2 ([ROOT]/foo/crates/bar.rs)
+[UPDATING] crates.io index
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[VERIFYING] foo v0.16.2 ([ROOT]/foo/crates/foo.rs)
+[COMPILING] foo v0.16.2 ([ROOT]/foo/target/package/foo-0.16.2)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[VERIFYING] bar v0.16.2 ([ROOT]/foo/crates/bar.rs)
+[UNPACKING] foo v0.16.2 (registry `[ROOT]/foo/target/package/tmp-registry`)
+[COMPILING] foo v0.16.2
+[COMPILING] bar v0.16.2 ([ROOT]/foo/target/package/bar-0.16.2)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]]
             .unordered(),

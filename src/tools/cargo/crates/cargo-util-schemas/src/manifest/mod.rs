@@ -171,15 +171,15 @@ pub struct InheritablePackage {
 /// are serialized to a TOML file. For example, you cannot have values after
 /// the field `metadata`, since it is a table and values cannot appear after
 /// tables.
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, Default)]
 #[serde(rename_all = "kebab-case")]
 #[cfg_attr(feature = "unstable-schema", derive(schemars::JsonSchema))]
 pub struct TomlPackage {
     pub edition: Option<InheritableString>,
     #[cfg_attr(feature = "unstable-schema", schemars(with = "Option<String>"))]
     pub rust_version: Option<InheritableRustVersion>,
-    #[cfg_attr(feature = "unstable-schema", schemars(with = "String"))]
-    pub name: PackageName,
+    #[cfg_attr(feature = "unstable-schema", schemars(with = "Option<String>"))]
+    pub name: Option<PackageName>,
     pub version: Option<InheritableSemverVersion>,
     pub authors: Option<InheritableVecString>,
     pub build: Option<StringOrBool>,
@@ -226,41 +226,13 @@ pub struct TomlPackage {
 impl TomlPackage {
     pub fn new(name: PackageName) -> Self {
         Self {
-            name,
-
-            edition: None,
-            rust_version: None,
-            version: None,
-            authors: None,
-            build: None,
-            metabuild: None,
-            default_target: None,
-            forced_target: None,
-            links: None,
-            exclude: None,
-            include: None,
-            publish: None,
-            workspace: None,
-            im_a_teapot: None,
-            autolib: None,
-            autobins: None,
-            autoexamples: None,
-            autotests: None,
-            autobenches: None,
-            default_run: None,
-            description: None,
-            homepage: None,
-            documentation: None,
-            readme: None,
-            keywords: None,
-            categories: None,
-            license: None,
-            license_file: None,
-            repository: None,
-            resolver: None,
-            metadata: None,
-            _invalid_cargo_features: None,
+            name: Some(name),
+            ..Default::default()
         }
+    }
+
+    pub fn normalized_name(&self) -> Result<&PackageName, UnresolvedError> {
+        self.name.as_ref().ok_or(UnresolvedError)
     }
 
     pub fn normalized_edition(&self) -> Result<Option<&String>, UnresolvedError> {
@@ -1525,6 +1497,7 @@ impl TomlPlatform {
 #[cfg_attr(feature = "unstable-schema", derive(schemars::JsonSchema))]
 pub struct InheritableLints {
     #[serde(skip_serializing_if = "is_false")]
+    #[cfg_attr(feature = "unstable-schema", schemars(default))]
     pub workspace: bool,
     #[serde(flatten)]
     pub lints: TomlLints,
@@ -1787,5 +1760,5 @@ pub struct UnresolvedError;
 fn dump_manifest_schema() {
     let schema = schemars::schema_for!(crate::manifest::TomlManifest);
     let dump = serde_json::to_string_pretty(&schema).unwrap();
-    snapbox::assert_data_eq!(dump, snapbox::file!("../../manifest.schema.json"));
+    snapbox::assert_data_eq!(dump, snapbox::file!("../../manifest.schema.json").raw());
 }

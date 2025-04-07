@@ -1,7 +1,10 @@
+#ifndef ENZYME_TBLGEN_BLAS_DECL_UPDATER_H
+#define ENZYME_TBLGEN_BLAS_DECL_UPDATER_H
+
 #include "datastructures.h"
 
-void emit_attributeBLASCaller(ArrayRef<TGPattern> blasPatterns,
-                              raw_ostream &os) {
+inline void emit_attributeBLASCaller(ArrayRef<TGPattern> blasPatterns,
+                                     raw_ostream &os) {
   os << "void attributeBLAS(BlasInfo blas, llvm::Function *F) {             \n";
   os << "  if (!F->empty())\n";
   os << "    return;\n";
@@ -15,7 +18,7 @@ void emit_attributeBLASCaller(ArrayRef<TGPattern> blasPatterns,
   os << "}                                                                \n";
 }
 
-void emit_attributeBLAS(const TGPattern &pattern, raw_ostream &os) {
+inline void emit_attributeBLAS(const TGPattern &pattern, raw_ostream &os) {
   auto name = pattern.getName();
   bool lv23 = pattern.isBLASLevel2or3();
   os << "llvm::Constant* attribute_" << name
@@ -106,7 +109,7 @@ void emit_attributeBLAS(const TGPattern &pattern, raw_ostream &os) {
   }
   os << "  if (!cublas && !cblas) {\n";
   for (int i = 0; i < numChars; i++) {
-    os << "  if (prevFT->getNumParams() >= argTys.size())";
+    os << "  if (prevFT->getNumParams() > argTys.size())";
     os << "    argTys.push_back(prevFT->getParamType(argTys.size()));\n";
     os << "  else";
     os << "    argTys.push_back(blas.intType(F->getContext()));\n";
@@ -158,8 +161,7 @@ void emit_attributeBLAS(const TGPattern &pattern, raw_ostream &os) {
          << ", llvm::Attribute::ReadNone);\n"
          << "      F->addParamAttr(" << i << " + offset"
          << ", llvm::Attribute::ReadOnly);\n"
-         << "      F->addParamAttr(" << i << " + offset"
-         << ", llvm::Attribute::NoCapture);\n";
+         << "      addFunctionNoCapture(F, " << i << " + offset);\n";
       os << "  }\n";
     }
   }
@@ -168,8 +170,7 @@ void emit_attributeBLAS(const TGPattern &pattern, raw_ostream &os) {
     auto typeOfArg = argTypeMap.lookup(argPos);
     size_t i = (lv23 ? argPos - 1 : argPos);
     if (typeOfArg == ArgType::vincData || typeOfArg == ArgType::mldData) {
-      os << "  F->addParamAttr(" << i << " + offset"
-         << ", llvm::Attribute::NoCapture);\n";
+      os << "  addFunctionNoCapture(F, " << i << " + offset);\n";
       if (mutableArgs.count(argPos) == 0) {
         // Only emit ReadOnly if the arg isn't mutable
         os << "  F->removeParamAttr(" << i << " + offset"
@@ -188,15 +189,14 @@ void emit_attributeBLAS(const TGPattern &pattern, raw_ostream &os) {
        << ", llvm::Attribute::ReadNone);\n"
        << "      F->addParamAttr(" << ptrRetArg << " + offset"
        << ", llvm::Attribute::WriteOnly);\n"
-       << "      F->addParamAttr(" << ptrRetArg << " + offset"
-       << ", llvm::Attribute::NoCapture);\n"
+       << "  addFunctionNoCapture(F, " << ptrRetArg << " + offset);\n"
        << "  }\n";
   }
   os << "  return res;\n";
   os << "}\n";
 }
 
-void emitBlasDeclUpdater(const RecordKeeper &RK, raw_ostream &os) {
+inline void emitBlasDeclUpdater(const RecordKeeper &RK, raw_ostream &os) {
   emitSourceFileHeader("Rewriters", os);
   const auto &blasPatterns = RK.getAllDerivedDefinitions("CallBlasPattern");
 
@@ -225,8 +225,8 @@ void emitBlasDeclUpdater(const RecordKeeper &RK, raw_ostream &os) {
   os << "  }\n";
   {
     const auto &patterns = RK.getAllDerivedDefinitions("CallPattern");
-    for (Record *pattern : patterns) {
-      DagInit *tree = pattern->getValueAsDag("PatternToMatch");
+    for (const Record *pattern : patterns) {
+      auto tree = pattern->getValueAsDag("PatternToMatch");
       os << "  if ((";
       bool prev = false;
       for (auto nameI : *pattern->getValueAsListInit("names")) {
@@ -262,9 +262,9 @@ void emitBlasDeclUpdater(const RecordKeeper &RK, raw_ostream &os) {
            << attrName << "));\n";
         os << "  #endif \n";
       }
-      ListInit *argOps = pattern->getValueAsListInit("ArgDerivatives");
+      auto argOps = pattern->getValueAsListInit("ArgDerivatives");
       for (auto argOpEn : enumerate(*argOps)) {
-        if (DagInit *resultRoot = dyn_cast<DagInit>(argOpEn.value())) {
+        if (auto resultRoot = dyn_cast<DagInit>(argOpEn.value())) {
           auto opName = resultRoot->getOperator()->getAsString();
           auto Def = cast<DefInit>(resultRoot->getOperator())->getDef();
           if (opName == "InactiveArgSpec" ||
@@ -283,3 +283,5 @@ void emitBlasDeclUpdater(const RecordKeeper &RK, raw_ostream &os) {
   os << "  return changed;\n";
   os << "}\n";
 }
+
+#endif // ENZYME_TBLGEN_BLAS_DECL_UPDATER_H

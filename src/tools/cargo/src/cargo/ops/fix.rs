@@ -122,6 +122,7 @@ pub fn fix(
     }
     let mut ws = Workspace::new(&root_manifest, gctx)?;
     ws.set_resolve_honors_rust_version(Some(original_ws.resolve_honors_rust_version()));
+    ws.set_resolve_feature_unification(original_ws.resolve_feature_unification());
     ws.set_requested_lockfile_path(opts.requested_lockfile_path.clone());
 
     // Spin up our lock server, which our subprocesses will use to synchronize fixes.
@@ -242,7 +243,7 @@ fn check_version_control(gctx: &GlobalContext, opts: &FixOptions) -> CargoResult
     bail!(
         "the working directory of this package has uncommitted changes, and \
          `cargo fix` can potentially perform destructive changes; if you'd \
-         like to suppress this error pass `--allow-dirty`, `--allow-staged`, \
+         like to suppress this error pass `--allow-dirty`, \
          or commit the changes to these files:\n\
          \n\
          {}\n\
