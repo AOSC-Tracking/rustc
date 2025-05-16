@@ -252,7 +252,7 @@ pub unsafe fn _tile_cmmrlfp16ps<const DST: i32, const A: i32, const B: i32>() {
 }
 
 #[allow(improper_ctypes)]
-extern "C" {
+unsafe extern "C" {
     #[link_name = "llvm.x86.ldtilecfg"]
     fn ldtilecfg(mem_addr: *const u8);
     #[link_name = "llvm.x86.sttilecfg"]
@@ -292,7 +292,7 @@ mod tests {
     use core::mem::transmute;
     use stdarch_test::simd_test;
     #[cfg(target_os = "linux")]
-    use syscalls::{syscall, Sysno};
+    use syscalls::{Sysno, syscall};
 
     #[allow(non_camel_case_types)]
     #[repr(packed)]

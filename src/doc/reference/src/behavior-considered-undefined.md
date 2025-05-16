@@ -15,19 +15,10 @@ behaviors. `unsafe` code that satisfies this property for any safe client is
 called *sound*; if `unsafe` code can be misused by safe code to exhibit
 undefined behavior, it is *unsound*.
 
-<div class="warning">
-
-***Warning:*** The following list is not exhaustive; it may grow or shrink.
-There is no formal model of Rust's semantics for what is and is not allowed in
-unsafe code, so there may be more behavior considered unsafe. We also reserve
-the right to make some of the behavior in that list defined in the future. In
-other words, this list does not say that anything will *definitely* always be
-undefined in all future Rust version (but we might make such commitments for
-some list items in the future).
-
-Please read the [Rustonomicon] before writing unsafe code.
-
-</div>
+> [!WARNING]
+> The following list is not exhaustive; it may grow or shrink. There is no formal model of Rust's semantics for what is and is not allowed in unsafe code, so there may be more behavior considered unsafe. We also reserve the right to make some of the behavior in that list defined in the future. In other words, this list does not say that anything will *definitely* always be undefined in all future Rust version (but we might make such commitments for some list items in the future).
+>
+> Please read the [Rustonomicon] before writing unsafe code.
 
 r[undefined.race]
 * Data races.
@@ -77,7 +68,7 @@ r[undefined.target-feature]
   does not support (see [`target_feature`]), *except* if the platform explicitly documents this to be safe.
 
 r[undefined.call]
-* Calling a function with the wrong call ABI or unwinding from a function with the wrong unwind ABI.
+* Calling a function with the wrong [call ABI][abi], or unwinding past a stack frame that does not allow unwinding (e.g. by calling a `"C-unwind"` function imported or transmuted as a `"C"` function or function pointer).
 
 r[undefined.invalid]
 * Producing an [invalid value][invalid-values]. "Producing" a
@@ -96,11 +87,13 @@ r[undefined.const-transmute-ptr2int]
   'Reinterpreting' refers to loading the pointer value at integer type without a
   cast, e.g. by doing raw pointer casts or using a union.
 
-> **Note**: Undefined behavior affects the entire program. For example, calling
-> a function in C that exhibits undefined behavior of C means your entire
-> program contains undefined behaviour that can also affect the Rust code. And
-> vice versa, undefined behavior in Rust can cause adverse affects on code
-> executed by any FFI calls to other languages.
+r[undefined.runtime]
+* Violating assumptions of the Rust runtime. Most assumptions of the Rust runtime are currently not explicitly documented.
+  * For assumptions specifically related to unwinding, see the [panic documentation][unwinding-ffi].
+  * The runtime assumes that a Rust stack frame is not deallocated without executing destructors for local variables owned by the stack frame. This assumption can be violated by C functions like `longjmp`.
+
+> [!NOTE]
+> Undefined behavior affects the entire program. For example, calling a function in C that exhibits undefined behavior of C means your entire program contains undefined behaviour that can also affect the Rust code. And vice versa, undefined behavior in Rust can cause adverse affects on code executed by any FFI calls to other languages.
 
 r[undefined.pointed-to]
 ### Pointed-to bytes
@@ -232,8 +225,8 @@ r[undefined.validity.valid-range]
 * If a type has a custom range of a valid values, then a valid value must be in that range.
   In the standard library, this affects [`NonNull<T>`] and [`NonZero<T>`].
 
-  > **Note**: `rustc` achieves this with the unstable
-  > `rustc_layout_scalar_valid_range_*` attributes.
+  > [!NOTE]
+  > `rustc` achieves this with the unstable `rustc_layout_scalar_valid_range_*` attributes.
 
 r[undefined.validity.undef]
 **Note:** Uninitialized memory is also implicitly invalid for any type that has
@@ -245,6 +238,7 @@ reading uninitialized memory is permitted are inside `union`s and in "padding"
 [`const`]: items/constant-items.md
 [noalias]: http://llvm.org/docs/LangRef.html#noalias
 [pointer aliasing rules]: http://llvm.org/docs/LangRef.html#pointer-aliasing-rules
+[abi]: items/external-blocks.md#abi
 [undef]: http://llvm.org/docs/LangRef.html#undefined-values
 [`target_feature`]: attributes/codegen.md#the-target_feature-attribute
 [`UnsafeCell<U>`]: std::cell::UnsafeCell
@@ -258,5 +252,6 @@ reading uninitialized memory is permitted are inside `union`s and in "padding"
 [project-field]: expressions/field-expr.md
 [project-tuple]: expressions/tuple-expr.md#tuple-indexing-expressions
 [project-slice]: expressions/array-expr.md#array-and-slice-indexing-expressions
+[unwinding-ffi]: panic.md#unwinding-across-ffi-boundaries
 [const-promoted]: destructors.md#constant-promotion
 [lifetime-extended]: destructors.md#temporary-lifetime-extension

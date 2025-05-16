@@ -62,6 +62,7 @@ impl Intrinsic {
             format!(
                 "{promote}cast<{cast}>(__return_value)",
                 cast = match self.results.kind() {
+                    TypeKind::Float if self.results.inner_size() == 16 => "float16_t".to_string(),
                     TypeKind::Float if self.results.inner_size() == 32 => "float".to_string(),
                     TypeKind::Float if self.results.inner_size() == 64 => "double".to_string(),
                     TypeKind::Int => format!("int{}_t", self.results.inner_size()),
@@ -91,7 +92,7 @@ impl Intrinsic {
         indentation: Indentation,
         additional: &str,
         passes: u32,
-        p64_armv7_workaround: bool,
+        target: &str,
     ) -> String {
         let body_indentation = indentation.nested();
         format!(
@@ -100,9 +101,7 @@ impl Intrinsic {
                 {body_indentation}auto __return_value = {intrinsic_call}({args});\n\
                 {print_result}\n\
             {indentation}}}",
-            loaded_args = self
-                .arguments
-                .load_values_c(body_indentation, p64_armv7_workaround),
+            loaded_args = self.arguments.load_values_c(body_indentation, target),
             intrinsic_call = self.name,
             args = self.arguments.as_call_param_c(),
             print_result = self.print_result_c(body_indentation, additional)

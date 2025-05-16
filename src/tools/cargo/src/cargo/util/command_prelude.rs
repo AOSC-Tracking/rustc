@@ -2,7 +2,7 @@ use crate::core::compiler::{
     BuildConfig, CompileKind, MessageFormat, RustcTargetData, TimingOutput,
 };
 use crate::core::resolver::{CliFeatures, ForceAllTargets, HasDevUnits};
-use crate::core::{shell, Edition, Package, Target, TargetKind, Workspace};
+use crate::core::{profiles::Profiles, shell, Edition, Package, Target, TargetKind, Workspace};
 use crate::ops::lockfile::LOCKFILE_NAME;
 use crate::ops::registry::RegistryOrIndex;
 use crate::ops::{self, CompileFilter, CompileOptions, NewOptions, Packages, VersionControl};
@@ -10,6 +10,7 @@ use crate::util::important_paths::find_root_manifest_for_wd;
 use crate::util::interning::InternedString;
 use crate::util::is_rustup;
 use crate::util::restricted_names;
+use crate::util::toml::is_embedded;
 use crate::util::{
     print_available_benches, print_available_binaries, print_available_examples,
     print_available_packages, print_available_tests,
@@ -273,7 +274,11 @@ pub trait CommandExt: Sized {
         self._arg(
             opt("profile", profile)
                 .value_name("PROFILE-NAME")
-                .help_heading(heading::COMPILATION_OPTIONS),
+                .help_heading(heading::COMPILATION_OPTIONS)
+                .add(clap_complete::ArgValueCandidates::new(|| {
+                    let candidates = get_profile_candidates();
+                    candidates
+                })),
         )
     }
 
@@ -325,7 +330,18 @@ pub trait CommandExt: Sized {
         self._arg(
             opt("manifest-path", "Path to Cargo.toml")
                 .value_name("PATH")
-                .help_heading(heading::MANIFEST_OPTIONS),
+                .help_heading(heading::MANIFEST_OPTIONS)
+                .add(clap_complete::engine::ArgValueCompleter::new(
+                    clap_complete::engine::PathCompleter::any().filter(|path: &Path| {
+                        if path.file_name() == Some(OsStr::new("Cargo.toml")) {
+                            return true;
+                        }
+                        if is_embedded(path) {
+                            return true;
+                        }
+                        false
+                    }),
+                )),
         )
     }
 
@@ -333,12 +349,35 @@ pub trait CommandExt: Sized {
         self._arg(
             opt("lockfile-path", "Path to Cargo.lock (unstable)")
                 .value_name("PATH")
-                .help_heading(heading::MANIFEST_OPTIONS),
+                .help_heading(heading::MANIFEST_OPTIONS)
+                .add(clap_complete::engine::ArgValueCompleter::new(
+                    clap_complete::engine::PathCompleter::any().filter(|path: &Path| {
+                        let file_name = match path.file_name() {
+                            Some(name) => name,
+                            None => return false,
+                        };
+
+                        // allow `Cargo.lock` file
+                        file_name == OsStr::new("Cargo.lock")
+                    }),
+                )),
         )
     }
 
     fn arg_message_format(self) -> Self {
-        self._arg(multi_opt("message-format", "FMT", "Error format"))
+        self._arg(
+            multi_opt("message-format", "FMT", "Error format")
+                .value_parser([
+                    "human",
+                    "short",
+                    "json",
+                    "json-diagnostic-short",
+                    "json-diagnostic-rendered-ansi",
+                    "json-render-diagnostics",
+                ])
+                .value_delimiter(',')
+                .ignore_case(true),
+        )
     }
 
     fn arg_build_plan(self) -> Self {
@@ -1083,6 +1122,53 @@ pub fn get_registry_candidates() -> CargoResult<Vec<clap_complete::CompletionCan
     }
 }
 
+fn get_profile_candidates() -> Vec<clap_complete::CompletionCandidate> {
+    match get_workspace_profile_candidates() {
+        Ok(candidates) if !candidates.is_empty() => candidates,
+        // fallback to default profile candidates
+        _ => default_profile_candidates(),
+    }
+}
+
+fn get_workspace_profile_candidates() -> CargoResult<Vec<clap_complete::CompletionCandidate>> {
+    let gctx = new_gctx_for_completions()?;
+    let ws = Workspace::new(&find_root_manifest_for_wd(gctx.cwd())?, &gctx)?;
+    let profiles = Profiles::new(&ws, InternedString::new("dev"))?;
+
+    let mut candidates = Vec::new();
+    for name in profiles.profile_names() {
+        let Ok(profile_instance) = Profiles::new(&ws, name) else {
+            continue;
+        };
+        let base_profile = profile_instance.base_profile();
+
+        let mut description = String::from(if base_profile.opt_level.as_str() == "0" {
+            "unoptimized"
+        } else {
+            "optimized"
+        });
+
+        if base_profile.debuginfo.is_turned_on() {
+            description.push_str(" + debuginfo");
+        }
+
+        candidates
+            .push(clap_complete::CompletionCandidate::new(&name).help(Some(description.into())));
+    }
+
+    Ok(candidates)
+}
+
+fn default_profile_candidates() -> Vec<clap_complete::CompletionCandidate> {
+    vec![
+        clap_complete::CompletionCandidate::new("dev").help(Some("unoptimized + debuginfo".into())),
+        clap_complete::CompletionCandidate::new("release").help(Some("optimized".into())),
+        clap_complete::CompletionCandidate::new("test")
+            .help(Some("unoptimized + debuginfo".into())),
+        clap_complete::CompletionCandidate::new("bench").help(Some("optimized".into())),
+    ]
+}
+
 fn get_example_candidates() -> Vec<clap_complete::CompletionCandidate> {
     get_targets_from_metadata()
         .unwrap_or_default()
@@ -1318,7 +1404,7 @@ fn get_packages() -> CargoResult<Vec<Package>> {
     Ok(packages)
 }
 
-fn new_gctx_for_completions() -> CargoResult<GlobalContext> {
+pub fn new_gctx_for_completions() -> CargoResult<GlobalContext> {
     let cwd = std::env::current_dir()?;
     let mut gctx = GlobalContext::new(shell::Shell::new(), cwd.clone(), cargo_home_with_cwd(&cwd)?);
 

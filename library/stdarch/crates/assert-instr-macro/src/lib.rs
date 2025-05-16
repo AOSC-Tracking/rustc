@@ -143,7 +143,7 @@ pub fn assert_instr(
         quote! {
             #attrs
             #maybe_allow_deprecated
-            #[no_mangle]
+            #[unsafe(no_mangle)]
             #[inline(never)]
             pub unsafe extern #abi fn #shim_name(#(#inputs),*) #ret {
                 #name::<#(#const_vals),*>(#(#input_vals),*)
@@ -156,7 +156,7 @@ pub fn assert_instr(
 
             #attrs
             #maybe_allow_deprecated
-            #[no_mangle]
+            #[unsafe(no_mangle)]
             #[inline(never)]
             pub unsafe extern #abi fn #shim_name(#(#inputs),*) #ret {
                 // The compiler in optimized mode by default runs a pass called
@@ -202,7 +202,7 @@ struct Invoc {
 
 impl syn::parse::Parse for Invoc {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
-        use syn::{ext::IdentExt, Token};
+        use syn::{Token, ext::IdentExt};
 
         let mut instr = String::new();
         while !input.is_empty() {

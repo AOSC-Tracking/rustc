@@ -5,7 +5,7 @@
 use stdarch_test::assert_instr;
 
 #[allow(improper_ctypes)]
-extern "C" {
+unsafe extern "C" {
     #[link_name = "llvm.x86.xsave"]
     fn xsave(p: *mut u8, hi: u32, lo: u32);
     #[link_name = "llvm.x86.xrstor"]
@@ -184,10 +184,6 @@ mod tests {
             self.data.as_mut_ptr()
         }
     }
-
-    // We cannot test for `_xsave`, `xrstor`, `_xsetbv`, `_xsaveopt`, `_xsaves`, `_xrstors` as they
-    // are privileged instructions and will need access to kernel mode to execute and test them.
-    // see https://github.com/rust-lang/stdarch/issues/209
 
     #[cfg_attr(stdarch_intel_sde, ignore)]
     #[simd_test(enable = "xsave")]

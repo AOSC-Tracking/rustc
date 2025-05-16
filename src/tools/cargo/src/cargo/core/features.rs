@@ -759,6 +759,7 @@ unstable_cli_options!(
     avoid_dev_deps: bool = ("Avoid installing dev-dependencies if possible"),
     binary_dep_depinfo: bool = ("Track changes to dependency artifacts"),
     bindeps: bool = ("Allow Cargo packages to depend on bin, cdylib, and staticlib crates, and use the artifacts built by those crates"),
+    build_dir: bool = ("Enable the `build.build-dir` option in .cargo/config.toml file"),
     #[serde(deserialize_with = "deserialize_comma_separated_list")]
     build_std: Option<Vec<String>>  = ("Enable Cargo to compile the standard library itself as part of a crate graph compilation"),
     #[serde(deserialize_with = "deserialize_comma_separated_list")]
@@ -791,6 +792,7 @@ unstable_cli_options!(
     root_dir: Option<PathBuf> = ("Set the root directory relative to which paths are printed (defaults to workspace root)"),
     rustdoc_map: bool = ("Allow passing external documentation mappings to rustdoc"),
     rustdoc_scrape_examples: bool = ("Allows Rustdoc to scrape code examples from reverse-dependencies"),
+    sbom: bool = ("Enable the `sbom` option in build config in .cargo/config.toml file"),
     script: bool = ("Enable support for single-file, `.rs` packages"),
     separate_nightlies: bool,
     skip_rustdoc_fingerprint: bool,
@@ -1264,6 +1266,7 @@ impl CliUnstable {
             "avoid-dev-deps" => self.avoid_dev_deps = parse_empty(k, v)?,
             "binary-dep-depinfo" => self.binary_dep_depinfo = parse_empty(k, v)?,
             "bindeps" => self.bindeps = parse_empty(k, v)?,
+            "build-dir" => self.build_dir = parse_empty(k, v)?,
             "build-std" => self.build_std = Some(parse_list(v)),
             "build-std-features" => self.build_std_features = Some(parse_list(v)),
             "cargo-lints" => self.cargo_lints = parse_empty(k, v)?,
@@ -1302,6 +1305,7 @@ impl CliUnstable {
             "root-dir" => self.root_dir = v.map(|v| v.into()),
             "rustdoc-map" => self.rustdoc_map = parse_empty(k, v)?,
             "rustdoc-scrape-examples" => self.rustdoc_scrape_examples = parse_empty(k, v)?,
+            "sbom" => self.sbom = parse_empty(k, v)?,
             "separate-nightlies" => self.separate_nightlies = parse_empty(k, v)?,
             "checksum-freshness" => self.checksum_freshness = parse_empty(k, v)?,
             "skip-rustdoc-fingerprint" => self.skip_rustdoc_fingerprint = parse_empty(k, v)?,

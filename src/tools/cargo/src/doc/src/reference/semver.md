@@ -766,7 +766,7 @@ pub struct SpecificLayout {
 // Example usage that will break.
 use updated_crate::SpecificLayout;
 
-extern "C" {
+unsafe extern "C" {
     // This C function is assuming a specific layout defined in a C header.
     fn c_fn_get_b(x: &SpecificLayout) -> u32;
 }
@@ -820,7 +820,7 @@ pub struct SpecificLayout {
 // Example usage that will break.
 use updated_crate::SpecificLayout;
 
-extern "C" {
+unsafe extern "C" {
     // This C function is assuming a specific layout defined in a C header.
     fn c_fn_get_b(x: &SpecificLayout) -> u32; // Error: is not FFI-safe
 }
@@ -941,7 +941,7 @@ pub struct Transparent<T>(T);
 #![deny(improper_ctypes)]
 use updated_crate::Transparent;
 
-extern "C" {
+unsafe extern "C" {
     fn c_fn() -> Transparent<f64>; // Error: is not FFI-safe
 }
 
@@ -1341,7 +1341,7 @@ struct Foo;
 impl Trait for Foo {}
 
 fn main() {
-    let obj: Box<dyn Trait> = Box::new(Foo); // Error: cannot be made into an object
+    let obj: Box<dyn Trait> = Box::new(Foo); // Error: the trait `Trait` is not dyn compatible
 }
 ```
 

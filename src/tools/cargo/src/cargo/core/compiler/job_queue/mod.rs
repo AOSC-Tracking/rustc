@@ -700,9 +700,15 @@ impl<'gctx> DrainState<'gctx> {
                 }
             }
             Message::FutureIncompatReport(id, items) => {
-                let package_id = self.active[&id].pkg.package_id();
+                let unit = &self.active[&id];
+                let package_id = unit.pkg.package_id();
+                let is_local = unit.is_local();
                 self.per_package_future_incompat_reports
-                    .push(FutureIncompatReportPackage { package_id, items });
+                    .push(FutureIncompatReportPackage {
+                        package_id,
+                        is_local,
+                        items,
+                    });
             }
             Message::Token(acquired_token) => {
                 let token = acquired_token.context("failed to acquire jobserver token")?;
@@ -854,7 +860,7 @@ impl<'gctx> DrainState<'gctx> {
     }
 
     fn handle_error(
-        &self,
+        &mut self,
         shell: &mut Shell,
         err_state: &mut ErrorsDuringDrain,
         new_err: impl Into<ErrorToHandle>,
@@ -863,6 +869,7 @@ impl<'gctx> DrainState<'gctx> {
         if new_err.print_always || err_state.count == 0 {
             crate::display_error(&new_err.error, shell);
             if err_state.count == 0 && !self.active.is_empty() {
+                self.progress.indicate_error();
                 let _ = shell.warn("build failed, waiting for other jobs to finish...");
             }
             err_state.count += 1;

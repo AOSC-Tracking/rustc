@@ -1212,15 +1212,6 @@ fn vcs_status_check_for_each_workspace_member() {
     });
     git::commit(&repo);
 
-    p.change_file(
-        "Cargo.toml",
-        r#"
-            [workspace]
-            members = ["isengard", "mordor"]
-            [workspace.package]
-            edition = "2021"
-        "#,
-    );
     // Dirty file outside won't affect packaging.
     p.change_file("hobbit", "changed!");
     p.change_file("mordor/src/lib.rs", "changed!");
@@ -1357,7 +1348,8 @@ fn dirty_file_outside_pkg_root_considered_dirty() {
     p.change_file("original-dir/file", "after");
     // * Changes in files outside pkg root that `license-file`/`readme` point to
     p.change_file("LICENSE", "after");
-    // * When workspace inheritance is involved and changed
+    // * When workspace root manifest has changned,
+    //   no matter whether workspace inheritance is involved.
     p.change_file(
         "Cargo.toml",
         r#"
@@ -1378,8 +1370,9 @@ fn dirty_file_outside_pkg_root_considered_dirty() {
     p.cargo("package --workspace --no-verify")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] 4 files in the working directory contain changes that were not yet committed into git:
+[ERROR] 5 files in the working directory contain changes that were not yet committed into git:
 
+Cargo.toml
 LICENSE
 README.md
 lib.rs
@@ -3424,7 +3417,7 @@ fn verify_packaged_status_line(
     uncompressed_size: u64,
     compressed_size: u64,
 ) {
-    use cargo::util::human_readable_bytes;
+    use cargo::util::HumanBytes;
 
     let stderr = String::from_utf8(output.stderr).unwrap();
     let mut packaged_lines = stderr
@@ -3438,12 +3431,9 @@ fn verify_packaged_status_line(
         "Only one `Packaged` status line should appear in stderr"
     );
     let size_info = packaged_line.trim().trim_start_matches("Packaged").trim();
-    let uncompressed = human_readable_bytes(uncompressed_size);
-    let compressed = human_readable_bytes(compressed_size);
-    let expected = format!(
-        "{} files, {:.1}{} ({:.1}{} compressed)",
-        num_files, uncompressed.0, uncompressed.1, compressed.0, compressed.1
-    );
+    let uncompressed = HumanBytes(uncompressed_size);
+    let compressed = HumanBytes(compressed_size);
+    let expected = format!("{num_files} files, {uncompressed:.1} ({compressed:.1} compressed)");
     assert_eq!(size_info, expected);
 }
 
@@ -6431,6 +6421,172 @@ fn workspace_with_local_and_remote_deps() {
 }
 
 #[cargo_test]
+fn workspace_with_capitalized_member() {
+    let reg = registry::init();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [workspace]
+            members = ["dep", "main"]
+            "#,
+        )
+        .file(
+            "main/Cargo.toml",
+            r#"
+            [package]
+            name = "main"
+            version = "0.0.1"
+            edition = "2015"
+            authors = []
+            license = "MIT"
+            description = "main"
+            repository = "bar"
+
+            [dependencies]
+            DEP = { path = "../dep", version = "0.1.0" }
+        "#,
+        )
+        .file("main/src/main.rs", "fn main() {}")
+        .file(
+            "dep/Cargo.toml",
+            r#"
+            [package]
+            name = "DEP"
+            version = "0.1.0"
+            edition = "2015"
+            authors = []
+            license = "MIT"
+            description = "dep"
+            repository = "bar"
+        "#,
+        )
+        .file("dep/src/lib.rs", "")
+        .build();
+
+    p.cargo("package -Zpackage-workspace --no-verify")
+        .masquerade_as_nightly_cargo(&["package-workspace"])
+        .replace_crates_io(reg.index_url())
+        .with_stderr_data(
+            str![[r#"
+[PACKAGING] main v0.0.1 ([ROOT]/foo/main)
+[UPDATING] crates.io index
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] DEP v0.1.0 ([ROOT]/foo/dep)
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+
+"#]]
+            .unordered(),
+        )
+        .run();
+}
+
+#[cargo_test]
+fn workspace_with_renamed_member() {
+    let reg = registry::init();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [workspace]
+            members = ["crates/*"]
+            "#,
+        )
+        .file(
+            "crates/val-json/Cargo.toml",
+            r#"
+            [package]
+            name = "obeli-sk-val-json"
+            version = "0.16.2"
+            edition = "2015"
+            authors = []
+            license = "MIT"
+            description = "main"
+            repository = "bar"
+
+            [dependencies]
+        "#,
+        )
+        .file("crates/val-json/src/lib.rs", "pub fn foo() {}")
+        .file(
+            "crates/concepts/Cargo.toml",
+            r#"
+            [package]
+            name = "obeli-sk-concepts"
+            version = "0.16.2"
+            edition = "2015"
+            authors = []
+            license = "MIT"
+            description = "main"
+            repository = "bar"
+
+            [dependencies]
+            val-json = { package = "obeli-sk-val-json", path = "../val-json", version = "0.16.2" }
+        "#,
+        )
+        .file(
+            "crates/concepts/src/lib.rs",
+            "pub fn foo() { val_json::foo() }",
+        )
+        .file(
+            "crates/utils/Cargo.toml",
+            r#"
+            [package]
+            name = "obeli-sk-utils"
+            version = "0.16.2"
+            edition = "2015"
+            authors = []
+            license = "MIT"
+            description = "main"
+            repository = "bar"
+
+            [dependencies]
+            concepts = { package = "obeli-sk-concepts", path = "../concepts", version = "0.16.2" }
+            val-json = { package = "obeli-sk-val-json", path = "../val-json", version = "0.16.2" }
+        "#,
+        )
+        .file(
+            "crates/utils/src/lib.rs",
+            "pub fn foo() { val_json::foo(); concepts::foo(); }",
+        )
+        .build();
+
+    p.cargo("package -Zpackage-workspace")
+        .masquerade_as_nightly_cargo(&["package-workspace"])
+        .replace_crates_io(reg.index_url())
+        .with_stderr_data(
+            str![[r#"
+[UPDATING] crates.io index
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] obeli-sk-val-json v0.16.2 ([ROOT]/foo/crates/val-json)
+[PACKAGING] obeli-sk-concepts v0.16.2 ([ROOT]/foo/crates/concepts)
+[PACKAGING] obeli-sk-utils v0.16.2 ([ROOT]/foo/crates/utils)
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[VERIFYING] obeli-sk-val-json v0.16.2 ([ROOT]/foo/crates/val-json)
+[COMPILING] obeli-sk-val-json v0.16.2 ([ROOT]/foo/target/package/obeli-sk-val-json-0.16.2)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[VERIFYING] obeli-sk-concepts v0.16.2 ([ROOT]/foo/crates/concepts)
+[UNPACKING] obeli-sk-val-json v0.16.2 (registry `[ROOT]/foo/target/package/tmp-registry`)
+[COMPILING] obeli-sk-val-json v0.16.2
+[COMPILING] obeli-sk-concepts v0.16.2 ([ROOT]/foo/target/package/obeli-sk-concepts-0.16.2)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[VERIFYING] obeli-sk-utils v0.16.2 ([ROOT]/foo/crates/utils)
+[UNPACKING] obeli-sk-concepts v0.16.2 (registry `[ROOT]/foo/target/package/tmp-registry`)
+[COMPILING] obeli-sk-val-json v0.16.2
+[COMPILING] obeli-sk-concepts v0.16.2
+[COMPILING] obeli-sk-utils v0.16.2 ([ROOT]/foo/target/package/obeli-sk-utils-0.16.2)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
+        )
+        .run();
+}
+
+#[cargo_test]
 fn workspace_with_dot_rs_dir() {
     let reg = registry::init();
 
@@ -7188,5 +7344,148 @@ This might cause the `.crate` file to include incorrect or incomplete files
             ("symlink-dir", str!["[ROOT]/bar/src"]),
             ("symlink-lib.rs", str!["[ROOT]/bar/src/lib.rs"]),
         ],
+    );
+}
+
+#[cargo_test]
+fn exclude_lockfile() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.1"
+                edition = "2015"
+                authors = []
+                license = "MIT"
+                description = "foo"
+                documentation = "foo"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("package --list --exclude-lockfile")
+        .with_stdout_data(str![[r#"
+Cargo.toml
+Cargo.toml.orig
+src/lib.rs
+
+"#]])
+        .with_stderr_data("")
+        .run();
+
+    p.cargo("package --exclude-lockfile")
+        .with_stderr_data(str![[r#"
+[PACKAGING] foo v0.0.1 ([ROOT]/foo)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[VERIFYING] foo v0.0.1 ([ROOT]/foo)
+[COMPILING] foo v0.0.1 ([ROOT]/foo/target/package/foo-0.0.1)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+
+    let f = File::open(&p.root().join("target/package/foo-0.0.1.crate")).unwrap();
+    validate_crate_contents(
+        f,
+        "foo-0.0.1.crate",
+        &["Cargo.toml", "Cargo.toml.orig", "src/lib.rs"],
+        (),
+    );
+}
+
+// A failing case from <https://github.com/rust-lang/cargo/issues/15059>
+#[cargo_test]
+fn unpublished_cyclic_dev_dependencies() {
+    registry::init();
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.1"
+                edition = "2015"
+                authors = []
+                license = "MIT"
+                description = "foo"
+                documentation = "foo"
+
+                [dev-dependencies]
+                foo = { path = ".", version = "0.0.1" }
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("package --no-verify --exclude-lockfile")
+        .with_stderr_data(str![[r#"
+[PACKAGING] foo v0.0.1 ([ROOT]/foo)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+
+"#]])
+        .run();
+
+    let f = File::open(&p.root().join("target/package/foo-0.0.1.crate")).unwrap();
+    validate_crate_contents(
+        f,
+        "foo-0.0.1.crate",
+        // no Cargo.lock
+        &["Cargo.toml", "Cargo.toml.orig", "src/lib.rs"],
+        (),
+    );
+}
+
+// A failing case from <https://github.com/rust-lang/cargo/issues/15059>
+#[cargo_test]
+fn unpublished_dependency() {
+    registry::init();
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.1"
+                edition = "2015"
+                authors = []
+                license = "MIT"
+                description = "foo"
+                documentation = "foo"
+
+                [dependencies]
+                dep = { path = "./dep", version = "0.0.1" }
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .file(
+            "dep/Cargo.toml",
+            r#"
+                [package]
+                name = "dep"
+                version = "0.0.1"
+                edition = "2015"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("package --no-verify -p foo --exclude-lockfile")
+        .with_stderr_data(str![[r#"
+[PACKAGING] foo v0.0.1 ([ROOT]/foo)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+
+"#]])
+        .run();
+
+    let f = File::open(&p.root().join("target/package/foo-0.0.1.crate")).unwrap();
+    validate_crate_contents(
+        f,
+        "foo-0.0.1.crate",
+        // no Cargo.lock
+        &["Cargo.toml", "Cargo.toml.orig", "src/lib.rs"],
+        (),
     );
 }

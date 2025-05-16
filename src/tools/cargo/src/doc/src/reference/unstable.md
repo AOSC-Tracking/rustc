@@ -74,9 +74,12 @@ Each new feature described below should explain how to use it.
     * [public-dependency](#public-dependency) --- Allows dependencies to be classified as either public or private.
     * [msrv-policy](#msrv-policy) --- MSRV-aware resolver and version selection
     * [precise-pre-release](#precise-pre-release) --- Allows pre-release versions to be selected with `update --precise`
+    * [sbom](#sbom) --- Generates SBOM pre-cursor files for compiled artifacts
     * [update-breaking](#update-breaking) --- Allows upgrading to breaking versions with `update --breaking`
+    * [feature-unification](#feature-unification) --- Enable new feature unification modes in workspaces
 * Output behavior
     * [artifact-dir](#artifact-dir) --- Adds a directory where artifacts are copied to.
+    * [build-dir](#build-dir) --- Adds a directory where intermediate build artifacts are stored.
     * [Different binary name](#different-binary-name) --- Assign a name to the built binary that is separate from the crate name.
     * [root-dir](#root-dir) --- Controls the root directory relative to which paths are printed
 * Compile behavior
@@ -120,6 +123,7 @@ Each new feature described below should explain how to use it.
     * [package-workspace](#package-workspace) --- Allows for packaging and publishing multiple crates in a workspace.
     * [native-completions](#native-completions) --- Move cargo shell completions to native completions.
     * [warnings](#warnings) --- controls warning behavior; options for allowing or denying warnings.
+    * [Package message format](#package-message-format) --- Message format for `cargo package`.
 
 ## allow-features
 
@@ -236,6 +240,34 @@ This can also be specified in `.cargo/config.toml` files.
 [build]
 artifact-dir = "out"
 ```
+
+## build-dir
+* Original Issue: [#14125](https://github.com/rust-lang/cargo/issues/14125)
+* Tracking Issue: [#14125](https://github.com/rust-lang/cargo/issues/14125)
+
+The directory where intermediate build artifacts will be stored.
+Intermediate artifacts are produced by Rustc/Cargo during the build process.
+
+```toml
+[build]
+build-dir = "out"
+```
+
+### `build.build-dir`
+
+* Type: string (path)
+* Default: Defaults to the value of `build.target-dir`
+* Environment: `CARGO_BUILD_BUILD_DIR`
+
+The path to where internal files used as part of the build are placed.
+
+This option supports path templating.
+
+Avaiable template variables:
+* `{workspace-root}` resolves to root of the current workspace.
+* `{cargo-cache-home}` resolves to `CARGO_HOME`
+* `{workspace-path-hash}` resolves to a hash of the manifest path
+
 
 ## root-dir
 * Original Issue: [#9887](https://github.com/rust-lang/cargo/issues/9887)
@@ -395,6 +427,99 @@ my-dependency = "0.1.1"
 It's possible to update `my-dependency` to a pre-release with `update -Zunstable-options my-dependency --precise 0.1.2-pre.0`.
 This is because `0.1.2-pre.0` is considered compatible with `0.1.1`.
 It would not be possible to upgrade to `0.2.0-pre.0` from `0.1.1` in the same way.
+
+## sbom
+* Tracking Issue: [#13709](https://github.com/rust-lang/cargo/pull/13709)
+* RFC: [#3553](https://github.com/rust-lang/rfcs/pull/3553)
+
+The `sbom` build config allows to generate so-called SBOM pre-cursor files
+alongside each compiled artifact. A Software Bill Of Material (SBOM) tool can
+incorporate these generated files to collect important information from the cargo
+build process that are difficult or impossible to obtain in another way.
+
+To enable this feature either set the `sbom` field in the `.cargo/config.toml`
+
+```toml
+[unstable]
+sbom = true
+
+[build]
+sbom = true
+```
+
+or set the `CARGO_BUILD_SBOM` environment variable to `true`. The functionality
+is available behind the flag `-Z sbom`.
+
+The generated output files are in JSON format and follow the naming scheme
+`<artifact>.cargo-sbom.json`. The JSON file contains information about dependencies,
+target, features and the used `rustc` compiler.
+
+SBOM pre-cursor files are generated for all executable and linkable outputs
+that are uplifted into the target or artifact directories.
+
+### Environment variables Cargo sets for crates
+
+* `CARGO_SBOM_PATH` -- a list of generated SBOM precursor files, separated by the platform PATH separator. The list can be split with `std::env::split_paths`.
+
+### SBOM pre-cursor schema
+
+```json5
+{
+  // Schema version.
+  "version": 1,
+  // Index into the crates array for the root crate.
+  "root": 0,
+  // Array of all crates. There may be duplicates of the same crate if that
+  // crate is compiled differently (different opt-level, features, etc).
+  "crates": [
+    {
+      // Package ID specification
+      "id": "path+file:///sample-package#0.1.0",
+      // List of target kinds: bin, lib, rlib, dylib, cdylib, staticlib, proc-macro, example, test, bench, custom-build
+      "kind": ["bin"],
+      // Enabled feature flags.
+      "features": [],
+      // Dependencies for this crate.
+      "dependencies": [
+        {
+          // Index in to the crates array.
+          "index": 1,
+          // Dependency kind: 
+          // Normal: A dependency linked to the artifact produced by this crate.
+          // Build: A compile-time dependency used to build this crate (build-script or proc-macro).
+          "kind": "normal"
+        },
+        {
+          // A crate can depend on another crate with both normal and build edges.
+          "index": 1,
+          "kind": "build"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#zerocopy@0.8.16",
+      "kind": ["bin"],
+      "features": [],
+      "dependencies": []
+    }
+  ],
+  // Information about rustc used to perform the compilation.
+  "rustc": {
+    // Compiler version
+    "version": "1.86.0-nightly",
+    // Compiler wrapper
+    "wrapper": null,
+    // Compiler workspace wrapper
+    "workspace_wrapper": null,
+    // Commit hash for rustc
+    "commit_hash": "bef3c3b01f690de16738b1c9f36470fbfc6ac623",
+    // Host target triple
+    "host": "x86_64-pc-windows-msvc",
+    // Verbose version string: `rustc -vV`
+    "verbose_version": "rustc 1.86.0-nightly (bef3c3b01 2025-02-04)\nbinary: rustc\ncommit-hash: bef3c3b01f690de16738b1c9f36470fbfc6ac623\ncommit-date: 2025-02-04\nhost: x86_64-pc-windows-msvc\nrelease: 1.86.0-nightly\nLLVM version: 19.1.7\n"
+  }
+}
+```
 
 ## update-breaking
 
@@ -1740,6 +1865,42 @@ Controls how Cargo handles warnings. Allowed values are:
 * `warn`: warnings are emitted as warnings (default).
 * `allow`: warnings are hidden.
 * `deny`: if warnings are emitted, an error will be raised at the end of the operation and the process will exit with a failure exit code. 
+
+## feature unification
+
+* RFC: [#3692](https://github.com/rust-lang/rfcs/blob/master/text/3692-feature-unification.md)
+* Tracking Issue: [#14774](https://github.com/rust-lang/cargo/issues/14774)
+
+The `-Z feature-unification` enables the `resolver.feature-unification`
+configuration option to control how features are unified across a workspace.
+If the `-Z feature-unification` unstable flag is not enabled,
+then the `resolver.feature-unification` configuration will be ignored.
+
+### `resolver.feature-unification`
+
+* Type: string
+* Default: `"selected"`
+* Environment: `CARGO_RESOLVER_FEATURE_UNIFICATION`
+
+Specify which packages participate in [feature unification](../reference/features.html#feature-unification).
+
+* `selected`: Merge dependency features from all packages specified for the current build.
+* `workspace`: Merge dependency features across all workspace members,
+  regardless of which packages are specified for the current build.
+* `package` _(unimplemented)_: Dependency features are considered on a package-by-package basis,
+  preferring duplicate builds of dependencies when different sets of features are activated by the packages.
+
+## Package message format
+
+* Original Issue: [#11666](https://github.com/rust-lang/cargo/issues/11666)
+* Tracking Issue: [#15353](https://github.com/rust-lang/cargo/issues/15353)
+
+The `--message-format` flag in `cargo package` controls the output message format.
+Currently, it only works with the `--list` flag and affects the file listing format,
+Requires `-Zunstable-options`.
+See [`cargo package --message-format`](../commands/cargo-package.md#option-cargo-package---message-format)
+for more information.
+
 # Stabilized and removed features
 
 ## Compile progress

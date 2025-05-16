@@ -1,9 +1,9 @@
 use std::ops::Range;
 
+use crate::Language;
 use crate::format::Indentation;
 use crate::json_parser::ArgPrep;
 use crate::types::{IntrinsicType, TypeKind};
-use crate::Language;
 
 /// An argument for the intrinsic.
 #[derive(Debug, PartialEq, Clone)]
@@ -209,13 +209,13 @@ impl ArgumentList {
     /// Creates a line for each argument that initializes the argument from an array `[arg]_vals` at
     /// an offset `i` using a load intrinsic, in C.
     /// e.g `uint8x8_t a = vld1_u8(&a_vals[i]);`
-    pub fn load_values_c(&self, indentation: Indentation, p64_armv7_workaround: bool) -> String {
+    pub fn load_values_c(&self, indentation: Indentation, target: &str) -> String {
         self.iter()
             .filter_map(|arg| {
                 // The ACLE doesn't support 64-bit polynomial loads on Armv7
                 // This and the cast are a workaround for this
                 let armv7_p64 = if let TypeKind::Poly = arg.ty.kind() {
-                    p64_armv7_workaround
+                    target.contains("v7")
                 } else {
                     false
                 };
@@ -226,7 +226,7 @@ impl ArgumentList {
                         ty = arg.to_c_type(),
                         name = arg.name,
                         load = if arg.is_simd() {
-                            arg.ty.get_load_function(p64_armv7_workaround)
+                            arg.ty.get_load_function(armv7_p64)
                         } else {
                             "*".to_string()
                         },

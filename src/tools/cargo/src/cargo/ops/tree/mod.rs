@@ -16,7 +16,7 @@ use std::str::FromStr;
 mod format;
 mod graph;
 
-pub use {graph::EdgeKind, graph::Node};
+pub use {graph::EdgeKind, graph::Node, graph::NodeId};
 
 pub struct TreeOptions {
     pub cli_features: CliFeatures,
@@ -91,6 +91,7 @@ impl FromStr for Prefix {
 #[derive(Clone, Copy)]
 pub enum DisplayDepth {
     MaxDisplayDepth(u32),
+    Public,
     Workspace,
 }
 
@@ -100,6 +101,7 @@ impl FromStr for DisplayDepth {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "workspace" => Ok(Self::Workspace),
+            "public" => Ok(Self::Public),
             s => s.parse().map(Self::MaxDisplayDepth).map_err(|_| {
                 clap::Error::raw(
                     clap::error::ErrorKind::ValueValidation,
@@ -240,7 +242,7 @@ pub fn build_and_print(ws: &Workspace<'_>, opts: &TreeOptions) -> CargoResult<()
 fn print(
     ws: &Workspace<'_>,
     opts: &TreeOptions,
-    roots: Vec<usize>,
+    roots: Vec<NodeId>,
     pkgs_to_prune: &[PackageIdSpec],
     graph: &Graph<'_>,
 ) -> CargoResult<()> {
@@ -282,7 +284,7 @@ fn print(
             &mut visited_deps,
             &mut levels_continue,
             &mut print_stack,
-        );
+        )?;
     }
 
     Ok(())
@@ -292,26 +294,26 @@ fn print(
 fn print_node<'a>(
     ws: &Workspace<'_>,
     graph: &'a Graph<'_>,
-    node_index: usize,
+    node_index: NodeId,
     format: &Pattern,
     symbols: &Symbols,
     pkgs_to_prune: &[PackageIdSpec],
     prefix: Prefix,
     no_dedupe: bool,
     display_depth: DisplayDepth,
-    visited_deps: &mut HashSet<usize>,
-    levels_continue: &mut Vec<bool>,
-    print_stack: &mut Vec<usize>,
-) {
+    visited_deps: &mut HashSet<NodeId>,
+    levels_continue: &mut Vec<(anstyle::Style, bool)>,
+    print_stack: &mut Vec<NodeId>,
+) -> CargoResult<()> {
     let new = no_dedupe || visited_deps.insert(node_index);
 
     match prefix {
         Prefix::Depth => drop_print!(ws.gctx(), "{}", levels_continue.len()),
         Prefix::Indent => {
-            if let Some((last_continues, rest)) = levels_continue.split_last() {
-                for continues in rest {
+            if let Some(((last_style, last_continues), rest)) = levels_continue.split_last() {
+                for (style, continues) in rest {
                     let c = if *continues { symbols.down } else { " " };
-                    drop_print!(ws.gctx(), "{}   ", c);
+                    drop_print!(ws.gctx(), "{style}{c}{style:#}   ");
                 }
 
                 let c = if *last_continues {
@@ -319,7 +321,12 @@ fn print_node<'a>(
                 } else {
                     symbols.ell
                 };
-                drop_print!(ws.gctx(), "{0}{1}{1} ", c, symbols.right);
+                drop_print!(
+                    ws.gctx(),
+                    "{last_style}{0}{1}{1}{last_style:#} ",
+                    c,
+                    symbols.right
+                );
             }
         }
         Prefix::None => {}
@@ -333,12 +340,12 @@ fn print_node<'a>(
     let star = if (new && !in_cycle) || !has_deps {
         ""
     } else {
-        " (*)"
+        color_print::cstr!(" <yellow,dim>(*)</>")
     };
     drop_println!(ws.gctx(), "{}{}", format.display(graph, node_index), star);
 
     if !new || in_cycle {
-        return;
+        return Ok(());
     }
     print_stack.push(node_index);
 
@@ -362,82 +369,103 @@ fn print_node<'a>(
             levels_continue,
             print_stack,
             kind,
-        );
+        )?;
     }
     print_stack.pop();
+
+    Ok(())
 }
 
 /// Prints all the dependencies of a package for the given dependency kind.
 fn print_dependencies<'a>(
     ws: &Workspace<'_>,
     graph: &'a Graph<'_>,
-    node_index: usize,
+    node_index: NodeId,
     format: &Pattern,
     symbols: &Symbols,
     pkgs_to_prune: &[PackageIdSpec],
     prefix: Prefix,
     no_dedupe: bool,
     display_depth: DisplayDepth,
-    visited_deps: &mut HashSet<usize>,
-    levels_continue: &mut Vec<bool>,
-    print_stack: &mut Vec<usize>,
+    visited_deps: &mut HashSet<NodeId>,
+    levels_continue: &mut Vec<(anstyle::Style, bool)>,
+    print_stack: &mut Vec<NodeId>,
     kind: &EdgeKind,
-) {
-    let deps = graph.connected_nodes(node_index, kind);
+) -> CargoResult<()> {
+    let deps = graph.edges_of_kind(node_index, kind);
     if deps.is_empty() {
-        return;
+        return Ok(());
     }
 
     let name = match kind {
         EdgeKind::Dep(DepKind::Normal) => None,
-        EdgeKind::Dep(DepKind::Build) => Some("[build-dependencies]"),
-        EdgeKind::Dep(DepKind::Development) => Some("[dev-dependencies]"),
+        EdgeKind::Dep(DepKind::Build) => {
+            Some(color_print::cstr!("<blue,bold>[build-dependencies]</>"))
+        }
+        EdgeKind::Dep(DepKind::Development) => {
+            Some(color_print::cstr!("<cyan,bold>[dev-dependencies]</>"))
+        }
         EdgeKind::Feature => None,
     };
 
     if let Prefix::Indent = prefix {
         if let Some(name) = name {
-            for continues in &**levels_continue {
+            for (style, continues) in &**levels_continue {
                 let c = if *continues { symbols.down } else { " " };
-                drop_print!(ws.gctx(), "{}   ", c);
+                drop_print!(ws.gctx(), "{style}{c}{style:#}   ");
             }
 
-            drop_println!(ws.gctx(), "{}", name);
+            drop_println!(ws.gctx(), "{name}");
         }
     }
 
-    let (max_display_depth, filter_non_workspace_member) = match display_depth {
-        DisplayDepth::MaxDisplayDepth(max) => (max, false),
-        DisplayDepth::Workspace => (u32::MAX, true),
+    let (max_display_depth, filter_non_workspace_member, filter_private) = match display_depth {
+        DisplayDepth::MaxDisplayDepth(max) => (max, false, false),
+        DisplayDepth::Workspace => (u32::MAX, true, false),
+        DisplayDepth::Public => {
+            if !ws.gctx().cli_unstable().unstable_options {
+                anyhow::bail!("`--depth public` requires `-Zunstable-options`")
+            }
+            (u32::MAX, false, true)
+        }
     };
 
     // Current level exceeds maximum display depth. Skip.
     if levels_continue.len() + 1 > max_display_depth as usize {
-        return;
+        return Ok(());
     }
 
     let mut it = deps
         .iter()
         .filter(|dep| {
             // Filter out packages to prune.
-            match graph.node(**dep) {
+            match graph.node(dep.node()) {
                 Node::Package { package_id, .. } => {
                     if filter_non_workspace_member && !ws.is_member_id(*package_id) {
                         return false;
                     }
+                    if filter_private && !dep.public() {
+                        return false;
+                    }
                     !pkgs_to_prune.iter().any(|spec| spec.matches(*package_id))
                 }
-                _ => true,
+                Node::Feature { .. } => {
+                    if filter_private && !dep.public() {
+                        return false;
+                    }
+                    true
+                }
             }
         })
         .peekable();
 
     while let Some(dependency) = it.next() {
-        levels_continue.push(it.peek().is_some());
+        let style = edge_line_color(dependency.kind());
+        levels_continue.push((style, it.peek().is_some()));
         print_node(
             ws,
             graph,
-            *dependency,
+            dependency.node(),
             format,
             symbols,
             pkgs_to_prune,
@@ -447,7 +475,22 @@ fn print_dependencies<'a>(
             visited_deps,
             levels_continue,
             print_stack,
-        );
+        )?;
         levels_continue.pop();
+    }
+
+    Ok(())
+}
+
+fn edge_line_color(kind: EdgeKind) -> anstyle::Style {
+    match kind {
+        EdgeKind::Dep(DepKind::Normal) => anstyle::Style::new() | anstyle::Effects::DIMMED,
+        EdgeKind::Dep(DepKind::Build) => {
+            anstyle::AnsiColor::Blue.on_default() | anstyle::Effects::BOLD
+        }
+        EdgeKind::Dep(DepKind::Development) => {
+            anstyle::AnsiColor::Cyan.on_default() | anstyle::Effects::BOLD
+        }
+        EdgeKind::Feature => anstyle::AnsiColor::Magenta.on_default() | anstyle::Effects::DIMMED,
     }
 }

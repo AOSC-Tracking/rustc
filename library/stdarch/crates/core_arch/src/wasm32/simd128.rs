@@ -73,7 +73,7 @@ conversions! {
 }
 
 #[allow(improper_ctypes)]
-extern "C" {
+unsafe extern "C" {
     #[link_name = "llvm.wasm.swizzle"]
     fn llvm_swizzle(a: simd::i8x16, b: simd::i8x16) -> simd::i8x16;
 
@@ -90,10 +90,6 @@ extern "C" {
     fn llvm_narrow_i8x16_s(a: simd::i16x8, b: simd::i16x8) -> simd::i8x16;
     #[link_name = "llvm.wasm.narrow.unsigned.v16i8.v8i16"]
     fn llvm_narrow_i8x16_u(a: simd::i16x8, b: simd::i16x8) -> simd::i8x16;
-    #[link_name = "llvm.wasm.sub.sat.signed.v16i8"]
-    fn llvm_i8x16_sub_sat_s(a: simd::i8x16, b: simd::i8x16) -> simd::i8x16;
-    #[link_name = "llvm.wasm.sub.sat.unsigned.v16i8"]
-    fn llvm_i8x16_sub_sat_u(a: simd::i8x16, b: simd::i8x16) -> simd::i8x16;
     #[link_name = "llvm.wasm.avgr.unsigned.v16i8"]
     fn llvm_avgr_u_i8x16(a: simd::i8x16, b: simd::i8x16) -> simd::i8x16;
 
@@ -111,10 +107,6 @@ extern "C" {
     fn llvm_narrow_i16x8_s(a: simd::i32x4, b: simd::i32x4) -> simd::i16x8;
     #[link_name = "llvm.wasm.narrow.unsigned.v8i16.v4i32"]
     fn llvm_narrow_i16x8_u(a: simd::i32x4, b: simd::i32x4) -> simd::i16x8;
-    #[link_name = "llvm.wasm.sub.sat.signed.v8i16"]
-    fn llvm_i16x8_sub_sat_s(a: simd::i16x8, b: simd::i16x8) -> simd::i16x8;
-    #[link_name = "llvm.wasm.sub.sat.unsigned.v8i16"]
-    fn llvm_i16x8_sub_sat_u(a: simd::i16x8, b: simd::i16x8) -> simd::i16x8;
     #[link_name = "llvm.wasm.avgr.unsigned.v8i16"]
     fn llvm_avgr_u_i16x8(a: simd::i16x8, b: simd::i16x8) -> simd::i16x8;
 
@@ -147,15 +139,6 @@ extern "C" {
     fn llvm_f64x2_min(x: simd::f64x2, y: simd::f64x2) -> simd::f64x2;
     #[link_name = "llvm.maximum.v2f64"]
     fn llvm_f64x2_max(x: simd::f64x2, y: simd::f64x2) -> simd::f64x2;
-
-    #[link_name = "llvm.fptosi.sat.v4i32.v4f32"]
-    fn llvm_i32x4_trunc_sat_f32x4_s(x: simd::f32x4) -> simd::i32x4;
-    #[link_name = "llvm.fptoui.sat.v4i32.v4f32"]
-    fn llvm_i32x4_trunc_sat_f32x4_u(x: simd::f32x4) -> simd::i32x4;
-    #[link_name = "llvm.fptosi.sat.v2i32.v2f64"]
-    fn llvm_i32x2_trunc_sat_f64x2_s(x: simd::f64x2) -> simd::i32x2;
-    #[link_name = "llvm.fptoui.sat.v2i32.v2f64"]
-    fn llvm_i32x2_trunc_sat_f64x2_u(x: simd::f64x2) -> simd::i32x2;
 }
 
 #[repr(packed)]
@@ -2425,7 +2408,7 @@ pub use i8x16_sub as u8x16_sub;
 #[doc(alias("i8x16.sub_sat_s"))]
 #[stable(feature = "wasm_simd", since = "1.54.0")]
 pub fn i8x16_sub_sat(a: v128, b: v128) -> v128 {
-    unsafe { llvm_i8x16_sub_sat_s(a.as_i8x16(), b.as_i8x16()).v128() }
+    unsafe { simd_saturating_sub(a.as_i8x16(), b.as_i8x16()).v128() }
 }
 
 /// Subtracts two 128-bit vectors as if they were two packed sixteen 8-bit
@@ -2436,7 +2419,7 @@ pub fn i8x16_sub_sat(a: v128, b: v128) -> v128 {
 #[doc(alias("i8x16.sub_sat_u"))]
 #[stable(feature = "wasm_simd", since = "1.54.0")]
 pub fn u8x16_sub_sat(a: v128, b: v128) -> v128 {
-    unsafe { llvm_i8x16_sub_sat_u(a.as_i8x16(), b.as_i8x16()).v128() }
+    unsafe { simd_saturating_sub(a.as_u8x16(), b.as_u8x16()).v128() }
 }
 
 /// Compares lane-wise signed integers, and returns the minimum of
@@ -2793,7 +2776,7 @@ pub use i16x8_sub as u16x8_sub;
 #[doc(alias("i16x8.sub_sat_s"))]
 #[stable(feature = "wasm_simd", since = "1.54.0")]
 pub fn i16x8_sub_sat(a: v128, b: v128) -> v128 {
-    unsafe { llvm_i16x8_sub_sat_s(a.as_i16x8(), b.as_i16x8()).v128() }
+    unsafe { simd_saturating_sub(a.as_i16x8(), b.as_i16x8()).v128() }
 }
 
 /// Subtracts two 128-bit vectors as if they were two packed eight 16-bit
@@ -2804,7 +2787,7 @@ pub fn i16x8_sub_sat(a: v128, b: v128) -> v128 {
 #[doc(alias("i16x8.sub_sat_u"))]
 #[stable(feature = "wasm_simd", since = "1.54.0")]
 pub fn u16x8_sub_sat(a: v128, b: v128) -> v128 {
-    unsafe { llvm_i16x8_sub_sat_u(a.as_i16x8(), b.as_i16x8()).v128() }
+    unsafe { simd_saturating_sub(a.as_u16x8(), b.as_u16x8()).v128() }
 }
 
 /// Multiplies two 128-bit vectors as if they were two packed eight 16-bit
@@ -4059,7 +4042,7 @@ pub fn f64x2_pmax(a: v128, b: v128) -> v128 {
 #[doc(alias("i32x4.trunc_sat_f32x4_s"))]
 #[stable(feature = "wasm_simd", since = "1.54.0")]
 pub fn i32x4_trunc_sat_f32x4(a: v128) -> v128 {
-    unsafe { llvm_i32x4_trunc_sat_f32x4_s(a.as_f32x4()).v128() }
+    unsafe { simd_as::<simd::f32x4, simd::i32x4>(a.as_f32x4()).v128() }
 }
 
 /// Converts a 128-bit vector interpreted as four 32-bit floating point numbers
@@ -4073,7 +4056,7 @@ pub fn i32x4_trunc_sat_f32x4(a: v128) -> v128 {
 #[doc(alias("i32x4.trunc_sat_f32x4_u"))]
 #[stable(feature = "wasm_simd", since = "1.54.0")]
 pub fn u32x4_trunc_sat_f32x4(a: v128) -> v128 {
-    unsafe { llvm_i32x4_trunc_sat_f32x4_u(a.as_f32x4()).v128() }
+    unsafe { simd_as::<simd::f32x4, simd::u32x4>(a.as_f32x4()).v128() }
 }
 
 /// Converts a 128-bit vector interpreted as four 32-bit signed integers into a
@@ -4114,7 +4097,7 @@ pub fn f32x4_convert_u32x4(a: v128) -> v128 {
 pub fn i32x4_trunc_sat_f64x2_zero(a: v128) -> v128 {
     let ret: simd::i32x4 = unsafe {
         simd_shuffle!(
-            llvm_i32x2_trunc_sat_f64x2_s(a.as_f64x2()),
+            simd_as::<simd::f64x2, simd::i32x2>(a.as_f64x2()),
             simd::i32x2::ZERO,
             [0, 1, 2, 3],
         )
@@ -4136,10 +4119,10 @@ pub fn i32x4_trunc_sat_f64x2_zero(a: v128) -> v128 {
 #[doc(alias("i32x4.trunc_sat_f64x2_u_zero"))]
 #[stable(feature = "wasm_simd", since = "1.54.0")]
 pub fn u32x4_trunc_sat_f64x2_zero(a: v128) -> v128 {
-    let ret: simd::i32x4 = unsafe {
+    let ret: simd::u32x4 = unsafe {
         simd_shuffle!(
-            llvm_i32x2_trunc_sat_f64x2_u(a.as_f64x2()),
-            simd::i32x2::ZERO,
+            simd_as::<simd::f64x2, simd::u32x2>(a.as_f64x2()),
+            simd::u32x2::ZERO,
             [0, 1, 2, 3],
         )
     };
@@ -4361,7 +4344,9 @@ mod tests {
         };
         assert_eq!(
             bytes,
-            [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, -15, -16]
+            [
+                -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, -15, -16
+            ]
         );
     }
 

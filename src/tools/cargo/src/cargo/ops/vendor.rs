@@ -1,8 +1,10 @@
 use crate::core::shell::Verbosity;
+use crate::core::SourceId;
 use crate::core::{GitReference, Package, Workspace};
 use crate::ops;
 use crate::sources::path::PathSource;
 use crate::sources::PathEntry;
+use crate::sources::SourceConfigMap;
 use crate::sources::CRATES_IO_REGISTRY;
 use crate::util::cache_lock::CacheLockMode;
 use crate::util::{try_canonicalize, CargoResult, GlobalContext};
@@ -21,6 +23,7 @@ pub struct VendorOptions<'a> {
     pub versioned_dirs: bool,
     pub destination: &'a Path,
     pub extra: Vec<PathBuf>,
+    pub respect_source_config: bool,
 }
 
 pub fn vendor(ws: &Workspace<'_>, opts: &VendorOptions<'_>) -> CargoResult<()> {
@@ -76,6 +79,32 @@ enum VendorSource {
     },
 }
 
+/// Cache for mapping replaced sources to replacements.
+struct SourceReplacementCache<'gctx> {
+    map: SourceConfigMap<'gctx>,
+    cache: HashMap<SourceId, SourceId>,
+}
+
+impl SourceReplacementCache<'_> {
+    fn new(gctx: &GlobalContext) -> CargoResult<SourceReplacementCache<'_>> {
+        Ok(SourceReplacementCache {
+            map: SourceConfigMap::new(gctx)?,
+            cache: Default::default(),
+        })
+    }
+
+    fn get(&mut self, id: SourceId) -> CargoResult<SourceId> {
+        use std::collections::hash_map::Entry;
+        match self.cache.entry(id) {
+            Entry::Occupied(e) => Ok(e.get().clone()),
+            Entry::Vacant(e) => {
+                let replaced = self.map.load(id, &HashSet::new())?.replaced_source_id();
+                Ok(e.insert(replaced).clone())
+            }
+        }
+    }
+}
+
 fn sync(
     gctx: &GlobalContext,
     workspaces: &[&Workspace<'_>],
@@ -101,6 +130,8 @@ fn sync(
         }
     }
 
+    let mut source_replacement_cache = SourceReplacementCache::new(gctx)?;
+
     // First up attempt to work around rust-lang/cargo#5956. Apparently build
     // artifacts sprout up in Cargo's global cache for whatever reason, although
     // it's unsure what tool is causing these issues at this time. For now we
@@ -113,28 +144,39 @@ fn sync(
     // attempt. If anything fails here we basically just move on to the next
     // crate to work with.
     for ws in workspaces {
-        let (packages, resolve) =
-            ops::resolve_ws(ws, dry_run).context("failed to load pkg lockfile")?;
+        let (packages, resolve) = ops::resolve_ws(ws, dry_run)
+            .with_context(|| format!("failed to load lockfile for {}", ws.root().display()))?;
 
         packages
             .get_many(resolve.iter())
-            .context("failed to download packages")?;
+            .with_context(|| format!("failed to download packages for {}", ws.root().display()))?;
 
         for pkg in resolve.iter() {
+            let sid = if opts.respect_source_config {
+                source_replacement_cache.get(pkg.source_id())?
+            } else {
+                pkg.source_id()
+            };
+
             // Don't delete actual source code!
-            if pkg.source_id().is_path() {
-                if let Ok(path) = pkg.source_id().url().to_file_path() {
+            if sid.is_path() {
+                if let Ok(path) = sid.url().to_file_path() {
                     if let Ok(path) = try_canonicalize(path) {
                         to_remove.remove(&path);
                     }
                 }
                 continue;
             }
-            if pkg.source_id().is_git() {
+            if sid.is_git() {
                 continue;
             }
-            if let Ok(pkg) = packages.get_one(pkg) {
-                drop(fs::remove_dir_all(pkg.root()));
+
+            // Only delete sources that are safe to delete, i.e. they are caches.
+            if sid.is_registry() {
+                if let Ok(pkg) = packages.get_one(pkg) {
+                    drop(fs::remove_dir_all(pkg.root()));
+                }
+                continue;
             }
         }
     }
@@ -145,12 +187,12 @@ fn sync(
     // Next up let's actually download all crates and start storing internal
     // tables about them.
     for ws in workspaces {
-        let (packages, resolve) =
-            ops::resolve_ws(ws, dry_run).context("failed to load pkg lockfile")?;
+        let (packages, resolve) = ops::resolve_ws(ws, dry_run)
+            .with_context(|| format!("failed to load lockfile for {}", ws.root().display()))?;
 
         packages
             .get_many(resolve.iter())
-            .context("failed to download packages")?;
+            .with_context(|| format!("failed to download packages for {}", ws.root().display()))?;
 
         for pkg in resolve.iter() {
             // No need to vendor path crates since they're already in the

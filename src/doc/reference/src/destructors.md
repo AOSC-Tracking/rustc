@@ -211,12 +211,8 @@ smallest scope that contains the expression and is one of the following:
 * The pattern-matching condition and consequent body of [`if let`] ([destructors.scope.temporary.edition2024]).
 * The entirety of the tail expression of a block ([destructors.scope.temporary.edition2024]).
 
-> **Notes**:
->
-> The [scrutinee] of a `match` expression is not a temporary scope, so
-> temporaries in the scrutinee can be dropped after the `match` expression. For
-> example, the temporary for `1` in `match 1 { ref mut z => z };` lives until
-> the end of the statement.
+> [!NOTE]
+> The [scrutinee] of a `match` expression is not a temporary scope, so temporaries in the scrutinee can be dropped after the `match` expression. For example, the temporary for `1` in `match 1 { ref mut z => z };` lives until the end of the statement.
 
 r[destructors.scope.temporary.edition2024]
 > **Edition differences**: The 2024 edition added two new temporary scope narrowing rules: `if let` temporaries are dropped before the `else` block, and temporaries of tail expressions of blocks are dropped immediately after the tail expression is evaluated.
@@ -274,7 +270,7 @@ Temporaries are also created to hold the result of operands to an expression
 while the other operands are evaluated. The temporaries are associated to the
 scope of the expression with that operand. Since the temporaries are moved from
 once the expression is evaluated, dropping them has no effect unless one of the
-operands to an expression breaks out of the expression, returns, or panics.
+operands to an expression breaks out of the expression, returns, or [panics][panic].
 
 ```rust
 # struct PrintOnDrop(&'static str);
@@ -315,8 +311,8 @@ r[destructors.scope.lifetime-extension]
 ### Temporary lifetime extension
 
 
-> **Note**: The exact rules for temporary lifetime extension are subject to
-> change. This is describing the current behavior only.
+> [!NOTE]
+> The exact rules for temporary lifetime extension are subject to change. This is describing the current behavior only.
 
 r[destructors.scope.lifetime-extension.let]
 The temporary scopes for expressions in `let` statements are sometimes
@@ -425,13 +421,24 @@ let x = (&temp()).use_temp();  // ERROR
 r[destructors.forget]
 ## Not running destructors
 
+r[destructors.manually-suppressing]
+### Manually suppressing destructors
 
 [`std::mem::forget`] can be used to prevent the destructor of a variable from being run,
 and [`std::mem::ManuallyDrop`] provides a wrapper to prevent a
 variable or field from being dropped automatically.
 
-> Note: Preventing a destructor from being run via [`std::mem::forget`] or other means is safe even if it has a type that isn't `'static`.
-> Besides the places where destructors are guaranteed to run as defined by this document, types may *not* safely rely on a destructor being run for soundness.
+> [!NOTE]
+> Preventing a destructor from being run via [`std::mem::forget`] or other means is safe even if it has a type that isn't `'static`. Besides the places where destructors are guaranteed to run as defined by this document, types may *not* safely rely on a destructor being run for soundness.
+
+r[destructors.process-termination]
+### Process termination without unwinding
+
+There are some ways to terminate the process without [unwinding], in which case destructors will not be run.
+
+The standard library provides [`std::process::exit`] and [`std::process::abort`] to do this explicitly. Additionally, if the [panic handler][panic.panic_handler.std] is set to `abort`, panicking will always terminate the process without destructors being run.
+
+There is one additional case to be aware of: when a panic reaches a [non-unwinding ABI boundary], either no destructors will run, or all destructors up until the ABI boundary will run.
 
 [Assignment]: expressions/operator-expr.md#assignment-expressions
 [binding modes]: patterns.md#binding-modes
@@ -442,11 +449,14 @@ variable or field from being dropped automatically.
 [initialized]: glossary.md#initialized
 [interior mutability]: interior-mutability.md
 [lazy boolean expression]: expressions/operator-expr.md#lazy-boolean-operators
+[non-unwinding ABI boundary]: items/functions.md#unwinding
+[panic]: panic.md
 [place context]: expressions.md#place-expressions-and-value-expressions
 [promoted]: destructors.md#constant-promotion
 [scrutinee]: glossary.md#scrutinee
 [statement]: statements.md
 [temporary]: expressions.md#temporaries
+[unwinding]: panic.md#unwinding
 [variable]: variables.md
 
 [array]: types/array.md

@@ -17,6 +17,10 @@ macro_rules! simd_ty {
             pub(crate) const fn new($($param_name: $elem_type),*) -> Self {
                 $id([$($param_name),*])
             }
+            #[inline(always)]
+            pub(crate) const fn from_array(elements: [$elem_type; $len]) -> Self {
+                $id(elements)
+            }
             // FIXME: Workaround rust@60637
             #[inline(always)]
             pub(crate) fn splat(value: $elem_type) -> Self {
@@ -194,6 +198,8 @@ simd_ty!(
 );
 simd_ty!(i32x4[i32;4]: x0, x1, x2, x3);
 simd_ty!(i64x2[i64;2]: x0, x1);
+
+simd_ty!(f16x4[f16;4]: x0, x1, x2, x3);
 
 simd_ty!(
     f16x8[f16;8]:

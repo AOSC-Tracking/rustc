@@ -534,6 +534,29 @@ fn fail_with_multiple_packages() {
 }
 
 #[cargo_test]
+fn fail_with_bad_bin_no_package() {
+    let p = project()
+        .file(
+            "src/main.rs",
+            r#"
+                fn main() { println!("hello a.rs"); }
+            "#,
+        )
+        .build();
+
+    p.cargo("rustc --bin main")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] no bin target named `main`
+[HELP] available bin targets:
+    foo
+...
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
 fn fail_with_glob() {
     let p = project()
         .file(
@@ -851,6 +874,28 @@ fn precedence() {
 [COMPILING] foo v0.0.0 ([ROOT]/foo)
 [RUNNING] `rustc [..]-C strip=debuginfo [..]--cfg cargo_rustc -C strip=symbols --cfg from_rustflags`
 [FINISHED] `release` profile [optimized] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn build_with_duplicate_crate_types() {
+    let p = project().file("src/lib.rs", "").build();
+
+    p.cargo("rustc -v --crate-type staticlib --crate-type staticlib")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[RUNNING] `rustc [..] --crate-type staticlib --emit[..]
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+
+    p.cargo("rustc -v --crate-type staticlib --crate-type staticlib")
+        .with_stderr_data(str![[r#"
+[FRESH] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
         .run();

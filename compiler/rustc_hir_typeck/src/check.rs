@@ -35,12 +35,8 @@ pub(super) fn check_fn<'a, 'tcx>(
     params_can_be_unsized: bool,
 ) -> Option<CoroutineTypes<'tcx>> {
     let fn_id = fcx.tcx.local_def_id_to_hir_id(fn_def_id);
-
     let tcx = fcx.tcx;
-    let hir = tcx.hir();
-
     let declared_ret_ty = fn_sig.output();
-
     let ret_ty =
         fcx.register_infer_ok_obligations(fcx.infcx.replace_opaque_types_with_inference_vars(
             declared_ret_ty,
@@ -69,7 +65,7 @@ pub(super) fn check_fn<'a, 'tcx>(
     });
 
     // Add formal parameters.
-    let inputs_hir = hir.fn_decl_by_hir_id(fn_id).map(|decl| &decl.inputs);
+    let inputs_hir = tcx.hir_fn_decl_by_hir_id(fn_id).map(|decl| &decl.inputs);
     let inputs_fn = fn_sig.inputs().iter().copied();
     for (idx, (param_ty, param)) in inputs_fn.chain(maybe_va_list).zip(body.params).enumerate() {
         // We checked the root's signature during wfcheck, but not the child.
@@ -117,22 +113,17 @@ pub(super) fn check_fn<'a, 'tcx>(
 
     fcx.typeck_results.borrow_mut().liberated_fn_sigs_mut().insert(fn_id, fn_sig);
 
-    let return_or_body_span = match decl.output {
-        hir::FnRetTy::DefaultReturn(_) => body.value.span,
-        hir::FnRetTy::Return(ty) => ty.span,
-    };
-
-    fcx.require_type_is_sized(
-        declared_ret_ty,
-        return_or_body_span,
-        ObligationCauseCode::SizedReturnType,
-    );
-    // We checked the root's signature during wfcheck, but not the child.
+    // We checked the root's ret ty during wfcheck, but not the child.
     if fcx.tcx.is_typeck_child(fn_def_id.to_def_id()) {
+        let return_or_body_span = match decl.output {
+            hir::FnRetTy::DefaultReturn(_) => body.value.span,
+            hir::FnRetTy::Return(ty) => ty.span,
+        };
+
         fcx.require_type_is_sized(
             declared_ret_ty,
             return_or_body_span,
-            ObligationCauseCode::WellFormed(None),
+            ObligationCauseCode::SizedReturnType,
         );
     }
 

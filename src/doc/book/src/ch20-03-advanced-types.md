@@ -8,16 +8,14 @@ the `!` type and dynamically sized types.
 
 ### Using the Newtype Pattern for Type Safety and Abstraction
 
-> Note: This section assumes you’ve read the earlier section [“Using the
-> Newtype Pattern to Implement External Traits on External
-> Types.”][using-the-newtype-pattern]<!-- ignore -->
-
-The newtype pattern is also useful for tasks beyond those we’ve discussed so
-far, including statically enforcing that values are never confused and
-indicating the units of a value. You saw an example of using newtypes to
+This section assumes you’ve read the earlier section [“Using the Newtype Pattern
+to Implement External Traits on External Types.”][using-the-newtype-pattern]<!--
+ignore --> The newtype pattern is also useful for tasks beyond those we’ve
+discussed so far, including statically enforcing that values are never confused
+and indicating the units of a value. You saw an example of using newtypes to
 indicate units in Listing 20-16: recall that the `Millimeters` and `Meters`
 structs wrapped `u32` values in a newtype. If we wrote a function with a
-parameter of type `Millimeters`, we couldn’t compile a program that
+parameter of type `Millimeters`, we wouldn’t be able to compile a program that
 accidentally tried to call that function with a value of type `Meters` or a
 plain `u32`.
 
@@ -30,11 +28,10 @@ Newtypes can also hide internal implementation. For example, we could provide a
 associated with their name. Code using `People` would only interact with the
 public API we provide, such as a method to add a name string to the `People`
 collection; that code wouldn’t need to know that we assign an `i32` ID to names
-internally. The newtype pattern is a lightweight way to achieve encapsulation
-to hide implementation details, which we discussed in the [“Encapsulation that
-Hides Implementation
-Details”][encapsulation-that-hides-implementation-details]<!-- ignore -->
-section of Chapter 18.
+internally. The newtype pattern is a lightweight way to achieve encapsulation to
+hide implementation details, which we discussed in [“Encapsulation That Hides
+Implementation Details”][encapsulation-that-hides-implementation-details]<!--
+ignore --> in Chapter 18.
 
 ### Creating Type Synonyms with Type Aliases
 
@@ -57,7 +54,7 @@ values of type `i32`:
 
 Because `Kilometers` and `i32` are the same type, we can add values of both
 types and we can pass `Kilometers` values to functions that take `i32`
-parameters. However, using this method, we don’t get the type checking benefits
+parameters. However, using this method, we don’t get the type-checking benefits
 that we get from the newtype pattern discussed earlier. In other words, if we
 mix up `Kilometers` and `i32` values somewhere, the compiler will not give us
 an error.
@@ -131,7 +128,7 @@ us a consistent interface across all of `std::io`. Because it’s an alias, it�
 just another `Result<T, E>`, which means we can use any methods that work on
 `Result<T, E>` with it, as well as special syntax like the `?` operator.
 
-### The Never Type that Never Returns
+### The Never Type That Never Returns
 
 Rust has a special type named `!` that’s known in type theory lingo as the
 _empty type_ because it has no values. We prefer to call it the _never type_
@@ -147,7 +144,7 @@ never are called _diverging functions_. We can’t create values of the type `!`
 so `bar` can never possibly return.
 
 But what use is a type you can never create values for? Recall the code from
-Listing 2-5, part of the number guessing game; we’ve reproduced a bit of it
+Listing 2-5, part of the number-guessing game; we’ve reproduced a bit of it
 here in Listing 20-27.
 
 <Listing number="20-27" caption="A `match` with an arm that ends in `continue`">
@@ -158,10 +155,10 @@ here in Listing 20-27.
 
 </Listing>
 
-At the time, we skipped over some details in this code. In Chapter 6 in [“The
-`match` Control Flow Operator”][the-match-control-flow-operator]<!-- ignore -->
-section, we discussed that `match` arms must all return the same type. So, for
-example, the following code doesn’t work:
+At the time, we skipped over some details in this code. In [“The `match` Control
+Flow Operator”][the-match-control-flow-operator]<!-- ignore --> in Chapter 6, we
+discussed that `match` arms must all return the same type. So, for example, the
+following code doesn’t work:
 
 ```rust,ignore,does_not_compile
 {{#rustdoc_include ../listings/ch20-advanced-features/no-listing-08-match-arms-different-types/src/main.rs:here}}
@@ -233,28 +230,28 @@ storage and `s2` needs 15. This is why it’s not possible to create a variable
 holding a dynamically sized type.
 
 So what do we do? In this case, you already know the answer: we make the types
-of `s1` and `s2` a `&str` rather than a `str`. Recall from the [“String
-Slices”][string-slices]<!-- ignore --> section of Chapter 4 that the slice data
+of `s1` and `s2` a `&str` rather than a `str`. Recall from [“String
+Slices”][string-slices]<!-- ignore --> in Chapter 4 that the slice data
 structure just stores the starting position and the length of the slice. So
 although a `&T` is a single value that stores the memory address of where the
 `T` is located, a `&str` is _two_ values: the address of the `str` and its
 length. As such, we can know the size of a `&str` value at compile time: it’s
 twice the length of a `usize`. That is, we always know the size of a `&str`, no
-matter how long the string it refers to is. In general, this is the way in
-which dynamically sized types are used in Rust: they have an extra bit of
-metadata that stores the size of the dynamic information. The golden rule of
-dynamically sized types is that we must always put values of dynamically sized
-types behind a pointer of some kind.
+matter how long the string it refers to is. In general, this is the way in which
+dynamically sized types are used in Rust: they have an extra bit of metadata
+that stores the size of the dynamic information. The golden rule of dynamically
+sized types is that we must always put values of dynamically sized types behind
+a pointer of some kind.
 
 We can combine `str` with all kinds of pointers: for example, `Box<str>` or
 `Rc<str>`. In fact, you’ve seen this before but with a different dynamically
 sized type: traits. Every trait is a dynamically sized type we can refer to by
-using the name of the trait. In Chapter 18 in the [“Using Trait Objects That
-Allow for Values of Different
-Types”][using-trait-objects-that-allow-for-values-of-different-types]<!--
-ignore --> section, we mentioned that to use traits as trait objects, we must
-put them behind a pointer, such as `&dyn Trait` or `Box<dyn Trait>` (`Rc<dyn
-Trait>` would work too).
+using the name of the trait. In [“Using Trait Objects That Allow for Values of
+Different
+Types”][using-trait-objects-that-allow-for-values-of-different-types]<!-- ignore
+--> in Chapter 18, we mentioned that to use traits as trait objects, we must put
+them behind a pointer, such as `&dyn Trait` or `Box<dyn Trait>` (`Rc<dyn Trait>`
+would work too).
 
 To work with DSTs, Rust provides the `Sized` trait to determine whether or not
 a type’s size is known at compile time. This trait is automatically implemented

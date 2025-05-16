@@ -54,9 +54,7 @@ so that the call to `f` works as if it were:
 
 <!-- ignore: continuation of above -->
 ```rust,ignore
-// Note: This is not valid Rust due to the duplicate mutable borrows.
-// This is only provided as an illustration.
-f(Closure{ left_top: &mut rect.left_top, right_bottom_x: &mut rect.left_top.x });
+f(Closure{ left_top: &mut rect.left_top, right_bottom_x: &mut rect.right_bottom.x });
 ```
 
 r[type.closure.capture]
@@ -486,10 +484,8 @@ r[type.closure.call.fn]
 * A closure which does not mutate or move out of any captured variables
   implements [`Fn`], indicating that it can be called by shared reference.
 
-> Note: `move` closures may still implement [`Fn`] or [`FnMut`], even though
-> they capture variables by move. This is because the traits implemented by a
-> closure type are determined by what the closure does with captured values,
-> not how it captures them.
+> [!NOTE]
+> `move` closures may still implement [`Fn`] or [`FnMut`], even though they capture variables by move. This is because the traits implemented by a closure type are determined by what the closure does with captured values, not how it captures them.
 
 r[type.closure.non-capturing]
 *Non-capturing closures* are closures that don't capture anything from their

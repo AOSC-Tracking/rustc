@@ -32,6 +32,18 @@ const DEFAULT_TEST_DIR_NAME: &'static str = "tests";
 const DEFAULT_BENCH_DIR_NAME: &'static str = "benches";
 const DEFAULT_EXAMPLE_DIR_NAME: &'static str = "examples";
 
+const TARGET_KIND_HUMAN_LIB: &str = "library";
+const TARGET_KIND_HUMAN_BIN: &str = "binary";
+const TARGET_KIND_HUMAN_EXAMPLE: &str = "example";
+const TARGET_KIND_HUMAN_TEST: &str = "test";
+const TARGET_KIND_HUMAN_BENCH: &str = "benchmark";
+
+const TARGET_KIND_LIB: &str = "lib";
+const TARGET_KIND_BIN: &str = "bin";
+const TARGET_KIND_EXAMPLE: &str = "example";
+const TARGET_KIND_TEST: &str = "test";
+const TARGET_KIND_BENCH: &str = "bench";
+
 #[tracing::instrument(skip_all)]
 pub(super) fn to_targets(
     features: &Features,
@@ -64,24 +76,28 @@ pub(super) fn to_targets(
         normalized_toml.bin.as_deref().unwrap_or_default(),
         package_root,
         edition,
+        warnings,
     )?);
 
     targets.extend(to_example_targets(
         normalized_toml.example.as_deref().unwrap_or_default(),
         package_root,
         edition,
+        warnings,
     )?);
 
     targets.extend(to_test_targets(
         normalized_toml.test.as_deref().unwrap_or_default(),
         package_root,
         edition,
+        warnings,
     )?);
 
     targets.extend(to_bench_targets(
         normalized_toml.bench.as_deref().unwrap_or_default(),
         package_root,
         edition,
+        warnings,
     )?);
 
     // processing the custom build script
@@ -141,8 +157,8 @@ pub fn normalize_lib(
         // Check early to improve error messages
         validate_lib_name(&lib, warnings)?;
 
-        validate_proc_macro(&lib, "library", edition, warnings)?;
-        validate_crate_types(&lib, "library", edition, warnings)?;
+        validate_proc_macro(&lib, TARGET_KIND_HUMAN_LIB, edition, warnings)?;
+        validate_crate_types(&lib, TARGET_KIND_HUMAN_LIB, edition, warnings)?;
 
         if let Some(PathValue(path)) = &lib.path {
             lib.path = Some(PathValue(paths::normalize_path(path).into()));
@@ -164,8 +180,8 @@ pub fn normalize_lib(
         // Check early to improve error messages
         validate_lib_name(&lib, warnings)?;
 
-        validate_proc_macro(&lib, "library", edition, warnings)?;
-        validate_crate_types(&lib, "library", edition, warnings)?;
+        validate_proc_macro(&lib, TARGET_KIND_HUMAN_LIB, edition, warnings)?;
+        validate_crate_types(&lib, TARGET_KIND_HUMAN_LIB, edition, warnings)?;
 
         if lib.path.is_none() {
             if let Some(inferred) = inferred {
@@ -247,7 +263,7 @@ fn to_lib_target(
     };
 
     let mut target = Target::lib_target(name_or_panic(lib), crate_types, path, edition);
-    configure(lib, &mut target)?;
+    configure(lib, &mut target, TARGET_KIND_HUMAN_LIB, warnings)?;
     target.set_name_inferred(original_lib.map_or(true, |v| v.name.is_none()));
     Ok(Some(target))
 }
@@ -285,8 +301,8 @@ pub fn normalize_bins(
             autodiscover,
             edition,
             warnings,
-            "binary",
-            "bin",
+            TARGET_KIND_HUMAN_BIN,
+            TARGET_KIND_BIN,
             "autobins",
         );
 
@@ -297,21 +313,28 @@ pub fn normalize_bins(
             validate_bin_crate_types(bin, edition, warnings, errors)?;
             validate_bin_proc_macro(bin, edition, warnings, errors)?;
 
-            let path = target_path(bin, &inferred, "bin", package_root, edition, &mut |_| {
-                if let Some(legacy_path) =
-                    legacy_bin_path(package_root, name_or_panic(bin), has_lib)
-                {
-                    warnings.push(format!(
-                        "path `{}` was erroneously implicitly accepted for binary `{}`,\n\
+            let path = target_path(
+                bin,
+                &inferred,
+                TARGET_KIND_BIN,
+                package_root,
+                edition,
+                &mut |_| {
+                    if let Some(legacy_path) =
+                        legacy_bin_path(package_root, name_or_panic(bin), has_lib)
+                    {
+                        warnings.push(format!(
+                            "path `{}` was erroneously implicitly accepted for binary `{}`,\n\
                      please set bin.path in Cargo.toml",
-                        legacy_path.display(),
-                        name_or_panic(bin)
-                    ));
-                    Some(legacy_path)
-                } else {
-                    None
-                }
-            });
+                            legacy_path.display(),
+                            name_or_panic(bin)
+                        ));
+                        Some(legacy_path)
+                    } else {
+                        None
+                    }
+                },
+            );
             let path = match path {
                 Ok(path) => paths::normalize_path(&path).into(),
                 Err(e) => anyhow::bail!("{}", e),
@@ -329,6 +352,7 @@ fn to_bin_targets(
     bins: &[TomlBinTarget],
     package_root: &Path,
     edition: Edition,
+    warnings: &mut Vec<String>,
 ) -> CargoResult<Vec<Target>> {
     // This loop performs basic checks on each of the TomlTarget in `bins`.
     for bin in bins {
@@ -339,7 +363,7 @@ fn to_bin_targets(
         }
     }
 
-    validate_unique_names(&bins, "binary")?;
+    validate_unique_names(&bins, TARGET_KIND_HUMAN_BIN)?;
 
     let mut result = Vec::new();
     for bin in bins {
@@ -352,7 +376,7 @@ fn to_bin_targets(
             edition,
         );
 
-        configure(bin, &mut target)?;
+        configure(bin, &mut target, TARGET_KIND_HUMAN_BIN, warnings)?;
         result.push(target);
     }
     Ok(result)
@@ -391,8 +415,8 @@ pub fn normalize_examples(
     let mut inferred = || infer_from_directory(&package_root, Path::new(DEFAULT_EXAMPLE_DIR_NAME));
 
     let targets = normalize_targets(
-        "example",
-        "example",
+        TARGET_KIND_HUMAN_EXAMPLE,
+        TARGET_KIND_EXAMPLE,
         toml_examples,
         &mut inferred,
         package_root,
@@ -411,8 +435,9 @@ fn to_example_targets(
     targets: &[TomlExampleTarget],
     package_root: &Path,
     edition: Edition,
+    warnings: &mut Vec<String>,
 ) -> CargoResult<Vec<Target>> {
-    validate_unique_names(&targets, "example")?;
+    validate_unique_names(&targets, TARGET_KIND_EXAMPLE)?;
 
     let mut result = Vec::new();
     for toml in targets {
@@ -429,7 +454,7 @@ fn to_example_targets(
             toml.required_features.clone(),
             edition,
         );
-        configure(&toml, &mut target)?;
+        configure(&toml, &mut target, TARGET_KIND_HUMAN_EXAMPLE, warnings)?;
         result.push(target);
     }
 
@@ -448,8 +473,8 @@ pub fn normalize_tests(
     let mut inferred = || infer_from_directory(&package_root, Path::new(DEFAULT_TEST_DIR_NAME));
 
     let targets = normalize_targets(
-        "test",
-        "test",
+        TARGET_KIND_HUMAN_TEST,
+        TARGET_KIND_TEST,
         toml_tests,
         &mut inferred,
         package_root,
@@ -468,8 +493,9 @@ fn to_test_targets(
     targets: &[TomlTestTarget],
     package_root: &Path,
     edition: Edition,
+    warnings: &mut Vec<String>,
 ) -> CargoResult<Vec<Target>> {
-    validate_unique_names(&targets, "test")?;
+    validate_unique_names(&targets, TARGET_KIND_TEST)?;
 
     let mut result = Vec::new();
     for toml in targets {
@@ -480,7 +506,7 @@ fn to_test_targets(
             toml.required_features.clone(),
             edition,
         );
-        configure(&toml, &mut target)?;
+        configure(&toml, &mut target, TARGET_KIND_HUMAN_TEST, warnings)?;
         result.push(target);
     }
     Ok(result)
@@ -513,8 +539,8 @@ pub fn normalize_benches(
     let mut inferred = || infer_from_directory(&package_root, Path::new(DEFAULT_BENCH_DIR_NAME));
 
     let targets = normalize_targets_with_legacy_path(
-        "benchmark",
-        "bench",
+        TARGET_KIND_HUMAN_BENCH,
+        TARGET_KIND_BENCH,
         toml_benches,
         &mut inferred,
         package_root,
@@ -535,8 +561,9 @@ fn to_bench_targets(
     targets: &[TomlBenchTarget],
     package_root: &Path,
     edition: Edition,
+    warnings: &mut Vec<String>,
 ) -> CargoResult<Vec<Target>> {
-    validate_unique_names(&targets, "bench")?;
+    validate_unique_names(&targets, TARGET_KIND_BENCH)?;
 
     let mut result = Vec::new();
     for toml in targets {
@@ -547,7 +574,7 @@ fn to_bench_targets(
             toml.required_features.clone(),
             edition,
         );
-        configure(&toml, &mut target)?;
+        configure(&toml, &mut target, TARGET_KIND_HUMAN_BENCH, warnings)?;
         result.push(target);
     }
 
@@ -873,7 +900,12 @@ fn validate_unique_names(targets: &[TomlTarget], target_kind: &str) -> CargoResu
     Ok(())
 }
 
-fn configure(toml: &TomlTarget, target: &mut Target) -> CargoResult<()> {
+fn configure(
+    toml: &TomlTarget,
+    target: &mut Target,
+    target_kind_human: &str,
+    warnings: &mut Vec<String>,
+) -> CargoResult<()> {
     let t2 = target.clone();
     target
         .set_tested(toml.test.unwrap_or_else(|| t2.tested()))
@@ -890,6 +922,10 @@ fn configure(toml: &TomlTarget, target: &mut Target) -> CargoResult<()> {
         .set_for_host(toml.proc_macro().unwrap_or_else(|| t2.for_host()));
 
     if let Some(edition) = toml.edition.clone() {
+        let name = target.name();
+        warnings.push(format!(
+            "`edition` is set on {target_kind_human} `{name}` which is deprecated"
+        ));
         target.set_edition(
             edition
                 .parse()
@@ -1074,7 +1110,7 @@ fn name_or_panic(target: &TomlTarget) -> &str {
 }
 
 fn validate_lib_name(target: &TomlTarget, warnings: &mut Vec<String>) -> CargoResult<()> {
-    validate_target_name(target, "library", "lib", warnings)?;
+    validate_target_name(target, TARGET_KIND_HUMAN_LIB, TARGET_KIND_LIB, warnings)?;
     let name = name_or_panic(target);
     if name.contains('-') {
         anyhow::bail!("library target names cannot contain hyphens: {}", name)
@@ -1084,7 +1120,7 @@ fn validate_lib_name(target: &TomlTarget, warnings: &mut Vec<String>) -> CargoRe
 }
 
 fn validate_bin_name(bin: &TomlTarget, warnings: &mut Vec<String>) -> CargoResult<()> {
-    validate_target_name(bin, "binary", "bin", warnings)?;
+    validate_target_name(bin, TARGET_KIND_HUMAN_BIN, TARGET_KIND_BIN, warnings)?;
     let name = name_or_panic(bin).to_owned();
     if restricted_names::is_conflicting_artifact_name(&name) {
         anyhow::bail!(
@@ -1139,7 +1175,7 @@ fn validate_bin_proc_macro(
             name
         ));
     } else {
-        validate_proc_macro(target, "binary", edition, warnings)?;
+        validate_proc_macro(target, TARGET_KIND_HUMAN_BIN, edition, warnings)?;
     }
     Ok(())
 }
@@ -1177,7 +1213,7 @@ fn validate_bin_crate_types(
                 crate_types.join(", ")
             ));
         } else {
-            validate_crate_types(target, "binary", edition, warnings)?;
+            validate_crate_types(target, TARGET_KIND_HUMAN_BIN, edition, warnings)?;
         }
     }
     Ok(())

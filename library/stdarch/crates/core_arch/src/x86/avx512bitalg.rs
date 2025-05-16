@@ -7,22 +7,19 @@
 //!
 //! [intel64_ref]: http://www.intel.de/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-software-developer-instruction-set-reference-manual-325383.pdf
 
-use crate::core_arch::simd::i16x16;
-use crate::core_arch::simd::i16x32;
-use crate::core_arch::simd::i16x8;
 use crate::core_arch::simd::i8x16;
 use crate::core_arch::simd::i8x32;
 use crate::core_arch::simd::i8x64;
+use crate::core_arch::simd::i16x8;
+use crate::core_arch::simd::i16x16;
+use crate::core_arch::simd::i16x32;
 use crate::core_arch::x86::__m128i;
 use crate::core_arch::x86::__m256i;
 use crate::core_arch::x86::__m512i;
+use crate::core_arch::x86::__mmask8;
 use crate::core_arch::x86::__mmask16;
 use crate::core_arch::x86::__mmask32;
 use crate::core_arch::x86::__mmask64;
-use crate::core_arch::x86::__mmask8;
-use crate::core_arch::x86::m128iExt;
-use crate::core_arch::x86::m256iExt;
-use crate::core_arch::x86::m512iExt;
 use crate::intrinsics::simd::{simd_ctpop, simd_select_bitmask};
 use crate::mem::transmute;
 
@@ -30,7 +27,7 @@ use crate::mem::transmute;
 use stdarch_test::assert_instr;
 
 #[allow(improper_ctypes)]
-extern "C" {
+unsafe extern "C" {
     #[link_name = "llvm.x86.avx512.mask.vpshufbitqmb.512"]
     fn bitshuffle_512(data: i8x64, indices: i8x64, mask: __mmask64) -> __mmask64;
     #[link_name = "llvm.x86.avx512.mask.vpshufbitqmb.256"]
@@ -46,8 +43,8 @@ extern "C" {
 #[target_feature(enable = "avx512bitalg")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntw))]
-pub unsafe fn _mm512_popcnt_epi16(a: __m512i) -> __m512i {
-    transmute(simd_ctpop(a.as_i16x32()))
+pub fn _mm512_popcnt_epi16(a: __m512i) -> __m512i {
+    unsafe { transmute(simd_ctpop(a.as_i16x32())) }
 }
 
 /// For each packed 16-bit integer maps the value to the number of logical 1 bits.
@@ -60,12 +57,14 @@ pub unsafe fn _mm512_popcnt_epi16(a: __m512i) -> __m512i {
 #[target_feature(enable = "avx512bitalg")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntw))]
-pub unsafe fn _mm512_maskz_popcnt_epi16(k: __mmask32, a: __m512i) -> __m512i {
-    transmute(simd_select_bitmask(
-        k,
-        simd_ctpop(a.as_i16x32()),
-        i16x32::ZERO,
-    ))
+pub fn _mm512_maskz_popcnt_epi16(k: __mmask32, a: __m512i) -> __m512i {
+    unsafe {
+        transmute(simd_select_bitmask(
+            k,
+            simd_ctpop(a.as_i16x32()),
+            i16x32::ZERO,
+        ))
+    }
 }
 
 /// For each packed 16-bit integer maps the value to the number of logical 1 bits.
@@ -78,12 +77,14 @@ pub unsafe fn _mm512_maskz_popcnt_epi16(k: __mmask32, a: __m512i) -> __m512i {
 #[target_feature(enable = "avx512bitalg")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntw))]
-pub unsafe fn _mm512_mask_popcnt_epi16(src: __m512i, k: __mmask32, a: __m512i) -> __m512i {
-    transmute(simd_select_bitmask(
-        k,
-        simd_ctpop(a.as_i16x32()),
-        src.as_i16x32(),
-    ))
+pub fn _mm512_mask_popcnt_epi16(src: __m512i, k: __mmask32, a: __m512i) -> __m512i {
+    unsafe {
+        transmute(simd_select_bitmask(
+            k,
+            simd_ctpop(a.as_i16x32()),
+            src.as_i16x32(),
+        ))
+    }
 }
 
 /// For each packed 16-bit integer maps the value to the number of logical 1 bits.
@@ -93,8 +94,8 @@ pub unsafe fn _mm512_mask_popcnt_epi16(src: __m512i, k: __mmask32, a: __m512i) -
 #[target_feature(enable = "avx512bitalg,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntw))]
-pub unsafe fn _mm256_popcnt_epi16(a: __m256i) -> __m256i {
-    transmute(simd_ctpop(a.as_i16x16()))
+pub fn _mm256_popcnt_epi16(a: __m256i) -> __m256i {
+    unsafe { transmute(simd_ctpop(a.as_i16x16())) }
 }
 
 /// For each packed 16-bit integer maps the value to the number of logical 1 bits.
@@ -107,12 +108,14 @@ pub unsafe fn _mm256_popcnt_epi16(a: __m256i) -> __m256i {
 #[target_feature(enable = "avx512bitalg,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntw))]
-pub unsafe fn _mm256_maskz_popcnt_epi16(k: __mmask16, a: __m256i) -> __m256i {
-    transmute(simd_select_bitmask(
-        k,
-        simd_ctpop(a.as_i16x16()),
-        i16x16::ZERO,
-    ))
+pub fn _mm256_maskz_popcnt_epi16(k: __mmask16, a: __m256i) -> __m256i {
+    unsafe {
+        transmute(simd_select_bitmask(
+            k,
+            simd_ctpop(a.as_i16x16()),
+            i16x16::ZERO,
+        ))
+    }
 }
 
 /// For each packed 16-bit integer maps the value to the number of logical 1 bits.
@@ -125,12 +128,14 @@ pub unsafe fn _mm256_maskz_popcnt_epi16(k: __mmask16, a: __m256i) -> __m256i {
 #[target_feature(enable = "avx512bitalg,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntw))]
-pub unsafe fn _mm256_mask_popcnt_epi16(src: __m256i, k: __mmask16, a: __m256i) -> __m256i {
-    transmute(simd_select_bitmask(
-        k,
-        simd_ctpop(a.as_i16x16()),
-        src.as_i16x16(),
-    ))
+pub fn _mm256_mask_popcnt_epi16(src: __m256i, k: __mmask16, a: __m256i) -> __m256i {
+    unsafe {
+        transmute(simd_select_bitmask(
+            k,
+            simd_ctpop(a.as_i16x16()),
+            src.as_i16x16(),
+        ))
+    }
 }
 
 /// For each packed 16-bit integer maps the value to the number of logical 1 bits.
@@ -140,8 +145,8 @@ pub unsafe fn _mm256_mask_popcnt_epi16(src: __m256i, k: __mmask16, a: __m256i) -
 #[target_feature(enable = "avx512bitalg,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntw))]
-pub unsafe fn _mm_popcnt_epi16(a: __m128i) -> __m128i {
-    transmute(simd_ctpop(a.as_i16x8()))
+pub fn _mm_popcnt_epi16(a: __m128i) -> __m128i {
+    unsafe { transmute(simd_ctpop(a.as_i16x8())) }
 }
 
 /// For each packed 16-bit integer maps the value to the number of logical 1 bits.
@@ -154,12 +159,14 @@ pub unsafe fn _mm_popcnt_epi16(a: __m128i) -> __m128i {
 #[target_feature(enable = "avx512bitalg,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntw))]
-pub unsafe fn _mm_maskz_popcnt_epi16(k: __mmask8, a: __m128i) -> __m128i {
-    transmute(simd_select_bitmask(
-        k,
-        simd_ctpop(a.as_i16x8()),
-        i16x8::ZERO,
-    ))
+pub fn _mm_maskz_popcnt_epi16(k: __mmask8, a: __m128i) -> __m128i {
+    unsafe {
+        transmute(simd_select_bitmask(
+            k,
+            simd_ctpop(a.as_i16x8()),
+            i16x8::ZERO,
+        ))
+    }
 }
 
 /// For each packed 16-bit integer maps the value to the number of logical 1 bits.
@@ -172,12 +179,14 @@ pub unsafe fn _mm_maskz_popcnt_epi16(k: __mmask8, a: __m128i) -> __m128i {
 #[target_feature(enable = "avx512bitalg,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntw))]
-pub unsafe fn _mm_mask_popcnt_epi16(src: __m128i, k: __mmask8, a: __m128i) -> __m128i {
-    transmute(simd_select_bitmask(
-        k,
-        simd_ctpop(a.as_i16x8()),
-        src.as_i16x8(),
-    ))
+pub fn _mm_mask_popcnt_epi16(src: __m128i, k: __mmask8, a: __m128i) -> __m128i {
+    unsafe {
+        transmute(simd_select_bitmask(
+            k,
+            simd_ctpop(a.as_i16x8()),
+            src.as_i16x8(),
+        ))
+    }
 }
 
 /// For each packed 8-bit integer maps the value to the number of logical 1 bits.
@@ -187,8 +196,8 @@ pub unsafe fn _mm_mask_popcnt_epi16(src: __m128i, k: __mmask8, a: __m128i) -> __
 #[target_feature(enable = "avx512bitalg")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntb))]
-pub unsafe fn _mm512_popcnt_epi8(a: __m512i) -> __m512i {
-    transmute(simd_ctpop(a.as_i8x64()))
+pub fn _mm512_popcnt_epi8(a: __m512i) -> __m512i {
+    unsafe { transmute(simd_ctpop(a.as_i8x64())) }
 }
 
 /// For each packed 8-bit integer maps the value to the number of logical 1 bits.
@@ -201,12 +210,14 @@ pub unsafe fn _mm512_popcnt_epi8(a: __m512i) -> __m512i {
 #[target_feature(enable = "avx512bitalg")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntb))]
-pub unsafe fn _mm512_maskz_popcnt_epi8(k: __mmask64, a: __m512i) -> __m512i {
-    transmute(simd_select_bitmask(
-        k,
-        simd_ctpop(a.as_i8x64()),
-        i8x64::ZERO,
-    ))
+pub fn _mm512_maskz_popcnt_epi8(k: __mmask64, a: __m512i) -> __m512i {
+    unsafe {
+        transmute(simd_select_bitmask(
+            k,
+            simd_ctpop(a.as_i8x64()),
+            i8x64::ZERO,
+        ))
+    }
 }
 
 /// For each packed 8-bit integer maps the value to the number of logical 1 bits.
@@ -219,12 +230,14 @@ pub unsafe fn _mm512_maskz_popcnt_epi8(k: __mmask64, a: __m512i) -> __m512i {
 #[target_feature(enable = "avx512bitalg")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntb))]
-pub unsafe fn _mm512_mask_popcnt_epi8(src: __m512i, k: __mmask64, a: __m512i) -> __m512i {
-    transmute(simd_select_bitmask(
-        k,
-        simd_ctpop(a.as_i8x64()),
-        src.as_i8x64(),
-    ))
+pub fn _mm512_mask_popcnt_epi8(src: __m512i, k: __mmask64, a: __m512i) -> __m512i {
+    unsafe {
+        transmute(simd_select_bitmask(
+            k,
+            simd_ctpop(a.as_i8x64()),
+            src.as_i8x64(),
+        ))
+    }
 }
 
 /// For each packed 8-bit integer maps the value to the number of logical 1 bits.
@@ -234,8 +247,8 @@ pub unsafe fn _mm512_mask_popcnt_epi8(src: __m512i, k: __mmask64, a: __m512i) ->
 #[target_feature(enable = "avx512bitalg,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntb))]
-pub unsafe fn _mm256_popcnt_epi8(a: __m256i) -> __m256i {
-    transmute(simd_ctpop(a.as_i8x32()))
+pub fn _mm256_popcnt_epi8(a: __m256i) -> __m256i {
+    unsafe { transmute(simd_ctpop(a.as_i8x32())) }
 }
 
 /// For each packed 8-bit integer maps the value to the number of logical 1 bits.
@@ -248,12 +261,14 @@ pub unsafe fn _mm256_popcnt_epi8(a: __m256i) -> __m256i {
 #[target_feature(enable = "avx512bitalg,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntb))]
-pub unsafe fn _mm256_maskz_popcnt_epi8(k: __mmask32, a: __m256i) -> __m256i {
-    transmute(simd_select_bitmask(
-        k,
-        simd_ctpop(a.as_i8x32()),
-        i8x32::ZERO,
-    ))
+pub fn _mm256_maskz_popcnt_epi8(k: __mmask32, a: __m256i) -> __m256i {
+    unsafe {
+        transmute(simd_select_bitmask(
+            k,
+            simd_ctpop(a.as_i8x32()),
+            i8x32::ZERO,
+        ))
+    }
 }
 
 /// For each packed 8-bit integer maps the value to the number of logical 1 bits.
@@ -266,12 +281,14 @@ pub unsafe fn _mm256_maskz_popcnt_epi8(k: __mmask32, a: __m256i) -> __m256i {
 #[target_feature(enable = "avx512bitalg,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntb))]
-pub unsafe fn _mm256_mask_popcnt_epi8(src: __m256i, k: __mmask32, a: __m256i) -> __m256i {
-    transmute(simd_select_bitmask(
-        k,
-        simd_ctpop(a.as_i8x32()),
-        src.as_i8x32(),
-    ))
+pub fn _mm256_mask_popcnt_epi8(src: __m256i, k: __mmask32, a: __m256i) -> __m256i {
+    unsafe {
+        transmute(simd_select_bitmask(
+            k,
+            simd_ctpop(a.as_i8x32()),
+            src.as_i8x32(),
+        ))
+    }
 }
 
 /// For each packed 8-bit integer maps the value to the number of logical 1 bits.
@@ -281,8 +298,8 @@ pub unsafe fn _mm256_mask_popcnt_epi8(src: __m256i, k: __mmask32, a: __m256i) ->
 #[target_feature(enable = "avx512bitalg,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntb))]
-pub unsafe fn _mm_popcnt_epi8(a: __m128i) -> __m128i {
-    transmute(simd_ctpop(a.as_i8x16()))
+pub fn _mm_popcnt_epi8(a: __m128i) -> __m128i {
+    unsafe { transmute(simd_ctpop(a.as_i8x16())) }
 }
 
 /// For each packed 8-bit integer maps the value to the number of logical 1 bits.
@@ -295,12 +312,14 @@ pub unsafe fn _mm_popcnt_epi8(a: __m128i) -> __m128i {
 #[target_feature(enable = "avx512bitalg,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntb))]
-pub unsafe fn _mm_maskz_popcnt_epi8(k: __mmask16, a: __m128i) -> __m128i {
-    transmute(simd_select_bitmask(
-        k,
-        simd_ctpop(a.as_i8x16()),
-        i8x16::ZERO,
-    ))
+pub fn _mm_maskz_popcnt_epi8(k: __mmask16, a: __m128i) -> __m128i {
+    unsafe {
+        transmute(simd_select_bitmask(
+            k,
+            simd_ctpop(a.as_i8x16()),
+            i8x16::ZERO,
+        ))
+    }
 }
 
 /// For each packed 8-bit integer maps the value to the number of logical 1 bits.
@@ -313,12 +332,14 @@ pub unsafe fn _mm_maskz_popcnt_epi8(k: __mmask16, a: __m128i) -> __m128i {
 #[target_feature(enable = "avx512bitalg,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpopcntb))]
-pub unsafe fn _mm_mask_popcnt_epi8(src: __m128i, k: __mmask16, a: __m128i) -> __m128i {
-    transmute(simd_select_bitmask(
-        k,
-        simd_ctpop(a.as_i8x16()),
-        src.as_i8x16(),
-    ))
+pub fn _mm_mask_popcnt_epi8(src: __m128i, k: __mmask16, a: __m128i) -> __m128i {
+    unsafe {
+        transmute(simd_select_bitmask(
+            k,
+            simd_ctpop(a.as_i8x16()),
+            src.as_i8x16(),
+        ))
+    }
 }
 
 /// Considers the input `b` as packed 64-bit integers and `c` as packed 8-bit integers.
@@ -330,8 +351,8 @@ pub unsafe fn _mm_mask_popcnt_epi8(src: __m128i, k: __mmask16, a: __m128i) -> __
 #[target_feature(enable = "avx512bitalg")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpshufbitqmb))]
-pub unsafe fn _mm512_bitshuffle_epi64_mask(b: __m512i, c: __m512i) -> __mmask64 {
-    bitshuffle_512(b.as_i8x64(), c.as_i8x64(), !0)
+pub fn _mm512_bitshuffle_epi64_mask(b: __m512i, c: __m512i) -> __mmask64 {
+    unsafe { bitshuffle_512(b.as_i8x64(), c.as_i8x64(), !0) }
 }
 
 /// Considers the input `b` as packed 64-bit integers and `c` as packed 8-bit integers.
@@ -346,8 +367,8 @@ pub unsafe fn _mm512_bitshuffle_epi64_mask(b: __m512i, c: __m512i) -> __mmask64 
 #[target_feature(enable = "avx512bitalg")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpshufbitqmb))]
-pub unsafe fn _mm512_mask_bitshuffle_epi64_mask(k: __mmask64, b: __m512i, c: __m512i) -> __mmask64 {
-    bitshuffle_512(b.as_i8x64(), c.as_i8x64(), k)
+pub fn _mm512_mask_bitshuffle_epi64_mask(k: __mmask64, b: __m512i, c: __m512i) -> __mmask64 {
+    unsafe { bitshuffle_512(b.as_i8x64(), c.as_i8x64(), k) }
 }
 
 /// Considers the input `b` as packed 64-bit integers and `c` as packed 8-bit integers.
@@ -359,8 +380,8 @@ pub unsafe fn _mm512_mask_bitshuffle_epi64_mask(k: __mmask64, b: __m512i, c: __m
 #[target_feature(enable = "avx512bitalg,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpshufbitqmb))]
-pub unsafe fn _mm256_bitshuffle_epi64_mask(b: __m256i, c: __m256i) -> __mmask32 {
-    bitshuffle_256(b.as_i8x32(), c.as_i8x32(), !0)
+pub fn _mm256_bitshuffle_epi64_mask(b: __m256i, c: __m256i) -> __mmask32 {
+    unsafe { bitshuffle_256(b.as_i8x32(), c.as_i8x32(), !0) }
 }
 
 /// Considers the input `b` as packed 64-bit integers and `c` as packed 8-bit integers.
@@ -375,8 +396,8 @@ pub unsafe fn _mm256_bitshuffle_epi64_mask(b: __m256i, c: __m256i) -> __mmask32 
 #[target_feature(enable = "avx512bitalg,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpshufbitqmb))]
-pub unsafe fn _mm256_mask_bitshuffle_epi64_mask(k: __mmask32, b: __m256i, c: __m256i) -> __mmask32 {
-    bitshuffle_256(b.as_i8x32(), c.as_i8x32(), k)
+pub fn _mm256_mask_bitshuffle_epi64_mask(k: __mmask32, b: __m256i, c: __m256i) -> __mmask32 {
+    unsafe { bitshuffle_256(b.as_i8x32(), c.as_i8x32(), k) }
 }
 
 /// Considers the input `b` as packed 64-bit integers and `c` as packed 8-bit integers.
@@ -388,8 +409,8 @@ pub unsafe fn _mm256_mask_bitshuffle_epi64_mask(k: __mmask32, b: __m256i, c: __m
 #[target_feature(enable = "avx512bitalg,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpshufbitqmb))]
-pub unsafe fn _mm_bitshuffle_epi64_mask(b: __m128i, c: __m128i) -> __mmask16 {
-    bitshuffle_128(b.as_i8x16(), c.as_i8x16(), !0)
+pub fn _mm_bitshuffle_epi64_mask(b: __m128i, c: __m128i) -> __mmask16 {
+    unsafe { bitshuffle_128(b.as_i8x16(), c.as_i8x16(), !0) }
 }
 
 /// Considers the input `b` as packed 64-bit integers and `c` as packed 8-bit integers.
@@ -404,8 +425,8 @@ pub unsafe fn _mm_bitshuffle_epi64_mask(b: __m128i, c: __m128i) -> __mmask16 {
 #[target_feature(enable = "avx512bitalg,avx512vl")]
 #[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
 #[cfg_attr(test, assert_instr(vpshufbitqmb))]
-pub unsafe fn _mm_mask_bitshuffle_epi64_mask(k: __mmask16, b: __m128i, c: __m128i) -> __mmask16 {
-    bitshuffle_128(b.as_i8x16(), c.as_i8x16(), k)
+pub fn _mm_mask_bitshuffle_epi64_mask(k: __mmask16, b: __m128i, c: __m128i) -> __mmask16 {
+    unsafe { bitshuffle_128(b.as_i8x16(), c.as_i8x16(), k) }
 }
 
 #[cfg(test)]

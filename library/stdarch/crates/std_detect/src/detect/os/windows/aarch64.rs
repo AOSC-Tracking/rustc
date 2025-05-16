@@ -1,6 +1,6 @@
 //! Run-time feature detection for Aarch64 on Windows.
 
-use crate::detect::{cache, Feature};
+use crate::detect::{Feature, cache};
 
 /// Try to read the features using IsProcessorFeaturePresent.
 pub(crate) fn detect_features() -> cache::Initializer {
@@ -20,7 +20,7 @@ pub(crate) fn detect_features() -> cache::Initializer {
     const PF_ARM_V83_JSCVT_INSTRUCTIONS_AVAILABLE: u32 = 44;
     const PF_ARM_V83_LRCPC_INSTRUCTIONS_AVAILABLE: u32 = 45;
 
-    extern "system" {
+    unsafe extern "system" {
         pub fn IsProcessorFeaturePresent(ProcessorFeature: DWORD) -> BOOL;
     }
 

@@ -2447,16 +2447,14 @@ fn bad_example() {
     p.cargo("run --example foo")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] no example target named `foo`.
-
+[ERROR] no example target named `foo` in default-run packages
 
 "#]])
         .run();
     p.cargo("run --bin foo")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] no bin target named `foo`.
-
+[ERROR] no bin target named `foo` in default-run packages
 
 "#]])
         .run();
@@ -3909,22 +3907,22 @@ test env_test ... ok
         .run();
 
     // Check that `cargo test` propagates the environment's $CARGO
-    let rustc = cargo_util::paths::resolve_executable("rustc".as_ref())
-        .unwrap()
-        .canonicalize()
-        .unwrap();
-    let stderr_rustc = format!(
+    let cargo_exe = cargo_test_support::cargo_exe();
+    let other_cargo_path = p.root().join(cargo_exe.file_name().unwrap());
+    std::fs::hard_link(&cargo_exe, &other_cargo_path).unwrap();
+    let stderr_other_cargo = format!(
         "{}[EXE]",
-        rustc
+        other_cargo_path
+            .canonicalize()
+            .unwrap()
             .with_extension("")
             .to_str()
             .unwrap()
-            .replace(rustc_host, "[HOST_TARGET]")
+            .replace(p.root().parent().unwrap().to_str().unwrap(), "[ROOT]")
     );
-    p.cargo("test --lib -- --nocapture")
-        // we use rustc since $CARGO is only used if it points to a path that exists
-        .env(cargo::CARGO_ENV, rustc)
-        .with_stderr_contains(stderr_rustc)
+    p.process(other_cargo_path)
+        .args(&["test", "--lib", "--", "--nocapture"])
+        .with_stderr_contains(stderr_other_cargo)
         .with_stdout_data(str![[r#"
 ...
 test env_test ... ok
@@ -4742,7 +4740,8 @@ fn test_dep_with_dev() {
         .run();
 }
 
-#[cargo_test(nightly, reason = "-Zdoctest-xcompile is unstable")]
+#[ignore = "1-86 beta betaport"]
+#[cargo_test]
 fn cargo_test_doctest_xcompile_ignores() {
     // -Zdoctest-xcompile also enables --enable-per-target-ignores which
     // allows the ignore-TARGET syntax.
@@ -4802,7 +4801,8 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
         .run();
 }
 
-#[cargo_test(nightly, reason = "-Zdoctest-xcompile is unstable")]
+#[ignore = "1-86 beta betaport"]
+#[cargo_test]
 fn cargo_test_doctest_xcompile() {
     if !cross_compile::can_run_on_host() {
         return;
@@ -4844,7 +4844,8 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     .run();
 }
 
-#[cargo_test(nightly, reason = "-Zdoctest-xcompile is unstable")]
+#[ignore = "1-86 beta betaport"]
+#[cargo_test]
 fn cargo_test_doctest_xcompile_runner() {
     if !cross_compile::can_run_on_host() {
         return;
@@ -4931,7 +4932,8 @@ this is a runner
     .run();
 }
 
-#[cargo_test(nightly, reason = "-Zdoctest-xcompile is unstable")]
+#[ignore = "1-86 beta betaport"]
+#[cargo_test]
 fn cargo_test_doctest_xcompile_no_runner() {
     if !cross_compile::can_run_on_host() {
         return;

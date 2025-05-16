@@ -16,9 +16,6 @@ use crate::core_arch::x86::__m512i;
 use crate::core_arch::x86::__mmask16;
 use crate::core_arch::x86::__mmask32;
 use crate::core_arch::x86::__mmask64;
-use crate::core_arch::x86::m128iExt;
-use crate::core_arch::x86::m256iExt;
-use crate::core_arch::x86::m512iExt;
 use crate::intrinsics::simd::simd_select_bitmask;
 use crate::mem::transmute;
 
@@ -26,7 +23,7 @@ use crate::mem::transmute;
 use stdarch_test::assert_instr;
 
 #[allow(improper_ctypes)]
-extern "C" {
+unsafe extern "C" {
     #[link_name = "llvm.x86.vgf2p8affineinvqb.512"]
     fn vgf2p8affineinvqb_512(x: i8x64, a: i8x64, imm8: u8) -> i8x64;
     #[link_name = "llvm.x86.vgf2p8affineinvqb.256"]

@@ -1337,10 +1337,9 @@ fn cargo_compile_with_filename() {
     p.cargo("build --bin bin.rs")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] no bin target named `bin.rs`.
-Available bin targets:
+[ERROR] no bin target named `bin.rs` in default-run packages
+[HELP] available bin targets:
     a
-
 
 "#]])
         .run();
@@ -1348,7 +1347,7 @@ Available bin targets:
     p.cargo("build --bin a.rs")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] no bin target named `a.rs`
+[ERROR] no bin target named `a.rs` in default-run packages
 
 [HELP] a target with a similar name exists: `a`
 
@@ -1358,10 +1357,9 @@ Available bin targets:
     p.cargo("build --example example.rs")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] no example target named `example.rs`.
-Available example targets:
+[ERROR] no example target named `example.rs` in default-run packages
+[HELP] available example targets:
     a
-
 
 "#]])
         .run();
@@ -1369,7 +1367,7 @@ Available example targets:
     p.cargo("build --example a.rs")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] no example target named `a.rs`
+[ERROR] no example target named `a.rs` in default-run packages
 
 [HELP] a target with a similar name exists: `a`
 
@@ -4068,9 +4066,12 @@ fn wrong_message_format_option() {
         .build();
 
     p.cargo("build --message-format XML")
-        .with_status(101)
+        .with_status(1)
         .with_stderr_data(str![[r#"
-[ERROR] invalid message format specifier: `xml`
+[ERROR] invalid value 'XML' for '--message-format <FMT>'
+  [possible values: human, short, json, json-diagnostic-short, json-diagnostic-rendered-ansi, json-render-diagnostics]
+
+For more information, try '--help'.
 
 "#]])
         .run();
@@ -5406,6 +5407,7 @@ fn target_edition() {
 
     p.cargo("build -v")
         .with_stderr_data(str![[r#"
+[WARNING] `edition` is set on library `foo` which is deprecated
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc [..]--edition=2018 [..]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -5906,7 +5908,7 @@ fn target_filters_workspace() {
     ws.cargo("build -v --example ex")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] no example target named `ex`
+[ERROR] no example target named `ex` in default-run packages
 
 [HELP] a target with a similar name exists: `ex1`
 
@@ -5916,7 +5918,7 @@ fn target_filters_workspace() {
     ws.cargo("build -v --example 'ex??'")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] no example target matches pattern `ex??`
+[ERROR] no example target matches pattern `ex??` in default-run packages
 
 [HELP] a target with a similar name exists: `ex1`
 

@@ -26,9 +26,8 @@ The *`inline` [attribute]* suggests that a copy of the attributed function
 should be placed in the caller, rather than generating code to call the
 function where it is defined.
 
-> ***Note***: The `rustc` compiler automatically inlines functions based on
-> internal heuristics. Incorrectly inlining functions can make the program
-> slower, so this attribute should be used with care.
+> [!NOTE]
+> The `rustc` compiler automatically inlines functions based on internal heuristics. Incorrectly inlining functions can make the program slower, so this attribute should be used with care.
 
 r[attributes.codegen.inline.modes]
 There are three ways to use the inline attribute:
@@ -39,8 +38,8 @@ There are three ways to use the inline attribute:
 * `#[inline(never)]` *suggests* that an inline expansion should never be
   performed.
 
-> ***Note***: `#[inline]` in every form is a hint, with no *requirements*
-> on the language to place a copy of the attributed function in the caller.
+> [!NOTE]
+> `#[inline]` in every form is a hint, with no *requirements* on the language to place a copy of the attributed function in the caller.
 
 r[attributes.codegen.cold]
 ### The `cold` attribute
@@ -69,7 +68,7 @@ features. It uses the [_MetaListNameValueStr_] syntax with a single key of
 ```rust
 # #[cfg(target_feature = "avx2")]
 #[target_feature(enable = "avx2")]
-unsafe fn foo_avx2() {}
+fn foo_avx2() {}
 ```
 
 r[attributes.codegen.target_feature.arch]
@@ -77,10 +76,64 @@ Each [target architecture] has a set of features that may be enabled. It is an
 error to specify a feature for a target architecture that the crate is not
 being compiled for.
 
+r[attributes.codegen.target_feature.closures]
+Closures defined within a `target_feature`-annotated function inherit the
+attribute from the enclosing function.
+
 r[attributes.codegen.target_feature.target-ub]
 It is [undefined behavior] to call a function that is compiled with a feature
 that is not supported on the current platform the code is running on, *except*
 if the platform explicitly documents this to be safe.
+
+r[attributes.codegen.target_feature.safety-restrictions]
+The following restrictions apply unless otherwise specified by the platform rules below:
+
+- Safe `#[target_feature]` functions (and closures that inherit the attribute) can only be safely called within a caller that enables all the `target_feature`s that the callee enables.
+  This restriction does not apply in an `unsafe` context.
+- Safe `#[target_feature]` functions (and closures that inherit the attribute) can only be coerced to *safe* function pointers in contexts that enable all the `target_feature`s that the coercee enables.
+  This restriction does not apply to `unsafe` function pointers.
+
+Implicitly enabled features are included in this rule. For example an `sse2` function can call ones marked with `sse`.
+
+```rust
+# #[cfg(target_feature = "sse2")] {
+#[target_feature(enable = "sse")]
+fn foo_sse() {}
+
+fn bar() {
+    // Calling `foo_sse` here is unsafe, as we must ensure that SSE is
+    // available first, even if `sse` is enabled by default on the target
+    // platform or manually enabled as compiler flags.
+    unsafe {
+        foo_sse();
+    }
+}
+
+#[target_feature(enable = "sse")]
+fn bar_sse() {
+    // Calling `foo_sse` here is safe.
+    foo_sse();
+    || foo_sse();
+}
+
+#[target_feature(enable = "sse2")]
+fn bar_sse2() {
+    // Calling `foo_sse` here is safe because `sse2` implies `sse`.
+    foo_sse();
+}
+# }
+```
+
+r[attributes.codegen.target_feature.fn-traits]
+A function with a `#[target_feature]` attribute *never* implements the `Fn` family of traits, although closures inheriting features from the enclosing function do.
+
+r[attributes.codegen.target_feature.allowed-positions]
+The `#[target_feature]` attribute is not allowed on the following places:
+
+- [the `main` function][crate.main]
+- a [`panic_handler` function][panic.panic_handler]
+- safe trait methods
+- safe default functions in traits
 
 r[attributes.codegen.target_feature.inline]
 Functions marked with `target_feature` are not inlined into a context that
@@ -98,8 +151,8 @@ r[attributes.codegen.target_feature.x86]
 
 
 Executing code with unsupported features is undefined behavior on this platform.
-Hence this platform requires that `#[target_feature]` is only applied to [`unsafe`
-functions][unsafe function].
+Hence on this platform usage of `#[target_feature]` functions follows the
+[above restrictions][attributes.codegen.target_feature.safety-restrictions].
 
 Feature     | Implicitly Enables | Description
 ------------|--------------------|-------------------
@@ -166,8 +219,8 @@ r[attributes.codegen.target_feature.aarch64]
 #### `aarch64`
 
 
-This platform requires that `#[target_feature]` is only applied to [`unsafe`
-functions][unsafe function].
+On this platform the usage of `#[target_feature]` functions follows the
+[above restrictions][attributes.codegen.target_feature.safety-restrictions].
 
 Further documentation on these features can be found in the [ARM Architecture
 Reference Manual], or elsewhere on [developer.arm.com].
@@ -175,8 +228,8 @@ Reference Manual], or elsewhere on [developer.arm.com].
 [ARM Architecture Reference Manual]: https://developer.arm.com/documentation/ddi0487/latest
 [developer.arm.com]: https://developer.arm.com
 
-> ***Note***: The following pairs of features should both be marked as enabled
-> or disabled together if used:
+> [!NOTE]
+> The following pairs of features should both be marked as enabled or disabled together if used:
 > - `paca` and `pacg`, which LLVM currently implements as one feature.
 
 
@@ -231,8 +284,8 @@ r[attributes.codegen.target_feature.riscv]
 #### `riscv32` or `riscv64`
 
 
-This platform requires that `#[target_feature]` is only applied to [`unsafe`
-functions][unsafe function].
+On this platform the usage of `#[target_feature]` functions follows the
+[above restrictions][attributes.codegen.target_feature.safety-restrictions].
 
 Further documentation on these features can be found in their respective
 specification. Many specifications are described in the [RISC-V ISA Manual] or
@@ -293,12 +346,11 @@ r[attributes.codegen.target_feature.wasm]
 #### `wasm32` or `wasm64`
 
 
-`#[target_feature]` may be used with both safe and
-[`unsafe` functions][unsafe function] on Wasm platforms. It is impossible to
-cause undefined behavior via the `#[target_feature]` attribute because
-attempting to use instructions unsupported by the Wasm engine will fail at load
-time without the risk of being interpreted in a way different from what the
-compiler expected.
+Safe `#[target_feature]` functions may always be used in safe contexts on Wasm
+platforms. It is impossible to cause undefined behavior via the
+`#[target_feature]` attribute because attempting to use instructions
+unsupported by the Wasm engine will fail at load time without the risk of being
+interpreted in a way different from what the compiler expected.
 
 Feature               | Implicitly Enables  | Description
 ----------------------|---------------------|-------------------
@@ -337,10 +389,8 @@ r[attributes.codegen.target_feature.remark-rt]
 See the [`is_x86_feature_detected`] or [`is_aarch64_feature_detected`] macros
 in the standard library for runtime feature detection on these platforms.
 
-> Note: `rustc` has a default set of features enabled for each target and CPU.
-> The CPU may be chosen with the [`-C target-cpu`] flag. Individual features
-> may be enabled or disabled for an entire crate with the
-> [`-C target-feature`] flag.
+> [!NOTE]
+> `rustc` has a default set of features enabled for each target and CPU. The CPU may be chosen with the [`-C target-cpu`] flag. Individual features may be enabled or disabled for an entire crate with the [`-C target-feature`] flag.
 
 r[attributes.codegen.track_caller]
 ## The `track_caller` attribute
@@ -374,11 +424,11 @@ fn f() {
 }
 ```
 
-> Note: `core` provides [`core::panic::Location::caller`] for observing caller locations. It wraps
-> the [`core::intrinsics::caller_location`] intrinsic implemented by `rustc`.
+> [!NOTE]
+> `core` provides [`core::panic::Location::caller`] for observing caller locations. It wraps the [`core::intrinsics::caller_location`] intrinsic implemented by `rustc`.
 
-> Note: because the resulting `Location` is a hint, an implementation may halt its walk up the stack
-> early. See [Limitations](#limitations) for important caveats.
+> [!NOTE]
+> Because the resulting `Location` is a hint, an implementation may halt its walk up the stack early. See [Limitations](#limitations) for important caveats.
 
 #### Examples
 
@@ -451,12 +501,8 @@ appears to observers to have been called at the attributed function's definition
 caller information across virtual calls. A common example of this coercion is the creation of a
 trait object whose methods are attributed.
 
-> Note: The aforementioned shim for function pointers is necessary because `rustc` implements
-> `track_caller` in a codegen context by appending an implicit parameter to the function ABI, but
-> this would be unsound for an indirect call because the parameter is not a part of the function's
-> type and a given function pointer type may or may not refer to a function with the attribute. The
-> creation of a shim hides the implicit parameter from callers of the function pointer, preserving
-> soundness.
+> [!NOTE]
+> The aforementioned shim for function pointers is necessary because `rustc` implements `track_caller` in a codegen context by appending an implicit parameter to the function ABI, but this would be unsound for an indirect call because the parameter is not a part of the function's type and a given function pointer type may or may not refer to a function with the attribute. The creation of a shim hides the implicit parameter from callers of the function pointer, preserving soundness.
 
 [_MetaListNameValueStr_]: ../attributes.md#meta-item-attribute-syntax
 [`-C target-cpu`]: ../../rustc/codegen-options/index.html#target-cpu
@@ -470,7 +516,6 @@ trait object whose methods are attributed.
 [target architecture]: ../conditional-compilation.md#target_arch
 [trait]: ../items/traits.md
 [undefined behavior]: ../behavior-considered-undefined.md
-[unsafe function]: ../unsafe-keyword.md
 [rust-abi]: ../items/external-blocks.md#abi
 [`Location`]: core::panic::Location
 
