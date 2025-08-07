@@ -807,7 +807,10 @@ impl Step for StdLink {
                 let _ = fs::remove_dir_all(sysroot.join("lib/rustlib/src/rust"));
             }
 
-            builder.cp_link_r(&builder.initial_sysroot.join("lib"), &sysroot.join("lib"));
+            builder.cp_link_r(
+                &builder.initial_sysroot.join("lib/rustlib"),
+                &sysroot.join("lib/rustlib"),
+            );
         } else {
             if builder.download_rustc() {
                 // Ensure there are no CI-rustc std artifacts.
