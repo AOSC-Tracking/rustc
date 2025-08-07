@@ -1426,6 +1426,56 @@ edition = "2021"
 }
 
 #[cargo_test]
+fn dirty_file_outside_pkg_root_inside_submodule() {
+    if !symlink_supported() {
+        return;
+    }
+    let (p, repo) = git::new_repo("foo", |p| {
+        p.file(
+            "Cargo.toml",
+            r#"
+                [workspace]
+                members = ["isengard"]
+                resolver = "2"
+            "#,
+        )
+        .file(
+            "isengard/Cargo.toml",
+            r#"
+                [package]
+                name = "isengard"
+                edition = "2015"
+                homepage = "saruman"
+                description = "saruman"
+                license = "ISC"
+            "#,
+        )
+        .file("isengard/src/lib.rs", "")
+    });
+    let submodule = git::new("submodule", |p| {
+        p.no_manifest().file("file.txt", "from-submodule")
+    });
+    git::add_submodule(
+        &repo,
+        submodule.root().to_url().as_ref(),
+        Path::new("submodule"),
+    );
+    p.symlink("submodule/file.txt", "isengard/src/file.txt");
+    git::add(&repo);
+    git::commit(&repo);
+    // This dirtyness should be detected in the future.
+    p.change_file("submodule/file.txt", "changed");
+
+    p.cargo("package --workspace --no-verify")
+        .with_stderr_data(str![[r#"
+[PACKAGING] isengard v0.0.0 ([ROOT]/foo/isengard)
+[PACKAGED] 6 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
 fn issue_13695_allow_dirty_vcs_info() {
     let p = project()
         .file(
@@ -3545,7 +3595,7 @@ fn larger_filesizes() {
                 description = "foo"
                 documentation = "https://example.com/"
             "#;
-    let lots_of_crabs = std::iter::repeat("🦀").take(1337).collect::<String>();
+    let lots_of_crabs = "🦀".repeat(1337);
     let main_rs_contents = format!(r#"fn main() {{ println!("{}"); }}"#, lots_of_crabs);
     let bar_txt_contents = "This file is relatively uncompressible, to increase the compressed
         package size beyond 1KiB.
@@ -3661,7 +3711,7 @@ fn symlink_filesizes() {
                 description = "foo"
                 homepage = "https://example.com/"
             "#;
-    let lots_of_crabs = std::iter::repeat("🦀").take(1337).collect::<String>();
+    let lots_of_crabs = "🦀".repeat(1337);
     let main_rs_contents = format!(r#"fn main() {{ println!("{}"); }}"#, lots_of_crabs);
     let bar_txt_contents = "This file is relatively uncompressible, to increase the compressed
         package size beyond 1KiB.
@@ -5756,6 +5806,77 @@ features = ["foo"]
     );
 }
 
+#[cargo_test]
+fn workspace_with_local_dev_deps() {
+    let crates_io = registry::init();
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [workspace]
+            members = ["main", "dev_dep"]
+            resolver = "3"
+
+            [workspace.dependencies]
+            dev_dep = { path = "dev_dep", version = "0.0.1" }
+        "#,
+        )
+        .file(
+            "main/Cargo.toml",
+            r#"
+            [package]
+            name = "main"
+            version = "0.0.1"
+            edition = "2024"
+            authors = []
+            license = "MIT"
+            description = "main"
+
+            [dev-dependencies]
+            dev_dep.workspace = true
+        "#,
+        )
+        .file(
+            "dev_dep/Cargo.toml",
+            r#"
+            [package]
+            name = "dev_dep"
+            version = "0.0.1"
+            edition = "2024"
+            authors = []
+            license = "MIT"
+            description = "main"
+        "#,
+        )
+        .file("main/src/lib.rs", "")
+        .file("dev_dep/src/lib.rs", "")
+        .build();
+
+    p.cargo("package -Zpackage-workspace")
+        .masquerade_as_nightly_cargo(&["package-workspace"])
+        .replace_crates_io(crates_io.index_url())
+        .with_stdout_data("")
+        .with_stderr_data(str![[r#"
+[WARNING] manifest has no documentation, homepage or repository.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info.
+[PACKAGING] dev_dep v0.0.1 ([ROOT]/foo/dev_dep)
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[WARNING] manifest has no documentation, homepage or repository.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info.
+[PACKAGING] main v0.0.1 ([ROOT]/foo/main)
+[UPDATING] crates.io index
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[VERIFYING] dev_dep v0.0.1 ([ROOT]/foo/dev_dep)
+[COMPILING] dev_dep v0.0.1 ([ROOT]/foo/target/package/dev_dep-0.0.1)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[VERIFYING] main v0.0.1 ([ROOT]/foo/main)
+[COMPILING] main v0.0.1 ([ROOT]/foo/target/package/main-0.0.1)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
 fn workspace_with_local_deps_packaging_one_fails_project() -> Project {
     project()
         .file(
@@ -6065,6 +6186,7 @@ src/main.rs
 
 #[cargo_test]
 fn workspace_with_local_deps_index_mismatch() {
+    registry::init();
     let alt_reg = registry::RegistryBuilder::new()
         .http_api()
         .http_index()
@@ -6123,12 +6245,12 @@ fn workspace_with_local_deps_index_mismatch() {
 [PACKAGING] level2 v0.0.1 ([ROOT]/foo/level2)
 [PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
 [PACKAGING] level1 v0.0.1 ([ROOT]/foo/level1)
-[UPDATING] crates.io index
+[UPDATING] `dummy-registry` index
 [ERROR] failed to prepare local package for uploading
 
 Caused by:
   no matching package named `level2` found
-  location searched: crates.io index
+  location searched: `dummy-registry` index (which is replacing registry `crates-io`)
   required by package `level1 v0.0.1 ([ROOT]/foo/level1)`
 
 "#]])
@@ -6765,6 +6887,125 @@ fn registry_inferred_from_unique_option() {
 
 #[cargo_test]
 fn registry_not_inferred_because_of_conflict() {
+    let _alt_reg = registry::RegistryBuilder::new()
+        .http_api()
+        .http_index()
+        .alternative()
+        .build();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [workspace]
+            members = ["dep", "main"]
+            "#,
+        )
+        .file(
+            "main/Cargo.toml",
+            r#"
+            [package]
+            name = "main"
+            version = "0.0.1"
+            edition = "2015"
+            authors = []
+            license = "MIT"
+            description = "main"
+            repository = "bar"
+            publish = ["alternative"]
+
+            [dependencies]
+            dep = { path = "../dep", version = "0.1.0", registry = "alternative" }
+        "#,
+        )
+        .file("main/src/main.rs", "fn main() {}")
+        .file(
+            "dep/Cargo.toml",
+            r#"
+            [package]
+            name = "dep"
+            version = "0.1.0"
+            edition = "2015"
+            authors = []
+            license = "MIT"
+            description = "dep"
+            repository = "bar"
+            publish = ["alternative2"]
+        "#,
+        )
+        .file("dep/src/lib.rs", "")
+        .build();
+
+    p.cargo("package")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[PACKAGING] dep v0.1.0 ([ROOT]/foo/dep)
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] main v0.0.1 ([ROOT]/foo/main)
+[UPDATING] `alternative` index
+[ERROR] failed to prepare local package for uploading
+
+Caused by:
+  no matching package named `dep` found
+  location searched: `alternative` index
+  required by package `main v0.0.1 ([ROOT]/foo/main)`
+
+"#]])
+        .run();
+
+    p.cargo("package --exclude-lockfile")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[PACKAGING] dep v0.1.0 ([ROOT]/foo/dep)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] main v0.0.1 ([ROOT]/foo/main)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[VERIFYING] dep v0.1.0 ([ROOT]/foo/dep)
+[COMPILING] dep v0.1.0 ([ROOT]/foo/target/package/dep-0.1.0)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[VERIFYING] main v0.0.1 ([ROOT]/foo/main)
+[UPDATING] `alternative` index
+[ERROR] failed to verify package tarball
+
+Caused by:
+  no matching package named `dep` found
+  location searched: `alternative` index
+  required by package `main v0.0.1 ([ROOT]/foo/target/package/main-0.0.1)`
+
+"#]])
+        .run();
+
+    p.cargo("package --no-verify")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[PACKAGING] dep v0.1.0 ([ROOT]/foo/dep)
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] main v0.0.1 ([ROOT]/foo/main)
+[UPDATING] `alternative` index
+[ERROR] failed to prepare local package for uploading
+
+Caused by:
+  no matching package named `dep` found
+  location searched: `alternative` index
+  required by package `main v0.0.1 ([ROOT]/foo/main)`
+
+"#]])
+        .run();
+
+    p.cargo("package --exclude-lockfile --no-verify")
+        .with_status(0)
+        .with_stderr_data(str![[r#"
+[PACKAGING] dep v0.1.0 ([ROOT]/foo/dep)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] main v0.0.1 ([ROOT]/foo/main)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn registry_not_inferred_because_of_conflict_nightly() {
     let alt_reg = registry::RegistryBuilder::new()
         .http_api()
         .http_index()
@@ -6819,6 +7060,35 @@ fn registry_not_inferred_because_of_conflict() {
         .with_status(101)
         .with_stderr_data(str![[r#"
 [ERROR] conflicts between `package.publish` fields in the selected packages
+
+"#]])
+        .run();
+
+    p.cargo("package --exclude-lockfile -Zpackage-workspace")
+        .masquerade_as_nightly_cargo(&["package-workspace"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] conflicts between `package.publish` fields in the selected packages
+
+"#]])
+        .run();
+
+    p.cargo("package --no-verify -Zpackage-workspace")
+        .masquerade_as_nightly_cargo(&["package-workspace"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] conflicts between `package.publish` fields in the selected packages
+
+"#]])
+        .run();
+
+    p.cargo("package --exclude-lockfile --no-verify -Zpackage-workspace")
+        .masquerade_as_nightly_cargo(&["package-workspace"])
+        .with_stderr_data(str![[r#"
+[PACKAGING] dep v0.1.0 ([ROOT]/foo/dep)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] main v0.0.1 ([ROOT]/foo/main)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
 
 "#]])
         .run();
@@ -7002,11 +7272,142 @@ fn registry_not_inferred_because_of_multiple_options() {
         .file("dep/src/lib.rs", "")
         .build();
 
+    p.cargo("package --exclude-lockfile")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[PACKAGING] dep v0.1.0 ([ROOT]/foo/dep)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] main v0.0.1 ([ROOT]/foo/main)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[VERIFYING] dep v0.1.0 ([ROOT]/foo/dep)
+[COMPILING] dep v0.1.0 ([ROOT]/foo/target/package/dep-0.1.0)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[VERIFYING] main v0.0.1 ([ROOT]/foo/main)
+[UPDATING] `alternative` index
+[ERROR] failed to verify package tarball
+
+Caused by:
+  no matching package named `dep` found
+  location searched: `alternative` index
+  required by package `main v0.0.1 ([ROOT]/foo/target/package/main-0.0.1)`
+
+"#]])
+        .run();
+
+    p.cargo("package --no-verify")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[PACKAGING] dep v0.1.0 ([ROOT]/foo/dep)
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] main v0.0.1 ([ROOT]/foo/main)
+[UPDATING] `alternative` index
+[ERROR] failed to prepare local package for uploading
+
+Caused by:
+  no matching package named `dep` found
+  location searched: `alternative` index
+  required by package `main v0.0.1 ([ROOT]/foo/main)`
+
+"#]])
+        .run();
+
+    p.cargo("package --exclude-lockfile --no-verify")
+        .with_status(0)
+        .with_stderr_data(str![[r#"
+[PACKAGING] dep v0.1.0 ([ROOT]/foo/dep)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] main v0.0.1 ([ROOT]/foo/main)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn registry_not_inferred_because_of_multiple_options_nightly() {
+    let _alt_reg = registry::RegistryBuilder::new()
+        .http_api()
+        .http_index()
+        .alternative()
+        .build();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [workspace]
+            members = ["dep", "main"]
+            "#,
+        )
+        .file(
+            "main/Cargo.toml",
+            r#"
+            [package]
+            name = "main"
+            version = "0.0.1"
+            edition = "2015"
+            authors = []
+            license = "MIT"
+            description = "main"
+            repository = "bar"
+            publish = ["alternative", "alternative2"]
+
+            [dependencies]
+            dep = { path = "../dep", version = "0.1.0", registry = "alternative" }
+        "#,
+        )
+        .file("main/src/main.rs", "fn main() {}")
+        .file(
+            "dep/Cargo.toml",
+            r#"
+            [package]
+            name = "dep"
+            version = "0.1.0"
+            edition = "2015"
+            authors = []
+            license = "MIT"
+            description = "dep"
+            repository = "bar"
+            publish = ["alternative", "alternative2"]
+        "#,
+        )
+        .file("dep/src/lib.rs", "")
+        .build();
+
     p.cargo("package -Zpackage-workspace")
         .masquerade_as_nightly_cargo(&["package-workspace"])
         .with_status(101)
         .with_stderr_data(str![[r#"
 [ERROR] --registry is required to disambiguate between "alternative" or "alternative2" registries
+
+"#]])
+        .run();
+
+    p.cargo("package --exclude-lockfile -Zpackage-workspace")
+        .masquerade_as_nightly_cargo(&["package-workspace"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] --registry is required to disambiguate between "alternative" or "alternative2" registries
+
+"#]])
+        .run();
+
+    p.cargo("package --no-verify -Zpackage-workspace")
+        .masquerade_as_nightly_cargo(&["package-workspace"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] --registry is required to disambiguate between "alternative" or "alternative2" registries
+
+"#]])
+        .run();
+
+    p.cargo("package --exclude-lockfile --no-verify -Zpackage-workspace")
+        .masquerade_as_nightly_cargo(&["package-workspace"])
+        .with_stderr_data(str![[r#"
+[PACKAGING] dep v0.1.0 ([ROOT]/foo/dep)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] main v0.0.1 ([ROOT]/foo/main)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
 
 "#]])
         .run();
@@ -7085,11 +7486,160 @@ fn registry_not_inferred_because_of_mismatch() {
         .file("dep/src/lib.rs", "")
         .build();
 
+    p.cargo("package")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[PACKAGING] dep v0.1.0 ([ROOT]/foo/dep)
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] main v0.0.1 ([ROOT]/foo/main)
+[UPDATING] `alternative` index
+[ERROR] failed to prepare local package for uploading
+
+Caused by:
+  no matching package named `dep` found
+  location searched: `alternative` index
+  required by package `main v0.0.1 ([ROOT]/foo/main)`
+
+"#]])
+        .run();
+
+    p.cargo("package --exclude-lockfile")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[PACKAGING] dep v0.1.0 ([ROOT]/foo/dep)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] main v0.0.1 ([ROOT]/foo/main)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[VERIFYING] dep v0.1.0 ([ROOT]/foo/dep)
+[COMPILING] dep v0.1.0 ([ROOT]/foo/target/package/dep-0.1.0)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[VERIFYING] main v0.0.1 ([ROOT]/foo/main)
+[UPDATING] `alternative` index
+[ERROR] failed to verify package tarball
+
+Caused by:
+  no matching package named `dep` found
+  location searched: `alternative` index
+  required by package `main v0.0.1 ([ROOT]/foo/target/package/main-0.0.1)`
+
+"#]])
+        .run();
+
+    p.cargo("package --no-verify")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[PACKAGING] dep v0.1.0 ([ROOT]/foo/dep)
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] main v0.0.1 ([ROOT]/foo/main)
+[UPDATING] `alternative` index
+[ERROR] failed to prepare local package for uploading
+
+Caused by:
+  no matching package named `dep` found
+  location searched: `alternative` index
+  required by package `main v0.0.1 ([ROOT]/foo/main)`
+
+"#]])
+        .run();
+
+    p.cargo("package --exclude-lockfile --no-verify")
+        .with_status(0)
+        .with_stderr_data(str![[r#"
+[PACKAGING] dep v0.1.0 ([ROOT]/foo/dep)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] main v0.0.1 ([ROOT]/foo/main)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn registry_not_inferred_because_of_mismatch_nightly() {
+    let _alt_reg = registry::RegistryBuilder::new()
+        .http_api()
+        .http_index()
+        .alternative()
+        .build();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [workspace]
+            members = ["dep", "main"]
+            "#,
+        )
+        .file(
+            "main/Cargo.toml",
+            r#"
+            [package]
+            name = "main"
+            version = "0.0.1"
+            edition = "2015"
+            authors = []
+            license = "MIT"
+            description = "main"
+            repository = "bar"
+            publish = ["alternative"]
+
+            [dependencies]
+            dep = { path = "../dep", version = "0.1.0", registry = "alternative" }
+        "#,
+        )
+        .file("main/src/main.rs", "fn main() {}")
+        // No `publish` field means "any registry", but the presence of this package
+        // will stop us from inferring a registry.
+        .file(
+            "dep/Cargo.toml",
+            r#"
+            [package]
+            name = "dep"
+            version = "0.1.0"
+            edition = "2015"
+            authors = []
+            license = "MIT"
+            description = "dep"
+            repository = "bar"
+        "#,
+        )
+        .file("dep/src/lib.rs", "")
+        .build();
+
     p.cargo("package -Zpackage-workspace")
         .masquerade_as_nightly_cargo(&["package-workspace"])
         .with_status(101)
         .with_stderr_data(str![[r#"
 [ERROR] --registry is required because not all `package.publish` settings agree
+
+"#]])
+        .run();
+
+    p.cargo("package --exclude-lockfile -Zpackage-workspace")
+        .masquerade_as_nightly_cargo(&["package-workspace"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] --registry is required because not all `package.publish` settings agree
+
+"#]])
+        .run();
+
+    p.cargo("package --no-verify -Zpackage-workspace")
+        .masquerade_as_nightly_cargo(&["package-workspace"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] --registry is required because not all `package.publish` settings agree
+
+"#]])
+        .run();
+
+    p.cargo("package --exclude-lockfile --no-verify -Zpackage-workspace")
+        .masquerade_as_nightly_cargo(&["package-workspace"])
+        .with_stderr_data(str![[r#"
+[PACKAGING] dep v0.1.0 ([ROOT]/foo/dep)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] main v0.0.1 ([ROOT]/foo/main)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
 
 "#]])
         .run();
@@ -7436,6 +7986,39 @@ fn unpublished_cyclic_dev_dependencies() {
         &["Cargo.toml", "Cargo.toml.orig", "src/lib.rs"],
         (),
     );
+}
+
+#[cargo_test]
+fn unpublished_cyclic_dev_dependencies_nightly() {
+    registry::init();
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.1"
+                edition = "2015"
+                authors = []
+                license = "MIT"
+                description = "foo"
+                documentation = "foo"
+
+                [dev-dependencies]
+                foo = { path = ".", version = "0.0.1" }
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("package --no-verify --exclude-lockfile -Zpackage-workspace")
+        .masquerade_as_nightly_cargo(&["package-workspace"])
+        .with_stderr_data(str![[r#"
+[PACKAGING] foo v0.0.1 ([ROOT]/foo)
+[PACKAGED] 3 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+
+"#]])
+        .run();
 }
 
 // A failing case from <https://github.com/rust-lang/cargo/issues/15059>

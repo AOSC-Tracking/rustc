@@ -957,10 +957,7 @@ pub fn _mm256_cvtepu8_epi64(a: __m128i) -> __m256i {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_extracti128_si256)
 #[inline]
 #[target_feature(enable = "avx2")]
-#[cfg_attr(
-    all(test, not(target_env = "msvc")),
-    assert_instr(vextractf128, IMM1 = 1)
-)]
+#[cfg_attr(test, assert_instr(vextractf128, IMM1 = 1))]
 #[rustc_legacy_const_generics(1)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub fn _mm256_extracti128_si256<const IMM1: i32>(a: __m256i) -> __m128i {
@@ -1781,10 +1778,7 @@ pub unsafe fn _mm256_mask_i64gather_pd<const SCALE: i32>(
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_inserti128_si256)
 #[inline]
 #[target_feature(enable = "avx2")]
-#[cfg_attr(
-    all(test, not(target_env = "msvc")),
-    assert_instr(vinsertf128, IMM1 = 1)
-)]
+#[cfg_attr(test, assert_instr(vinsertf128, IMM1 = 1))]
 #[rustc_legacy_const_generics(2)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub fn _mm256_inserti128_si256<const IMM1: i32>(a: __m256i, b: __m128i) -> __m256i {
@@ -2152,7 +2146,7 @@ pub fn _mm256_movemask_epi8(a: __m256i) -> i32 {
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub fn _mm256_mpsadbw_epu8<const IMM8: i32>(a: __m256i, b: __m256i) -> __m256i {
     static_assert_uimm_bits!(IMM8, 8);
-    unsafe { transmute(mpsadbw(a.as_u8x32(), b.as_u8x32(), IMM8)) }
+    unsafe { transmute(mpsadbw(a.as_u8x32(), b.as_u8x32(), IMM8 as i8)) }
 }
 
 /// Multiplies the low 32-bit integers from each packed 64-bit element in
@@ -3806,7 +3800,7 @@ unsafe extern "C" {
     #[link_name = "llvm.x86.avx2.maskstore.q.256"]
     fn maskstoreq256(mem_addr: *mut i8, mask: i64x4, a: i64x4);
     #[link_name = "llvm.x86.avx2.mpsadbw"]
-    fn mpsadbw(a: u8x32, b: u8x32, imm8: i32) -> u16x16;
+    fn mpsadbw(a: u8x32, b: u8x32, imm8: i8) -> u16x16;
     #[link_name = "llvm.x86.avx2.pmul.hr.sw"]
     fn pmulhrsw(a: i16x16, b: i16x16) -> i16x16;
     #[link_name = "llvm.x86.avx2.packsswb"]

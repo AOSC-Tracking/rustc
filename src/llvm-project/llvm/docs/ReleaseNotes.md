@@ -202,6 +202,10 @@ Changes to the DirectX Backend
 Changes to the Hexagon Backend
 ------------------------------
 
+* The default Hexagon architecture version in ELF object files produced by
+  the tools such as llvm-mc is changed to v68. This version will be set if
+  the user does not provide the CPU version in the command line.
+
 Changes to the LoongArch Backend
 --------------------------------
 
@@ -344,6 +348,15 @@ Changes to the RISC-V Backend
 * Adds experimental assembler support for the Qualcomm uC 'Xqcilo` (Large Offset Load Store)
   extension.
 * Added ``Sdext`` and ``Sdtrig`` extensions.
+
+Changes to the SystemZ Backend
+------------------------------
+
+* Added support for the IBM z17 processor and the arch15 cpu architecture.
+* Added support for `__builtin_setjump` and `__builtin_longjmp`.
+* Improve inlining heuristics to fix compile time explosion in certain cases.
+* Improve various cost functions.
+* Improve compatibility of the assembler parser with the GNU assembler.
 
 Changes to the WebAssembly Backend
 ----------------------------------

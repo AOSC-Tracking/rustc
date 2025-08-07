@@ -7,7 +7,9 @@ use rustc_hir::{self as hir, AmbigArg, HirId};
 use rustc_middle::query::plumbing::CyclePlaceholder;
 use rustc_middle::ty::print::with_forced_trimmed_paths;
 use rustc_middle::ty::util::IntTypeExt;
-use rustc_middle::ty::{self, IsSuggestable, Ty, TyCtxt, TypeVisitableExt, fold_regions};
+use rustc_middle::ty::{
+    self, DefiningScopeKind, IsSuggestable, Ty, TyCtxt, TypeVisitableExt, fold_regions,
+};
 use rustc_middle::{bug, span_bug};
 use rustc_span::{DUMMY_SP, Ident, Span};
 
@@ -92,10 +94,12 @@ fn const_arg_anon_type_of<'tcx>(icx: &ItemCtxt<'tcx>, arg_hir_id: HirId, span: S
         }
 
         Node::TyPat(pat) => {
-            let hir::TyKind::Pat(ty, p) = tcx.parent_hir_node(pat.hir_id).expect_ty().kind else {
-                bug!()
+            let node = match tcx.parent_hir_node(pat.hir_id) {
+                // Or patterns can be nested one level deep
+                Node::TyPat(p) => tcx.parent_hir_node(p.hir_id),
+                other => other,
             };
-            assert_eq!(p.hir_id, pat.hir_id);
+            let hir::TyKind::Pat(ty, _) = node.expect_ty().kind else { bug!() };
             icx.lower_ty(ty)
         }
 
@@ -202,7 +206,7 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::EarlyBinder<'_
         },
 
         Node::Item(item) => match item.kind {
-            ItemKind::Static(ident, ty, .., body_id) => {
+            ItemKind::Static(_, ident, ty, body_id) => {
                 if ty.is_suggestable_infer_ty() {
                     infer_placeholder_type(
                         icx.lowerer(),
@@ -216,7 +220,7 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::EarlyBinder<'_
                     icx.lower_ty(ty)
                 }
             }
-            ItemKind::Const(ident, ty, _, body_id) => {
+            ItemKind::Const(ident, _, ty, body_id) => {
                 if ty.is_suggestable_infer_ty() {
                     infer_placeholder_type(
                         icx.lowerer(),
@@ -230,7 +234,7 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::EarlyBinder<'_
                     icx.lower_ty(ty)
                 }
             }
-            ItemKind::TyAlias(_, self_ty, _) => icx.lower_ty(self_ty),
+            ItemKind::TyAlias(_, _, self_ty) => icx.lower_ty(self_ty),
             ItemKind::Impl(hir::Impl { self_ty, .. }) => match self_ty.find_self_aliases() {
                 spans if spans.len() > 0 => {
                     let guar = tcx
@@ -324,10 +328,18 @@ pub(super) fn type_of_opaque(
     if let Some(def_id) = def_id.as_local() {
         Ok(ty::EarlyBinder::bind(match tcx.hir_node_by_def_id(def_id).expect_opaque_ty().origin {
             hir::OpaqueTyOrigin::TyAlias { in_assoc_ty: false, .. } => {
-                opaque::find_opaque_ty_constraints_for_tait(tcx, def_id)
+                opaque::find_opaque_ty_constraints_for_tait(
+                    tcx,
+                    def_id,
+                    DefiningScopeKind::MirBorrowck,
+                )
             }
             hir::OpaqueTyOrigin::TyAlias { in_assoc_ty: true, .. } => {
-                opaque::find_opaque_ty_constraints_for_impl_trait_in_assoc_type(tcx, def_id)
+                opaque::find_opaque_ty_constraints_for_impl_trait_in_assoc_type(
+                    tcx,
+                    def_id,
+                    DefiningScopeKind::MirBorrowck,
+                )
             }
             // Opaque types desugared from `impl Trait`.
             hir::OpaqueTyOrigin::FnReturn { parent: owner, in_trait_or_impl }
@@ -340,7 +352,12 @@ pub(super) fn type_of_opaque(
                         "tried to get type of this RPITIT with no definition"
                     );
                 }
-                opaque::find_opaque_ty_constraints_for_rpit(tcx, def_id, owner)
+                opaque::find_opaque_ty_constraints_for_rpit(
+                    tcx,
+                    def_id,
+                    owner,
+                    DefiningScopeKind::MirBorrowck,
+                )
             }
         }))
     } else {
@@ -348,6 +365,42 @@ pub(super) fn type_of_opaque(
         // and load the type from metadata.
         Ok(tcx.type_of(def_id))
     }
+}
+
+pub(super) fn type_of_opaque_hir_typeck(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+) -> ty::EarlyBinder<'_, Ty<'_>> {
+    ty::EarlyBinder::bind(match tcx.hir_node_by_def_id(def_id).expect_opaque_ty().origin {
+        hir::OpaqueTyOrigin::TyAlias { in_assoc_ty: false, .. } => {
+            opaque::find_opaque_ty_constraints_for_tait(tcx, def_id, DefiningScopeKind::HirTypeck)
+        }
+        hir::OpaqueTyOrigin::TyAlias { in_assoc_ty: true, .. } => {
+            opaque::find_opaque_ty_constraints_for_impl_trait_in_assoc_type(
+                tcx,
+                def_id,
+                DefiningScopeKind::HirTypeck,
+            )
+        }
+        // Opaque types desugared from `impl Trait`.
+        hir::OpaqueTyOrigin::FnReturn { parent: owner, in_trait_or_impl }
+        | hir::OpaqueTyOrigin::AsyncFn { parent: owner, in_trait_or_impl } => {
+            if in_trait_or_impl == Some(hir::RpitContext::Trait)
+                && !tcx.defaultness(owner).has_value()
+            {
+                span_bug!(
+                    tcx.def_span(def_id),
+                    "tried to get type of this RPITIT with no definition"
+                );
+            }
+            opaque::find_opaque_ty_constraints_for_rpit(
+                tcx,
+                def_id,
+                owner,
+                DefiningScopeKind::HirTypeck,
+            )
+        }
+    })
 }
 
 fn infer_placeholder_type<'tcx>(
@@ -399,13 +452,6 @@ fn infer_placeholder_type<'tcx>(
             if let Some(ty) = node.ty() {
                 visitor.visit_ty_unambig(ty);
             }
-            // If we have just one span, let's try to steal a const `_` feature error.
-            let try_steal_span = if !tcx.features().generic_arg_infer() && visitor.spans.len() == 1
-            {
-                visitor.spans.first().copied()
-            } else {
-                None
-            };
             // If we didn't find any infer tys, then just fallback to `span`.
             if visitor.spans.is_empty() {
                 visitor.spans.push(span);
@@ -436,15 +482,7 @@ fn infer_placeholder_type<'tcx>(
                 }
             }
 
-            if let Some(try_steal_span) = try_steal_span {
-                cx.dcx().try_steal_replace_and_emit_err(
-                    try_steal_span,
-                    StashKey::UnderscoreForArrayLengths,
-                    diag,
-                )
-            } else {
-                diag.emit()
-            }
+            diag.emit()
         });
     Ty::new_error(tcx, guar)
 }
@@ -479,5 +517,5 @@ pub(crate) fn type_alias_is_lazy<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) ->
             }
         }
     }
-    HasTait.visit_ty_unambig(tcx.hir_expect_item(def_id).expect_ty_alias().1).is_break()
+    HasTait.visit_ty_unambig(tcx.hir_expect_item(def_id).expect_ty_alias().2).is_break()
 }

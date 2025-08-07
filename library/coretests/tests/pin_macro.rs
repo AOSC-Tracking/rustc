@@ -38,7 +38,6 @@ fn rust_2024_expr() {
 }
 
 #[test]
-#[cfg(not(bootstrap))]
 fn temp_lifetime() {
     // Check that temporary lifetimes work as in Rust 2021.
     // Regression test for https://github.com/rust-lang/rust/issues/138596
@@ -46,4 +45,15 @@ fn temp_lifetime() {
         _ => {}
     }
     async fn foo(_: &mut usize) {}
+}
+
+#[test]
+fn transitive_extension() {
+    async fn temporary() {}
+
+    // `pin!` witnessed in the wild being used like this, even if it yields
+    // a `Pin<&mut &mut impl Unpin>`; it does work because `pin!`
+    // happens to transitively extend the lifespan of `temporary()`.
+    let p = pin!(&mut temporary());
+    let _use = p;
 }

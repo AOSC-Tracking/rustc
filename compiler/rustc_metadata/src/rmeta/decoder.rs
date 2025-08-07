@@ -1,12 +1,11 @@
 // Decoding metadata from a single crate's metadata
 
 use std::iter::TrustedLen;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use std::{io, iter, mem};
+use std::{io, mem};
 
 pub(super) use cstore_impl::provide;
-use proc_macro::bridge::client::ProcMacro;
 use rustc_ast as ast;
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxIndexMap;
@@ -26,6 +25,7 @@ use rustc_middle::mir::interpret::{AllocDecodingSession, AllocDecodingState};
 use rustc_middle::ty::Visibility;
 use rustc_middle::ty::codec::TyDecoder;
 use rustc_middle::{bug, implement_ty_decoder};
+use rustc_proc_macro::bridge::client::ProcMacro;
 use rustc_serialize::opaque::MemDecoder;
 use rustc_serialize::{Decodable, Decoder};
 use rustc_session::Session;
@@ -562,9 +562,9 @@ impl<'a, 'tcx> SpanDecoder for DecodeContext<'a, 'tcx> {
                     Symbol::intern(s)
                 })
             }
-            SYMBOL_PREINTERNED => {
+            SYMBOL_PREDEFINED => {
                 let symbol_index = self.read_u32();
-                Symbol::new_from_decoded(symbol_index)
+                Symbol::new(symbol_index)
             }
             _ => unreachable!(),
         }
@@ -1272,34 +1272,30 @@ impl<'a> CrateMetadataRef<'a> {
         id: DefIndex,
         sess: &'a Session,
     ) -> impl Iterator<Item = ModChild> {
-        iter::from_coroutine(
-            #[coroutine]
-            move || {
-                if let Some(data) = &self.root.proc_macro_data {
-                    // If we are loading as a proc macro, we want to return
-                    // the view of this crate as a proc macro crate.
-                    if id == CRATE_DEF_INDEX {
-                        for child_index in data.macros.decode(self) {
-                            yield self.get_mod_child(child_index, sess);
-                        }
-                    }
-                } else {
-                    // Iterate over all children.
-                    let non_reexports =
-                        self.root.tables.module_children_non_reexports.get(self, id);
-                    for child_index in non_reexports.unwrap().decode(self) {
+        gen move {
+            if let Some(data) = &self.root.proc_macro_data {
+                // If we are loading as a proc macro, we want to return
+                // the view of this crate as a proc macro crate.
+                if id == CRATE_DEF_INDEX {
+                    for child_index in data.macros.decode(self) {
                         yield self.get_mod_child(child_index, sess);
                     }
+                }
+            } else {
+                // Iterate over all children.
+                let non_reexports = self.root.tables.module_children_non_reexports.get(self, id);
+                for child_index in non_reexports.unwrap().decode(self) {
+                    yield self.get_mod_child(child_index, sess);
+                }
 
-                    let reexports = self.root.tables.module_children_reexports.get(self, id);
-                    if !reexports.is_default() {
-                        for reexport in reexports.decode((self, sess)) {
-                            yield reexport;
-                        }
+                let reexports = self.root.tables.module_children_reexports.get(self, id);
+                if !reexports.is_default() {
+                    for reexport in reexports.decode((self, sess)) {
+                        yield reexport;
                     }
                 }
-            },
-        )
+            }
+        }
     }
 
     fn is_ctfe_mir_available(self, id: DefIndex) -> bool {
@@ -1313,7 +1309,7 @@ impl<'a> CrateMetadataRef<'a> {
     fn get_fn_has_self_parameter(self, id: DefIndex, sess: &'a Session) -> bool {
         self.root
             .tables
-            .fn_arg_names
+            .fn_arg_idents
             .get(self, id)
             .expect("argument names not encoded for a function")
             .decode((self, sess))
@@ -1332,29 +1328,30 @@ impl<'a> CrateMetadataRef<'a> {
     }
 
     fn get_associated_item(self, id: DefIndex, sess: &'a Session) -> ty::AssocItem {
-        let name = if self.root.tables.opt_rpitit_info.get(self, id).is_some() {
-            kw::Empty
-        } else {
-            self.item_name(id)
-        };
-        let (kind, has_self) = match self.def_kind(id) {
-            DefKind::AssocConst => (ty::AssocKind::Const, false),
-            DefKind::AssocFn => (ty::AssocKind::Fn, self.get_fn_has_self_parameter(id, sess)),
-            DefKind::AssocTy => (ty::AssocKind::Type, false),
+        let kind = match self.def_kind(id) {
+            DefKind::AssocConst => ty::AssocKind::Const { name: self.item_name(id) },
+            DefKind::AssocFn => ty::AssocKind::Fn {
+                name: self.item_name(id),
+                has_self: self.get_fn_has_self_parameter(id, sess),
+            },
+            DefKind::AssocTy => {
+                let data = if let Some(rpitit_info) = self.root.tables.opt_rpitit_info.get(self, id)
+                {
+                    ty::AssocTypeData::Rpitit(rpitit_info.decode(self))
+                } else {
+                    ty::AssocTypeData::Normal(self.item_name(id))
+                };
+                ty::AssocKind::Type { data }
+            }
             _ => bug!("cannot get associated-item of `{:?}`", self.def_key(id)),
         };
         let container = self.root.tables.assoc_container.get(self, id).unwrap();
-        let opt_rpitit_info =
-            self.root.tables.opt_rpitit_info.get(self, id).map(|d| d.decode(self));
 
         ty::AssocItem {
-            name,
             kind,
             def_id: self.local_def_id(id),
             trait_item_def_id: self.get_trait_item_def_id(id),
             container,
-            fn_has_self_parameter: has_self,
-            opt_rpitit_info,
         }
     }
 
@@ -1488,6 +1485,17 @@ impl<'a> CrateMetadataRef<'a> {
         tcx.arena.alloc_from_iter(self.root.lang_items_missing.decode(self))
     }
 
+    fn get_exportable_items(self) -> impl Iterator<Item = DefId> {
+        self.root.exportable_items.decode(self).map(move |index| self.local_def_id(index))
+    }
+
+    fn get_stable_order_of_exportable_impls(self) -> impl Iterator<Item = (DefId, usize)> {
+        self.root
+            .stable_order_of_exportable_impls
+            .decode(self)
+            .map(move |v| (self.local_def_id(v.0), v.1))
+    }
+
     fn exported_symbols<'tcx>(
         self,
         tcx: TyCtxt<'tcx>,
@@ -1598,10 +1606,14 @@ impl<'a> CrateMetadataRef<'a> {
     /// Proc macro crates don't currently export spans, so this function does not have
     /// to work for them.
     fn imported_source_file(self, source_file_index: u32, sess: &Session) -> ImportedSourceFile {
-        fn filter<'a>(sess: &Session, path: Option<&'a Path>) -> Option<&'a Path> {
+        fn filter<'a>(
+            sess: &Session,
+            real_source_base_dir: &Option<PathBuf>,
+            path: Option<&'a Path>,
+        ) -> Option<&'a Path> {
             path.filter(|_| {
                 // Only spend time on further checks if we have what to translate *to*.
-                sess.opts.real_rust_source_base_dir.is_some()
+                real_source_base_dir.is_some()
                 // Some tests need the translation to be always skipped.
                 && sess.opts.unstable_opts.translate_remapped_path_to_local_path
             })
@@ -1613,84 +1625,92 @@ impl<'a> CrateMetadataRef<'a> {
             })
         }
 
-        let try_to_translate_virtual_to_real = |name: &mut rustc_span::FileName| {
-            // Translate the virtual `/rustc/$hash` prefix back to a real directory
-            // that should hold actual sources, where possible.
-            //
-            // NOTE: if you update this, you might need to also update bootstrap's code for generating
-            // the `rust-src` component in `Src::run` in `src/bootstrap/dist.rs`.
-            let virtual_rust_source_base_dir = [
-                filter(sess, option_env!("CFG_VIRTUAL_RUST_SOURCE_BASE_DIR").map(Path::new)),
-                filter(sess, sess.opts.unstable_opts.simulate_remapped_rust_src_base.as_deref()),
-            ];
+        let try_to_translate_virtual_to_real =
+            |virtual_source_base_dir: Option<&str>,
+             real_source_base_dir: &Option<PathBuf>,
+             name: &mut rustc_span::FileName| {
+                let virtual_source_base_dir = [
+                    filter(sess, real_source_base_dir, virtual_source_base_dir.map(Path::new)),
+                    filter(
+                        sess,
+                        real_source_base_dir,
+                        sess.opts.unstable_opts.simulate_remapped_rust_src_base.as_deref(),
+                    ),
+                ];
 
-            debug!(
-                "try_to_translate_virtual_to_real(name={:?}): \
-                 virtual_rust_source_base_dir={:?}, real_rust_source_base_dir={:?}",
-                name, virtual_rust_source_base_dir, sess.opts.real_rust_source_base_dir,
-            );
+                debug!(
+                    "try_to_translate_virtual_to_real(name={:?}): \
+                     virtual_source_base_dir={:?}, real_source_base_dir={:?}",
+                    name, virtual_source_base_dir, real_source_base_dir,
+                );
 
-            for virtual_dir in virtual_rust_source_base_dir.iter().flatten() {
-                if let Some(real_dir) = &sess.opts.real_rust_source_base_dir
-                    && let rustc_span::FileName::Real(old_name) = name
-                    && let rustc_span::RealFileName::Remapped { local_path: _, virtual_name } =
-                        old_name
-                    && let Ok(rest) = virtual_name.strip_prefix(virtual_dir)
-                {
-                    // The std library crates are in
-                    // `$sysroot/lib/rustlib/src/rust/library`, whereas other crates
-                    // may be in `$sysroot/lib/rustlib/src/rust/` directly. So we
-                    // detect crates from the std libs and handle them specially.
-                    const STD_LIBS: &[&str] = &[
-                        "core",
-                        "alloc",
-                        "std",
-                        "test",
-                        "term",
-                        "unwind",
-                        "proc_macro",
-                        "panic_abort",
-                        "panic_unwind",
-                        "profiler_builtins",
-                        "rtstartup",
-                        "rustc-std-workspace-core",
-                        "rustc-std-workspace-alloc",
-                        "rustc-std-workspace-std",
-                        "backtrace",
-                    ];
-                    let is_std_lib = STD_LIBS.iter().any(|l| rest.starts_with(l));
+                for virtual_dir in virtual_source_base_dir.iter().flatten() {
+                    if let Some(real_dir) = &real_source_base_dir
+                        && let rustc_span::FileName::Real(old_name) = name
+                        && let rustc_span::RealFileName::Remapped { local_path: _, virtual_name } =
+                            old_name
+                        && let Ok(rest) = virtual_name.strip_prefix(virtual_dir)
+                    {
+                        let new_path = real_dir.join(rest);
 
-                    let new_path = if is_std_lib {
-                        real_dir.join("library").join(rest)
-                    } else {
-                        real_dir.join(rest)
-                    };
+                        debug!(
+                            "try_to_translate_virtual_to_real: `{}` -> `{}`",
+                            virtual_name.display(),
+                            new_path.display(),
+                        );
 
-                    debug!(
-                        "try_to_translate_virtual_to_real: `{}` -> `{}`",
-                        virtual_name.display(),
-                        new_path.display(),
-                    );
-
-                    // Check if the translated real path is affected by any user-requested
-                    // remaps via --remap-path-prefix. Apply them if so.
-                    // Note that this is a special case for imported rust-src paths specified by
-                    // https://rust-lang.github.io/rfcs/3127-trim-paths.html#handling-sysroot-paths.
-                    // Other imported paths are not currently remapped (see #66251).
-                    let (user_remapped, applied) =
-                        sess.source_map().path_mapping().map_prefix(&new_path);
-                    let new_name = if applied {
-                        rustc_span::RealFileName::Remapped {
-                            local_path: Some(new_path.clone()),
-                            virtual_name: user_remapped.to_path_buf(),
-                        }
-                    } else {
-                        rustc_span::RealFileName::LocalPath(new_path)
-                    };
-                    *old_name = new_name;
+                        // Check if the translated real path is affected by any user-requested
+                        // remaps via --remap-path-prefix. Apply them if so.
+                        // Note that this is a special case for imported rust-src paths specified by
+                        // https://rust-lang.github.io/rfcs/3127-trim-paths.html#handling-sysroot-paths.
+                        // Other imported paths are not currently remapped (see #66251).
+                        let (user_remapped, applied) =
+                            sess.source_map().path_mapping().map_prefix(&new_path);
+                        let new_name = if applied {
+                            rustc_span::RealFileName::Remapped {
+                                local_path: Some(new_path.clone()),
+                                virtual_name: user_remapped.to_path_buf(),
+                            }
+                        } else {
+                            rustc_span::RealFileName::LocalPath(new_path)
+                        };
+                        *old_name = new_name;
+                    }
                 }
-            }
-        };
+            };
+
+        let try_to_translate_real_to_virtual =
+            |virtual_source_base_dir: Option<&str>,
+             real_source_base_dir: &Option<PathBuf>,
+             subdir: &str,
+             name: &mut rustc_span::FileName| {
+                if let Some(virtual_dir) = &sess.opts.unstable_opts.simulate_remapped_rust_src_base
+                    && let Some(real_dir) = real_source_base_dir
+                    && let rustc_span::FileName::Real(old_name) = name
+                {
+                    let relative_path = match old_name {
+                        rustc_span::RealFileName::LocalPath(local) => {
+                            local.strip_prefix(real_dir).ok()
+                        }
+                        rustc_span::RealFileName::Remapped { virtual_name, .. } => {
+                            virtual_source_base_dir
+                                .and_then(|virtual_dir| virtual_name.strip_prefix(virtual_dir).ok())
+                        }
+                    };
+                    debug!(
+                        ?relative_path,
+                        ?virtual_dir,
+                        ?subdir,
+                        "simulate_remapped_rust_src_base"
+                    );
+                    if let Some(rest) = relative_path.and_then(|p| p.strip_prefix(subdir).ok()) {
+                        *old_name = rustc_span::RealFileName::Remapped {
+                            local_path: None,
+                            virtual_name: virtual_dir.join(subdir).join(rest),
+                        };
+                    }
+                }
+            };
 
         let mut import_info = self.cdata.source_map_import_info.lock();
         for _ in import_info.len()..=(source_file_index as usize) {
@@ -1728,36 +1748,45 @@ impl<'a> CrateMetadataRef<'a> {
                 // This is useful for testing so that tests about the effects of
                 // `try_to_translate_virtual_to_real` don't have to worry about how the
                 // compiler is bootstrapped.
-                if let Some(virtual_dir) = &sess.opts.unstable_opts.simulate_remapped_rust_src_base
-                    && let Some(real_dir) = &sess.opts.real_rust_source_base_dir
-                    && let rustc_span::FileName::Real(ref mut old_name) = name
-                {
-                    let relative_path = match old_name {
-                        rustc_span::RealFileName::LocalPath(local) => {
-                            local.strip_prefix(real_dir).ok()
-                        }
-                        rustc_span::RealFileName::Remapped { virtual_name, .. } => {
-                            option_env!("CFG_VIRTUAL_RUST_SOURCE_BASE_DIR")
-                                .and_then(|virtual_dir| virtual_name.strip_prefix(virtual_dir).ok())
-                        }
-                    };
-                    debug!(?relative_path, ?virtual_dir, "simulate_remapped_rust_src_base");
-                    for subdir in ["library", "compiler"] {
-                        if let Some(rest) = relative_path.and_then(|p| p.strip_prefix(subdir).ok())
-                        {
-                            *old_name = rustc_span::RealFileName::Remapped {
-                                local_path: None, // FIXME: maybe we should preserve this?
-                                virtual_name: virtual_dir.join(subdir).join(rest),
-                            };
-                            break;
-                        }
-                    }
-                }
+                try_to_translate_real_to_virtual(
+                    option_env!("CFG_VIRTUAL_RUST_SOURCE_BASE_DIR"),
+                    &sess.opts.real_rust_source_base_dir,
+                    "library",
+                    &mut name,
+                );
+
+                // If this file is under $sysroot/lib/rustlib/rustc-src/
+                // and the user wish to simulate remapping with -Z simulate-remapped-rust-src-base,
+                // then we change `name` to a similar state as if the rust was bootstrapped
+                // with `remap-debuginfo = true`.
+                try_to_translate_real_to_virtual(
+                    option_env!("CFG_VIRTUAL_RUSTC_DEV_SOURCE_BASE_DIR"),
+                    &sess.opts.real_rustc_dev_source_base_dir,
+                    "compiler",
+                    &mut name,
+                );
 
                 // If this file's path has been remapped to `/rustc/$hash`,
-                // we might be able to reverse that (also see comments above,
-                // on `try_to_translate_virtual_to_real`).
-                try_to_translate_virtual_to_real(&mut name);
+                // we might be able to reverse that.
+                //
+                // NOTE: if you update this, you might need to also update bootstrap's code for generating
+                // the `rust-src` component in `Src::run` in `src/bootstrap/dist.rs`.
+                try_to_translate_virtual_to_real(
+                    option_env!("CFG_VIRTUAL_RUST_SOURCE_BASE_DIR"),
+                    &sess.opts.real_rust_source_base_dir,
+                    &mut name,
+                );
+
+                // If this file's path has been remapped to `/rustc-dev/$hash`,
+                // we might be able to reverse that.
+                //
+                // NOTE: if you update this, you might need to also update bootstrap's code for generating
+                // the `rustc-dev` component in `Src::run` in `src/bootstrap/dist.rs`.
+                try_to_translate_virtual_to_real(
+                    option_env!("CFG_VIRTUAL_RUSTC_DEV_SOURCE_BASE_DIR"),
+                    &sess.opts.real_rustc_dev_source_base_dir,
+                    &mut name,
+                );
 
                 let local_version = sess.source_map().new_imported_source_file(
                     name,
@@ -1970,6 +1999,10 @@ impl CrateMetadata {
 
     pub(crate) fn hash(&self) -> Svh {
         self.root.header.hash
+    }
+
+    pub(crate) fn has_async_drops(&self) -> bool {
+        self.root.tables.adt_async_destructor.len > 0
     }
 
     fn num_def_ids(&self) -> usize {

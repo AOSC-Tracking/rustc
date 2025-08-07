@@ -4,14 +4,28 @@ use rustc_attr_data_structures::RustcVersion;
 use rustc_feature::{Features, GatedCfg, find_gated_cfg};
 use rustc_session::Session;
 use rustc_session::config::ExpectedValues;
-use rustc_session::lint::BuiltinLintDiag;
 use rustc_session::lint::builtin::UNEXPECTED_CFGS;
+use rustc_session::lint::{BuiltinLintDiag, Lint};
 use rustc_session::parse::feature_err;
-use rustc_span::symbol::kw;
 use rustc_span::{Span, Symbol, sym};
 
 use crate::session_diagnostics::{self, UnsupportedLiteralReason};
 use crate::{fluent_generated, parse_version};
+
+/// Emitter of a builtin lint from `cfg_matches`.
+///
+/// Used to support emiting a lint (currently on check-cfg), either:
+///  - as an early buffered lint (in `rustc`)
+///  - or has a "normal" lint from HIR (in `rustdoc`)
+pub trait CfgMatchesLintEmitter {
+    fn emit_span_lint(&self, sess: &Session, lint: &'static Lint, sp: Span, diag: BuiltinLintDiag);
+}
+
+impl CfgMatchesLintEmitter for NodeId {
+    fn emit_span_lint(&self, sess: &Session, lint: &'static Lint, sp: Span, diag: BuiltinLintDiag) {
+        sess.psess.buffer_lint(lint, sp, *self, diag);
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Condition {
@@ -26,17 +40,17 @@ pub struct Condition {
 pub fn cfg_matches(
     cfg: &MetaItemInner,
     sess: &Session,
-    lint_node_id: NodeId,
+    lint_emitter: impl CfgMatchesLintEmitter,
     features: Option<&Features>,
 ) -> bool {
     eval_condition(cfg, sess, features, &mut |cfg| {
         try_gate_cfg(cfg.name, cfg.span, sess, features);
         match sess.psess.check_config.expecteds.get(&cfg.name) {
             Some(ExpectedValues::Some(values)) if !values.contains(&cfg.value) => {
-                sess.psess.buffer_lint(
+                lint_emitter.emit_span_lint(
+                    sess,
                     UNEXPECTED_CFGS,
                     cfg.span,
-                    lint_node_id,
                     BuiltinLintDiag::UnexpectedCfgValue(
                         (cfg.name, cfg.name_span),
                         cfg.value.map(|v| (v, cfg.value_span.unwrap())),
@@ -44,10 +58,10 @@ pub fn cfg_matches(
                 );
             }
             None if sess.psess.check_config.exhaustive_names => {
-                sess.psess.buffer_lint(
+                lint_emitter.emit_span_lint(
+                    sess,
                     UNEXPECTED_CFGS,
                     cfg.span,
-                    lint_node_id,
                     BuiltinLintDiag::UnexpectedCfgName(
                         (cfg.name, cfg.name_span),
                         cfg.value.map(|v| (v, cfg.value_span.unwrap())),
@@ -89,20 +103,6 @@ pub fn eval_condition(
     let cfg = match cfg {
         MetaItemInner::MetaItem(meta_item) => meta_item,
         MetaItemInner::Lit(MetaItemLit { kind: LitKind::Bool(b), .. }) => {
-            if let Some(features) = features {
-                // we can't use `try_gate_cfg` as symbols don't differentiate between `r#true`
-                // and `true`, and we want to keep the former working without feature gate
-                gate_cfg(
-                    &(
-                        if *b { kw::True } else { kw::False },
-                        sym::cfg_boolean_literals,
-                        |features: &Features| features.cfg_boolean_literals(),
-                    ),
-                    cfg.span(),
-                    sess,
-                    features,
-                );
-            }
             return *b;
         }
         _ => {
@@ -117,7 +117,7 @@ pub fn eval_condition(
     };
 
     match &cfg.kind {
-        MetaItemKind::List(mis) if cfg.name_or_empty() == sym::version => {
+        MetaItemKind::List(mis) if cfg.has_name(sym::version) => {
             try_gate_cfg(sym::version, cfg.span, sess, features);
             let (min_version, span) = match &mis[..] {
                 [MetaItemInner::Lit(MetaItemLit { kind: LitKind::Str(sym, ..), span, .. })] => {
@@ -144,9 +144,9 @@ pub fn eval_condition(
 
             // See https://github.com/rust-lang/rust/issues/64796#issuecomment-640851454 for details
             if sess.psess.assume_incomplete_release {
-                RustcVersion::CURRENT > min_version
+                RustcVersion::current_overridable() > min_version
             } else {
-                RustcVersion::CURRENT >= min_version
+                RustcVersion::current_overridable() >= min_version
             }
         }
         MetaItemKind::List(mis) => {
@@ -164,18 +164,18 @@ pub fn eval_condition(
 
             // The unwraps below may look dangerous, but we've already asserted
             // that they won't fail with the loop above.
-            match cfg.name_or_empty() {
-                sym::any => mis
+            match cfg.name() {
+                Some(sym::any) => mis
                     .iter()
                     // We don't use any() here, because we want to evaluate all cfg condition
                     // as eval_condition can (and does) extra checks
                     .fold(false, |res, mi| res | eval_condition(mi, sess, features, eval)),
-                sym::all => mis
+                Some(sym::all) => mis
                     .iter()
                     // We don't use all() here, because we want to evaluate all cfg condition
                     // as eval_condition can (and does) extra checks
                     .fold(true, |res, mi| res & eval_condition(mi, sess, features, eval)),
-                sym::not => {
+                Some(sym::not) => {
                     let [mi] = mis.as_slice() else {
                         dcx.emit_err(session_diagnostics::ExpectedOneCfgPattern { span: cfg.span });
                         return false;
@@ -183,7 +183,7 @@ pub fn eval_condition(
 
                     !eval_condition(mi, sess, features, eval)
                 }
-                sym::target => {
+                Some(sym::target) => {
                     if let Some(features) = features
                         && !features.cfg_target_compact()
                     {

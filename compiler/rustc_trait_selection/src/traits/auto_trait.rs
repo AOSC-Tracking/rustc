@@ -382,7 +382,7 @@ impl<'tcx> AutoTraitFinder<'tcx> {
                     for (new_region, old_region) in
                         iter::zip(new_args.regions(), old_args.regions())
                     {
-                        match (*new_region, *old_region) {
+                        match (new_region.kind(), old_region.kind()) {
                             // If both predicates have an `ReBound` (a HRTB) in the
                             // same spot, we do nothing.
                             (ty::ReBound(_, _), ty::ReBound(_, _)) => {}
@@ -726,7 +726,9 @@ impl<'tcx> AutoTraitFinder<'tcx> {
                 }
                 ty::PredicateKind::Clause(ty::ClauseKind::RegionOutlives(binder)) => {
                     let binder = bound_predicate.rebind(binder);
-                    selcx.infcx.region_outlives_predicate(&dummy_cause, binder)
+                    selcx.infcx.enter_forall(binder, |pred| {
+                        selcx.infcx.register_region_outlives_constraint(pred, &dummy_cause);
+                    });
                 }
                 ty::PredicateKind::Clause(ty::ClauseKind::TypeOutlives(binder)) => {
                     let binder = bound_predicate.rebind(binder);
@@ -735,14 +737,14 @@ impl<'tcx> AutoTraitFinder<'tcx> {
                         binder.map_bound_ref(|pred| pred.0).no_bound_vars(),
                     ) {
                         (None, Some(t_a)) => {
-                            selcx.infcx.register_region_obligation_with_cause(
+                            selcx.infcx.register_type_outlives_constraint(
                                 t_a,
                                 selcx.infcx.tcx.lifetimes.re_static,
                                 &dummy_cause,
                             );
                         }
                         (Some(ty::OutlivesPredicate(t_a, r_b)), _) => {
-                            selcx.infcx.register_region_obligation_with_cause(
+                            selcx.infcx.register_type_outlives_constraint(
                                 t_a,
                                 r_b,
                                 &dummy_cause,

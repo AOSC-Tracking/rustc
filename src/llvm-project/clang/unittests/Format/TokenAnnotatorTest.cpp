@@ -1073,6 +1073,11 @@ TEST_F(TokenAnnotatorTest, UnderstandsOverloadedOperators) {
   ASSERT_EQ(Tokens.size(), 11u) << Tokens;
   EXPECT_TOKEN(Tokens[3], tok::identifier, TT_FunctionDeclarationName);
   EXPECT_TOKEN(Tokens[7], tok::l_paren, TT_OverloadedOperatorLParen);
+
+  Tokens = annotate("using std::operator==;");
+  ASSERT_EQ(Tokens.size(), 7u) << Tokens;
+  // Not TT_FunctionDeclarationName.
+  EXPECT_TOKEN(Tokens[3], tok::kw_operator, TT_Unknown);
 }
 
 TEST_F(TokenAnnotatorTest, OverloadedOperatorInTemplate) {
@@ -2181,6 +2186,13 @@ TEST_F(TokenAnnotatorTest, UnderstandsFunctionDeclarationNames) {
   ASSERT_EQ(Tokens.size(), 6u) << Tokens;
   EXPECT_TOKEN(Tokens[1], tok::identifier, TT_FunctionDeclarationName);
   EXPECT_TOKEN(Tokens[2], tok::l_paren, TT_FunctionDeclarationLParen);
+
+  Tokens = annotate("#define FUNC(foo, bar, baz) \\\n"
+                    "  auto foo##bar##baz() -> Type {}");
+  ASSERT_EQ(Tokens.size(), 23u) << Tokens;
+  EXPECT_TOKEN(Tokens[11], tok::identifier, TT_FunctionDeclarationName);
+  EXPECT_TOKEN(Tokens[16], tok::l_paren, TT_FunctionDeclarationLParen);
+  EXPECT_TOKEN(Tokens[18], tok::arrow, TT_TrailingReturnArrow);
 
   Tokens = annotate("int iso_time(time_t);");
   ASSERT_EQ(Tokens.size(), 7u) << Tokens;
@@ -3791,6 +3803,12 @@ TEST_F(TokenAnnotatorTest, AfterPPDirective) {
 
   ASSERT_EQ(Tokens.size(), 7u) << Tokens;
   EXPECT_TOKEN(Tokens[2], tok::minusminus, TT_AfterPPDirective);
+}
+
+TEST_F(TokenAnnotatorTest, UTF8StringLiteral) {
+  auto Tokens = annotate("return u8\"foo\";", getLLVMStyle(FormatStyle::LK_C));
+  ASSERT_EQ(Tokens.size(), 4u) << Tokens;
+  EXPECT_TOKEN(Tokens[1], tok::utf8_string_literal, TT_Unknown);
 }
 
 } // namespace

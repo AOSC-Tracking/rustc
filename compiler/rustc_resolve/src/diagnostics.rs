@@ -5,8 +5,9 @@ use rustc_ast::{
     self as ast, CRATE_NODE_ID, Crate, ItemKind, MetaItemInner, MetaItemKind, ModKind, NodeId, Path,
 };
 use rustc_ast_pretty::pprust;
-use rustc_data_structures::fx::FxHashSet;
-use rustc_data_structures::unord::UnordSet;
+use rustc_attr_data_structures::{self as attr, Stability};
+use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::unord::{UnordMap, UnordSet};
 use rustc_errors::codes::*;
 use rustc_errors::{
     Applicability, Diag, DiagCtxtHandle, ErrorGuaranteed, MultiSpan, SuggestionStyle,
@@ -110,6 +111,7 @@ pub(crate) struct ImportSuggestion {
     pub via_import: bool,
     /// An extra note that should be issued if this item is suggested
     pub note: Option<String>,
+    pub is_stable: bool,
 }
 
 /// Adjust the impl span so that just the `impl` keyword is taken by removing
@@ -170,10 +172,10 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
 
     fn report_with_use_injections(&mut self, krate: &Crate) {
         for UseError { mut err, candidates, def_id, instead, suggestion, path, is_call } in
-            self.use_injections.drain(..)
+            std::mem::take(&mut self.use_injections)
         {
             let (span, found_use) = if let Some(def_id) = def_id.as_local() {
-                UsePlacementFinder::check(krate, self.def_id_to_node_id[def_id])
+                UsePlacementFinder::check(krate, self.def_id_to_node_id(def_id))
             } else {
                 (None, FoundUse::No)
             };
@@ -1052,6 +1054,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                                 false,
                                 false,
                                 None,
+                                None,
                             ) else {
                                 continue;
                             };
@@ -1091,7 +1094,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     ));
                 }
                 Scope::BuiltinAttrs => {
-                    let res = Res::NonMacroAttr(NonMacroAttrKind::Builtin(kw::Empty));
+                    let res = Res::NonMacroAttr(NonMacroAttrKind::Builtin(sym::dummy));
                     if filter_fn(res) {
                         suggestions.extend(
                             BUILTIN_ATTRIBUTES
@@ -1172,20 +1175,21 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             ThinVec::<ast::PathSegment>::new(),
             true,
             start_did.is_local() || !self.tcx.is_doc_hidden(start_did),
+            true,
         )];
         let mut worklist_via_import = vec![];
 
-        while let Some((in_module, path_segments, accessible, doc_visible)) = match worklist.pop() {
-            None => worklist_via_import.pop(),
-            Some(x) => Some(x),
-        } {
+        while let Some((in_module, path_segments, accessible, doc_visible, is_stable)) =
+            match worklist.pop() {
+                None => worklist_via_import.pop(),
+                Some(x) => Some(x),
+            }
+        {
             let in_module_is_extern = !in_module.def_id().is_local();
             in_module.for_each_child(self, |this, ident, ns, name_binding| {
-                // avoid non-importable candidates
-                if !name_binding.is_importable()
-                    // FIXME(import_trait_associated_functions): remove this when `import_trait_associated_functions` is stable
-                    || name_binding.is_assoc_const_or_fn()
-                        && !this.tcx.features().import_trait_associated_functions()
+                // Avoid non-importable candidates.
+                if name_binding.is_assoc_item()
+                    && !this.tcx.features().import_trait_associated_functions()
                 {
                     return;
                 }
@@ -1260,6 +1264,27 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                         candidates.remove(idx);
                     }
 
+                    let is_stable = if is_stable
+                        && let Some(did) = did
+                        && this.is_stable(did, path.span)
+                    {
+                        true
+                    } else {
+                        false
+                    };
+
+                    // Rreplace unstable suggestions if we meet a new stable one,
+                    // and do nothing if any other situation. For example, if we
+                    // meet `std::ops::Range` after `std::range::legacy::Range`,
+                    // we will remove the latter and then insert the former.
+                    if is_stable
+                        && let Some(idx) = candidates
+                            .iter()
+                            .position(|v: &ImportSuggestion| v.did == did && !v.is_stable)
+                    {
+                        candidates.remove(idx);
+                    }
+
                     if candidates.iter().all(|v: &ImportSuggestion| v.did != did) {
                         // See if we're recommending TryFrom, TryInto, or FromIterator and add
                         // a note about editions
@@ -1291,6 +1316,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                             doc_visible: child_doc_visible,
                             note,
                             via_import,
+                            is_stable,
                         });
                     }
                 }
@@ -1317,20 +1343,50 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     if !is_extern_crate_that_also_appears_in_prelude || alias_import {
                         // add the module to the lookup
                         if seen_modules.insert(module.def_id()) {
-                            if via_import { &mut worklist_via_import } else { &mut worklist }
-                                .push((module, path_segments, child_accessible, child_doc_visible));
+                            if via_import { &mut worklist_via_import } else { &mut worklist }.push(
+                                (
+                                    module,
+                                    path_segments,
+                                    child_accessible,
+                                    child_doc_visible,
+                                    is_stable && this.is_stable(module.def_id(), name_binding.span),
+                                ),
+                            );
                         }
                     }
                 }
             })
         }
 
-        // If only some candidates are accessible, take just them
-        if !candidates.iter().all(|v: &ImportSuggestion| !v.accessible) {
-            candidates.retain(|x| x.accessible)
+        candidates
+    }
+
+    fn is_stable(&self, did: DefId, span: Span) -> bool {
+        if did.is_local() {
+            return true;
         }
 
-        candidates
+        match self.tcx.lookup_stability(did) {
+            Some(Stability {
+                level: attr::StabilityLevel::Unstable { implied_by, .. },
+                feature,
+                ..
+            }) => {
+                if span.allows_unstable(feature) {
+                    true
+                } else if self.tcx.features().enabled(feature) {
+                    true
+                } else if let Some(implied_by) = implied_by
+                    && self.tcx.features().enabled(implied_by)
+                {
+                    true
+                } else {
+                    false
+                }
+            }
+            Some(_) => true,
+            None => false,
+        }
     }
 
     /// When name resolution fails, this method can be used to look up candidate
@@ -1427,7 +1483,35 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         parent_scope: &ParentScope<'ra>,
         ident: Ident,
         krate: &Crate,
+        sugg_span: Option<Span>,
     ) {
+        // Bring imported but unused `derive` macros into `macro_map` so we ensure they can be used
+        // for suggestions.
+        self.visit_scopes(
+            ScopeSet::Macro(MacroKind::Derive),
+            &parent_scope,
+            ident.span.ctxt(),
+            |this, scope, _use_prelude, _ctxt| {
+                let Scope::Module(m, _) = scope else {
+                    return None;
+                };
+                for (_, resolution) in this.resolutions(m).borrow().iter() {
+                    let Some(binding) = resolution.borrow().binding else {
+                        continue;
+                    };
+                    let Res::Def(DefKind::Macro(MacroKind::Derive | MacroKind::Attr), def_id) =
+                        binding.res()
+                    else {
+                        continue;
+                    };
+                    // By doing this all *imported* macros get added to the `macro_map` even if they
+                    // are *unused*, which makes the later suggestions find them and work.
+                    let _ = this.get_macro_by_def_id(def_id);
+                }
+                None::<()>
+            },
+        );
+
         let is_expected = &|res: Res| res.macro_kind() == Some(macro_kind);
         let suggestion = self.early_lookup_typo_candidate(
             ScopeSet::Macro(macro_kind),
@@ -1435,12 +1519,14 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             ident,
             is_expected,
         );
-        self.add_typo_suggestion(err, suggestion, ident.span);
+        if !self.add_typo_suggestion(err, suggestion, ident.span) {
+            self.detect_derive_attribute(err, ident, parent_scope, sugg_span);
+        }
 
         let import_suggestions =
             self.lookup_import_candidates(ident, Namespace::MacroNS, parent_scope, is_expected);
         let (span, found_use) = match parent_scope.module.nearest_parent_mod().as_local() {
-            Some(def_id) => UsePlacementFinder::check(krate, self.def_id_to_node_id[def_id]),
+            Some(def_id) => UsePlacementFinder::check(krate, self.def_id_to_node_id(def_id)),
             None => (None, FoundUse::No),
         };
         show_candidates(
@@ -1565,6 +1651,105 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             };
             err.subdiagnostic(note);
             return;
+        }
+    }
+
+    /// Given an attribute macro that failed to be resolved, look for `derive` macros that could
+    /// provide it, either as-is or with small typos.
+    fn detect_derive_attribute(
+        &self,
+        err: &mut Diag<'_>,
+        ident: Ident,
+        parent_scope: &ParentScope<'ra>,
+        sugg_span: Option<Span>,
+    ) {
+        // Find all of the `derive`s in scope and collect their corresponding declared
+        // attributes.
+        // FIXME: this only works if the crate that owns the macro that has the helper_attr
+        // has already been imported.
+        let mut derives = vec![];
+        let mut all_attrs: UnordMap<Symbol, Vec<_>> = UnordMap::default();
+        // We're collecting these in a hashmap, and handle ordering the output further down.
+        #[allow(rustc::potential_query_instability)]
+        for (def_id, data) in &self.macro_map {
+            for helper_attr in &data.ext.helper_attrs {
+                let item_name = self.tcx.item_name(*def_id);
+                all_attrs.entry(*helper_attr).or_default().push(item_name);
+                if helper_attr == &ident.name {
+                    derives.push(item_name);
+                }
+            }
+        }
+        let kind = MacroKind::Derive.descr();
+        if !derives.is_empty() {
+            // We found an exact match for the missing attribute in a `derive` macro. Suggest it.
+            let mut derives: Vec<String> = derives.into_iter().map(|d| d.to_string()).collect();
+            derives.sort();
+            derives.dedup();
+            let msg = match &derives[..] {
+                [derive] => format!(" `{derive}`"),
+                [start @ .., last] => format!(
+                    "s {} and `{last}`",
+                    start.iter().map(|d| format!("`{d}`")).collect::<Vec<_>>().join(", ")
+                ),
+                [] => unreachable!("we checked for this to be non-empty 10 lines above!?"),
+            };
+            let msg = format!(
+                "`{}` is an attribute that can be used by the {kind}{msg}, you might be \
+                     missing a `derive` attribute",
+                ident.name,
+            );
+            let sugg_span = if let ModuleKind::Def(DefKind::Enum, id, _) = parent_scope.module.kind
+            {
+                let span = self.def_span(id);
+                if span.from_expansion() {
+                    None
+                } else {
+                    // For enum variants sugg_span is empty but we can get the enum's Span.
+                    Some(span.shrink_to_lo())
+                }
+            } else {
+                // For items this `Span` will be populated, everything else it'll be None.
+                sugg_span
+            };
+            match sugg_span {
+                Some(span) => {
+                    err.span_suggestion_verbose(
+                        span,
+                        msg,
+                        format!("#[derive({})]\n", derives.join(", ")),
+                        Applicability::MaybeIncorrect,
+                    );
+                }
+                None => {
+                    err.note(msg);
+                }
+            }
+        } else {
+            // We didn't find an exact match. Look for close matches. If any, suggest fixing typo.
+            let all_attr_names = all_attrs.keys().map(|s| *s).into_sorted_stable_ord();
+            if let Some(best_match) = find_best_match_for_name(&all_attr_names, ident.name, None)
+                && let Some(macros) = all_attrs.get(&best_match)
+            {
+                let mut macros: Vec<String> = macros.into_iter().map(|d| d.to_string()).collect();
+                macros.sort();
+                macros.dedup();
+                let msg = match &macros[..] {
+                    [] => return,
+                    [name] => format!(" `{name}` accepts"),
+                    [start @ .., end] => format!(
+                        "s {} and `{end}` accept",
+                        start.iter().map(|m| format!("`{m}`")).collect::<Vec<_>>().join(", "),
+                    ),
+                };
+                let msg = format!("the {kind}{msg} the similarly named `{best_match}` attribute");
+                err.span_suggestion_verbose(
+                    ident.span,
+                    msg,
+                    best_match,
+                    Applicability::MaybeIncorrect,
+                );
+            }
         }
     }
 
@@ -1793,7 +1978,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 &import_suggestions,
                 Instead::Yes,
                 FoundUse::Yes,
-                DiagMode::Import { append: single_nested },
+                DiagMode::Import { append: single_nested, unresolved_import: false },
                 vec![],
                 "",
             );
@@ -2438,7 +2623,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         let Res::Def(DefKind::Macro(MacroKind::Bang), _) = binding.res() else {
             return None;
         };
-        let module_name = crate_module.kind.name().unwrap_or(kw::Empty);
+        let module_name = crate_module.kind.name().unwrap_or(kw::Crate);
         let import_snippet = match import.kind {
             ImportKind::Single { source, target, .. } if source != target => {
                 format!("{source} as {target}")
@@ -2555,7 +2740,11 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 .iter()
                 .filter_map(|item| {
                     let parent_module = self.opt_local_def_id(item.parent_module)?.to_def_id();
-                    Some(StrippedCfgItem { parent_module, name: item.name, cfg: item.cfg.clone() })
+                    Some(StrippedCfgItem {
+                        parent_module,
+                        ident: item.ident,
+                        cfg: item.cfg.clone(),
+                    })
                 })
                 .collect::<Vec<_>>();
             local_items.as_slice()
@@ -2563,12 +2752,58 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             self.tcx.stripped_cfg_items(module.krate)
         };
 
-        for &StrippedCfgItem { parent_module, name, ref cfg } in symbols {
-            if parent_module != module || name.name != *segment {
+        for &StrippedCfgItem { parent_module, ident, ref cfg } in symbols {
+            if ident.name != *segment {
                 continue;
             }
 
-            let note = errors::FoundItemConfigureOut { span: name.span };
+            fn comes_from_same_module_for_glob(
+                r: &Resolver<'_, '_>,
+                parent_module: DefId,
+                module: DefId,
+                visited: &mut FxHashMap<DefId, bool>,
+            ) -> bool {
+                if let Some(&cached) = visited.get(&parent_module) {
+                    // this branch is prevent from being called recursively infinity,
+                    // because there has some cycles in globs imports,
+                    // see more spec case at `tests/ui/cfg/diagnostics-reexport-2.rs#reexport32`
+                    return cached;
+                }
+                visited.insert(parent_module, false);
+                let res = r.module_map.get(&parent_module).is_some_and(|m| {
+                    for importer in m.glob_importers.borrow().iter() {
+                        if let Some(next_parent_module) = importer.parent_scope.module.opt_def_id()
+                        {
+                            if next_parent_module == module
+                                || comes_from_same_module_for_glob(
+                                    r,
+                                    next_parent_module,
+                                    module,
+                                    visited,
+                                )
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                });
+                visited.insert(parent_module, res);
+                res
+            }
+
+            let comes_from_same_module = parent_module == module
+                || comes_from_same_module_for_glob(
+                    self,
+                    parent_module,
+                    module,
+                    &mut Default::default(),
+                );
+            if !comes_from_same_module {
+                continue;
+            }
+
+            let note = errors::FoundItemConfigureOut { span: ident.span };
             err.subdiagnostic(note);
 
             if let MetaItemKind::List(nested) = &cfg.kind
@@ -2750,6 +2985,8 @@ pub(crate) enum DiagMode {
     Pattern,
     /// The binding is part of a use statement
     Import {
+        /// `true` means diagnostics is for unresolved import
+        unresolved_import: bool,
         /// `true` mean add the tips afterward for case `use a::{b,c}`,
         /// rather than replacing within.
         append: bool,
@@ -2800,6 +3037,7 @@ fn show_candidates(
         return false;
     }
 
+    let mut showed = false;
     let mut accessible_path_strings: Vec<PathString<'_>> = Vec::new();
     let mut inaccessible_path_strings: Vec<PathString<'_>> = Vec::new();
 
@@ -2958,8 +3196,11 @@ fn show_candidates(
             append_candidates(&mut msg, accessible_path_strings);
             err.help(msg);
         }
-        true
-    } else if !(inaccessible_path_strings.is_empty() || matches!(mode, DiagMode::Import { .. })) {
+        showed = true;
+    }
+    if !inaccessible_path_strings.is_empty()
+        && (!matches!(mode, DiagMode::Import { unresolved_import: false, .. }))
+    {
         let prefix =
             if let DiagMode::Pattern = mode { "you might have meant to match on " } else { "" };
         if let [(name, descr, source_span, note, _)] = &inaccessible_path_strings[..] {
@@ -3022,10 +3263,9 @@ fn show_candidates(
 
             err.span_note(multi_span, msg);
         }
-        true
-    } else {
-        false
+        showed = true;
     }
+    showed
 }
 
 #[derive(Debug)]
@@ -3063,7 +3303,7 @@ impl<'tcx> visit::Visitor<'tcx> for UsePlacementFinder {
 
     fn visit_item(&mut self, item: &'tcx ast::Item) {
         if self.target_module == item.id {
-            if let ItemKind::Mod(_, ModKind::Loaded(items, _inline, mod_spans, _)) = &item.kind {
+            if let ItemKind::Mod(_, _, ModKind::Loaded(items, _inline, mod_spans, _)) = &item.kind {
                 let inject = mod_spans.inject_use_span;
                 if is_span_suitable_for_use_injection(inject) {
                     self.first_legal_span = Some(inject);

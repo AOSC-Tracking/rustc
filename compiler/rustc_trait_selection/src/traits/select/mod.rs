@@ -27,11 +27,10 @@ use rustc_middle::ty::abstract_const::NotConstEvaluatable;
 use rustc_middle::ty::error::TypeErrorToStringExt;
 use rustc_middle::ty::print::{PrintTraitRefExt as _, with_no_trimmed_paths};
 use rustc_middle::ty::{
-    self, GenericArgsRef, PolyProjectionPredicate, Ty, TyCtxt, TypeFoldable, TypeVisitableExt,
-    TypingMode, Upcast,
+    self, DeepRejectCtxt, GenericArgsRef, PolyProjectionPredicate, SizedTraitKind, Ty, TyCtxt,
+    TypeFoldable, TypeVisitableExt, TypingMode, Upcast, elaborate,
 };
 use rustc_span::{Symbol, sym};
-use rustc_type_ir::elaborate;
 use tracing::{debug, instrument, trace};
 
 use self::EvaluationResult::*;
@@ -49,7 +48,9 @@ use crate::infer::{InferCtxt, InferOk, TypeFreshener};
 use crate::solve::InferCtxtSelectExt as _;
 use crate::traits::normalize::{normalize_with_depth, normalize_with_depth_to};
 use crate::traits::project::{ProjectAndUnifyResult, ProjectionCacheKeyExt};
-use crate::traits::{EvaluateConstErr, ProjectionCacheKey, Unimplemented, effects};
+use crate::traits::{
+    EvaluateConstErr, ProjectionCacheKey, Unimplemented, effects, sizedness_fast_path,
+};
 
 mod _match;
 mod candidate_assembly;
@@ -264,9 +265,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         &mut self,
         obligation: &PolyTraitObligation<'tcx>,
     ) -> SelectionResult<'tcx, Selection<'tcx>> {
-        if self.infcx.next_trait_solver() {
-            return self.infcx.select_in_new_trait_solver(obligation);
-        }
+        assert!(!self.infcx.next_trait_solver());
 
         let candidate = match self.select_from_obligation(obligation) {
             Err(SelectionError::Overflow(OverflowError::Canonical)) => {
@@ -298,6 +297,10 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         &mut self,
         obligation: &TraitObligation<'tcx>,
     ) -> SelectionResult<'tcx, Selection<'tcx>> {
+        if self.infcx.next_trait_solver() {
+            return self.infcx.select_in_new_trait_solver(obligation);
+        }
+
         self.poly_select(&Obligation {
             cause: obligation.cause.clone(),
             param_env: obligation.param_env,
@@ -603,6 +606,10 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             None => self.check_recursion_limit(&obligation, &obligation)?,
         }
 
+        if sizedness_fast_path(self.tcx(), obligation.predicate) {
+            return Ok(EvaluatedToOk);
+        }
+
         ensure_sufficient_stack(|| {
             let bound_predicate = obligation.predicate.kind();
             match bound_predicate.skip_binder() {
@@ -652,7 +659,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     }
                 }
 
-                ty::PredicateKind::Clause(ty::ClauseKind::WellFormed(arg)) => {
+                ty::PredicateKind::Clause(ty::ClauseKind::WellFormed(term)) => {
                     // So, there is a bit going on here. First, `WellFormed` predicates
                     // are coinductive, like trait predicates with auto traits.
                     // This means that we need to detect if we have recursively
@@ -676,11 +683,11 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     let cache = previous_stack.cache;
                     let dfn = cache.next_dfn();
 
-                    for stack_arg in previous_stack.cache.wf_args.borrow().iter().rev() {
-                        if stack_arg.0 != arg {
+                    for stack_term in previous_stack.cache.wf_args.borrow().iter().rev() {
+                        if stack_term.0 != term {
                             continue;
                         }
-                        debug!("WellFormed({:?}) on stack", arg);
+                        debug!("WellFormed({:?}) on stack", term);
                         if let Some(stack) = previous_stack.head {
                             // Okay, let's imagine we have two different stacks:
                             //   `T: NonAutoTrait -> WF(T) -> T: NonAutoTrait`
@@ -696,11 +703,11 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                             // would contain `(T, 1)`. We want to check all
                             // trait predicates greater than `1`. The previous
                             // stack would be `T: Auto`.
-                            let cycle = stack.iter().take_while(|s| s.depth > stack_arg.1);
+                            let cycle = stack.iter().take_while(|s| s.depth > stack_term.1);
                             let tcx = self.tcx();
                             let cycle = cycle.map(|stack| stack.obligation.predicate.upcast(tcx));
                             if self.coinductive_match(cycle) {
-                                stack.update_reached_depth(stack_arg.1);
+                                stack.update_reached_depth(stack_term.1);
                                 return Ok(EvaluatedToOk);
                             } else {
                                 return Ok(EvaluatedToAmbigStackDependent);
@@ -714,11 +721,11 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                         obligation.param_env,
                         obligation.cause.body_id,
                         obligation.recursion_depth + 1,
-                        arg,
+                        term,
                         obligation.cause.span,
                     ) {
                         Some(obligations) => {
-                            cache.wf_args.borrow_mut().push((arg, previous_stack.depth()));
+                            cache.wf_args.borrow_mut().push((term, previous_stack.depth()));
                             let result =
                                 self.evaluate_predicates_recursively(previous_stack, obligations);
                             cache.wf_args.borrow_mut().pop();
@@ -1236,7 +1243,12 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             ty::PredicateKind::Clause(ty::ClauseKind::Trait(data)) => {
                 self.infcx.tcx.trait_is_coinductive(data.def_id())
             }
-            ty::PredicateKind::Clause(ty::ClauseKind::WellFormed(_)) => true,
+            ty::PredicateKind::Clause(ty::ClauseKind::WellFormed(_)) => {
+                // FIXME(generic_const_exprs): GCE needs well-formedness predicates to be
+                // coinductive, but GCE is on the way out anyways, so this should eventually
+                // be replaced with `false`.
+                self.infcx.tcx.features().generic_const_exprs()
+            }
             _ => false,
         })
     }
@@ -1446,6 +1458,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         match self.infcx.typing_mode() {
             TypingMode::Coherence => {}
             TypingMode::Analysis { .. }
+            | TypingMode::Borrowck { .. }
             | TypingMode::PostBorrowckAnalysis { .. }
             | TypingMode::PostAnalysis => return Ok(()),
         }
@@ -1491,7 +1504,10 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             // However, if we disqualify *all* goals from being cached, perf suffers.
             // This is likely fixed by better caching in general in the new solver.
             // See: <https://github.com/rust-lang/rust/issues/132064>.
-            TypingMode::Analysis { defining_opaque_types } => {
+            TypingMode::Analysis {
+                defining_opaque_types_and_generators: defining_opaque_types,
+            }
+            | TypingMode::Borrowck { defining_opaque_types } => {
                 defining_opaque_types.is_empty() || !pred.has_opaque_types()
             }
             // The hidden types of `defined_opaque_types` is not local to the current
@@ -1660,6 +1676,12 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             return Err(());
         }
 
+        let drcx = DeepRejectCtxt::relate_rigid_rigid(self.infcx.tcx);
+        let obligation_args = obligation.predicate.skip_binder().trait_ref.args;
+        if !drcx.args_may_unify(obligation_args, trait_bound.skip_binder().args) {
+            return Err(());
+        }
+
         let trait_bound = self.infcx.instantiate_binder_with_fresh_vars(
             obligation.cause.span,
             HigherRankedType,
@@ -1751,17 +1773,18 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
 
         if is_match {
             let generics = self.tcx().generics_of(obligation.predicate.def_id);
-            // FIXME(generic-associated-types): Addresses aggressive inference in #92917.
+            // FIXME(generic_associated_types): Addresses aggressive inference in #92917.
             // If this type is a GAT, and of the GAT args resolve to something new,
             // that means that we must have newly inferred something about the GAT.
             // We should give up in that case.
-            // FIXME(generic-associated-types): This only detects one layer of inference,
-            // which is probably not what we actually want, but fixing it causes some ambiguity:
+            //
+            // This only detects one layer of inference, which is probably not what we actually
+            // want, but fixing it causes some ambiguity:
             // <https://github.com/rust-lang/rust/issues/125196>.
             if !generics.is_own_empty()
                 && obligation.predicate.args[generics.parent_count..].iter().any(|&p| {
                     p.has_non_region_infer()
-                        && match p.unpack() {
+                        && match p.kind() {
                             ty::GenericArgKind::Const(ct) => {
                                 self.infcx.shallow_resolve_const(ct) != ct
                             }
@@ -1801,17 +1824,21 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
             return Some(candidates.pop().unwrap().candidate);
         }
 
-        // We prefer trivial builtin candidates, i.e. builtin impls without any nested
-        // requirements, over all others. This is a fix for #53123 and prevents winnowing
-        // from accidentally extending the lifetime of a variable.
-        let mut trivial_builtin = candidates
-            .iter()
-            .filter(|c| matches!(c.candidate, BuiltinCandidate { has_nested: false }));
-        if let Some(_trivial) = trivial_builtin.next() {
-            // There should only ever be a single trivial builtin candidate
+        // We prefer `Sized` candidates over everything.
+        let mut sized_candidates =
+            candidates.iter().filter(|c| matches!(c.candidate, SizedCandidate { has_nested: _ }));
+        if let Some(sized_candidate) = sized_candidates.next() {
+            // There should only ever be a single sized candidate
             // as they would otherwise overlap.
-            debug_assert_eq!(trivial_builtin.next(), None);
-            return Some(BuiltinCandidate { has_nested: false });
+            debug_assert_eq!(sized_candidates.next(), None);
+            // Only prefer the built-in `Sized` candidate if its nested goals are certain.
+            // Otherwise, we may encounter failure later on if inference causes this candidate
+            // to not hold, but a where clause would've applied instead.
+            if sized_candidate.evaluation.must_apply_modulo_regions() {
+                return Some(sized_candidate.candidate.clone());
+            } else {
+                return None;
+            }
         }
 
         // Before we consider where-bounds, we have to deduplicate them here and also
@@ -1892,12 +1919,23 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
         // impl `impl<T: ?Sized> Any for T { .. }`. This really shouldn't exist but is
         // necessary due to #57893. We again arbitrarily prefer the applicable candidate
         // with the lowest index.
+        //
+        // We do not want to use these impls to guide inference in case a user-written impl
+        // may also apply.
         let object_bound = candidates
             .iter()
             .filter_map(|c| if let ObjectCandidate(i) = c.candidate { Some(i) } else { None })
             .try_reduce(|c1, c2| if has_non_region_infer { None } else { Some(c1.min(c2)) });
         match object_bound {
-            Some(Some(index)) => return Some(ObjectCandidate(index)),
+            Some(Some(index)) => {
+                return if has_non_region_infer
+                    && candidates.iter().any(|c| matches!(c.candidate, ImplCandidate(_)))
+                {
+                    None
+                } else {
+                    Some(ObjectCandidate(index))
+                };
+            }
             Some(None) => {}
             None => return None,
         }
@@ -1940,7 +1978,8 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
             // Don't use impl candidates which overlap with other candidates.
             // This should pretty much only ever happen with malformed impls.
             if candidates.iter().all(|c| match c.candidate {
-                BuiltinCandidate { has_nested: _ }
+                SizedCandidate { has_nested: _ }
+                | BuiltinCandidate { has_nested: _ }
                 | TransmutabilityCandidate
                 | AutoImplCandidate
                 | ClosureCandidate { .. }
@@ -2055,9 +2094,10 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
 }
 
 impl<'tcx> SelectionContext<'_, 'tcx> {
-    fn sized_conditions(
+    fn sizedness_conditions(
         &mut self,
         obligation: &PolyTraitObligation<'tcx>,
+        sizedness: SizedTraitKind,
     ) -> BuiltinImplConditions<'tcx> {
         use self::BuiltinImplConditions::{Ambiguous, None, Where};
 
@@ -2087,7 +2127,12 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
                 Where(ty::Binder::dummy(Vec::new()))
             }
 
-            ty::Str | ty::Slice(_) | ty::Dynamic(..) | ty::Foreign(..) => None,
+            ty::Str | ty::Slice(_) | ty::Dynamic(..) => match sizedness {
+                SizedTraitKind::Sized => None,
+                SizedTraitKind::MetaSized => Where(ty::Binder::dummy(Vec::new())),
+            },
+
+            ty::Foreign(..) => None,
 
             ty::Tuple(tys) => Where(
                 obligation.predicate.rebind(tys.last().map_or_else(Vec::new, |&last| vec![last])),
@@ -2096,11 +2141,9 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
             ty::Pat(ty, _) => Where(obligation.predicate.rebind(vec![*ty])),
 
             ty::Adt(def, args) => {
-                if let Some(sized_crit) = def.sized_constraint(self.tcx()) {
+                if let Some(crit) = def.sizedness_constraint(self.tcx(), sizedness) {
                     // (*) binder moved here
-                    Where(
-                        obligation.predicate.rebind(vec![sized_crit.instantiate(self.tcx(), args)]),
-                    )
+                    Where(obligation.predicate.rebind(vec![crit.instantiate(self.tcx(), args)]))
                 } else {
                     Where(ty::Binder::dummy(Vec::new()))
                 }
@@ -2294,6 +2337,11 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
             | ty::Never
             | ty::Char => ty::Binder::dummy(Vec::new()),
 
+            // This branch is only for `experimental_default_bounds`.
+            // Other foreign types were rejected earlier in
+            // `assemble_candidates_from_auto_impls`.
+            ty::Foreign(..) => ty::Binder::dummy(Vec::new()),
+
             // FIXME(unsafe_binders): Squash the double binder for now, I guess.
             ty::UnsafeBinder(_) => return Err(SelectionError::Unimplemented),
 
@@ -2303,8 +2351,7 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
             ty::Placeholder(..)
             | ty::Dynamic(..)
             | ty::Param(..)
-            | ty::Foreign(..)
-            | ty::Alias(ty::Projection | ty::Inherent | ty::Weak, ..)
+            | ty::Alias(ty::Projection | ty::Inherent | ty::Free, ..)
             | ty::Bound(..)
             | ty::Infer(ty::TyVar(_) | ty::FreshTy(_) | ty::FreshIntTy(_) | ty::FreshFloatTy(_)) => {
                 bug!("asked to assemble constituent types of unexpected type: {:?}", t);
@@ -2836,7 +2883,7 @@ fn rebind_coroutine_witness_types<'tcx>(
     let shifted_coroutine_types =
         tcx.shift_bound_var_indices(bound_vars.len(), bound_coroutine_types.skip_binder());
     ty::Binder::bind_with_vars(
-        ty::EarlyBinder::bind(shifted_coroutine_types.to_vec()).instantiate(tcx, args),
+        ty::EarlyBinder::bind(shifted_coroutine_types.types.to_vec()).instantiate(tcx, args),
         tcx.mk_bound_variable_kinds_from_iter(
             bound_vars.iter().chain(bound_coroutine_types.bound_vars()),
         ),
@@ -2950,14 +2997,14 @@ struct ProvisionalEvaluationCache<'tcx> {
     ///   means the cached value for `F`.
     map: RefCell<FxIndexMap<ty::PolyTraitPredicate<'tcx>, ProvisionalEvaluation>>,
 
-    /// The stack of args that we assume to be true because a `WF(arg)` predicate
+    /// The stack of terms that we assume to be well-formed because a `WF(term)` predicate
     /// is on the stack above (and because of wellformedness is coinductive).
     /// In an "ideal" world, this would share a stack with trait predicates in
     /// `TraitObligationStack`. However, trait predicates are *much* hotter than
     /// `WellFormed` predicates, and it's very likely that the additional matches
     /// will have a perf effect. The value here is the well-formed `GenericArg`
     /// and the depth of the trait predicate *above* that well-formed predicate.
-    wf_args: RefCell<Vec<(ty::GenericArg<'tcx>, usize)>>,
+    wf_args: RefCell<Vec<(ty::Term<'tcx>, usize)>>,
 }
 
 /// A cache value for the provisional cache: contains the depth-first

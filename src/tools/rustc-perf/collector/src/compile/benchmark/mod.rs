@@ -3,6 +3,7 @@ use crate::compile::benchmark::codegen_backend::CodegenBackend;
 use crate::compile::benchmark::patch::Patch;
 use crate::compile::benchmark::profile::Profile;
 use crate::compile::benchmark::scenario::Scenario;
+use crate::compile::benchmark::target::Target;
 use crate::compile::execute::{CargoProcess, Processor};
 use crate::toolchain::Toolchain;
 use crate::utils::wait_for_future;
@@ -20,6 +21,7 @@ pub mod codegen_backend;
 pub(crate) mod patch;
 pub mod profile;
 pub mod scenario;
+pub mod target;
 
 fn default_runs() -> usize {
     3
@@ -76,6 +78,10 @@ pub struct BenchmarkConfig {
     excluded_scenarios: HashSet<Scenario>,
 
     artifact: ArtifactType,
+
+    /// Which package from a workspace should be compiled
+    #[serde(default)]
+    package: Option<String>,
 }
 
 impl BenchmarkConfig {
@@ -180,6 +186,7 @@ impl Benchmark {
         cwd: &'a Path,
         profile: Profile,
         backend: CodegenBackend,
+        target: Target,
     ) -> CargoProcess<'a> {
         let mut cargo_args = self
             .config
@@ -220,10 +227,13 @@ impl Benchmark {
                 .collect(),
             touch_file: self.config.touch_file.clone(),
             jobserver: None,
+            target,
+            workspace_package: self.config.package.clone(),
         }
     }
 
     /// Run a specific benchmark under a processor + profiler combination.
+    #[allow(clippy::too_many_arguments)]
     pub async fn measure(
         &self,
         processor: &mut dyn Processor,
@@ -232,6 +242,7 @@ impl Benchmark {
         backends: &[CodegenBackend],
         toolchain: &Toolchain,
         iterations: Option<usize>,
+        targets: &[Target],
     ) -> anyhow::Result<()> {
         if self.config.disabled {
             eprintln!("Skipping {}: disabled", self.name);
@@ -263,10 +274,15 @@ impl Benchmark {
         }
 
         eprintln!("Preparing {}", self.name);
-        let mut target_dirs: Vec<((CodegenBackend, Profile), TempDir)> = vec![];
+        let mut target_dirs: Vec<((CodegenBackend, Profile, Target), TempDir)> = vec![];
         for backend in backends {
             for profile in &profiles {
-                target_dirs.push(((*backend, *profile), self.make_temp_dir(&self.path)?));
+                for target in targets {
+                    target_dirs.push((
+                        (*backend, *profile, *target),
+                        self.make_temp_dir(&self.path)?,
+                    ));
+                }
             }
         }
 
@@ -304,15 +320,21 @@ impl Benchmark {
             )
             .context("jobserver::new")?;
             let mut threads = Vec::with_capacity(target_dirs.len());
-            for ((backend, profile), prep_dir) in &target_dirs {
+            for ((backend, profile, target), prep_dir) in &target_dirs {
                 let server = server.clone();
                 let thread = s.spawn::<_, anyhow::Result<()>>(move || {
                     wait_for_future(async move {
                         let server = server.clone();
-                        self.mk_cargo_process(toolchain, prep_dir.path(), *profile, *backend)
-                            .jobserver(server)
-                            .run_rustc(false)
-                            .await?;
+                        self.mk_cargo_process(
+                            toolchain,
+                            prep_dir.path(),
+                            *profile,
+                            *backend,
+                            *target,
+                        )
+                        .jobserver(server)
+                        .run_rustc(false)
+                        .await?;
                         Ok::<(), anyhow::Error>(())
                     })?;
                     Ok(())
@@ -343,12 +365,13 @@ impl Benchmark {
         let mut timing_dirs: Vec<ManuallyDrop<TempDir>> = vec![];
 
         let benchmark_start = std::time::Instant::now();
-        for ((backend, profile), prep_dir) in &target_dirs {
+        for ((backend, profile, target), prep_dir) in &target_dirs {
             let backend = *backend;
             let profile = *profile;
+            let target = *target;
             eprintln!(
-                "Running {}: {:?} + {:?} + {:?}",
-                self.name, profile, scenarios, backend
+                "Running {}: {:?} + {:?} + {:?} + {:?}",
+                self.name, profile, scenarios, backend, target,
             );
 
             // We want at least two runs for all benchmarks (since we run
@@ -370,7 +393,7 @@ impl Benchmark {
 
                 // A full non-incremental build.
                 if scenarios.contains(&Scenario::Full) {
-                    self.mk_cargo_process(toolchain, cwd, profile, backend)
+                    self.mk_cargo_process(toolchain, cwd, profile, backend, target)
                         .processor(processor, Scenario::Full, "Full", None)
                         .run_rustc(true)
                         .await?;
@@ -381,7 +404,7 @@ impl Benchmark {
                     // An incremental  from scratch (slowest incremental case).
                     // This is required for any subsequent incremental builds.
                     if scenarios.iter().any(|s| s.is_incr()) {
-                        self.mk_cargo_process(toolchain, cwd, profile, backend)
+                        self.mk_cargo_process(toolchain, cwd, profile, backend, target)
                             .incremental(true)
                             .processor(processor, Scenario::IncrFull, "IncrFull", None)
                             .run_rustc(true)
@@ -390,7 +413,7 @@ impl Benchmark {
 
                     // An incremental build with no changes (fastest incremental case).
                     if scenarios.contains(&Scenario::IncrUnchanged) {
-                        self.mk_cargo_process(toolchain, cwd, profile, backend)
+                        self.mk_cargo_process(toolchain, cwd, profile, backend, target)
                             .incremental(true)
                             .processor(processor, Scenario::IncrUnchanged, "IncrUnchanged", None)
                             .run_rustc(true)
@@ -405,7 +428,7 @@ impl Benchmark {
                             // An incremental build with some changes (realistic
                             // incremental case).
                             let scenario_str = format!("IncrPatched{}", i);
-                            self.mk_cargo_process(toolchain, cwd, profile, backend)
+                            self.mk_cargo_process(toolchain, cwd, profile, backend, target)
                                 .incremental(true)
                                 .processor(
                                     processor,
@@ -443,14 +466,22 @@ pub fn compile_benchmark_dir() -> PathBuf {
     PathBuf::from("collector/compile-benchmarks")
 }
 
+pub enum CompileBenchmarkFilter<'a> {
+    All,
+    /// Select benchmarks exactly matching the given benchmark names.
+    Exact(&'a [String]),
+    /// Select benchmarks matching the given prefixes/suffixes.
+    Fuzzy {
+        include: &'a [String],
+        exclude: &'a [String],
+        exclude_suffix: &'a [String],
+    },
+}
+
 pub fn get_compile_benchmarks(
     benchmark_dir: &Path,
-    include: &[String],
-    exclude: &[String],
-    exclude_suffix: &[String],
+    filter: CompileBenchmarkFilter<'_>,
 ) -> anyhow::Result<Vec<Benchmark>> {
-    let mut benchmarks = Vec::new();
-
     let mut paths = Vec::new();
     for entry in std::fs::read_dir(benchmark_dir)
         .with_context(|| format!("failed to list benchmark dir '{}'", benchmark_dir.display()))?
@@ -469,6 +500,40 @@ pub fn get_compile_benchmarks(
 
         paths.push((path, name));
     }
+
+    let mut benchmarks = match filter {
+        CompileBenchmarkFilter::All => paths
+            .into_iter()
+            .map(|(path, name)| Benchmark::new(name, path))
+            .collect::<anyhow::Result<Vec<Benchmark>>>()?,
+        CompileBenchmarkFilter::Exact(names) => paths
+            .into_iter()
+            .filter(|(_, name)| names.contains(name))
+            .map(|(path, name)| Benchmark::new(name, path))
+            .collect::<anyhow::Result<Vec<Benchmark>>>()?,
+        CompileBenchmarkFilter::Fuzzy {
+            include,
+            exclude,
+            exclude_suffix,
+        } => select_benchmarks_fuzzy(paths, include, exclude, exclude_suffix)?,
+    };
+
+    benchmarks.sort_by_key(|benchmark| benchmark.name.clone());
+
+    if benchmarks.is_empty() {
+        eprintln!("Warning: no benchmarks selected! Try less strict filters.");
+    }
+
+    Ok(benchmarks)
+}
+
+fn select_benchmarks_fuzzy(
+    paths: Vec<(PathBuf, String)>,
+    include: &[String],
+    exclude: &[String],
+    exclude_suffix: &[String],
+) -> anyhow::Result<Vec<Benchmark>> {
+    let mut benchmarks = Vec::new();
 
     // For each --include/--exclude entry, we count how many times it's used,
     // to enable `check_for_unused` below.
@@ -528,12 +593,6 @@ Expected zero or more entries or substrings from list: {:?}."#,
     check_for_unused("exclude", excludes)?;
     check_for_unused("exclude-suffix", exclude_suffixes)?;
 
-    benchmarks.sort_by_key(|benchmark| benchmark.name.clone());
-
-    if benchmarks.is_empty() {
-        eprintln!("Warning: no benchmarks selected! Try less strict filters.");
-    }
-
     Ok(benchmarks)
 }
 
@@ -555,17 +614,28 @@ fn substring_matches(
 
 #[cfg(test)]
 mod tests {
-    use crate::compile::benchmark::get_compile_benchmarks;
+    use crate::compile::benchmark::{get_compile_benchmarks, CompileBenchmarkFilter};
     use std::path::Path;
 
     #[test]
     fn check_compile_benchmarks() {
         // Check that we can deserialize all perf-config.json files in the compile benchmark
-        // directory.
+        // directory and that they have [workspace] in their Cargo.toml.
         let root = env!("CARGO_MANIFEST_DIR");
+        let benchmark_dir = Path::new(root).join("compile-benchmarks");
         let benchmarks =
-            get_compile_benchmarks(&Path::new(root).join("compile-benchmarks"), &[], &[], &[])
-                .unwrap();
+            get_compile_benchmarks(&benchmark_dir, CompileBenchmarkFilter::All).unwrap();
         assert!(!benchmarks.is_empty());
+
+        for benchmark in benchmarks {
+            let dir = benchmark_dir.join(&benchmark.name.0);
+            let cargo_toml = std::fs::read_to_string(&dir.join("Cargo.toml"))
+                .expect(&format!("Cannot read Cargo.toml of {}", benchmark.name));
+            assert!(
+                cargo_toml.contains("[workspace]"),
+                "{} does not contain [workspace] in its Cargo.toml",
+                benchmark.name
+            );
+        }
     }
 }

@@ -38,13 +38,21 @@ fn associated_type_bounds<'tcx>(
         let icx = ItemCtxt::new(tcx, assoc_item_def_id);
         let mut bounds = Vec::new();
         icx.lowerer().lower_bounds(item_ty, hir_bounds, &mut bounds, ty::List::empty(), filter);
-        // Associated types are implicitly sized unless a `?Sized` bound is found
+        // Implicit bounds are added to associated types unless a `?Trait` bound is found
         match filter {
             PredicateFilter::All
             | PredicateFilter::SelfOnly
             | PredicateFilter::SelfTraitThatDefines(_)
             | PredicateFilter::SelfAndAssociatedTypeBounds => {
-                icx.lowerer().add_sized_bound(&mut bounds, item_ty, hir_bounds, None, span);
+                icx.lowerer().add_sizedness_bounds(
+                    &mut bounds,
+                    item_ty,
+                    hir_bounds,
+                    None,
+                    None,
+                    span,
+                );
+                icx.lowerer().add_default_traits(&mut bounds, item_ty, hir_bounds, None, span);
             }
             // `ConstIfConst` is only interested in `~const` bounds.
             PredicateFilter::ConstIfConst | PredicateFilter::SelfConstIfConst => {}
@@ -151,7 +159,7 @@ fn remap_gat_vars_and_recurse_into_nested_projections<'tcx>(
     let mut mapping = FxIndexMap::default();
     let generics = tcx.generics_of(assoc_item_def_id);
     for (param, var) in std::iter::zip(&generics.own_params, gat_vars) {
-        let existing = match var.unpack() {
+        let existing = match var.kind() {
             ty::GenericArgKind::Lifetime(re) => {
                 if let ty::RegionKind::ReBound(ty::INNERMOST, bv) = re.kind() {
                     mapping.insert(bv.var, tcx.mk_param_from_def(param))
@@ -327,14 +335,21 @@ fn opaque_type_bounds<'tcx>(
         let icx = ItemCtxt::new(tcx, opaque_def_id);
         let mut bounds = Vec::new();
         icx.lowerer().lower_bounds(item_ty, hir_bounds, &mut bounds, ty::List::empty(), filter);
-        // Opaque types are implicitly sized unless a `?Sized` bound is found
+        // Implicit bounds are added to opaque types unless a `?Trait` bound is found
         match filter {
             PredicateFilter::All
             | PredicateFilter::SelfOnly
             | PredicateFilter::SelfTraitThatDefines(_)
             | PredicateFilter::SelfAndAssociatedTypeBounds => {
-                // Associated types are implicitly sized unless a `?Sized` bound is found
-                icx.lowerer().add_sized_bound(&mut bounds, item_ty, hir_bounds, None, span);
+                icx.lowerer().add_sizedness_bounds(
+                    &mut bounds,
+                    item_ty,
+                    hir_bounds,
+                    None,
+                    None,
+                    span,
+                );
+                icx.lowerer().add_default_traits(&mut bounds, item_ty, hir_bounds, None, span);
             }
             //`ConstIfConst` is only interested in `~const` bounds.
             PredicateFilter::ConstIfConst | PredicateFilter::SelfConstIfConst => {}

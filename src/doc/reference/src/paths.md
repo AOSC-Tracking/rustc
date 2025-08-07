@@ -19,12 +19,13 @@ r[paths.simple]
 ### Simple Paths
 
 r[paths.simple.syntax]
-> **<sup>Syntax</sup>**\
-> _SimplePath_ :\
-> &nbsp;&nbsp; `::`<sup>?</sup> _SimplePathSegment_ (`::` _SimplePathSegment_)<sup>\*</sup>
->
-> _SimplePathSegment_ :\
-> &nbsp;&nbsp; [IDENTIFIER] | `super` | `self` | `crate` | `$crate`
+```grammar,paths
+SimplePath ->
+    `::`? SimplePathSegment (`::` SimplePathSegment)*
+
+SimplePathSegment ->
+    IDENTIFIER | `super` | `self` | `crate` | `$crate`
+```
 
 r[paths.simple.intro]
 Simple paths are used in [visibility] markers, [attributes], [macros][mbe], and [`use`] items.
@@ -42,34 +43,35 @@ r[paths.expr]
 ### Paths in expressions
 
 r[paths.expr.syntax]
-> **<sup>Syntax</sup>**\
-> _PathInExpression_ :\
-> &nbsp;&nbsp; `::`<sup>?</sup> _PathExprSegment_ (`::` _PathExprSegment_)<sup>\*</sup>
->
-> _PathExprSegment_ :\
-> &nbsp;&nbsp; _PathIdentSegment_ (`::` _GenericArgs_)<sup>?</sup>
->
-> _PathIdentSegment_ :\
-> &nbsp;&nbsp; [IDENTIFIER] | `super` | `self` | `Self` | `crate` | `$crate`
->
-> _GenericArgs_ :\
-> &nbsp;&nbsp; &nbsp;&nbsp; `<` `>`\
-> &nbsp;&nbsp; | `<` ( _GenericArg_ `,` )<sup>\*</sup> _GenericArg_ `,`<sup>?</sup> `>`
->
-> _GenericArg_ :\
-> &nbsp;&nbsp; [_Lifetime_] | [_Type_] | _GenericArgsConst_ | _GenericArgsBinding_ | _GenericArgsBounds_
->
-> _GenericArgsConst_ :\
-> &nbsp;&nbsp; &nbsp;&nbsp; [_BlockExpression_]\
-> &nbsp;&nbsp; | [_LiteralExpression_]\
-> &nbsp;&nbsp; | `-` [_LiteralExpression_]\
-> &nbsp;&nbsp; | [_SimplePathSegment_]
->
-> _GenericArgsBinding_ :\
-> &nbsp;&nbsp; [IDENTIFIER] _GenericArgs_<sup>?</sup> `=` [_Type_]
->
-> _GenericArgsBounds_ :\
-> &nbsp;&nbsp; [IDENTIFIER] _GenericArgs_<sup>?</sup> `:` [_TypeParamBounds_]
+```grammar,paths
+PathInExpression ->
+    `::`? PathExprSegment (`::` PathExprSegment)*
+
+PathExprSegment ->
+    PathIdentSegment (`::` GenericArgs)?
+
+PathIdentSegment ->
+    IDENTIFIER | `super` | `self` | `Self` | `crate` | `$crate`
+
+GenericArgs ->
+      `<` `>`
+    | `<` ( GenericArg `,` )* GenericArg `,`? `>`
+
+GenericArg ->
+    Lifetime | Type | GenericArgsConst | GenericArgsBinding | GenericArgsBounds
+
+GenericArgsConst ->
+      BlockExpression
+    | LiteralExpression
+    | `-` LiteralExpression
+    | SimplePathSegment
+
+GenericArgsBinding ->
+    IDENTIFIER GenericArgs? `=` Type
+
+GenericArgsBounds ->
+    IDENTIFIER GenericArgs? `:` TypeParamBounds
+```
 
 r[paths.expr.intro]
 Paths in expressions allow for paths with generic arguments to be specified. They are
@@ -89,8 +91,30 @@ The order of generic arguments is restricted to lifetime arguments, then type
 arguments, then const arguments, then equality constraints.
 
 r[paths.expr.complex-const-params]
-Const arguments must be surrounded by braces unless they are a
-[literal] or a single segment path.
+Const arguments must be surrounded by braces unless they are a [literal], an [inferred const], or a single segment path. An [inferred const] may not be surrounded by braces.
+
+```rust
+mod m {
+    pub const C: usize = 1;
+}
+const C: usize = m::C;
+fn f<const N: usize>() -> [u8; N] { [0; N] }
+
+let _ = f::<1>(); // Literal.
+let _: [_; 1] = f::<_>(); // Inferred const.
+let _: [_; 1] = f::<(((_)))>(); // Inferred const.
+let _ = f::<C>(); // Single segment path.
+let _ = f::<{ m::C }>(); // Multi-segment path must be braced.
+```
+
+```rust,compile_fail
+fn f<const N: usize>() -> [u8; N] { [0; _] }
+let _: [_; 1] = f::<{ _ }>();
+//                    ^ ERROR `_` not allowed here
+```
+
+> [!NOTE]
+> In a generic argument list, an [inferred const] is parsed as an [inferred type][InferredType] but then semantically treated as a separate kind of [const generic argument].
 
 r[paths.expr.impl-trait-params]
 The synthetic type parameters corresponding to `impl Trait` types are implicit,
@@ -100,15 +124,13 @@ r[paths.qualified]
 ## Qualified paths
 
 r[paths.qualified.syntax]
-> **<sup>Syntax</sup>**\
-> _QualifiedPathInExpression_ :\
-> &nbsp;&nbsp; _QualifiedPathType_ (`::` _PathExprSegment_)<sup>+</sup>
->
-> _QualifiedPathType_ :\
-> &nbsp;&nbsp; `<` [_Type_] (`as` _TypePath_)<sup>?</sup> `>`
->
-> _QualifiedPathInType_ :\
-> &nbsp;&nbsp; _QualifiedPathType_ (`::` _TypePathSegment_)<sup>+</sup>
+```grammar,paths
+QualifiedPathInExpression -> QualifiedPathType (`::` PathExprSegment)+
+
+QualifiedPathType -> `<` Type (`as` TypePath)? `>`
+
+QualifiedPathInType -> QualifiedPathType (`::` TypePathSegment)+
+```
 
 r[paths.qualified.intro]
 Fully qualified paths allow for disambiguating the path for [trait implementations] and
@@ -137,18 +159,15 @@ r[paths.type]
 ### Paths in types
 
 r[paths.type.syntax]
-> **<sup>Syntax</sup>**\
-> _TypePath_ :\
-> &nbsp;&nbsp; `::`<sup>?</sup> _TypePathSegment_ (`::` _TypePathSegment_)<sup>\*</sup>
->
-> _TypePathSegment_ :\
-> &nbsp;&nbsp; _PathIdentSegment_ (`::`<sup>?</sup> ([_GenericArgs_] | _TypePathFn_))<sup>?</sup>
->
-> _TypePathFn_ :\
-> `(` _TypePathFnInputs_<sup>?</sup> `)` (`->` [_TypeNoBounds_])<sup>?</sup>
->
-> _TypePathFnInputs_ :\
-> [_Type_] (`,` [_Type_])<sup>\*</sup> `,`<sup>?</sup>
+```grammar,paths
+TypePath -> `::`? TypePathSegment (`::` TypePathSegment)*
+
+TypePathSegment -> PathIdentSegment (`::`? (GenericArgs | TypePathFn))?
+
+TypePathFn -> `(` TypePathFnInputs? `)` (`->` TypeNoBounds)?
+
+TypePathFnInputs -> Type (`,` Type)* `,`?
+```
 
 r[paths.type.intro]
 Type paths are used within type definitions, trait bounds, type parameter bounds,
@@ -156,7 +175,7 @@ and qualified paths.
 
 r[paths.type.turbofish]
 Although the `::` token is allowed before the generics arguments, it is not required
-because there is no ambiguity like there is in _PathInExpression_.
+because there is no ambiguity like there is in [PathInExpression].
 
 ```rust
 # mod ops {
@@ -188,14 +207,11 @@ Paths starting with `::` are considered to be *global paths* where the segments 
 start being resolved from a place which differs based on edition. Each identifier in
 the path must resolve to an item.
 
-r[paths.qualifiers.global-root.edition2015]
-> **Edition Differences**: In the 2015 Edition, identifiers resolve from the "crate root"
-> (`crate::` in the 2018 edition), which contains a variety of different items, including
-> external crates, default crates such as `std` or `core`, and items in the top level of
-> the crate (including `use` imports).
+r[paths.qualifiers.global-root.edition2018]
+> [!EDITION-2018]
+> In the 2015 Edition, identifiers resolve from the "crate root" (`crate::` in the 2018 edition), which contains a variety of different items, including external crates, default crates such as `std` or `core`, and items in the top level of the crate (including `use` imports).
 >
-> Beginning with the 2018 Edition, paths starting with `::` resolve from
-> crates in the [extern prelude]. That is, they must be followed by the name of a crate.
+> Beginning with the 2018 Edition, paths starting with `::` resolve from crates in the [extern prelude]. That is, they must be followed by the name of a crate.
 
 ```rust
 pub fn foo() {
@@ -374,11 +390,11 @@ r[paths.qualifiers.macro-crate]
 ### `$crate`
 
 r[paths.qualifiers.macro-crate.allowed-positions]
-`$crate` is only used within [macro transcribers], and can only be used as the first
+[`$crate`] is only used within [macro transcribers], and can only be used as the first
 segment, without a preceding `::`.
 
 r[paths.qualifiers.macro-crate.hygiene]
-`$crate` will expand to a path to access items from the
+[`$crate`] will expand to a path to access items from the
 top level of the crate where the macro is defined, regardless of which crate the macro is
 invoked.
 
@@ -478,27 +494,20 @@ mod without { // crate::without
 # fn main() {}
 ```
 
-[_BlockExpression_]: expressions/block-expr.md
-[_Expression_]: expressions.md
-[_GenericArgs_]: #paths-in-expressions
-[_Lifetime_]: trait-bounds.md
-[_LiteralExpression_]: expressions/literal-expr.md
-[_SimplePathSegment_]: #simple-paths
-[_Type_]: types.md#type-expressions
-[_TypeNoBounds_]: types.md#type-expressions
-[_TypeParamBounds_]: trait-bounds.md
+[`$crate`]: macro.decl.hygiene.crate
 [implementations]: items/implementations.md
 [items]: items.md
 [literal]: expressions/literal-expr.md
 [use declarations]: items/use-declarations.md
-[IDENTIFIER]: identifiers.md
 [`Self` scope]: names/scopes.md#self-scope
 [`use`]: items/use-declarations.md
 [attributes]: attributes.md
+[const generic argument]: items.generics.const.argument
 [enumeration]: items/enumerations.md
 [expressions]: expressions.md
 [extern prelude]: names/preludes.md#extern-prelude
 [implementation]: items/implementations.md
+[inferred const]: items.generics.const.inferred
 [macro transcribers]: macros-by-example.md
 [macros]: macros.md
 [mbe]: macros-by-example.md

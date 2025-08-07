@@ -1,5 +1,8 @@
+//@ needs-target-std
 //@ ignore-windows
 //@ ignore-apple
+//@ ignore-wasm (`object` doesn't handle wasm object files)
+//@ ignore-cross-compile
 
 // This test should be replaced with one in tests/debuginfo once we can easily
 // tell via GDB or LLDB if debuginfo contains source code. Cheap tricks in LLDB
@@ -21,7 +24,7 @@ fn main() {
         .output(&output)
         .arg("-g")
         .arg("-Zembed-source=yes")
-        .arg("-Zdwarf-version=5")
+        .arg("-Cdwarf-version=5")
         .run();
     let output = rfs::read(output);
     let obj = object::File::parse(output.as_slice()).unwrap();

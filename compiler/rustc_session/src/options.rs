@@ -16,7 +16,7 @@ use rustc_span::{RealFileName, SourceFileHashAlgorithm};
 use rustc_target::spec::{
     CodeModel, FramePointer, LinkerFlavorCli, MergeFunctions, OnBrokenPipe, PanicStrategy,
     RelocModel, RelroLevel, SanitizerSet, SplitDebuginfo, StackProtector, SymbolVisibility,
-    TargetTuple, TlsModel, WasmCAbi,
+    TargetTuple, TlsModel,
 };
 
 use crate::config::*;
@@ -387,20 +387,34 @@ top_level_options!(
 
         /// Remap source path prefixes in all output (messages, object files, debug, etc.).
         remap_path_prefix: Vec<(PathBuf, PathBuf)> [TRACKED_NO_CRATE_HASH],
-        /// Base directory containing the `src/` for the Rust standard library, and
-        /// potentially `rustc` as well, if we can find it. Right now it's always
-        /// `$sysroot/lib/rustlib/src/rust` (i.e. the `rustup` `rust-src` component).
+
+        /// Base directory containing the `library/` directory for the Rust standard library.
+        /// Right now it's always `$sysroot/lib/rustlib/src/rust`
+        /// (i.e. the `rustup` `rust-src` component).
         ///
         /// This directory is what the virtual `/rustc/$hash` is translated back to,
         /// if Rust was built with path remapping to `/rustc/$hash` enabled
         /// (the `rust.remap-debuginfo` option in `bootstrap.toml`).
         real_rust_source_base_dir: Option<PathBuf> [TRACKED_NO_CRATE_HASH],
 
+        /// Base directory containing the `compiler/` directory for the rustc sources.
+        /// Right now it's always `$sysroot/lib/rustlib/rustc-src/rust`
+        /// (i.e. the `rustup` `rustc-dev` component).
+        ///
+        /// This directory is what the virtual `/rustc-dev/$hash` is translated back to,
+        /// if Rust was built with path remapping to `/rustc/$hash` enabled
+        /// (the `rust.remap-debuginfo` option in `bootstrap.toml`).
+        real_rustc_dev_source_base_dir: Option<PathBuf> [TRACKED_NO_CRATE_HASH],
+
         edition: Edition [TRACKED],
 
         /// `true` if we're emitting JSON blobs about each artifact produced
         /// by the compiler.
         json_artifact_notifications: bool [TRACKED],
+
+        /// `true` if we're emitting JSON timings with the start and end of
+        /// high-level compilation sections
+        json_timings: bool [UNTRACKED],
 
         /// `true` if we're emitting a JSON blob containing the unused externs
         json_unused_externs: JsonUnusedExterns [UNTRACKED],
@@ -711,7 +725,7 @@ mod desc {
     pub(crate) const parse_list: &str = "a space-separated list of strings";
     pub(crate) const parse_list_with_polarity: &str =
         "a comma-separated list of strings, with elements beginning with + or -";
-    pub(crate) const parse_autodiff: &str = "a comma separated list of settings: `Enable`, `PrintSteps`, `PrintTA`, `PrintAA`, `PrintPerf`, `PrintModBefore`, `PrintModAfter`, `LooseTypes`, `Inline`";
+    pub(crate) const parse_autodiff: &str = "a comma separated list of settings: `Enable`, `PrintSteps`, `PrintTA`, `PrintAA`, `PrintPerf`, `PrintModBefore`, `PrintModAfter`, `PrintModFinal`, `PrintPasses`, `NoPostopt`, `LooseTypes`, `Inline`";
     pub(crate) const parse_comma_list: &str = "a comma-separated list of strings";
     pub(crate) const parse_opt_comma_list: &str = parse_comma_list;
     pub(crate) const parse_number: &str = "a number";
@@ -794,7 +808,7 @@ mod desc {
         "either a boolean (`yes`, `no`, `on`, `off`, etc), or a non-negative number";
     pub(crate) const parse_llvm_module_flag: &str = "<key>:<type>:<value>:<behavior>. Type must currently be `u32`. Behavior should be one of (`error`, `warning`, `require`, `override`, `append`, `appendunique`, `max`, `min`)";
     pub(crate) const parse_function_return: &str = "`keep` or `thunk-extern`";
-    pub(crate) const parse_wasm_c_abi: &str = "`legacy` or `spec`";
+    pub(crate) const parse_wasm_c_abi: &str = "`spec`";
     pub(crate) const parse_mir_include_spans: &str =
         "either a boolean (`yes`, `no`, `on`, `off`, etc), or `nll` (default: `nll`)";
     pub(crate) const parse_align: &str = "a number that is a power of 2 between 1 and 2^29";
@@ -1359,6 +1373,9 @@ pub mod parse {
                 "PrintSteps" => AutoDiff::PrintSteps,
                 "PrintModBefore" => AutoDiff::PrintModBefore,
                 "PrintModAfter" => AutoDiff::PrintModAfter,
+                "PrintModFinal" => AutoDiff::PrintModFinal,
+                "NoPostopt" => AutoDiff::NoPostopt,
+                "PrintPasses" => AutoDiff::PrintPasses,
                 "LooseTypes" => AutoDiff::LooseTypes,
                 "Inline" => AutoDiff::Inline,
                 _ => {
@@ -1887,14 +1904,8 @@ pub mod parse {
         true
     }
 
-    pub(crate) fn parse_wasm_c_abi(slot: &mut WasmCAbi, v: Option<&str>) -> bool {
-        match v {
-            Some("spec") => *slot = WasmCAbi::Spec,
-            // Explicitly setting the `-Z` flag suppresses the lint.
-            Some("legacy") => *slot = WasmCAbi::Legacy { with_lint: false },
-            _ => return false,
-        }
-        true
+    pub(crate) fn parse_wasm_c_abi(_slot: &mut (), v: Option<&str>) -> bool {
+        v == Some("spec")
     }
 
     pub(crate) fn parse_mir_include_spans(slot: &mut MirIncludeSpans, v: Option<&str>) -> bool {
@@ -1955,6 +1966,9 @@ options! {
         "allow the linker to link its default libraries (default: no)"),
     dlltool: Option<PathBuf> = (None, parse_opt_pathbuf, [UNTRACKED],
         "import library generation tool (ignored except when targeting windows-gnu)"),
+    #[rustc_lint_opt_deny_field_access("use `Session::dwarf_version` instead of this field")]
+    dwarf_version: Option<u32> = (None, parse_opt_number, [TRACKED],
+        "version of DWARF debug information to emit (default: 2 or 4, depending on platform)"),
     embed_bitcode: bool = (true, parse_bool, [TRACKED],
         "emit bitcode in rlibs (default: yes)"),
     extra_filename: String = (String::new(), parse_string, [UNTRACKED],
@@ -2093,6 +2107,9 @@ options! {
         `=PrintSteps`
         `=PrintModBefore`
         `=PrintModAfter`
+        `=PrintModFinal`
+        `=PrintPasses`,
+        `=NoPostopt`
         `=LooseTypes`
         `=Inline`
         Multiple options can be combined with commas."),
@@ -2104,6 +2121,8 @@ options! {
         "emit noalias metadata for box (default: yes)"),
     branch_protection: Option<BranchProtection> = (None, parse_branch_protection, [TRACKED],
         "set options for branch target identification and pointer authentication on AArch64"),
+    build_sdylib_interface: bool = (false, parse_bool, [UNTRACKED],
+        "whether the stable interface is being built"),
     cf_protection: CFProtection = (CFProtection::None, parse_cfprotection, [TRACKED],
         "instrument control-flow architecture protection"),
     check_cfg_all_expected: bool = (false, parse_bool, [UNTRACKED],
@@ -2175,6 +2194,8 @@ options! {
         them only if an error has not been emitted"),
     ehcont_guard: bool = (false, parse_bool, [TRACKED],
         "generate Windows EHCont Guard tables"),
+    embed_metadata: bool = (true, parse_bool, [TRACKED],
+        "embed metadata in rlibs and dylibs (default: yes)"),
     embed_source: bool = (false, parse_bool, [TRACKED],
         "embed source text in DWARF debug sections (default: no)"),
     emit_stack_sizes: bool = (false, parse_bool, [UNTRACKED],
@@ -2185,6 +2206,8 @@ options! {
         "Use WebAssembly error handling for wasm32-unknown-emscripten"),
     enforce_type_length_limit: bool = (false, parse_bool, [TRACKED],
         "enforce the type length limit when monomorphizing instances in codegen"),
+    experimental_default_bounds: bool = (false, parse_bool, [TRACKED],
+        "enable default bounds for experimental group of auto traits"),
     export_executable_symbols: bool = (false, parse_bool, [TRACKED],
         "export symbols from executables, as if they were dynamic libraries"),
     external_clangrt: bool = (false, parse_bool, [UNTRACKED],
@@ -2195,7 +2218,7 @@ options! {
     fewer_names: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "reduce memory use by retaining fewer names within compilation artifacts (LLVM-IR) \
         (default: no)"),
-    fixed_x18: bool = (false, parse_bool, [TRACKED],
+    fixed_x18: bool = (false, parse_bool, [TRACKED TARGET_MODIFIER],
         "make the x18 register reserved on AArch64 (default: no)"),
     flatten_format_args: bool = (true, parse_bool, [TRACKED],
         "flatten nested format_args!() and literals into a simplified format_args!() call \
@@ -2218,6 +2241,8 @@ options! {
         environment variable `RUSTC_GRAPHVIZ_FONT` (default: `Courier, monospace`)"),
     has_thread_local: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "explicitly enable the `cfg(target_thread_local)` directive"),
+    hint_mostly_unused: bool = (false, parse_bool, [TRACKED],
+        "hint that most of this crate will go unused, to minimize work for uncalled functions"),
     human_readable_cgu_names: bool = (false, parse_bool, [TRACKED],
         "generate human-readable, predictable names for codegen units (default: no)"),
     identify_regions: bool = (false, parse_bool, [UNTRACKED],
@@ -2290,6 +2315,8 @@ options! {
         (space separated)"),
     macro_backtrace: bool = (false, parse_bool, [UNTRACKED],
         "show macro backtraces (default: no)"),
+    macro_stats: bool = (false, parse_bool, [UNTRACKED],
+        "print some statistics about macro expansions (default: no)"),
     maximal_hir_to_mir_coverage: bool = (false, parse_bool, [TRACKED],
         "save as much information as possible about the correspondence between MIR and HIR \
         as source scopes (default: no)"),
@@ -2313,18 +2340,20 @@ options! {
     mir_include_spans: MirIncludeSpans = (MirIncludeSpans::default(), parse_mir_include_spans, [UNTRACKED],
         "include extra comments in mir pretty printing, like line numbers and statement indices, \
          details about types, etc. (boolean for all passes, 'nll' to enable in NLL MIR only, default: 'nll')"),
-    mir_keep_place_mention: bool = (false, parse_bool, [TRACKED],
-        "keep place mention MIR statements, interpreted e.g., by miri; implies -Zmir-opt-level=0 \
-        (default: no)"),
     #[rustc_lint_opt_deny_field_access("use `Session::mir_opt_level` instead of this field")]
     mir_opt_level: Option<usize> = (None, parse_opt_number, [TRACKED],
         "MIR optimization level (0-4; default: 1 in non optimized builds and 2 in optimized builds)"),
+    mir_preserve_ub: bool = (false, parse_bool, [TRACKED],
+        "keep place mention statements and reads in trivial SwitchInt terminators, which are interpreted \
+        e.g., by miri; implies -Zmir-opt-level=0 (default: no)"),
     mir_strip_debuginfo: MirStripDebugInfo = (MirStripDebugInfo::None, parse_mir_strip_debuginfo, [TRACKED],
         "Whether to remove some of the MIR debug info from methods.  Default: None"),
     move_size_limit: Option<usize> = (None, parse_opt_number, [TRACKED],
         "the size at which the `large_assignments` lint starts to be emitted"),
     mutable_noalias: bool = (true, parse_bool, [TRACKED],
         "emit noalias metadata for mutable references (default: yes)"),
+    namespaced_crates: bool = (false, parse_bool, [TRACKED],
+        "allow crates to be namespaced by other crates (default: no)"),
     next_solver: NextSolverConfig = (NextSolverConfig::default(), parse_next_solver_config, [TRACKED],
         "enable and configure the next generation trait solver used by rustc"),
     nll_facts: bool = (false, parse_bool, [UNTRACKED],
@@ -2349,6 +2378,8 @@ options! {
         "run LLVM in non-parallel mode (while keeping codegen-units and ThinLTO)"),
     no_profiler_runtime: bool = (false, parse_no_value, [TRACKED],
         "prevent automatic injection of the profiler_builtins crate"),
+    no_steal_thir: bool = (false, parse_bool, [UNTRACKED],
+        "don't steal the THIR when we're done with it; useful for rustc drivers (default: no)"),
     no_trait_vptr: bool = (false, parse_no_value, [TRACKED],
         "disable generation of trait vptr in vtable for upcasting"),
     no_unique_section_names: bool = (false, parse_bool, [TRACKED],
@@ -2391,10 +2422,8 @@ options! {
         "print codegen statistics (default: no)"),
     print_llvm_passes: bool = (false, parse_bool, [UNTRACKED],
         "print the LLVM optimization passes being run (default: no)"),
-    print_mono_items: Option<String> = (None, parse_opt_string, [UNTRACKED],
-        "print the result of the monomorphization collection pass. \
-         Value `lazy` means to use normal collection; `eager` means to collect all items.
-         Note that this overwrites the effect `-Clink-dead-code` has on collection!"),
+    print_mono_items: bool = (false, parse_bool, [UNTRACKED],
+        "print the result of the monomorphization collection pass (default: no)"),
     print_type_sizes: bool = (false, parse_bool, [UNTRACKED],
         "print layout information for each type encountered (default: no)"),
     proc_macro_backtrace: bool = (false, parse_bool, [UNTRACKED],
@@ -2429,6 +2458,11 @@ options! {
     remark_dir: Option<PathBuf> = (None, parse_opt_pathbuf, [UNTRACKED],
         "directory into which to write optimization remarks (if not specified, they will be \
 written to standard error output)"),
+    retpoline: bool = (false, parse_bool, [TRACKED TARGET_MODIFIER],
+        "enables retpoline-indirect-branches and retpoline-indirect-calls target features (default: no)"),
+    retpoline_external_thunk: bool = (false, parse_bool, [TRACKED TARGET_MODIFIER],
+        "enables retpoline-external-thunk, retpoline-indirect-branches and retpoline-indirect-calls \
+        target features (default: no)"),
     sanitizer: SanitizerSet = (SanitizerSet::empty(), parse_sanitizers, [TRACKED],
         "use a sanitizer"),
     sanitizer_cfi_canonical_jump_tables: Option<bool> = (Some(true), parse_opt_bool, [TRACKED],
@@ -2439,6 +2473,8 @@ written to standard error output)"),
         "enable normalizing integer types (default: no)"),
     sanitizer_dataflow_abilist: Vec<String> = (Vec::new(), parse_comma_list, [TRACKED],
         "additional ABI list files that control how shadow parameters are passed (comma separated)"),
+    sanitizer_kcfi_arity: Option<bool> = (None, parse_opt_bool, [TRACKED],
+        "enable KCFI arity indicator (default: no)"),
     sanitizer_memory_track_origins: usize = (0, parse_sanitizer_memory_track_origins, [TRACKED],
         "enable origins tracking in MemorySanitizer"),
     sanitizer_recover: SanitizerSet = (SanitizerSet::empty(), parse_sanitizers, [TRACKED],
@@ -2551,6 +2587,9 @@ written to standard error output)"),
         "in diagnostics, use heuristics to shorten paths referring to items"),
     tune_cpu: Option<String> = (None, parse_opt_string, [TRACKED],
         "select processor to schedule for (`rustc --print target-cpus` for details)"),
+    #[rustc_lint_opt_deny_field_access("use `TyCtxt::use_typing_mode_borrowck` instead of this field")]
+    typing_mode_borrowck: bool = (false, parse_bool, [TRACKED],
+        "enable `TypingMode::Borrowck`, changing the way opaque types are handled during MIR borrowck"),
     #[rustc_lint_opt_deny_field_access("use `Session::ub_checks` instead of this field")]
     ub_checks: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "emit runtime checks for Undefined Behavior (default: -Cdebug-assertions)"),
@@ -2605,8 +2644,11 @@ written to standard error output)"),
         Requires `-Clto[=[fat,yes]]`"),
     wasi_exec_model: Option<WasiExecModel> = (None, parse_wasi_exec_model, [TRACKED],
         "whether to build a wasi command or reactor"),
-    wasm_c_abi: WasmCAbi = (WasmCAbi::Legacy { with_lint: true }, parse_wasm_c_abi, [TRACKED],
-        "use spec-compliant C ABI for `wasm32-unknown-unknown` (default: legacy)"),
+    // This option only still exists to provide a more gradual transition path for people who need
+    // the spec-complaint C ABI to be used.
+    // FIXME remove this after a couple releases
+    wasm_c_abi: () = ((), parse_wasm_c_abi, [TRACKED],
+        "use spec-compliant C ABI for `wasm32-unknown-unknown` (deprecated, always enabled)"),
     write_long_types_to_disk: bool = (true, parse_bool, [UNTRACKED],
         "whether long type names should be written to files instead of being printed in errors"),
     // tidy-alphabetical-end

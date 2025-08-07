@@ -1,4 +1,3 @@
-//@ignore-target: windows # File handling is not implemented yet
 //@compile-flags: -Zmiri-disable-isolation
 
 #![feature(io_error_more)]
@@ -7,8 +6,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{
-    File, OpenOptions, canonicalize, create_dir, read_dir, remove_dir, remove_dir_all, remove_file,
-    rename,
+    self, File, OpenOptions, create_dir, read_dir, remove_dir, remove_dir_all, remove_file, rename,
 };
 use std::io::{Error, ErrorKind, IsTerminal, Read, Result, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -19,19 +17,24 @@ mod utils;
 fn main() {
     test_path_conversion();
     test_file();
-    test_file_clone();
     test_file_create_new();
-    test_seek();
     test_metadata();
-    test_file_set_len();
-    test_file_sync();
+    test_seek();
     test_errors();
-    test_rename();
-    test_directory();
-    test_canonicalize();
     test_from_raw_os_error();
-    #[cfg(unix)]
-    test_pread_pwrite();
+    test_file_clone();
+    // Windows file handling is very incomplete.
+    if cfg!(not(windows)) {
+        test_file_set_len();
+        test_file_sync();
+        test_rename();
+        test_directory();
+        test_canonicalize();
+        #[cfg(unix)]
+        test_pread_pwrite();
+        #[cfg(not(any(target_os = "solaris", target_os = "illumos")))]
+        test_flock();
+    }
 }
 
 fn test_path_conversion() {
@@ -144,10 +147,10 @@ fn test_metadata() {
     let path = utils::prepare_with_content("miri_test_fs_metadata.txt", bytes);
 
     // Test that metadata of an absolute path is correct.
-    check_metadata(bytes, &path).unwrap();
+    check_metadata(bytes, &path).expect("absolute path metadata");
     // Test that metadata of a relative path is correct.
     std::env::set_current_dir(path.parent().unwrap()).unwrap();
-    check_metadata(bytes, Path::new(path.file_name().unwrap())).unwrap();
+    check_metadata(bytes, Path::new(path.file_name().unwrap())).expect("relative path metadata");
 
     // Removing file should succeed.
     remove_file(&path).unwrap();
@@ -238,7 +241,7 @@ fn test_canonicalize() {
     let path = dir_path.join("test_file");
     drop(File::create(&path).unwrap());
 
-    let p = canonicalize(format!("{}/./test_file", dir_path.to_string_lossy())).unwrap();
+    let p = fs::canonicalize(format!("{}/./test_file", dir_path.to_string_lossy())).unwrap();
     assert_eq!(p.to_string_lossy().find("/./"), None);
 
     remove_dir_all(&dir_path).unwrap();
@@ -348,4 +351,29 @@ fn test_pread_pwrite() {
     // Ensure that cursor position is not changed
     f.read_exact(&mut buf1).unwrap();
     assert_eq!(&buf1, b"  m");
+}
+
+// This function does seem to exist on Illumos but std does not expose it there.
+#[cfg(not(any(target_os = "solaris", target_os = "illumos")))]
+fn test_flock() {
+    let bytes = b"Hello, World!\n";
+    let path = utils::prepare_with_content("miri_test_fs_flock.txt", bytes);
+    let file1 = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+    let file2 = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+
+    // Test that we can apply many shared locks
+    file1.lock_shared().unwrap();
+    file2.lock_shared().unwrap();
+    // Test that shared lock prevents exclusive lock
+    assert!(matches!(file1.try_lock().unwrap_err(), fs::TryLockError::WouldBlock));
+    // Unlock shared lock
+    file1.unlock().unwrap();
+    file2.unlock().unwrap();
+    // Take exclusive lock
+    file1.lock().unwrap();
+    // Test that shared lock prevents exclusive and shared locks
+    assert!(matches!(file2.try_lock().unwrap_err(), fs::TryLockError::WouldBlock));
+    assert!(matches!(file2.try_lock_shared().unwrap_err(), fs::TryLockError::WouldBlock));
+    // Unlock exclusive lock
+    file1.unlock().unwrap();
 }

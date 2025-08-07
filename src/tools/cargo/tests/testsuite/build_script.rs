@@ -181,12 +181,9 @@ fn custom_build_env_vars() {
         )
         .file("bar/src/lib.rs", "pub fn hello() {}");
 
-    let cargo = cargo_exe().canonicalize().unwrap();
+    let cargo = cargo_exe();
     let cargo = cargo.to_str().unwrap();
-    let rustc = paths::resolve_executable("rustc".as_ref())
-        .unwrap()
-        .canonicalize()
-        .unwrap();
+    let rustc = paths::resolve_executable("rustc".as_ref()).unwrap();
     let rustc = rustc.to_str().unwrap();
     let file_content = format!(
         r##"
@@ -1035,7 +1032,7 @@ fn links_duplicates() {
     ... required by package `foo v0.5.0 ([ROOT]/foo)`
 versions that meet the requirements `*` are: 0.5.0
 
-the package `a-sys` links to the native library `a`, but it conflicts with a previous package which links to `a` as well:
+package `a-sys` links to the native library `a`, but it conflicts with a previous package which links to `a` as well:
 package `foo v0.5.0 ([ROOT]/foo)`
 Only one package in the dependency graph may specify the same links value. This helps ensure that only one copy of a native library is linked in the final binary. Try to adjust your dependencies so that only one package uses the `links = "a"` value. For more information, see https://doc.rust-lang.org/cargo/reference/resolver.html#links.
 
@@ -1162,7 +1159,7 @@ fn links_duplicates_deep_dependency() {
     ... which satisfies path dependency `a` of package `foo v0.5.0 ([ROOT]/foo)`
 versions that meet the requirements `*` are: 0.5.0
 
-the package `a-sys` links to the native library `a`, but it conflicts with a previous package which links to `a` as well:
+package `a-sys` links to the native library `a`, but it conflicts with a previous package which links to `a` as well:
 package `foo v0.5.0 ([ROOT]/foo)`
 Only one package in the dependency graph may specify the same links value. This helps ensure that only one copy of a native library is linked in the final binary. Try to adjust your dependencies so that only one package uses the `links = "a"` value. For more information, see https://doc.rust-lang.org/cargo/reference/resolver.html#links.
 
@@ -4770,7 +4767,7 @@ fn links_duplicates_with_cycle() {
     ... required by package `foo v0.5.0 ([ROOT]/foo)`
 versions that meet the requirements `*` are: 0.5.0
 
-the package `a` links to the native library `a`, but it conflicts with a previous package which links to `a` as well:
+package `a` links to the native library `a`, but it conflicts with a previous package which links to `a` as well:
 package `foo v0.5.0 ([ROOT]/foo)`
 Only one package in the dependency graph may specify the same links value. This helps ensure that only one copy of a native library is linked in the final binary. Try to adjust your dependencies so that only one package uses the `links = "a"` value. For more information, see https://doc.rust-lang.org/cargo/reference/resolver.html#links.
 
@@ -5423,7 +5420,7 @@ fn rerun_if_published_directory() {
 
     p.cargo("check").run();
 
-    // Delete regitry src to make directories being recreated with the latest timestamp.
+    // Delete registry src to make directories being recreated with the latest timestamp.
     cargo_home().join("registry/src").rm_rf();
 
     p.cargo("check --verbose")
@@ -5513,7 +5510,6 @@ fn test_with_dep_metadata() {
     p.cargo("test --lib").run();
 }
 
-#[ignore = "1-86 beta betaport"]
 #[cargo_test]
 fn duplicate_script_with_extra_env() {
     // Test where a build script is run twice, that emits different rustc-env
@@ -5604,10 +5600,10 @@ test check_target ... ok
 "#]])
         .run();
 
+    // Remove check once 1.88 is stable
     if cargo_test_support::is_nightly() {
-        p.cargo("test --workspace -Z doctest-xcompile --doc --target")
+        p.cargo("test --workspace --doc --target")
             .arg(&target)
-            .masquerade_as_nightly_cargo(&["doctest-xcompile"])
             .with_stdout_data(str![[r#"
 ...
 test foo/src/lib.rs - (line 2) ... ok
@@ -6087,4 +6083,91 @@ fn directory_with_leading_underscore() {
     p.cargo("build --manifest-path=_foo/foo/Cargo.toml -v")
         .with_status(0)
         .run();
+}
+
+#[cargo_test]
+fn linker_search_path_preference() {
+    // This isn't strictly the exact scenario that causes the issue, but it's the shortest demonstration
+    // of the issue.
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "2024"
+                build = "build.rs"
+
+                [dependencies]
+                a = { path = "a" }
+                b = { path = "b" }
+            "#,
+        )
+        .file(
+            "build.rs",
+            r#"
+                fn main() {
+                    let out_dir = std::env::var("OUT_DIR").unwrap();
+                    println!("cargo::rustc-link-search=/usr/lib");
+                    println!("cargo::rustc-link-search={}/libs2", out_dir);
+                    println!("cargo::rustc-link-search=/lib");
+                    println!("cargo::rustc-link-search={}/libs1", out_dir);
+                }
+            "#,
+        )
+        .file("src/main.rs", "fn main() {}")
+        .file(
+            "a/Cargo.toml",
+            r#"
+                [package]
+                name = "a"
+                version = "0.1.0"
+                edition = "2024"
+                build = "build.rs"
+            "#,
+        )
+        .file("a/src/lib.rs", "")
+        .file(
+            "a/build.rs",
+            r#"
+                fn main() {
+                    let out_dir = std::env::var("OUT_DIR").unwrap();
+                    println!("cargo::rustc-link-search=/usr/lib3");
+                    println!("cargo::rustc-link-search={}/libsA.2", out_dir);
+                    println!("cargo::rustc-link-search=/lib3");
+                    println!("cargo::rustc-link-search={}/libsA.1", out_dir);
+                }
+            "#,
+        )
+        .file(
+            "b/Cargo.toml",
+            r#"
+                [package]
+                name = "b"
+                version = "0.1.0"
+                edition = "2024"
+                build = "build.rs"
+            "#,
+        )
+        .file("b/src/lib.rs", "")
+        .file(
+            "b/build.rs",
+            r#"
+                fn main() {
+                    let out_dir = std::env::var("OUT_DIR").unwrap();
+                    println!("cargo::rustc-link-search=/usr/lib2");
+                    println!("cargo::rustc-link-search={}/libsB.1", out_dir);
+                    println!("cargo::rustc-link-search=/lib2");
+                    println!("cargo::rustc-link-search={}/libsB.2", out_dir);
+                }
+            "#,
+        )
+        .build();
+
+    p.cargo("build -v").with_stderr_data(str![[r#"
+...
+[RUNNING] `rustc --crate-name foo [..] -L [ROOT]/foo/target/debug/build/foo-[HASH]/out/libs2 -L [ROOT]/foo/target/debug/build/foo-[HASH]/out/libs1 -L [ROOT]/foo/target/debug/build/a-[HASH]/out/libsA.2 -L [ROOT]/foo/target/debug/build/a-[HASH]/out/libsA.1 -L [ROOT]/foo/target/debug/build/b-[HASH]/out/libsB.1 -L [ROOT]/foo/target/debug/build/b-[HASH]/out/libsB.2 -L /usr/lib -L /lib -L /usr/lib3 -L /lib3 -L /usr/lib2 -L /lib2`
+...
+"#]]).run();
 }

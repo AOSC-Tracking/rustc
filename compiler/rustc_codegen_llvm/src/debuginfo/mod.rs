@@ -66,6 +66,7 @@ pub(crate) struct CodegenUnitDebugContext<'ll, 'tcx> {
     created_files: RefCell<UnordMap<Option<(StableSourceFileId, SourceFileHash)>, &'ll DIFile>>,
 
     type_map: metadata::TypeMap<'ll, 'tcx>,
+    adt_stack: RefCell<Vec<(DefId, GenericArgsRef<'tcx>)>>,
     namespace_map: RefCell<DefIdMap<&'ll DIScope>>,
     recursion_marker_type: OnceCell<&'ll DIType>,
 }
@@ -80,6 +81,7 @@ impl<'ll, 'tcx> CodegenUnitDebugContext<'ll, 'tcx> {
             builder,
             created_files: Default::default(),
             type_map: Default::default(),
+            adt_stack: Default::default(),
             namespace_map: RefCell::new(Default::default()),
             recursion_marker_type: OnceCell::new(),
         }
@@ -145,6 +147,12 @@ pub(crate) fn finalize(cx: &CodegenCx<'_, '_>) {
     }
 }
 
+impl<'ll> Builder<'_, 'll, '_> {
+    pub(crate) fn get_dbg_loc(&self) -> Option<&'ll DILocation> {
+        unsafe { llvm::LLVMGetCurrentDebugLocation2(self.llbuilder) }
+    }
+}
+
 impl<'ll> DebugInfoBuilderMethods for Builder<'_, 'll, '_> {
     // FIXME(eddyb) find a common convention for all of the debuginfo-related
     // names (choose between `dbg`, `debug`, `debuginfo`, `debug_info` etc.).
@@ -205,10 +213,6 @@ impl<'ll> DebugInfoBuilderMethods for Builder<'_, 'll, '_> {
         unsafe {
             llvm::LLVMSetCurrentDebugLocation2(self.llbuilder, ptr::null());
         }
-    }
-
-    fn get_dbg_loc(&self) -> Option<&'ll DILocation> {
-        unsafe { llvm::LLVMGetCurrentDebugLocation2(self.llbuilder) }
     }
 
     fn insert_reference_to_gdb_debug_scripts_section_global(&mut self) {

@@ -67,8 +67,12 @@ pub(crate) fn try_inline(
             record_extern_fqn(cx, did, ItemType::Trait);
             cx.with_param_env(did, |cx| {
                 build_impls(cx, did, attrs_without_docs, &mut ret);
-                clean::TraitItem(Box::new(build_external_trait(cx, did)))
+                clean::TraitItem(Box::new(build_trait(cx, did)))
             })
+        }
+        Res::Def(DefKind::TraitAlias, did) => {
+            record_extern_fqn(cx, did, ItemType::TraitAlias);
+            cx.with_param_env(did, |cx| clean::TraitAliasItem(build_trait_alias(cx, did)))
         }
         Res::Def(DefKind::Fn, did) => {
             record_extern_fqn(cx, did, ItemType::Function);
@@ -251,7 +255,7 @@ pub(crate) fn record_extern_fqn(cx: &mut DocContext<'_>, did: DefId, kind: ItemT
     }
 }
 
-pub(crate) fn build_external_trait(cx: &mut DocContext<'_>, did: DefId) -> clean::Trait {
+pub(crate) fn build_trait(cx: &mut DocContext<'_>, did: DefId) -> clean::Trait {
     let trait_items = cx
         .tcx
         .associated_items(did)
@@ -260,18 +264,35 @@ pub(crate) fn build_external_trait(cx: &mut DocContext<'_>, did: DefId) -> clean
         .map(|item| clean_middle_assoc_item(item, cx))
         .collect();
 
-    let predicates = cx.tcx.predicates_of(did);
-    let generics = clean_ty_generics(cx, cx.tcx.generics_of(did), predicates);
-    let generics = filter_non_trait_generics(did, generics);
-    let (generics, supertrait_bounds) = separate_supertrait_bounds(generics);
+    let generics = clean_ty_generics(cx, did);
+    let (generics, mut supertrait_bounds) = separate_self_bounds(generics);
+
+    supertrait_bounds.retain(|b| {
+        // FIXME(sized-hierarchy): Always skip `MetaSized` bounds so that only `?Sized`
+        // is shown and none of the new sizedness traits leak into documentation.
+        !b.is_meta_sized_bound(cx)
+    });
+
     clean::Trait { def_id: did, generics, items: trait_items, bounds: supertrait_bounds }
 }
 
-pub(crate) fn build_function(cx: &mut DocContext<'_>, def_id: DefId) -> Box<clean::Function> {
+fn build_trait_alias(cx: &mut DocContext<'_>, did: DefId) -> clean::TraitAlias {
+    let generics = clean_ty_generics(cx, did);
+    let (generics, mut bounds) = separate_self_bounds(generics);
+
+    bounds.retain(|b| {
+        // FIXME(sized-hierarchy): Always skip `MetaSized` bounds so that only `?Sized`
+        // is shown and none of the new sizedness traits leak into documentation.
+        !b.is_meta_sized_bound(cx)
+    });
+
+    clean::TraitAlias { generics, bounds }
+}
+
+pub(super) fn build_function(cx: &mut DocContext<'_>, def_id: DefId) -> Box<clean::Function> {
     let sig = cx.tcx.fn_sig(def_id).instantiate_identity();
     // The generics need to be cleaned before the signature.
-    let mut generics =
-        clean_ty_generics(cx, cx.tcx.generics_of(def_id), cx.tcx.explicit_predicates_of(def_id));
+    let mut generics = clean_ty_generics(cx, def_id);
     let bound_vars = clean_bound_vars(sig.bound_vars());
 
     // At the time of writing early & late-bound params are stored separately in rustc,
@@ -300,30 +321,26 @@ pub(crate) fn build_function(cx: &mut DocContext<'_>, def_id: DefId) -> Box<clea
 }
 
 fn build_enum(cx: &mut DocContext<'_>, did: DefId) -> clean::Enum {
-    let predicates = cx.tcx.explicit_predicates_of(did);
-
     clean::Enum {
-        generics: clean_ty_generics(cx, cx.tcx.generics_of(did), predicates),
+        generics: clean_ty_generics(cx, did),
         variants: cx.tcx.adt_def(did).variants().iter().map(|v| clean_variant_def(v, cx)).collect(),
     }
 }
 
 fn build_struct(cx: &mut DocContext<'_>, did: DefId) -> clean::Struct {
-    let predicates = cx.tcx.explicit_predicates_of(did);
     let variant = cx.tcx.adt_def(did).non_enum_variant();
 
     clean::Struct {
         ctor_kind: variant.ctor_kind(),
-        generics: clean_ty_generics(cx, cx.tcx.generics_of(did), predicates),
+        generics: clean_ty_generics(cx, did),
         fields: variant.fields.iter().map(|x| clean_middle_field(x, cx)).collect(),
     }
 }
 
 fn build_union(cx: &mut DocContext<'_>, did: DefId) -> clean::Union {
-    let predicates = cx.tcx.explicit_predicates_of(did);
     let variant = cx.tcx.adt_def(did).non_enum_variant();
 
-    let generics = clean_ty_generics(cx, cx.tcx.generics_of(did), predicates);
+    let generics = clean_ty_generics(cx, did);
     let fields = variant.fields.iter().map(|x| clean_middle_field(x, cx)).collect();
     clean::Union { generics, fields }
 }
@@ -333,14 +350,13 @@ fn build_type_alias(
     did: DefId,
     ret: &mut Vec<Item>,
 ) -> Box<clean::TypeAlias> {
-    let predicates = cx.tcx.explicit_predicates_of(did);
     let ty = cx.tcx.type_of(did).instantiate_identity();
     let type_ = clean_middle_ty(ty::Binder::dummy(ty), cx, Some(did), None);
     let inner_type = clean_ty_alias_inner_type(ty, cx, ret);
 
     Box::new(clean::TypeAlias {
         type_,
-        generics: clean_ty_generics(cx, cx.tcx.generics_of(did), predicates),
+        generics: clean_ty_generics(cx, did),
         inner_type,
         item_type: None,
     })
@@ -472,7 +488,6 @@ pub(crate) fn build_impl(
     }
 
     let document_hidden = cx.render_options.document_hidden;
-    let predicates = tcx.explicit_predicates_of(did);
     let (trait_items, generics) = match impl_item {
         Some(impl_) => (
             impl_
@@ -490,17 +505,17 @@ pub(crate) fn build_impl(
                         return true;
                     }
                     if let Some(associated_trait) = associated_trait {
-                        let assoc_kind = match item.kind {
-                            hir::ImplItemKind::Const(..) => ty::AssocKind::Const,
-                            hir::ImplItemKind::Fn(..) => ty::AssocKind::Fn,
-                            hir::ImplItemKind::Type(..) => ty::AssocKind::Type,
+                        let assoc_tag = match item.kind {
+                            hir::ImplItemKind::Const(..) => ty::AssocTag::Const,
+                            hir::ImplItemKind::Fn(..) => ty::AssocTag::Fn,
+                            hir::ImplItemKind::Type(..) => ty::AssocTag::Type,
                         };
                         let trait_item = tcx
                             .associated_items(associated_trait.def_id)
-                            .find_by_name_and_kind(
+                            .find_by_ident_and_kind(
                                 tcx,
                                 item.ident,
-                                assoc_kind,
+                                assoc_tag,
                                 associated_trait.def_id,
                             )
                             .unwrap(); // SAFETY: For all impl items there exists trait item that has the same name.
@@ -524,10 +539,10 @@ pub(crate) fn build_impl(
                     if let Some(associated_trait) = associated_trait {
                         let trait_item = tcx
                             .associated_items(associated_trait.def_id)
-                            .find_by_name_and_kind(
+                            .find_by_ident_and_kind(
                                 tcx,
                                 item.ident(tcx),
-                                item.kind,
+                                item.as_tag(),
                                 associated_trait.def_id,
                             )
                             .unwrap(); // corresponding associated item has to exist
@@ -538,9 +553,7 @@ pub(crate) fn build_impl(
                 })
                 .map(|item| clean_middle_assoc_item(item, cx))
                 .collect::<Vec<_>>(),
-            clean::enter_impl_trait(cx, |cx| {
-                clean_ty_generics(cx, tcx.generics_of(did), predicates)
-            }),
+            clean::enter_impl_trait(cx, |cx| clean_ty_generics(cx, did)),
         ),
     };
     let polarity = tcx.impl_polarity(did);
@@ -702,8 +715,7 @@ pub(crate) fn print_inlined_const(tcx: TyCtxt<'_>, did: DefId) -> String {
 }
 
 fn build_const_item(cx: &mut DocContext<'_>, def_id: DefId) -> clean::Constant {
-    let mut generics =
-        clean_ty_generics(cx, cx.tcx.generics_of(def_id), cx.tcx.explicit_predicates_of(def_id));
+    let mut generics = clean_ty_generics(cx, def_id);
     clean::simplify::move_bounds_to_generic_parameters(&mut generics);
     let ty = clean_middle_ty(
         ty::Binder::dummy(cx.tcx.type_of(def_id).instantiate_identity()),
@@ -750,50 +762,7 @@ fn build_macro(
     }
 }
 
-/// A trait's generics clause actually contains all of the predicates for all of
-/// its associated types as well. We specifically move these clauses to the
-/// associated types instead when displaying, so when we're generating the
-/// generics for the trait itself we need to be sure to remove them.
-/// We also need to remove the implied "recursive" Self: Trait bound.
-///
-/// The inverse of this filtering logic can be found in the `Clean`
-/// implementation for `AssociatedType`
-fn filter_non_trait_generics(trait_did: DefId, mut g: clean::Generics) -> clean::Generics {
-    for pred in &mut g.where_predicates {
-        if let clean::WherePredicate::BoundPredicate { ty: clean::SelfTy, ref mut bounds, .. } =
-            *pred
-        {
-            bounds.retain(|bound| match bound {
-                clean::GenericBound::TraitBound(clean::PolyTrait { trait_, .. }, _) => {
-                    trait_.def_id() != trait_did
-                }
-                _ => true,
-            });
-        }
-    }
-
-    g.where_predicates.retain(|pred| match pred {
-        clean::WherePredicate::BoundPredicate {
-            ty:
-                clean::QPath(box clean::QPathData {
-                    self_type: clean::Generic(_),
-                    trait_: Some(trait_),
-                    ..
-                }),
-            bounds,
-            ..
-        } => !bounds.is_empty() && trait_.def_id() != trait_did,
-        _ => true,
-    });
-    g
-}
-
-/// Supertrait bounds for a trait are also listed in the generics coming from
-/// the metadata for a crate, so we want to separate those out and create a new
-/// list of explicit supertrait bounds to render nicely.
-fn separate_supertrait_bounds(
-    mut g: clean::Generics,
-) -> (clean::Generics, Vec<clean::GenericBound>) {
+fn separate_self_bounds(mut g: clean::Generics) -> (clean::Generics, Vec<clean::GenericBound>) {
     let mut ty_bounds = Vec::new();
     g.where_predicates.retain(|pred| match *pred {
         clean::WherePredicate::BoundPredicate { ty: clean::SelfTy, ref bounds, .. } => {
@@ -806,22 +775,17 @@ fn separate_supertrait_bounds(
 }
 
 pub(crate) fn record_extern_trait(cx: &mut DocContext<'_>, did: DefId) {
-    if did.is_local() {
+    if did.is_local()
+        || cx.external_traits.contains_key(&did)
+        || cx.active_extern_traits.contains(&did)
+    {
         return;
     }
 
-    {
-        if cx.external_traits.contains_key(&did) || cx.active_extern_traits.contains(&did) {
-            return;
-        }
-    }
-
-    {
-        cx.active_extern_traits.insert(did);
-    }
+    cx.active_extern_traits.insert(did);
 
     debug!("record_extern_trait: {did:?}");
-    let trait_ = build_external_trait(cx, did);
+    let trait_ = build_trait(cx, did);
 
     cx.external_traits.insert(did, trait_);
     cx.active_extern_traits.remove(&did);

@@ -41,22 +41,20 @@ type NormalizedInputsAndOutput<'tcx> = Vec<Ty<'tcx>>;
 
 pub(crate) struct CreateResult<'tcx> {
     pub(crate) universal_region_relations: Frozen<UniversalRegionRelations<'tcx>>,
-    pub(crate) region_bound_pairs: RegionBoundPairs<'tcx>,
-    pub(crate) known_type_outlives_obligations: Vec<ty::PolyTypeOutlivesPredicate<'tcx>>,
+    pub(crate) region_bound_pairs: Frozen<RegionBoundPairs<'tcx>>,
+    pub(crate) known_type_outlives_obligations: Frozen<Vec<ty::PolyTypeOutlivesPredicate<'tcx>>>,
     pub(crate) normalized_inputs_and_output: NormalizedInputsAndOutput<'tcx>,
 }
 
 pub(crate) fn create<'tcx>(
     infcx: &InferCtxt<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
-    implicit_region_bound: ty::Region<'tcx>,
     universal_regions: UniversalRegions<'tcx>,
     constraints: &mut MirTypeckRegionConstraints<'tcx>,
 ) -> CreateResult<'tcx> {
     UniversalRegionRelationsBuilder {
         infcx,
         param_env,
-        implicit_region_bound,
         constraints,
         universal_regions,
         region_bound_pairs: Default::default(),
@@ -133,7 +131,8 @@ impl UniversalRegionRelations<'_> {
         assert!(self.universal_regions.is_universal_region(fr0));
 
         let mut external_parents = vec![];
-        let mut queue = vec![fr0];
+
+        let mut queue = vec![relation.minimal_scc_representative(fr0)];
 
         // Keep expanding `fr` into its parents until we reach
         // non-local regions.
@@ -181,7 +180,6 @@ struct UniversalRegionRelationsBuilder<'a, 'tcx> {
     infcx: &'a InferCtxt<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
     universal_regions: UniversalRegions<'tcx>,
-    implicit_region_bound: ty::Region<'tcx>,
     constraints: &'a mut MirTypeckRegionConstraints<'tcx>,
 
     // outputs:
@@ -320,7 +318,6 @@ impl<'tcx> UniversalRegionRelationsBuilder<'_, 'tcx> {
                 self.infcx,
                 &self.universal_regions,
                 &self.region_bound_pairs,
-                self.implicit_region_bound,
                 param_env,
                 &known_type_outlives_obligations,
                 Locations::All(span),
@@ -337,8 +334,8 @@ impl<'tcx> UniversalRegionRelationsBuilder<'_, 'tcx> {
                 outlives: self.outlives.freeze(),
                 inverse_outlives: self.inverse_outlives.freeze(),
             }),
-            known_type_outlives_obligations,
-            region_bound_pairs: self.region_bound_pairs,
+            known_type_outlives_obligations: Frozen::freeze(known_type_outlives_obligations),
+            region_bound_pairs: Frozen::freeze(self.region_bound_pairs),
             normalized_inputs_and_output,
         }
     }

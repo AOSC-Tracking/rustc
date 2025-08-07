@@ -1,6 +1,7 @@
 use crate::compile::benchmark::codegen_backend::CodegenBackend;
 use crate::compile::benchmark::profile::Profile;
 use crate::compile::benchmark::scenario::Scenario;
+use crate::compile::benchmark::target::Target;
 use crate::compile::benchmark::BenchmarkName;
 use crate::compile::execute;
 use crate::compile::execute::{
@@ -91,11 +92,16 @@ impl<'a> BenchProcessor<'a> {
         scenario: database::Scenario,
         profile: database::Profile,
         backend: CodegenBackend,
+        target: Target,
         stats: Stats,
     ) {
         let backend = match backend {
             CodegenBackend::Llvm => database::CodegenBackend::Llvm,
             CodegenBackend::Cranelift => database::CodegenBackend::Cranelift,
+        };
+
+        let target = match target {
+            Target::X86_64UnknownLinuxGnu => database::Target::X86_64UnknownLinuxGnu,
         };
 
         let mut buf = FuturesUnordered::new();
@@ -107,6 +113,7 @@ impl<'a> BenchProcessor<'a> {
                 profile,
                 scenario,
                 backend,
+                target,
                 stat,
                 value,
             ));
@@ -120,7 +127,7 @@ impl<'a> BenchProcessor<'a> {
     }
 }
 
-impl<'a> Processor for BenchProcessor<'a> {
+impl Processor for BenchProcessor<'_> {
     fn perf_tool(&self) -> PerfTool {
         if self.is_first_collection && self.is_self_profile {
             if cfg!(unix) {
@@ -199,8 +206,15 @@ impl<'a> Processor for BenchProcessor<'a> {
                         res.0.stats.retain(|key, _| key.starts_with("size:"));
                     }
 
-                    self.insert_stats(collection, scenario, profile, data.backend, res.0)
-                        .await;
+                    self.insert_stats(
+                        collection,
+                        scenario,
+                        profile,
+                        data.backend,
+                        data.target,
+                        res.0,
+                    )
+                    .await;
 
                     Ok(Retry::No)
                 }
@@ -309,7 +323,7 @@ impl SelfProfileS3Upload {
             .arg("INTELLIGENT_TIERING")
             .arg("--only-show-errors")
             .arg(upload.path())
-            .arg(&format!(
+            .arg(format!(
                 "s3://rustc-perf/{}",
                 &prefix.join(filename).to_str().unwrap()
             ))

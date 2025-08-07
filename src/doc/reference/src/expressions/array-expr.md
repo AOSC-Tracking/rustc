@@ -4,13 +4,13 @@ r[expr.array]
 ## Array expressions
 
 r[expr.array.syntax]
-> **<sup>Syntax</sup>**\
-> _ArrayExpression_ :\
-> &nbsp;&nbsp; `[` _ArrayElements_<sup>?</sup> `]`
->
-> _ArrayElements_ :\
-> &nbsp;&nbsp; &nbsp;&nbsp; [_Expression_] ( `,` [_Expression_] )<sup>\*</sup> `,`<sup>?</sup>\
-> &nbsp;&nbsp; | [_Expression_] `;` [_Expression_]
+```grammar,expressions
+ArrayExpression -> `[` ArrayElements? `]`
+
+ArrayElements ->
+      Expression ( `,` Expression )* `,`?
+    | Expression `;` Expression
+```
 
 r[expr.array.constructor]
 *Array expressions* construct [arrays][array].
@@ -35,7 +35,18 @@ r[expr.array.length-operand]
 The expression after the `;` is called the *length operand*.
 
 r[expr.array.length-restriction]
-It must have type `usize` and be a [constant expression], such as a [literal] or a [constant item].
+The length operand must either be an [inferred const] or be a [constant expression] of type `usize` (e.g. a [literal] or a [constant item]).
+
+```rust
+const C: usize = 1;
+let _: [u8; C] = [0; 1]; // Literal.
+let _: [u8; C] = [0; C]; // Constant item.
+let _: [u8; C] = [0; _]; // Inferred const.
+let _: [u8; C] = [0; (((_)))]; // Inferred const.
+```
+
+> [!NOTE]
+> In an array expression, an [inferred const] is parsed as an [expression][Expression] but then semantically treated as a separate kind of [const generic argument].
 
 r[expr.array.repeat-behavior]
 An array expression of this form creates an array with the length of the value of the length operand with each element being a copy of the repeat operand.
@@ -66,9 +77,10 @@ const EMPTY: Vec<i32> = Vec::new();
 r[expr.array.index]
 ## Array and slice indexing expressions
 
-> **<sup>Syntax</sup>**\
-> _IndexExpression_ :\
-> &nbsp;&nbsp; [_Expression_] `[` [_Expression_] `]`
+r[expr.array.index.syntax]
+```grammar,expressions
+IndexExpression -> Expression `[` Expression `]`
+```
 
 r[expr.array.index.array]
 [Array] and [slice]-typed values can be indexed by writing a square-bracket-enclosed expression of type `usize` (the index) after them.
@@ -109,10 +121,11 @@ The array index expression can be implemented for types other than arrays and sl
 [`Copy`]: ../special-types-and-traits.md#copy
 [IndexMut]: std::ops::IndexMut
 [Index]: std::ops::Index
-[_Expression_]: ../expressions.md
 [array]: ../types/array.md
+[const generic argument]: items.generics.const.argument
 [constant expression]: ../const_eval.md#constant-expressions
 [constant item]: ../items/constant-items.md
+[inferred const]: items.generics.const.inferred
 [literal]: ../tokens.md#literals
 [memory location]: ../expressions.md#place-expressions-and-value-expressions
 [panic]: ../panic.md

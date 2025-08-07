@@ -1,6 +1,5 @@
 use crate::command_prelude::*;
 use cargo::ops;
-use cargo::util::interning::InternedString;
 
 const PRINT_ARG_NAME: &str = "print";
 const CRATE_TYPE_ARG_NAME: &str = "crate-type";
@@ -64,20 +63,20 @@ pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
     // This is a legacy behavior that changes the behavior based on the profile.
     // If we want to support this more formally, I think adding a --mode flag
     // would be warranted.
-    let mode = match args.get_one::<String>("profile").map(String::as_str) {
-        Some("test") => CompileMode::Test,
-        Some("bench") => CompileMode::Bench,
-        Some("check") => CompileMode::Check { test: false },
-        _ => CompileMode::Build,
+    let intent = match args.get_one::<String>("profile").map(String::as_str) {
+        Some("test") => UserIntent::Test,
+        Some("bench") => UserIntent::Bench,
+        Some("check") => UserIntent::Check { test: false },
+        _ => UserIntent::Build,
     };
     let mut compile_opts = args.compile_options_for_single_package(
         gctx,
-        mode,
+        intent,
         Some(&ws),
         ProfileChecking::LegacyRustc,
     )?;
     if compile_opts.build_config.requested_profile == "check" {
-        compile_opts.build_config.requested_profile = InternedString::new("dev");
+        compile_opts.build_config.requested_profile = "dev".into();
     }
     let target_args = values(args, "args");
     compile_opts.target_rustc_args = if target_args.is_empty() {

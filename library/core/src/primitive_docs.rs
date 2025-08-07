@@ -127,15 +127,13 @@ mod prim_bool {}
 /// [`Result<String, !>`] which we can unpack like this:
 ///
 /// ```
-/// #![feature(exhaustive_patterns)]
 /// use std::str::FromStr;
 /// let Ok(s) = String::from_str("hello");
 /// ```
 ///
-/// Since the [`Err`] variant contains a `!`, it can never occur. If the `exhaustive_patterns`
-/// feature is present this means we can exhaustively match on [`Result<T, !>`] by just taking the
-/// [`Ok`] variant. This illustrates another behavior of `!` - it can be used to "delete" certain
-/// enum variants from generic types like `Result`.
+/// Since the [`Err`] variant contains a `!`, it can never occur. This means we can exhaustively
+/// match on [`Result<T, !>`] by just taking the [`Ok`] variant. This illustrates another behavior
+/// of `!` - it can be used to "delete" certain enum variants from generic types like `Result`.
 ///
 /// ## Infinite loops
 ///
@@ -1309,12 +1307,59 @@ mod prim_f16 {}
 // FIXME: Is there a better place to put this?
 ///
 /// | `target_arch` | Extra payloads possible on this platform |
-/// |---------------|---------|
-/// | `x86`, `x86_64`, `arm`, `aarch64`, `riscv32`, `riscv64` | None |
+/// |---------------|------------------------------------------|
+// Sorted alphabetically
+/// | `aarch64`, `arm`, `arm64ec`, `loongarch64`, `powerpc` (except when `target_abi = "spe"`), `powerpc64`, `riscv32`, `riscv64`, `s390x`, `x86`, `x86_64` | None |
+/// | `nvptx64` | All payloads |
 /// | `sparc`, `sparc64` | The all-one payload |
-/// | `wasm32`, `wasm64` | If all input NaNs are quiet with all-zero payload: None.<br> Otherwise: all possible payloads. |
+/// | `wasm32`, `wasm64` | If all input NaNs are quiet with all-zero payload: None.<br> Otherwise: all payloads. |
 ///
 /// For targets not in this table, all payloads are possible.
+///
+/// # Algebraic operators
+///
+/// Algebraic operators of the form `a.algebraic_*(b)` allow the compiler to optimize
+/// floating point operations using all the usual algebraic properties of real numbers --
+/// despite the fact that those properties do *not* hold on floating point numbers.
+/// This can give a great performance boost since it may unlock vectorization.
+///
+/// The exact set of optimizations is unspecified but typically allows combining operations,
+/// rearranging series of operations based on mathematical properties, converting between division
+/// and reciprocal multiplication, and disregarding the sign of zero. This means that the results of
+/// elementary operations may have undefined precision, and "non-mathematical" values
+/// such as NaN, +/-Inf, or -0.0 may behave in unexpected ways, but these operations
+/// will never cause undefined behavior.
+///
+/// Because of the unpredictable nature of compiler optimizations, the same inputs may produce
+/// different results even within a single program run. **Unsafe code must not rely on any property
+/// of the return value for soundness.** However, implementations will generally do their best to
+/// pick a reasonable tradeoff between performance and accuracy of the result.
+///
+/// For example:
+///
+/// ```
+/// # #![feature(float_algebraic)]
+/// # #![allow(unused_assignments)]
+/// # let mut x: f32 = 0.0;
+/// # let a: f32 = 1.0;
+/// # let b: f32 = 2.0;
+/// # let c: f32 = 3.0;
+/// # let d: f32 = 4.0;
+/// x = a.algebraic_add(b).algebraic_add(c).algebraic_add(d);
+/// ```
+///
+/// May be rewritten as:
+///
+/// ```
+/// # #![allow(unused_assignments)]
+/// # let mut x: f32 = 0.0;
+/// # let a: f32 = 1.0;
+/// # let b: f32 = 2.0;
+/// # let c: f32 = 3.0;
+/// # let d: f32 = 4.0;
+/// x = a + b + c + d; // As written
+/// x = (a + c) + (b + d); // Reordered to shorten critical path and enable vectorization
+/// ```
 
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_f32 {}
@@ -1383,6 +1428,18 @@ mod prim_i64 {}
 #[rustc_doc_primitive = "i128"]
 //
 /// The 128-bit signed integer type.
+///
+/// # ABI compatibility
+///
+/// Rust's `i128` is expected to be ABI-compatible with C's `__int128` on platforms where the type
+/// is available, which includes most 64-bit architectures. If any platforms that do not specify
+/// `__int128` are updated to introduce it, the Rust `i128` ABI on relevant targets will be changed
+/// to match.
+///
+/// It is important to note that in C, `__int128` is _not_ the same as `_BitInt(128)`, and the two
+/// types are allowed to have different ABIs. In particular, on x86, `__int128` and `_BitInt(128)`
+/// do not use the same alignment. `i128` is intended to always match `__int128` and does not
+/// attempt to match `_BitInt(128)` on platforms without `__int128`.
 #[stable(feature = "i128", since = "1.26.0")]
 mod prim_i128 {}
 
@@ -1413,6 +1470,8 @@ mod prim_u64 {}
 #[rustc_doc_primitive = "u128"]
 //
 /// The 128-bit unsigned integer type.
+///
+/// Please see [the documentation for `i128`](prim@i128) for information on ABI compatibility.
 #[stable(feature = "i128", since = "1.26.0")]
 mod prim_u128 {}
 
@@ -1578,7 +1637,7 @@ mod prim_usize {}
 /// * if `size_of_val(t) > 0`, then `t` is dereferenceable for `size_of_val(t)` many bytes
 ///
 /// If `t` points at address `a`, being "dereferenceable" for N bytes means that the memory range
-/// `[a, a + N)` is all contained within a single [allocated object].
+/// `[a, a + N)` is all contained within a single [allocation].
 ///
 /// For instance, this means that unsafe code in a safe function may assume these invariants are
 /// ensured of arguments passed by the caller, and it may assume that these invariants are ensured
@@ -1594,7 +1653,7 @@ mod prim_usize {}
 /// may be unsound or become unsound in future versions of Rust depending on how this question is
 /// decided.
 ///
-/// [allocated object]: ptr#allocated-object
+/// [allocation]: ptr#allocation
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_ref {}
 
@@ -1788,6 +1847,8 @@ mod prim_ref {}
 /// - If `T` is guaranteed to be subject to the [null pointer
 ///   optimization](option/index.html#representation), and `E` is an enum satisfying the following
 ///   requirements, then `T` and `E` are ABI-compatible. Such an enum `E` is called "option-like".
+///   - The enum `E` uses the [`Rust` representation], and is not modified by the `align` or
+///     `packed` representation modifiers.
 ///   - The enum `E` has exactly two variants.
 ///   - One variant has exactly one field, of type `T`.
 ///   - All fields of the other variant are zero-sized with 1-byte alignment.
@@ -1861,6 +1922,7 @@ mod prim_ref {}
 /// [`Pointer`]: fmt::Pointer
 /// [`UnwindSafe`]: panic::UnwindSafe
 /// [`RefUnwindSafe`]: panic::RefUnwindSafe
+/// [`Rust` representation]: <https://doc.rust-lang.org/reference/type-layout.html#the-rust-representation>
 ///
 /// In addition, all *safe* function pointers implement [`Fn`], [`FnMut`], and [`FnOnce`], because
 /// these traits are specially known to the compiler.

@@ -1105,6 +1105,7 @@ impl String {
     /// ```
     #[cfg(not(no_global_oom_handling))]
     #[inline]
+    #[track_caller]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_confusables("append", "push")]
     #[rustc_diagnostic_item = "string_push_str"]
@@ -1135,6 +1136,7 @@ impl String {
     /// ```
     #[cfg(not(no_global_oom_handling))]
     #[stable(feature = "string_extend_from_within", since = "1.87.0")]
+    #[track_caller]
     pub fn extend_from_within<R>(&mut self, src: R)
     where
         R: RangeBounds<usize>,
@@ -1206,6 +1208,7 @@ impl String {
     /// ```
     #[cfg(not(no_global_oom_handling))]
     #[inline]
+    #[track_caller]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn reserve(&mut self, additional: usize) {
         self.vec.reserve(additional)
@@ -1257,6 +1260,7 @@ impl String {
     #[cfg(not(no_global_oom_handling))]
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[track_caller]
     pub fn reserve_exact(&mut self, additional: usize) {
         self.vec.reserve_exact(additional)
     }
@@ -1352,6 +1356,7 @@ impl String {
     /// ```
     #[cfg(not(no_global_oom_handling))]
     #[inline]
+    #[track_caller]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn shrink_to_fit(&mut self) {
         self.vec.shrink_to_fit()
@@ -1379,6 +1384,7 @@ impl String {
     /// ```
     #[cfg(not(no_global_oom_handling))]
     #[inline]
+    #[track_caller]
     #[stable(feature = "shrink_to", since = "1.56.0")]
     pub fn shrink_to(&mut self, min_capacity: usize) {
         self.vec.shrink_to(min_capacity)
@@ -1400,12 +1406,16 @@ impl String {
     #[cfg(not(no_global_oom_handling))]
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[track_caller]
     pub fn push(&mut self, ch: char) {
-        match ch.len_utf8() {
-            1 => self.vec.push(ch as u8),
-            _ => {
-                self.vec.extend_from_slice(ch.encode_utf8(&mut [0; char::MAX_LEN_UTF8]).as_bytes())
-            }
+        let len = self.len();
+        let ch_len = ch.len_utf8();
+        self.reserve(ch_len);
+
+        // SAFETY: Just reserved capacity for at least the length needed to encode `ch`.
+        unsafe {
+            core::char::encode_utf8_raw_unchecked(ch as u32, self.vec.as_mut_ptr().add(self.len()));
+            self.vec.set_len(len + ch_len);
         }
     }
 
@@ -1453,6 +1463,7 @@ impl String {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[track_caller]
     pub fn truncate(&mut self, new_len: usize) {
         if new_len <= self.len() {
             assert!(self.is_char_boundary(new_len));
@@ -1486,10 +1497,11 @@ impl String {
         Some(ch)
     }
 
-    /// Removes a [`char`] from this `String` at a byte position and returns it.
+    /// Removes a [`char`] from this `String` at byte position `idx` and returns it.
     ///
-    /// This is an *O*(*n*) operation, as it requires copying every element in the
-    /// buffer.
+    /// Copies all bytes after the removed char to new positions.
+    ///
+    /// Note that calling this in a loop can result in quadratic behavior.
     ///
     /// # Panics
     ///
@@ -1507,6 +1519,7 @@ impl String {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[track_caller]
     #[rustc_confusables("delete", "take")]
     pub fn remove(&mut self, idx: usize) -> char {
         let ch = match self[idx..].chars().next() {
@@ -1675,10 +1688,13 @@ impl String {
         drop(guard);
     }
 
-    /// Inserts a character into this `String` at a byte position.
+    /// Inserts a character into this `String` at byte position `idx`.
     ///
-    /// This is an *O*(*n*) operation as it requires copying every element in the
-    /// buffer.
+    /// Reallocates if `self.capacity()` is insufficient, which may involve copying all
+    /// `self.capacity()` bytes. Makes space for the insertion by copying all bytes of
+    /// `&self[idx..]` to new positions.
+    ///
+    /// Note that calling this in a loop can result in quadratic behavior.
     ///
     /// # Panics
     ///
@@ -1698,35 +1714,46 @@ impl String {
     /// ```
     #[cfg(not(no_global_oom_handling))]
     #[inline]
+    #[track_caller]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_confusables("set")]
     pub fn insert(&mut self, idx: usize, ch: char) {
         assert!(self.is_char_boundary(idx));
-        let mut bits = [0; char::MAX_LEN_UTF8];
-        let bits = ch.encode_utf8(&mut bits).as_bytes();
 
-        unsafe {
-            self.insert_bytes(idx, bits);
-        }
-    }
-
-    #[cfg(not(no_global_oom_handling))]
-    unsafe fn insert_bytes(&mut self, idx: usize, bytes: &[u8]) {
         let len = self.len();
-        let amt = bytes.len();
-        self.vec.reserve(amt);
+        let ch_len = ch.len_utf8();
+        self.reserve(ch_len);
 
+        // SAFETY: Move the bytes starting from `idx` to their new location `ch_len`
+        // bytes ahead. This is safe because sufficient capacity was reserved, and `idx`
+        // is a char boundary.
         unsafe {
-            ptr::copy(self.vec.as_ptr().add(idx), self.vec.as_mut_ptr().add(idx + amt), len - idx);
-            ptr::copy_nonoverlapping(bytes.as_ptr(), self.vec.as_mut_ptr().add(idx), amt);
-            self.vec.set_len(len + amt);
+            ptr::copy(
+                self.vec.as_ptr().add(idx),
+                self.vec.as_mut_ptr().add(idx + ch_len),
+                len - idx,
+            );
+        }
+
+        // SAFETY: Encode the character into the vacated region if `idx != len`,
+        // or into the uninitialized spare capacity otherwise.
+        unsafe {
+            core::char::encode_utf8_raw_unchecked(ch as u32, self.vec.as_mut_ptr().add(idx));
+        }
+
+        // SAFETY: Update the length to include the newly added bytes.
+        unsafe {
+            self.vec.set_len(len + ch_len);
         }
     }
 
-    /// Inserts a string slice into this `String` at a byte position.
+    /// Inserts a string slice into this `String` at byte position `idx`.
     ///
-    /// This is an *O*(*n*) operation as it requires copying every element in the
-    /// buffer.
+    /// Reallocates if `self.capacity()` is insufficient, which may involve copying all
+    /// `self.capacity()` bytes. Makes space for the insertion by copying all bytes of
+    /// `&self[idx..]` to new positions.
+    ///
+    /// Note that calling this in a loop can result in quadratic behavior.
     ///
     /// # Panics
     ///
@@ -1744,13 +1771,33 @@ impl String {
     /// ```
     #[cfg(not(no_global_oom_handling))]
     #[inline]
+    #[track_caller]
     #[stable(feature = "insert_str", since = "1.16.0")]
     #[rustc_diagnostic_item = "string_insert_str"]
     pub fn insert_str(&mut self, idx: usize, string: &str) {
         assert!(self.is_char_boundary(idx));
 
+        let len = self.len();
+        let amt = string.len();
+        self.reserve(amt);
+
+        // SAFETY: Move the bytes starting from `idx` to their new location `amt` bytes
+        // ahead. This is safe because sufficient capacity was just reserved, and `idx`
+        // is a char boundary.
         unsafe {
-            self.insert_bytes(idx, string.as_bytes());
+            ptr::copy(self.vec.as_ptr().add(idx), self.vec.as_mut_ptr().add(idx + amt), len - idx);
+        }
+
+        // SAFETY: Copy the new string slice into the vacated region if `idx != len`,
+        // or into the uninitialized spare capacity otherwise. The borrow checker
+        // ensures that the source and destination do not overlap.
+        unsafe {
+            ptr::copy_nonoverlapping(string.as_ptr(), self.vec.as_mut_ptr().add(idx), amt);
+        }
+
+        // SAFETY: Update the length to include the newly added bytes.
+        unsafe {
+            self.vec.set_len(len + amt);
         }
     }
 
@@ -1803,6 +1850,7 @@ impl String {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_stable(feature = "const_vec_string_slice", since = "1.87.0")]
     #[rustc_confusables("length", "size")]
+    #[rustc_no_implicit_autorefs]
     pub const fn len(&self) -> usize {
         self.vec.len()
     }
@@ -1822,6 +1870,7 @@ impl String {
     #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_stable(feature = "const_vec_string_slice", since = "1.87.0")]
+    #[rustc_no_implicit_autorefs]
     pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -1851,6 +1900,7 @@ impl String {
     /// ```
     #[cfg(not(no_global_oom_handling))]
     #[inline]
+    #[track_caller]
     #[stable(feature = "string_split_off", since = "1.16.0")]
     #[must_use = "use `.truncate()` if you don't need the other half"]
     pub fn split_off(&mut self, at: usize) -> String {
@@ -1915,6 +1965,7 @@ impl String {
     /// assert_eq!(s, "");
     /// ```
     #[stable(feature = "drain", since = "1.6.0")]
+    #[track_caller]
     pub fn drain<R>(&mut self, range: R) -> Drain<'_>
     where
         R: RangeBounds<usize>,
@@ -2014,6 +2065,7 @@ impl String {
     /// ```
     #[cfg(not(no_global_oom_handling))]
     #[stable(feature = "splice", since = "1.27.0")]
+    #[track_caller]
     pub fn replace_range<R>(&mut self, range: R, replace_with: &str)
     where
         R: RangeBounds<usize>,
@@ -2063,6 +2115,7 @@ impl String {
     #[stable(feature = "box_str", since = "1.4.0")]
     #[must_use = "`self` will be dropped if the result is not used"]
     #[inline]
+    #[track_caller]
     pub fn into_boxed_str(self) -> Box<str> {
         let slice = self.vec.into_boxed_slice();
         unsafe { from_boxed_utf8_unchecked(slice) }
@@ -2250,6 +2303,7 @@ impl Error for FromUtf16Error {
 #[cfg(not(no_global_oom_handling))]
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Clone for String {
+    #[track_caller]
     fn clone(&self) -> Self {
         String { vec: self.vec.clone() }
     }
@@ -2258,6 +2312,7 @@ impl Clone for String {
     ///
     /// This method is preferred over simply assigning `source.clone()` to `self`,
     /// as it avoids reallocation if possible.
+    #[track_caller]
     fn clone_from(&mut self, source: &Self) {
         self.vec.clone_from(&source.vec);
     }
@@ -2431,11 +2486,14 @@ impl<'a> Extend<Cow<'a, str>> for String {
 #[cfg(not(no_global_oom_handling))]
 #[unstable(feature = "ascii_char", issue = "110998")]
 impl Extend<core::ascii::Char> for String {
+    #[inline]
+    #[track_caller]
     fn extend<I: IntoIterator<Item = core::ascii::Char>>(&mut self, iter: I) {
         self.vec.extend(iter.into_iter().map(|c| c.to_u8()));
     }
 
     #[inline]
+    #[track_caller]
     fn extend_one(&mut self, c: core::ascii::Char) {
         self.vec.push(c.to_u8());
     }
@@ -2444,11 +2502,14 @@ impl Extend<core::ascii::Char> for String {
 #[cfg(not(no_global_oom_handling))]
 #[unstable(feature = "ascii_char", issue = "110998")]
 impl<'a> Extend<&'a core::ascii::Char> for String {
+    #[inline]
+    #[track_caller]
     fn extend<I: IntoIterator<Item = &'a core::ascii::Char>>(&mut self, iter: I) {
         self.extend(iter.into_iter().cloned());
     }
 
     #[inline]
+    #[track_caller]
     fn extend_one(&mut self, c: &'a core::ascii::Char) {
         self.vec.push(c.to_u8());
     }
@@ -2795,7 +2856,55 @@ impl SpecToString for bool {
     }
 }
 
+macro_rules! impl_to_string {
+    ($($signed:ident, $unsigned:ident,)*) => {
+        $(
+        #[cfg(not(no_global_oom_handling))]
+        #[cfg(not(feature = "optimize_for_size"))]
+        impl SpecToString for $signed {
+            #[inline]
+            fn spec_to_string(&self) -> String {
+                const SIZE: usize = $signed::MAX.ilog10() as usize + 1;
+                let mut buf = [core::mem::MaybeUninit::<u8>::uninit(); SIZE];
+                // Only difference between signed and unsigned are these 8 lines.
+                let mut out;
+                if *self < 0 {
+                    out = String::with_capacity(SIZE + 1);
+                    out.push('-');
+                } else {
+                    out = String::with_capacity(SIZE);
+                }
+
+                out.push_str(self.unsigned_abs()._fmt(&mut buf));
+                out
+            }
+        }
+        #[cfg(not(no_global_oom_handling))]
+        #[cfg(not(feature = "optimize_for_size"))]
+        impl SpecToString for $unsigned {
+            #[inline]
+            fn spec_to_string(&self) -> String {
+                const SIZE: usize = $unsigned::MAX.ilog10() as usize + 1;
+                let mut buf = [core::mem::MaybeUninit::<u8>::uninit(); SIZE];
+
+                self._fmt(&mut buf).to_string()
+            }
+        }
+        )*
+    }
+}
+
+impl_to_string! {
+    i8, u8,
+    i16, u16,
+    i32, u32,
+    i64, u64,
+    isize, usize,
+    i128, u128,
+}
+
 #[cfg(not(no_global_oom_handling))]
+#[cfg(feature = "optimize_for_size")]
 impl SpecToString for u8 {
     #[inline]
     fn spec_to_string(&self) -> String {
@@ -2815,6 +2924,7 @@ impl SpecToString for u8 {
 }
 
 #[cfg(not(no_global_oom_handling))]
+#[cfg(feature = "optimize_for_size")]
 impl SpecToString for i8 {
     #[inline]
     fn spec_to_string(&self) -> String {

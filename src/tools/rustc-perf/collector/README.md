@@ -135,6 +135,9 @@ The following options alter the behaviour of the `bench_local` subcommand.
   dedicated to artifact sizes (ending with `-tiny`).
 - `--id <ID>` the identifier that will be used to identify the results in the
   database.
+- `--exact-match <BENCHMARKS>`: comma-separated list of benchmark names that should be
+  executed. The names have to match exactly. Cannot be combined with
+  `--include`/`--exclude`/`--exclude-suffix`.
 - `--include <INCLUDE>`: the inverse of `--exclude`. The argument is a
   comma-separated list of benchmark prefixes. When this option is specified, a
   benchmark is included in the run only if its name matches one of the given
@@ -235,14 +238,14 @@ Finally, while most of the options you can pass to the collector are supported, 
 the profilers used in the `profile_local` command are not. In Windows, the only currently supported
 profiler is the `self-profiler`.
 
-As a complete example, let's run just the `regex-1.5.5` benchmark in the `Debug`
+As a complete example, let's run just the `regex-automata-0.4.8` benchmark in the `Debug`
 profile with self-profiling results available:
 
 ```pwsh
 $env:XPERF="C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\xperf.exe"
 $env:TRACELOG="C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x64\tracelog.exe"
-.\target\release\collector.exe bench_local $env:RUST_ORIGINAL --id Original --profiles Debug --include regex-1.5.5 --self-profile
-.\target\release\collector.exe bench_local $env:RUST_MODIFIED --id Modified --profiles Debug --include regex-1.5.5 --self-profile
+.\target\release\collector.exe bench_local $env:RUST_ORIGINAL --id Original --profiles Debug --include regex-automata-0.4.8 --self-profile
+.\target\release\collector.exe bench_local $env:RUST_MODIFIED --id Modified --profiles Debug --include regex-automata-0.4.8 --self-profile
 .\target\release\site.exe .\results.db
 ```
 
@@ -556,3 +559,22 @@ compilation of the final/leaf crate. Cargo only passes arguments after `--` to t
 therefore this does not affect the compilation of dependencies.
 2) Profiling/benchmarking - `cargo` is invoked with `--wrap-rustc-with <TOOL>`, which executes the
 specified profiling tool by `rustc-fake`.
+
+## How to test
+Run `make test`; in the root of the project there is a `Makefile` which
+presently exists to spin up/down a Postgres database, from a
+`docker-compose.yml`, then run `cargo test` with a `TEST_DB_URL` set. In
+concrete terms `make test` is a convenience for running;
+
+```bash
+docker compose up -d pg_test && \
+    TEST_DB_URL="postgres://postgres:testpass@localhost/postgres" cargo test
+```
+
+The above becomes cumbersome to type and easy to forget both how to setup the
+database and set the `TEST_DB_URL` environment variable.
+
+**Note: Windows**
+The tests for the database are disabled and will skip. This is due, at the time
+of writing (May 2025), to limitations with the GitHub Ci runner not supporting
+docker, hence unable to start the database for the tests.

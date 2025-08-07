@@ -288,10 +288,10 @@ impl<'tcx> MirBorrowckCtxt<'_, '_, 'tcx> {
         let tcx = self.infcx.tcx;
 
         debug!("give_region_a_name: error_region = {:?}", error_region);
-        match *error_region {
+        match error_region.kind() {
             ty::ReEarlyParam(ebr) => ebr.has_name().then(|| {
                 let def_id = tcx.generics_of(self.mir_def_id()).region_param(ebr, tcx).def_id;
-                let span = tcx.hir().span_if_local(def_id).unwrap_or(DUMMY_SP);
+                let span = tcx.hir_span_if_local(def_id).unwrap_or(DUMMY_SP);
                 RegionName { name: ebr.name, source: RegionNameSource::NamedEarlyParamRegion(span) }
             }),
 
@@ -302,7 +302,7 @@ impl<'tcx> MirBorrowckCtxt<'_, '_, 'tcx> {
             ty::ReLateParam(late_param) => match late_param.kind {
                 ty::LateParamRegionKind::Named(region_def_id, name) => {
                     // Get the span to point to, even if we don't use the name.
-                    let span = tcx.hir().span_if_local(region_def_id).unwrap_or(DUMMY_SP);
+                    let span = tcx.hir_span_if_local(region_def_id).unwrap_or(DUMMY_SP);
                     debug!(
                         "bound region named: {:?}, is_named: {:?}",
                         name,
@@ -606,8 +606,8 @@ impl<'tcx> MirBorrowckCtxt<'_, '_, 'tcx> {
         hir_args: &'hir hir::GenericArgs<'hir>,
         search_stack: &mut Vec<(Ty<'tcx>, &'hir hir::Ty<'hir>)>,
     ) -> Option<&'hir hir::Lifetime> {
-        for (kind, hir_arg) in iter::zip(args, hir_args.args) {
-            match (kind.unpack(), hir_arg) {
+        for (arg, hir_arg) in iter::zip(args, hir_args.args) {
+            match (arg.kind(), hir_arg) {
                 (GenericArgKind::Lifetime(r), hir::GenericArg::Lifetime(lt)) => {
                     if r.as_var() == needle_fr {
                         return Some(lt);
@@ -631,7 +631,7 @@ impl<'tcx> MirBorrowckCtxt<'_, '_, 'tcx> {
                 ) => {
                     self.dcx().span_delayed_bug(
                         hir_arg.span(),
-                        format!("unmatched arg and hir arg: found {kind:?} vs {hir_arg:?}"),
+                        format!("unmatched arg and hir arg: found {arg:?} vs {hir_arg:?}"),
                     );
                 }
             }
@@ -896,7 +896,7 @@ impl<'tcx> MirBorrowckCtxt<'_, '_, 'tcx> {
         &self,
         fr: RegionVid,
     ) -> Option<RegionName> {
-        let ty::ReEarlyParam(region) = *self.to_error_region(fr)? else {
+        let ty::ReEarlyParam(region) = self.to_error_region(fr)?.kind() else {
             return None;
         };
         if region.has_name() {
@@ -912,7 +912,7 @@ impl<'tcx> MirBorrowckCtxt<'_, '_, 'tcx> {
 
         let found = tcx
             .any_free_region_meets(&tcx.type_of(region_parent).instantiate_identity(), |r| {
-                *r == ty::ReEarlyParam(region)
+                r.kind() == ty::ReEarlyParam(region)
             });
 
         Some(RegionName {
@@ -931,7 +931,7 @@ impl<'tcx> MirBorrowckCtxt<'_, '_, 'tcx> {
         &self,
         fr: RegionVid,
     ) -> Option<RegionName> {
-        let ty::ReEarlyParam(region) = *self.to_error_region(fr)? else {
+        let ty::ReEarlyParam(region) = self.to_error_region(fr)?.kind() else {
             return None;
         };
         if region.has_name() {
@@ -997,7 +997,7 @@ impl<'tcx> MirBorrowckCtxt<'_, '_, 'tcx> {
     ) -> bool {
         let tcx = self.infcx.tcx;
         ty.walk().any(|arg| {
-            if let ty::GenericArgKind::Type(ty) = arg.unpack()
+            if let ty::GenericArgKind::Type(ty) = arg.kind()
                 && let ty::Param(_) = ty.kind()
             {
                 clauses.iter().any(|pred| {
@@ -1007,7 +1007,7 @@ impl<'tcx> MirBorrowckCtxt<'_, '_, 'tcx> {
                             if data.projection_term.self_ty() == ty => {}
                         _ => return false,
                     }
-                    tcx.any_free_region_meets(pred, |r| *r == ty::ReEarlyParam(region))
+                    tcx.any_free_region_meets(pred, |r| r.kind() == ty::ReEarlyParam(region))
                 })
             } else {
                 false

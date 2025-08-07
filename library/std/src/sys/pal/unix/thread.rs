@@ -8,30 +8,23 @@ use crate::sys::weak::weak;
 use crate::sys::{os, stack_overflow};
 use crate::time::Duration;
 use crate::{cmp, io, ptr};
-#[cfg(not(any(target_os = "l4re", target_os = "vxworks", target_os = "espidf")))]
+#[cfg(not(any(
+    target_os = "l4re",
+    target_os = "vxworks",
+    target_os = "espidf",
+    target_os = "nuttx"
+)))]
 pub const DEFAULT_MIN_STACK_SIZE: usize = 2 * 1024 * 1024;
 #[cfg(target_os = "l4re")]
 pub const DEFAULT_MIN_STACK_SIZE: usize = 1024 * 1024;
 #[cfg(target_os = "vxworks")]
 pub const DEFAULT_MIN_STACK_SIZE: usize = 256 * 1024;
-#[cfg(target_os = "espidf")]
-pub const DEFAULT_MIN_STACK_SIZE: usize = 0; // 0 indicates that the stack size configured in the ESP-IDF menuconfig system should be used
+#[cfg(any(target_os = "espidf", target_os = "nuttx"))]
+pub const DEFAULT_MIN_STACK_SIZE: usize = 0; // 0 indicates that the stack size configured in the ESP-IDF/NuttX menuconfig system should be used
 
-#[cfg(target_os = "fuchsia")]
-mod zircon {
-    type zx_handle_t = u32;
-    type zx_status_t = i32;
-    pub const ZX_PROP_NAME: u32 = 3;
-
-    unsafe extern "C" {
-        pub fn zx_object_set_property(
-            handle: zx_handle_t,
-            property: u32,
-            value: *const libc::c_void,
-            value_size: libc::size_t,
-        ) -> zx_status_t;
-        pub fn zx_thread_self() -> zx_handle_t;
-    }
+struct ThreadData {
+    name: Option<Box<str>>,
+    f: Box<dyn FnOnce()>,
 }
 
 pub struct Thread {
@@ -46,16 +39,20 @@ unsafe impl Sync for Thread {}
 impl Thread {
     // unsafe: see thread::Builder::spawn_unchecked for safety requirements
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
-    pub unsafe fn new(stack: usize, p: Box<dyn FnOnce()>) -> io::Result<Thread> {
-        let p = Box::into_raw(Box::new(p));
+    pub unsafe fn new(
+        stack: usize,
+        name: Option<&str>,
+        f: Box<dyn FnOnce()>,
+    ) -> io::Result<Thread> {
+        let data = Box::into_raw(Box::new(ThreadData { name: name.map(Box::from), f }));
         let mut native: libc::pthread_t = mem::zeroed();
         let mut attr: mem::MaybeUninit<libc::pthread_attr_t> = mem::MaybeUninit::uninit();
         assert_eq!(libc::pthread_attr_init(attr.as_mut_ptr()), 0);
 
-        #[cfg(target_os = "espidf")]
+        #[cfg(any(target_os = "espidf", target_os = "nuttx"))]
         if stack > 0 {
             // Only set the stack if a non-zero value is passed
-            // 0 is used as an indication that the default stack size configured in the ESP-IDF menuconfig system should be used
+            // 0 is used as an indication that the default stack size configured in the ESP-IDF/NuttX menuconfig system should be used
             assert_eq!(
                 libc::pthread_attr_setstacksize(
                     attr.as_mut_ptr(),
@@ -65,7 +62,7 @@ impl Thread {
             );
         }
 
-        #[cfg(not(target_os = "espidf"))]
+        #[cfg(not(any(target_os = "espidf", target_os = "nuttx")))]
         {
             let stack_size = cmp::max(stack, min_stack_size(attr.as_ptr()));
 
@@ -85,7 +82,7 @@ impl Thread {
             };
         }
 
-        let ret = libc::pthread_create(&mut native, attr.as_ptr(), thread_start, p as *mut _);
+        let ret = libc::pthread_create(&mut native, attr.as_ptr(), thread_start, data as *mut _);
         // Note: if the thread creation fails and this assert fails, then p will
         // be leaked. However, an alternative design could cause double-free
         // which is clearly worse.
@@ -94,19 +91,20 @@ impl Thread {
         return if ret != 0 {
             // The thread failed to start and as a result p was not consumed. Therefore, it is
             // safe to reconstruct the box so that it gets deallocated.
-            drop(Box::from_raw(p));
+            drop(Box::from_raw(data));
             Err(io::Error::from_raw_os_error(ret))
         } else {
             Ok(Thread { id: native })
         };
 
-        extern "C" fn thread_start(main: *mut libc::c_void) -> *mut libc::c_void {
+        extern "C" fn thread_start(data: *mut libc::c_void) -> *mut libc::c_void {
             unsafe {
+                let data = Box::from_raw(data as *mut ThreadData);
                 // Next, set up our stack overflow handler which may get triggered if we run
                 // out of stack.
-                let _handler = stack_overflow::Handler::new();
+                let _handler = stack_overflow::Handler::new(data.name);
                 // Finally, let's run some code.
-                Box::from_raw(main as *mut Box<dyn FnOnce()>)();
+                (data.f)();
             }
             ptr::null_mut()
         }
@@ -189,15 +187,13 @@ impl Thread {
     }
 
     #[cfg(any(target_os = "solaris", target_os = "illumos", target_os = "nto"))]
-    // FIXME(#115199): Rust currently omits weak function definitions
-    // and its metadata from LLVM IR.
-    #[no_sanitize(cfi)]
     pub fn set_name(name: &CStr) {
-        weak! {
+        weak!(
             fn pthread_setname_np(
-                libc::pthread_t, *const libc::c_char
-            ) -> libc::c_int
-        }
+                thread: libc::pthread_t,
+                name: *const libc::c_char,
+            ) -> libc::c_int;
+        );
 
         if let Some(f) = pthread_setname_np.get() {
             #[cfg(target_os = "nto")]
@@ -213,7 +209,7 @@ impl Thread {
 
     #[cfg(target_os = "fuchsia")]
     pub fn set_name(name: &CStr) {
-        use self::zircon::*;
+        use super::fuchsia::*;
         unsafe {
             zx_object_set_property(
                 zx_thread_self(),
@@ -236,16 +232,8 @@ impl Thread {
 
     #[cfg(target_os = "vxworks")]
     pub fn set_name(name: &CStr) {
-        // FIXME(libc): adding real STATUS, ERROR type eventually.
-        unsafe extern "C" {
-            fn taskNameSet(task_id: libc::TASK_ID, task_name: *mut libc::c_char) -> libc::c_int;
-        }
-
-        //  VX_TASK_NAME_LEN is 31 in VxWorks 7.
-        const VX_TASK_NAME_LEN: usize = 31;
-
-        let mut name = truncate_cstr::<{ VX_TASK_NAME_LEN }>(name);
-        let res = unsafe { taskNameSet(libc::taskIdSelf(), name.as_mut_ptr()) };
+        let mut name = truncate_cstr::<{ libc::VX_TASK_RENAME_LENGTH - 1 }>(name);
+        let res = unsafe { libc::taskNameSet(libc::taskIdSelf(), name.as_mut_ptr()) };
         debug_assert_eq!(res, libc::OK);
     }
 
@@ -762,7 +750,9 @@ unsafe fn min_stack_size(attr: *const libc::pthread_attr_t) -> usize {
     // We use dlsym to avoid an ELF version dependency on GLIBC_PRIVATE. (#23628)
     // We shouldn't really be using such an internal symbol, but there's currently
     // no other way to account for the TLS size.
-    dlsym!(fn __pthread_get_minstack(*const libc::pthread_attr_t) -> libc::size_t);
+    dlsym!(
+        fn __pthread_get_minstack(attr: *const libc::pthread_attr_t) -> libc::size_t;
+    );
 
     match __pthread_get_minstack.get() {
         None => libc::PTHREAD_STACK_MIN,

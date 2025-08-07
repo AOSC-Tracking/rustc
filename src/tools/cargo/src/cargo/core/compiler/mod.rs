@@ -67,8 +67,9 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Error};
 use lazycell::LazyCell;
-use tracing::{debug, trace};
+use tracing::{debug, instrument, trace};
 
+pub use self::build_config::UserIntent;
 pub use self::build_config::{BuildConfig, CompileMode, MessageFormat, TimingOutput};
 pub use self::build_context::{
     BuildContext, FileFlavor, FileType, RustDocFingerprint, RustcTargetData, TargetInfo,
@@ -79,7 +80,7 @@ pub use self::compilation::{Compilation, Doctest, UnitOutput};
 pub use self::compile_kind::{CompileKind, CompileKindFallback, CompileTarget};
 pub use self::crate_type::CrateType;
 pub use self::custom_build::LinkArgTarget;
-pub use self::custom_build::{BuildOutput, BuildScriptOutputs, BuildScripts};
+pub use self::custom_build::{BuildOutput, BuildScriptOutputs, BuildScripts, LibraryPath};
 pub(crate) use self::fingerprint::DirtyReason;
 pub use self::job_queue::Freshness;
 use self::job_queue::{Job, JobQueue, JobState, Work};
@@ -140,10 +141,11 @@ pub trait Executor: Send + Sync + 'static {
 pub struct DefaultExecutor;
 
 impl Executor for DefaultExecutor {
+    #[instrument(name = "rustc", skip_all, fields(package = id.name().as_str(), process = cmd.to_string()))]
     fn exec(
         &self,
         cmd: &ProcessBuilder,
-        _id: PackageId,
+        id: PackageId,
         _target: &Target,
         _mode: CompileMode,
         on_stdout_line: &mut dyn FnMut(&str) -> CargoResult<()>,
@@ -178,50 +180,55 @@ fn compile<'gctx>(
         return Ok(());
     }
 
-    // Build up the work to be done to compile this unit, enqueuing it once
-    // we've got everything constructed.
-    fingerprint::prepare_init(build_runner, unit)?;
+    // If we are in `--compile-time-deps` and the given unit is not a compile time
+    // dependency, skip compling the unit and jumps to dependencies, which still
+    // have chances to be compile time dependencies
+    if !unit.skip_non_compile_time_dep {
+        // Build up the work to be done to compile this unit, enqueuing it once
+        // we've got everything constructed.
+        fingerprint::prepare_init(build_runner, unit)?;
 
-    let job = if unit.mode.is_run_custom_build() {
-        custom_build::prepare(build_runner, unit)?
-    } else if unit.mode.is_doc_test() {
-        // We run these targets later, so this is just a no-op for now.
-        Job::new_fresh()
-    } else if build_plan {
-        Job::new_dirty(
-            rustc(build_runner, unit, &exec.clone())?,
-            DirtyReason::FreshBuild,
-        )
-    } else {
-        let force = exec.force_rebuild(unit) || force_rebuild;
-        let mut job = fingerprint::prepare_target(build_runner, unit, force)?;
-        job.before(if job.freshness().is_dirty() {
-            let work = if unit.mode.is_doc() || unit.mode.is_doc_scrape() {
-                rustdoc(build_runner, unit)?
-            } else {
-                rustc(build_runner, unit, exec)?
-            };
-            work.then(link_targets(build_runner, unit, false)?)
+        let job = if unit.mode.is_run_custom_build() {
+            custom_build::prepare(build_runner, unit)?
+        } else if unit.mode.is_doc_test() {
+            // We run these targets later, so this is just a no-op for now.
+            Job::new_fresh()
+        } else if build_plan {
+            Job::new_dirty(
+                rustc(build_runner, unit, &exec.clone())?,
+                DirtyReason::FreshBuild,
+            )
         } else {
-            // We always replay the output cache,
-            // since it might contain future-incompat-report messages
-            let show_diagnostics = unit.show_warnings(bcx.gctx)
-                && build_runner.bcx.gctx.warning_handling()? != WarningHandling::Allow;
-            let work = replay_output_cache(
-                unit.pkg.package_id(),
-                PathBuf::from(unit.pkg.manifest_path()),
-                &unit.target,
-                build_runner.files().message_cache_path(unit),
-                build_runner.bcx.build_config.message_format,
-                show_diagnostics,
-            );
-            // Need to link targets on both the dirty and fresh.
-            work.then(link_targets(build_runner, unit, true)?)
-        });
+            let force = exec.force_rebuild(unit) || force_rebuild;
+            let mut job = fingerprint::prepare_target(build_runner, unit, force)?;
+            job.before(if job.freshness().is_dirty() {
+                let work = if unit.mode.is_doc() || unit.mode.is_doc_scrape() {
+                    rustdoc(build_runner, unit)?
+                } else {
+                    rustc(build_runner, unit, exec)?
+                };
+                work.then(link_targets(build_runner, unit, false)?)
+            } else {
+                // We always replay the output cache,
+                // since it might contain future-incompat-report messages
+                let show_diagnostics = unit.show_warnings(bcx.gctx)
+                    && build_runner.bcx.gctx.warning_handling()? != WarningHandling::Allow;
+                let work = replay_output_cache(
+                    unit.pkg.package_id(),
+                    PathBuf::from(unit.pkg.manifest_path()),
+                    &unit.target,
+                    build_runner.files().message_cache_path(unit),
+                    build_runner.bcx.build_config.message_format,
+                    show_diagnostics,
+                );
+                // Need to link targets on both the dirty and fresh.
+                work.then(link_targets(build_runner, unit, true)?)
+            });
 
-        job
-    };
-    jobs.enqueue(build_runner, unit, job)?;
+            job
+        };
+        jobs.enqueue(build_runner, unit, job)?;
+    }
 
     // Be sure to compile all dependencies of this target as well.
     let deps = Vec::from(build_runner.unit_deps(unit)); // Create vec due to mutable borrow.
@@ -497,6 +504,8 @@ fn rustc(
         current_id: PackageId,
         mode: CompileMode,
     ) -> CargoResult<()> {
+        let mut library_paths = vec![];
+
         for key in build_scripts.to_link.iter() {
             let output = build_script_outputs.get(key.1).ok_or_else(|| {
                 internal(format!(
@@ -504,9 +513,30 @@ fn rustc(
                     key.0, key.1
                 ))
             })?;
-            for path in output.library_paths.iter() {
-                rustc.arg("-L").arg(path);
-            }
+            library_paths.extend(output.library_paths.iter());
+        }
+
+        // NOTE: This very intentionally does not use the derived ord from LibraryPath because we need to
+        // retain relative ordering within the same type (i.e. not lexicographic). The use of a stable sort
+        // is also important here because it ensures that paths of the same type retain the same relative
+        // ordering (for an unstable sort to work here, the list would need to retain the idx of each element
+        // and then sort by that idx when the type is equivalent.
+        library_paths.sort_by_key(|p| match p {
+            LibraryPath::CargoArtifact(_) => 0,
+            LibraryPath::External(_) => 1,
+        });
+
+        for path in library_paths.iter() {
+            rustc.arg("-L").arg(path.as_ref());
+        }
+
+        for key in build_scripts.to_link.iter() {
+            let output = build_script_outputs.get(key.1).ok_or_else(|| {
+                internal(format!(
+                    "couldn't find build script output for {}/{}",
+                    key.0, key.1
+                ))
+            })?;
 
             if key.0 == current_id {
                 if pass_l_flag {
@@ -654,13 +684,20 @@ fn add_plugin_deps(
             .get(*metadata)
             .ok_or_else(|| internal(format!("couldn't find libs for plugin dep {}", pkg_id)))?;
         search_path.append(&mut filter_dynamic_search_path(
-            output.library_paths.iter(),
+            output.library_paths.iter().map(AsRef::as_ref),
             root_output,
         ));
     }
     let search_path = paths::join_paths(&search_path, var)?;
     rustc.env(var, &search_path);
     Ok(())
+}
+
+fn get_dynamic_search_path(path: &Path) -> &Path {
+    match path.to_str().and_then(|s| s.split_once("=")) {
+        Some(("native" | "crate" | "dependency" | "framework" | "all", path)) => Path::new(path),
+        _ => path,
+    }
 }
 
 // Determine paths to add to the dynamic search path from -L entries
@@ -674,12 +711,9 @@ where
 {
     let mut search_path = vec![];
     for dir in paths {
-        let dir = match dir.to_str().and_then(|s| s.split_once("=")) {
-            Some(("native" | "crate" | "dependency" | "framework" | "all", path)) => path.into(),
-            _ => dir.clone(),
-        };
+        let dir = get_dynamic_search_path(dir);
         if dir.starts_with(&root_output) {
-            search_path.push(dir);
+            search_path.push(dir.to_path_buf());
         } else {
             debug!(
                 "Not including path {} in runtime library search path because it is \
@@ -707,6 +741,15 @@ fn prepare_rustc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResult
         .compilation
         .rustc_process(unit, is_primary, is_workspace)?;
     build_base_args(build_runner, &mut base, unit)?;
+    if unit.pkg.manifest().is_embedded() {
+        if !gctx.cli_unstable().script {
+            anyhow::bail!(
+                "parsing `{}` requires `-Zscript`",
+                unit.pkg.manifest_path().display()
+            );
+        }
+        base.arg("-Z").arg("crate-attr=feature(frontmatter)");
+    }
 
     base.inherit_jobserver(&build_runner.jobserver);
     build_deps_args(&mut base, build_runner, unit)?;
@@ -746,6 +789,15 @@ fn prepare_rustdoc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
     let bcx = build_runner.bcx;
     // script_metadata is not needed here, it is only for tests.
     let mut rustdoc = build_runner.compilation.rustdoc_process(unit, None)?;
+    if unit.pkg.manifest().is_embedded() {
+        if !bcx.gctx.cli_unstable().script {
+            anyhow::bail!(
+                "parsing `{}` requires `-Zscript`",
+                unit.pkg.manifest_path().display()
+            );
+        }
+        rustdoc.arg("-Z").arg("crate-attr=feature(frontmatter)");
+    }
     rustdoc.inherit_jobserver(&build_runner.jobserver);
     let crate_name = unit.target.crate_name();
     rustdoc.arg("--crate-name").arg(&crate_name);
@@ -762,6 +814,21 @@ fn prepare_rustdoc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
 
     add_error_format_and_color(build_runner, &mut rustdoc);
     add_allow_features(build_runner, &mut rustdoc);
+
+    if build_runner.bcx.gctx.cli_unstable().rustdoc_depinfo {
+        // toolchain-shared-resources is required for keeping the shared styling resources
+        // invocation-specific is required for keeping the original rustdoc emission
+        let mut arg =
+            OsString::from("--emit=toolchain-shared-resources,invocation-specific,dep-info=");
+        arg.push(rustdoc_dep_info_loc(build_runner, unit));
+        rustdoc.arg(arg);
+
+        if build_runner.bcx.gctx.cli_unstable().checksum_freshness {
+            rustdoc.arg("-Z").arg("checksum-hash-algorithm=blake3");
+        }
+
+        rustdoc.arg("-Zunstable-options");
+    }
 
     if let Some(trim_paths) = unit.profile.trim_paths.as_ref() {
         trim_paths_args_rustdoc(&mut rustdoc, build_runner, unit, trim_paths)?;
@@ -807,7 +874,7 @@ fn prepare_rustdoc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
     build_deps_args(&mut rustdoc, build_runner, unit)?;
     rustdoc::add_root_urls(build_runner, unit, &mut rustdoc)?;
 
-    rustdoc::add_output_format(build_runner, unit, &mut rustdoc)?;
+    rustdoc::add_output_format(build_runner, &mut rustdoc)?;
 
     if let Some(args) = build_runner.bcx.extra_args_for(unit) {
         rustdoc.args(args);
@@ -838,6 +905,20 @@ fn rustdoc(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<W
     let package_id = unit.pkg.package_id();
     let manifest_path = PathBuf::from(unit.pkg.manifest_path());
     let target = Target::clone(&unit.target);
+
+    let rustdoc_dep_info_loc = rustdoc_dep_info_loc(build_runner, unit);
+    let dep_info_loc = fingerprint::dep_info_loc(build_runner, unit);
+    let build_dir = build_runner.bcx.ws.build_dir().into_path_unlocked();
+    let pkg_root = unit.pkg.root().to_path_buf();
+    let cwd = rustdoc
+        .get_cwd()
+        .unwrap_or_else(|| build_runner.bcx.gctx.cwd())
+        .to_path_buf();
+    let fingerprint_dir = build_runner.files().fingerprint_dir(unit);
+    let is_local = unit.is_local();
+    let env_config = Arc::clone(build_runner.bcx.gctx.env_config()?);
+    let rustdoc_depinfo_enabled = build_runner.bcx.gctx.cli_unstable().rustdoc_depinfo;
+
     let mut output_options = OutputOptions::new(build_runner, unit);
     let script_metadata = build_runner.find_build_script_metadata(unit);
     let scrape_outputs = if should_include_scrape_units(build_runner.bcx, unit) {
@@ -903,6 +984,7 @@ fn rustdoc(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<W
             paths::remove_dir_all(crate_dir)?;
         }
         state.running(&rustdoc);
+        let timestamp = paths::set_invocation_time(&fingerprint_dir)?;
 
         let result = rustdoc
             .exec_with_streaming(
@@ -928,6 +1010,29 @@ fn rustdoc(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<W
             }
 
             return Err(e);
+        }
+
+        if rustdoc_depinfo_enabled && rustdoc_dep_info_loc.exists() {
+            fingerprint::translate_dep_info(
+                &rustdoc_dep_info_loc,
+                &dep_info_loc,
+                &cwd,
+                &pkg_root,
+                &build_dir,
+                &rustdoc,
+                // Should we track source file for doc gen?
+                is_local,
+                &env_config,
+            )
+            .with_context(|| {
+                internal(format_args!(
+                    "could not parse/generate dep info at: {}",
+                    rustdoc_dep_info_loc.display()
+                ))
+            })?;
+            // This mtime shift allows Cargo to detect if a source file was
+            // modified in the middle of the build.
+            paths::set_file_time_no_err(dep_info_loc, timestamp);
         }
 
         Ok(())
@@ -1030,6 +1135,7 @@ fn build_base_args(
         strip,
         rustflags: profile_rustflags,
         trim_paths,
+        hint_mostly_unused,
         ..
     } = unit.profile.clone();
     let test = unit.mode.is_any_test();
@@ -1053,13 +1159,31 @@ fn build_base_args(
 
     if unit.mode.is_check() {
         cmd.arg("--emit=dep-info,metadata");
-    } else if !unit.requires_upstream_objects() {
-        // Always produce metadata files for rlib outputs. Metadata may be used
-        // in this session for a pipelined compilation, or it may be used in a
-        // future Cargo session as part of a pipelined compile.
-        cmd.arg("--emit=dep-info,metadata,link");
+    } else if build_runner.bcx.gctx.cli_unstable().no_embed_metadata {
+        // Nightly rustc supports the -Zembed-metadata=no flag, which tells it to avoid including
+        // full metadata in rlib/dylib artifacts, to save space on disk. In this case, metadata
+        // will only be stored in .rmeta files.
+        // When we use this flag, we should also pass --emit=metadata to all artifacts that
+        // contain useful metadata (rlib/dylib/proc macros), so that a .rmeta file is actually
+        // generated. If we didn't do this, the full metadata would not get written anywhere.
+        // However, we do not want to pass --emit=metadata to artifacts that never produce useful
+        // metadata, such as binaries, because that would just unnecessarily create empty .rmeta
+        // files on disk.
+        if unit.benefits_from_no_embed_metadata() {
+            cmd.arg("--emit=dep-info,metadata,link");
+            cmd.args(&["-Z", "embed-metadata=no"]);
+        } else {
+            cmd.arg("--emit=dep-info,link");
+        }
     } else {
-        cmd.arg("--emit=dep-info,link");
+        // If we don't use -Zembed-metadata=no, we emit .rmeta files only for rlib outputs.
+        // This metadata may be used in this session for a pipelined compilation, or it may
+        // be used in a future Cargo session as part of a pipelined compile.
+        if !unit.requires_upstream_objects() {
+            cmd.arg("--emit=dep-info,metadata,link");
+        } else {
+            cmd.arg("--emit=dep-info,link");
+        }
     }
 
     let prefer_dynamic = (unit.target.for_host() && !unit.target.is_custom_build())
@@ -1202,6 +1326,16 @@ fn build_base_args(
         opt(cmd, "-C", "incremental=", Some(dir));
     }
 
+    if hint_mostly_unused {
+        if bcx.gctx.cli_unstable().profile_hint_mostly_unused {
+            cmd.arg("-Zhint-mostly-unused");
+        } else {
+            bcx.gctx
+                .shell()
+                .warn("ignoring 'hint-mostly-unused' profile option, pass `-Zprofile-hint-mostly-unused` to enable it")?;
+        }
+    }
+
     let strip = strip.into_inner();
     if strip != StripInner::None {
         cmd.arg("-C").arg(format!("strip={}", strip));
@@ -1275,6 +1409,7 @@ fn trim_paths_args_rustdoc(
     // Order of `--remap-path-prefix` flags is important for `-Zbuild-std`.
     // We want to show `/rustc/<hash>/library/std` instead of `std-0.0.0`.
     cmd.arg(package_remap(build_runner, unit));
+    cmd.arg(build_dir_remap(build_runner));
     cmd.arg(sysroot_remap(build_runner, unit));
 
     Ok(())
@@ -1302,6 +1437,7 @@ fn trim_paths_args(
     // Order of `--remap-path-prefix` flags is important for `-Zbuild-std`.
     // We want to show `/rustc/<hash>/library/std` instead of `std-0.0.0`.
     cmd.arg(package_remap(build_runner, unit));
+    cmd.arg(build_dir_remap(build_runner));
     cmd.arg(sysroot_remap(build_runner, unit));
 
     Ok(())
@@ -1375,6 +1511,26 @@ fn package_remap(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> OsString {
     remap
 }
 
+/// Remap all paths pointing to `build.build-dir`,
+/// i.e., `[BUILD_DIR]/debug/deps/foo-[HASH].dwo` would be remapped to
+/// `/cargo/build-dir/debug/deps/foo-[HASH].dwo`
+/// (note the `/cargo/build-dir` prefix).
+///
+/// This covers scenarios like:
+///
+/// * Build script generated code. For example, a build script may call `file!`
+///   macros, and the associated crate uses [`include!`] to include the expanded
+///   [`file!`] macro in-place via the `OUT_DIR` environment.
+/// * On Linux, `DW_AT_GNU_dwo_name` that contains paths to split debuginfo
+///   files (dwp and dwo).
+fn build_dir_remap(build_runner: &BuildRunner<'_, '_>) -> OsString {
+    let build_dir = build_runner.bcx.ws.build_dir();
+    let mut remap = OsString::from("--remap-path-prefix=");
+    remap.push(build_dir.as_path_unlocked());
+    remap.push("=/cargo/build-dir");
+    remap
+}
+
 /// Generates the `--check-cfg` arguments for the `unit`.
 fn check_cfg_args(unit: &Unit) -> Vec<OsString> {
     // The routine below generates the --check-cfg arguments. Our goals here are to
@@ -1409,7 +1565,7 @@ fn check_cfg_args(unit: &Unit) -> Vec<OsString> {
     arg_feature.push("))");
 
     // In addition to the package features, we also include the `test` cfg (since
-    // compiler-team#785, as to be able to someday apply yt conditionaly), as well
+    // compiler-team#785, as to be able to someday apply yt conditionally), as well
     // the `docsrs` cfg from the docs.rs service.
     //
     // We include `docsrs` here (in Cargo) instead of rustc, since there is a much closer
@@ -1558,6 +1714,8 @@ pub fn extern_args(
     let mut result = Vec::new();
     let deps = build_runner.unit_deps(unit);
 
+    let no_embed_metadata = build_runner.bcx.gctx.cli_unstable().no_embed_metadata;
+
     // Closure to add one dependency to `result`.
     let mut link_to =
         |dep: &UnitDep, extern_crate_name: InternedString, noprelude: bool| -> CargoResult<()> {
@@ -1605,6 +1763,12 @@ pub fn extern_args(
                 // Example: a bin needs `rlib` for dependencies, it cannot use rmeta.
                 for output in outputs.iter() {
                     if output.flavor == FileFlavor::Linkable {
+                        pass(&output.path);
+                    }
+                    // If we use -Zembed-metadata=no, we also need to pass the path to the
+                    // corresponding .rmeta file to the linkable artifact, because the
+                    // normal dependency (rlib) doesn't contain the full metadata.
+                    else if no_embed_metadata && output.flavor == FileFlavor::Rmeta {
                         pass(&output.path);
                     }
                 }
@@ -2011,4 +2175,11 @@ fn scrape_output_path(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoR
     build_runner
         .outputs(unit)
         .map(|outputs| outputs[0].path.clone())
+}
+
+/// Gets the dep-info file emitted by rustdoc.
+fn rustdoc_dep_info_loc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> PathBuf {
+    let mut loc = build_runner.files().fingerprint_file_path(unit, "");
+    loc.set_extension("d");
+    loc
 }

@@ -2,9 +2,9 @@ r[expr.await]
 # Await expressions
 
 r[expr.await.syntax]
-> **<sup>Syntax</sup>**\
-> _AwaitExpression_ :\
-> &nbsp;&nbsp; [_Expression_] `.` `await`
+```grammar,expressions
+AwaitExpression -> Expression `.` `await`
+```
 
 r[expr.await.intro]
 An `await` expression is a syntactic construct for suspending a computation
@@ -27,7 +27,9 @@ More specifically, an await expression has the following effect.
 5. If the call to `poll` returns [`Poll::Pending`], then the future returns `Poll::Pending`, suspending its state so that, when the surrounding async context is re-polled,execution returns to step 3;
 6. Otherwise the call to `poll` must have returned [`Poll::Ready`], in which case the value contained in the [`Poll::Ready`] variant is used as the result of the `await` expression itself.
 
-> **Edition differences**: Await expressions are only available beginning with Rust 2018.
+r[expr.await.edition2018]
+> [!EDITION-2018]
+> Await expressions are only available beginning with Rust 2018.
 
 r[expr.await.task]
 ## Task context
@@ -56,7 +58,6 @@ match operand.into_future() {
 where the `yield` pseudo-code returns `Poll::Pending` and, when re-invoked, resumes execution from that point.
 The variable `current_context` refers to the context taken from the async environment.
 
-[_Expression_]: ../expressions.md
 [`async fn`]: ../items/functions.md#async-functions
 [`async` closure]: closure-expr.md#async-closures
 [`async` block]: block-expr.md#async-blocks

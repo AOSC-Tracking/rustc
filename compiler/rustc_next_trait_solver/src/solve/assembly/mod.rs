@@ -2,20 +2,26 @@
 
 pub(super) mod structural_traits;
 
+use std::cell::Cell;
+use std::ops::ControlFlow;
+
 use derive_where::derive_where;
 use rustc_type_ir::inherent::*;
 use rustc_type_ir::lang_items::TraitSolverLangItem;
+use rustc_type_ir::solve::SizedTraitKind;
 use rustc_type_ir::{
-    self as ty, Interner, TypeFoldable, TypeVisitableExt as _, TypingMode, Upcast as _, elaborate,
+    self as ty, Interner, TypeFoldable, TypeSuperVisitable, TypeVisitable, TypeVisitableExt as _,
+    TypeVisitor, TypingMode, Upcast as _, elaborate,
 };
 use tracing::{debug, instrument};
 
 use super::trait_goals::TraitGoalProvenVia;
+use super::{has_only_region_constraints, inspect};
 use crate::delegate::SolverDelegate;
 use crate::solve::inspect::ProbeKind;
 use crate::solve::{
     BuiltinImplSource, CandidateSource, CanonicalResponse, Certainty, EvalCtxt, Goal, GoalSource,
-    MaybeCause, NoSolution, QueryResult,
+    MaybeCause, NoSolution, ParamEnvSource, QueryResult,
 };
 
 enum AliasBoundKind {
@@ -47,18 +53,6 @@ where
     fn with_self_ty(self, cx: I, self_ty: I::Ty) -> Self;
 
     fn trait_def_id(self, cx: I) -> I::DefId;
-
-    /// Try equating an assumption predicate against a goal's predicate. If it
-    /// holds, then execute the `then` callback, which should do any additional
-    /// work, then produce a response (typically by executing
-    /// [`EvalCtxt::evaluate_added_goals_and_make_canonical_response`]).
-    fn probe_and_match_goal_against_assumption(
-        ecx: &mut EvalCtxt<'_, D>,
-        source: CandidateSource<I>,
-        goal: Goal<I, Self>,
-        assumption: I::Clause,
-        then: impl FnOnce(&mut EvalCtxt<'_, D>) -> QueryResult<I>,
-    ) -> Result<Candidate<I>, NoSolution>;
 
     /// Consider a clause, which consists of a "assumption" and some "requirements",
     /// to satisfy a goal. If the requirements hold, then attempt to satisfy our
@@ -92,16 +86,20 @@ where
             let ty::Dynamic(bounds, _, _) = goal.predicate.self_ty().kind() else {
                 panic!("expected object type in `probe_and_consider_object_bound_candidate`");
             };
-            ecx.add_goals(
-                GoalSource::ImplWhereBound,
-                structural_traits::predicates_for_object_candidate(
-                    ecx,
-                    goal.param_env,
-                    goal.predicate.trait_ref(cx),
-                    bounds,
-                ),
-            );
-            ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+            match structural_traits::predicates_for_object_candidate(
+                ecx,
+                goal.param_env,
+                goal.predicate.trait_ref(cx),
+                bounds,
+            ) {
+                Ok(requirements) => {
+                    ecx.add_goals(GoalSource::ImplWhereBound, requirements);
+                    ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+                }
+                Err(_) => {
+                    ecx.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS)
+                }
+            }
         })
     }
 
@@ -113,6 +111,66 @@ where
         goal: Goal<I, Self>,
         alias_ty: ty::AliasTy<I>,
     ) -> Vec<Candidate<I>>;
+
+    fn probe_and_consider_param_env_candidate(
+        ecx: &mut EvalCtxt<'_, D>,
+        goal: Goal<I, Self>,
+        assumption: I::Clause,
+    ) -> Result<Candidate<I>, NoSolution> {
+        Self::fast_reject_assumption(ecx, goal, assumption)?;
+
+        // Dealing with `ParamEnv` candidates is a bit of a mess as we need to lazily
+        // check whether the candidate is global while considering normalization.
+        //
+        // We need to write into `source` inside of `match_assumption`, but need to access it
+        // in `probe` even if the candidate does not apply before we get there. We handle this
+        // by using a `Cell` here. We only ever write into it inside of `match_assumption`.
+        let source = Cell::new(CandidateSource::ParamEnv(ParamEnvSource::Global));
+        ecx.probe(|result: &QueryResult<I>| inspect::ProbeKind::TraitCandidate {
+            source: source.get(),
+            result: *result,
+        })
+        .enter(|ecx| {
+            Self::match_assumption(ecx, goal, assumption, |ecx| {
+                source.set(ecx.characterize_param_env_assumption(goal.param_env, assumption)?);
+                ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+            })
+        })
+        .map(|result| Candidate { source: source.get(), result })
+    }
+
+    /// Try equating an assumption predicate against a goal's predicate. If it
+    /// holds, then execute the `then` callback, which should do any additional
+    /// work, then produce a response (typically by executing
+    /// [`EvalCtxt::evaluate_added_goals_and_make_canonical_response`]).
+    fn probe_and_match_goal_against_assumption(
+        ecx: &mut EvalCtxt<'_, D>,
+        source: CandidateSource<I>,
+        goal: Goal<I, Self>,
+        assumption: I::Clause,
+        then: impl FnOnce(&mut EvalCtxt<'_, D>) -> QueryResult<I>,
+    ) -> Result<Candidate<I>, NoSolution> {
+        Self::fast_reject_assumption(ecx, goal, assumption)?;
+
+        ecx.probe_trait_candidate(source)
+            .enter(|ecx| Self::match_assumption(ecx, goal, assumption, then))
+    }
+
+    /// Try to reject the assumption based off of simple heuristics, such as [`ty::ClauseKind`]
+    /// and `DefId`.
+    fn fast_reject_assumption(
+        ecx: &mut EvalCtxt<'_, D>,
+        goal: Goal<I, Self>,
+        assumption: I::Clause,
+    ) -> Result<(), NoSolution>;
+
+    /// Relate the goal and assumption.
+    fn match_assumption(
+        ecx: &mut EvalCtxt<'_, D>,
+        goal: Goal<I, Self>,
+        assumption: I::Clause,
+        then: impl FnOnce(&mut EvalCtxt<'_, D>) -> QueryResult<I>,
+    ) -> QueryResult<I>;
 
     fn consider_impl_candidate(
         ecx: &mut EvalCtxt<'_, D>,
@@ -146,13 +204,15 @@ where
         goal: Goal<I, Self>,
     ) -> Result<Candidate<I>, NoSolution>;
 
-    /// A type is `Sized` if its tail component is `Sized`.
+    /// A type is `Sized` if its tail component is `Sized` and a type is `MetaSized` if its tail
+    /// component is `MetaSized`.
     ///
     /// These components are given by built-in rules from
-    /// [`structural_traits::instantiate_constituent_tys_for_sized_trait`].
-    fn consider_builtin_sized_candidate(
+    /// [`structural_traits::instantiate_constituent_tys_for_sizedness_trait`].
+    fn consider_builtin_sizedness_candidates(
         ecx: &mut EvalCtxt<'_, D>,
         goal: Goal<I, Self>,
+        sizedness: SizedTraitKind,
     ) -> Result<Candidate<I>, NoSolution>;
 
     /// A type is `Copy` or `Clone` if its components are `Copy` or `Clone`.
@@ -251,11 +311,6 @@ where
         goal: Goal<I, Self>,
     ) -> Result<Candidate<I>, NoSolution>;
 
-    fn consider_builtin_async_destruct_candidate(
-        ecx: &mut EvalCtxt<'_, D>,
-        goal: Goal<I, Self>,
-    ) -> Result<Candidate<I>, NoSolution>;
-
     fn consider_builtin_destruct_candidate(
         ecx: &mut EvalCtxt<'_, D>,
         goal: Goal<I, Self>,
@@ -284,6 +339,21 @@ where
     ) -> Vec<Candidate<I>>;
 }
 
+/// Allows callers of `assemble_and_evaluate_candidates` to choose whether to limit
+/// candidate assembly to param-env and alias-bound candidates.
+///
+/// On top of being a micro-optimization, as it avoids doing unnecessary work when
+/// a param-env trait bound candidate shadows impls for normalization, this is also
+/// required to prevent query cycles due to RPITIT inference. See the issue at:
+/// <https://github.com/rust-lang/trait-system-refactor-initiative/issues/173>.
+pub(super) enum AssembleCandidatesFrom {
+    All,
+    /// Only assemble candidates from the environment and alias bounds, ignoring
+    /// user-written and built-in impls. We only expect `ParamEnv` and `AliasBound`
+    /// candidates to be assembled.
+    EnvAndBounds,
+}
+
 impl<D, I> EvalCtxt<'_, D>
 where
     D: SolverDelegate<Interner = I>,
@@ -292,6 +362,7 @@ where
     pub(super) fn assemble_and_evaluate_candidates<G: GoalKind<D>>(
         &mut self,
         goal: Goal<I, G>,
+        assemble_from: AssembleCandidatesFrom,
     ) -> Vec<Candidate<I>> {
         let Ok(normalized_self_ty) =
             self.structurally_normalize_ty(goal.param_env, goal.predicate.self_ty())
@@ -318,15 +389,17 @@ where
             }
         }
 
-        self.assemble_impl_candidates(goal, &mut candidates);
-
-        self.assemble_builtin_impl_candidates(goal, &mut candidates);
-
         self.assemble_alias_bound_candidates(goal, &mut candidates);
-
-        self.assemble_object_bound_candidates(goal, &mut candidates);
-
         self.assemble_param_env_candidates(goal, &mut candidates);
+
+        match assemble_from {
+            AssembleCandidatesFrom::All => {
+                self.assemble_impl_candidates(goal, &mut candidates);
+                self.assemble_builtin_impl_candidates(goal, &mut candidates);
+                self.assemble_object_bound_candidates(goal, &mut candidates);
+            }
+            AssembleCandidatesFrom::EnvAndBounds => {}
+        }
 
         candidates
     }
@@ -396,7 +469,15 @@ where
             G::consider_trait_alias_candidate(self, goal)
         } else {
             match cx.as_lang_item(trait_def_id) {
-                Some(TraitSolverLangItem::Sized) => G::consider_builtin_sized_candidate(self, goal),
+                Some(TraitSolverLangItem::Sized) => {
+                    G::consider_builtin_sizedness_candidates(self, goal, SizedTraitKind::Sized)
+                }
+                Some(TraitSolverLangItem::MetaSized) => {
+                    G::consider_builtin_sizedness_candidates(self, goal, SizedTraitKind::MetaSized)
+                }
+                Some(TraitSolverLangItem::PointeeSized) => {
+                    unreachable!("`PointeeSized` is removed during lowering");
+                }
                 Some(TraitSolverLangItem::Copy | TraitSolverLangItem::Clone) => {
                     G::consider_builtin_copy_clone_candidate(self, goal)
                 }
@@ -454,9 +535,6 @@ where
                 Some(TraitSolverLangItem::DiscriminantKind) => {
                     G::consider_builtin_discriminant_kind_candidate(self, goal)
                 }
-                Some(TraitSolverLangItem::AsyncDestruct) => {
-                    G::consider_builtin_async_destruct_candidate(self, goal)
-                }
                 Some(TraitSolverLangItem::Destruct) => {
                     G::consider_builtin_destruct_candidate(self, goal)
                 }
@@ -485,14 +563,8 @@ where
         goal: Goal<I, G>,
         candidates: &mut Vec<Candidate<I>>,
     ) {
-        for (i, assumption) in goal.param_env.caller_bounds().iter().enumerate() {
-            candidates.extend(G::probe_and_consider_implied_clause(
-                self,
-                CandidateSource::ParamEnv(i),
-                goal,
-                assumption,
-                [],
-            ));
+        for assumption in goal.param_env.caller_bounds().iter() {
+            candidates.extend(G::probe_and_consider_param_env_candidate(self, goal, assumption));
         }
     }
 
@@ -573,7 +645,7 @@ where
             }
 
             ty::Alias(kind @ (ty::Projection | ty::Opaque), alias_ty) => (kind, alias_ty),
-            ty::Alias(ty::Inherent | ty::Weak, _) => {
+            ty::Alias(ty::Inherent | ty::Free, _) => {
                 self.cx().delay_bug(format!("could not normalize {self_ty:?}, it is not WF"));
                 return;
             }
@@ -749,7 +821,73 @@ where
             }
         })
     }
+}
 
+pub(super) enum AllowInferenceConstraints {
+    Yes,
+    No,
+}
+
+impl<D, I> EvalCtxt<'_, D>
+where
+    D: SolverDelegate<Interner = I>,
+    I: Interner,
+{
+    /// Check whether we can ignore impl candidates due to specialization.
+    ///
+    /// This is only necessary for `feature(specialization)` and seems quite ugly.
+    pub(super) fn filter_specialized_impls(
+        &mut self,
+        allow_inference_constraints: AllowInferenceConstraints,
+        candidates: &mut Vec<Candidate<I>>,
+    ) {
+        match self.typing_mode() {
+            TypingMode::Coherence => return,
+            TypingMode::Analysis { .. }
+            | TypingMode::Borrowck { .. }
+            | TypingMode::PostBorrowckAnalysis { .. }
+            | TypingMode::PostAnalysis => {}
+        }
+
+        let mut i = 0;
+        'outer: while i < candidates.len() {
+            let CandidateSource::Impl(victim_def_id) = candidates[i].source else {
+                i += 1;
+                continue;
+            };
+
+            for (j, c) in candidates.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+
+                let CandidateSource::Impl(other_def_id) = c.source else {
+                    continue;
+                };
+
+                // See if we can toss out `victim` based on specialization.
+                //
+                // While this requires us to know *for sure* that the `lhs` impl applies
+                // we still use modulo regions here. This is fine as specialization currently
+                // assumes that specializing impls have to be always applicable, meaning that
+                // the only allowed region constraints may be constraints also present on the default impl.
+                if matches!(allow_inference_constraints, AllowInferenceConstraints::Yes)
+                    || has_only_region_constraints(c.result)
+                {
+                    if self.cx().impl_specializes(other_def_id, victim_def_id) {
+                        candidates.remove(i);
+                        continue 'outer;
+                    }
+                }
+            }
+
+            i += 1;
+        }
+    }
+
+    /// Assemble and merge candidates for goals which are related to an underlying trait
+    /// goal. Right now, this is normalizes-to and host effect goals.
+    ///
     /// We sadly can't simply take all possible candidates for normalization goals
     /// and check whether they result in the same constraints. We want to make sure
     /// that trying to normalize an alias doesn't result in constraints which aren't
@@ -778,54 +916,63 @@ where
     ///
     /// See trait-system-refactor-initiative#124 for more details.
     #[instrument(level = "debug", skip(self, inject_normalize_to_rigid_candidate), ret)]
-    pub(super) fn merge_candidates(
+    pub(super) fn assemble_and_merge_candidates<G: GoalKind<D>>(
         &mut self,
         proven_via: Option<TraitGoalProvenVia>,
-        candidates: Vec<Candidate<I>>,
+        goal: Goal<I, G>,
         inject_normalize_to_rigid_candidate: impl FnOnce(&mut EvalCtxt<'_, D>) -> QueryResult<I>,
     ) -> QueryResult<I> {
         let Some(proven_via) = proven_via else {
             // We don't care about overflow. If proving the trait goal overflowed, then
             // it's enough to report an overflow error for that, we don't also have to
             // overflow during normalization.
-            return Ok(self.make_ambiguous_response_no_constraints(MaybeCause::Ambiguity));
+            //
+            // We use `forced_ambiguity` here over `make_ambiguous_response_no_constraints`
+            // because the former will also record a built-in candidate in the inspector.
+            return self.forced_ambiguity(MaybeCause::Ambiguity).map(|cand| cand.result);
         };
 
         match proven_via {
-            // Even when a trait bound has been proven using a where-bound, we
-            // still need to consider alias-bounds for normalization, see
-            // tests/ui/next-solver/alias-bound-shadowed-by-env.rs.
-            //
-            // FIXME(const_trait_impl): should this behavior also be used by
-            // constness checking. Doing so is *at least theoretically* breaking,
-            // see github.com/rust-lang/rust/issues/133044#issuecomment-2500709754
             TraitGoalProvenVia::ParamEnv | TraitGoalProvenVia::AliasBound => {
-                let mut candidates_from_env_and_bounds: Vec<_> = candidates
+                // Even when a trait bound has been proven using a where-bound, we
+                // still need to consider alias-bounds for normalization, see
+                // `tests/ui/next-solver/alias-bound-shadowed-by-env.rs`.
+                let candidates_from_env_and_bounds: Vec<_> = self
+                    .assemble_and_evaluate_candidates(goal, AssembleCandidatesFrom::EnvAndBounds);
+
+                // We still need to prefer where-bounds over alias-bounds however.
+                // See `tests/ui/winnowing/norm-where-bound-gt-alias-bound.rs`.
+                let mut considered_candidates: Vec<_> = if candidates_from_env_and_bounds
                     .iter()
-                    .filter(|c| {
-                        matches!(
-                            c.source,
-                            CandidateSource::AliasBound | CandidateSource::ParamEnv(_)
-                        )
-                    })
-                    .map(|c| c.result)
-                    .collect();
+                    .any(|c| matches!(c.source, CandidateSource::ParamEnv(_)))
+                {
+                    candidates_from_env_and_bounds
+                        .into_iter()
+                        .filter(|c| matches!(c.source, CandidateSource::ParamEnv(_)))
+                        .map(|c| c.result)
+                        .collect()
+                } else {
+                    candidates_from_env_and_bounds.into_iter().map(|c| c.result).collect()
+                };
 
                 // If the trait goal has been proven by using the environment, we want to treat
                 // aliases as rigid if there are no applicable projection bounds in the environment.
-                if candidates_from_env_and_bounds.is_empty() {
+                if considered_candidates.is_empty() {
                     if let Ok(response) = inject_normalize_to_rigid_candidate(self) {
-                        candidates_from_env_and_bounds.push(response);
+                        considered_candidates.push(response);
                     }
                 }
 
-                if let Some(response) = self.try_merge_responses(&candidates_from_env_and_bounds) {
+                if let Some(response) = self.try_merge_responses(&considered_candidates) {
                     Ok(response)
                 } else {
-                    self.flounder(&candidates_from_env_and_bounds)
+                    self.flounder(&considered_candidates)
                 }
             }
             TraitGoalProvenVia::Misc => {
+                let mut candidates =
+                    self.assemble_and_evaluate_candidates(goal, AssembleCandidatesFrom::All);
+
                 // Prefer "orphaned" param-env normalization predicates, which are used
                 // (for example, and ideally only) when proving item bounds for an impl.
                 let candidates_from_env: Vec<_> = candidates
@@ -837,12 +984,126 @@ where
                     return Ok(response);
                 }
 
+                // We drop specialized impls to allow normalization via a final impl here. In case
+                // the specializing impl has different inference constraints from the specialized
+                // impl, proving the trait goal is already ambiguous, so we never get here. This
+                // means we can just ignore inference constraints and don't have to special-case
+                // constraining the normalized-to `term`.
+                self.filter_specialized_impls(AllowInferenceConstraints::Yes, &mut candidates);
+
                 let responses: Vec<_> = candidates.iter().map(|c| c.result).collect();
                 if let Some(response) = self.try_merge_responses(&responses) {
                     Ok(response)
                 } else {
                     self.flounder(&responses)
                 }
+            }
+        }
+    }
+
+    /// Compute whether a param-env assumption is global or non-global after normalizing it.
+    ///
+    /// This is necessary because, for example, given:
+    ///
+    /// ```ignore,rust
+    /// where
+    ///     T: Trait<Assoc = u32>,
+    ///     i32: From<T::Assoc>,
+    /// ```
+    ///
+    /// The `i32: From<T::Assoc>` bound is non-global before normalization, but is global after.
+    /// Since the old trait solver normalized param-envs eagerly, we want to emulate this
+    /// behavior lazily.
+    fn characterize_param_env_assumption(
+        &mut self,
+        param_env: I::ParamEnv,
+        assumption: I::Clause,
+    ) -> Result<CandidateSource<I>, NoSolution> {
+        // FIXME: This should be fixed, but it also requires changing the behavior
+        // in the old solver which is currently relied on.
+        if assumption.has_bound_vars() {
+            return Ok(CandidateSource::ParamEnv(ParamEnvSource::NonGlobal));
+        }
+
+        match assumption.visit_with(&mut FindParamInClause {
+            ecx: self,
+            param_env,
+            universes: vec![],
+        }) {
+            ControlFlow::Break(Err(NoSolution)) => Err(NoSolution),
+            ControlFlow::Break(Ok(())) => Ok(CandidateSource::ParamEnv(ParamEnvSource::NonGlobal)),
+            ControlFlow::Continue(()) => Ok(CandidateSource::ParamEnv(ParamEnvSource::Global)),
+        }
+    }
+}
+
+struct FindParamInClause<'a, 'b, D: SolverDelegate<Interner = I>, I: Interner> {
+    ecx: &'a mut EvalCtxt<'b, D>,
+    param_env: I::ParamEnv,
+    universes: Vec<Option<ty::UniverseIndex>>,
+}
+
+impl<D, I> TypeVisitor<I> for FindParamInClause<'_, '_, D, I>
+where
+    D: SolverDelegate<Interner = I>,
+    I: Interner,
+{
+    type Result = ControlFlow<Result<(), NoSolution>>;
+
+    fn visit_binder<T: TypeVisitable<I>>(&mut self, t: &ty::Binder<I, T>) -> Self::Result {
+        self.universes.push(None);
+        t.super_visit_with(self)?;
+        self.universes.pop();
+        ControlFlow::Continue(())
+    }
+
+    fn visit_ty(&mut self, ty: I::Ty) -> Self::Result {
+        let ty = self.ecx.replace_bound_vars(ty, &mut self.universes);
+        let Ok(ty) = self.ecx.structurally_normalize_ty(self.param_env, ty) else {
+            return ControlFlow::Break(Err(NoSolution));
+        };
+
+        if let ty::Placeholder(p) = ty.kind() {
+            if p.universe() == ty::UniverseIndex::ROOT {
+                ControlFlow::Break(Ok(()))
+            } else {
+                ControlFlow::Continue(())
+            }
+        } else {
+            ty.super_visit_with(self)
+        }
+    }
+
+    fn visit_const(&mut self, ct: I::Const) -> Self::Result {
+        let ct = self.ecx.replace_bound_vars(ct, &mut self.universes);
+        let Ok(ct) = self.ecx.structurally_normalize_const(self.param_env, ct) else {
+            return ControlFlow::Break(Err(NoSolution));
+        };
+
+        if let ty::ConstKind::Placeholder(p) = ct.kind() {
+            if p.universe() == ty::UniverseIndex::ROOT {
+                ControlFlow::Break(Ok(()))
+            } else {
+                ControlFlow::Continue(())
+            }
+        } else {
+            ct.super_visit_with(self)
+        }
+    }
+
+    fn visit_region(&mut self, r: I::Region) -> Self::Result {
+        match self.ecx.eager_resolve_region(r).kind() {
+            ty::ReStatic | ty::ReError(_) | ty::ReBound(..) => ControlFlow::Continue(()),
+            ty::RePlaceholder(p) => {
+                if p.universe() == ty::UniverseIndex::ROOT {
+                    ControlFlow::Break(Ok(()))
+                } else {
+                    ControlFlow::Continue(())
+                }
+            }
+            ty::ReVar(_) => ControlFlow::Break(Ok(())),
+            ty::ReErased | ty::ReEarlyParam(_) | ty::ReLateParam(_) => {
+                unreachable!("unexpected region in param-env clause")
             }
         }
     }

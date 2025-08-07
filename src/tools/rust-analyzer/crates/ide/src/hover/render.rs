@@ -3,34 +3,34 @@ use std::{env, mem, ops::Not};
 
 use either::Either;
 use hir::{
-    db::ExpandDatabase, Adt, AsAssocItem, AsExternAssocItem, CaptureKind, DisplayTarget, DropGlue,
+    Adt, AsAssocItem, AsExternAssocItem, CaptureKind, DisplayTarget, DropGlue,
     DynCompatibilityViolation, HasCrate, HasSource, HirDisplay, Layout, LayoutError,
     MethodViolationCode, Name, Semantics, Symbol, Trait, Type, TypeInfo, VariantDef,
+    db::ExpandDatabase,
 };
 use ide_db::{
-    base_db::SourceDatabase,
+    RootDatabase,
     defs::Definition,
-    documentation::HasDocs,
+    documentation::{DocsRangeMap, HasDocs},
     famous_defs::FamousDefs,
     generated::lints::{CLIPPY_LINTS, DEFAULT_LINTS, FEATURES},
     syntax_helpers::prettify_macro_expansion,
-    RootDatabase,
 };
 use itertools::Itertools;
 use rustc_apfloat::{
-    ieee::{Half as f16, Quad as f128},
     Float,
+    ieee::{Half as f16, Quad as f128},
 };
-use span::Edition;
+use span::{Edition, TextSize};
 use stdx::format_to;
-use syntax::{algo, ast, match_ast, AstNode, AstToken, Direction, SyntaxToken, T};
+use syntax::{AstNode, AstToken, Direction, SyntaxToken, T, algo, ast, match_ast};
 
 use crate::{
-    doc_links::{remove_links, rewrite_links},
-    hover::{notable_traits, walk_and_push_ty, SubstTyLen},
-    interpret::render_const_eval_error,
     HoverAction, HoverConfig, HoverResult, Markup, MemoryLayoutHoverConfig,
     MemoryLayoutHoverRenderKind,
+    doc_links::{remove_links, rewrite_links},
+    hover::{SubstTyLen, notable_traits, walk_and_push_ty},
+    interpret::render_const_eval_error,
 };
 
 pub(super) fn type_info_of(
@@ -276,13 +276,10 @@ pub(super) fn keyword(
         keyword_hints(sema, token, parent, edition, display_target);
 
     let doc_owner = find_std_module(&famous_defs, &keyword_mod, edition)?;
-    let docs = doc_owner.docs(sema.db)?;
-    let markup = process_markup(
-        sema.db,
-        Definition::Module(doc_owner),
-        &markup(Some(docs.into()), description, None, None, String::new()),
-        config,
-    );
+    let (docs, range_map) = doc_owner.docs_with_rangemap(sema.db)?;
+    let (markup, range_map) =
+        markup(Some(docs.into()), Some(range_map), description, None, None, String::new());
+    let markup = process_markup(sema.db, Definition::Module(doc_owner), &markup, range_map, config);
     Some(HoverResult { markup, actions })
 }
 
@@ -346,11 +343,7 @@ pub(super) fn try_for_lint(attr: &ast::Attr, token: &SyntaxToken) -> Option<Hove
                 .is_some_and(|t| {
                     t.kind() == T![ident] && t.into_token().is_some_and(|t| t.text() == "clippy")
                 });
-            if is_clippy {
-                (true, CLIPPY_LINTS)
-            } else {
-                (false, DEFAULT_LINTS)
-            }
+            if is_clippy { (true, CLIPPY_LINTS) } else { (false, DEFAULT_LINTS) }
         }
         _ => return None,
     };
@@ -375,11 +368,15 @@ pub(super) fn process_markup(
     db: &RootDatabase,
     def: Definition,
     markup: &Markup,
+    markup_range_map: Option<DocsRangeMap>,
     config: &HoverConfig,
 ) -> Markup {
     let markup = markup.as_str();
-    let markup =
-        if config.links_in_hover { rewrite_links(db, markup, def) } else { remove_links(markup) };
+    let markup = if config.links_in_hover {
+        rewrite_links(db, markup, def, markup_range_map)
+    } else {
+        remove_links(markup)
+    };
     Markup::from(markup)
 }
 
@@ -418,7 +415,7 @@ fn definition_owner_name(db: &RootDatabase, def: Definition, edition: Edition) -
                             "{}::{}",
                             name.display(db, edition),
                             it.name(db).display(db, edition)
-                        ))
+                        ));
                     }
                     None => Some(it.name(db)),
                 }
@@ -436,7 +433,7 @@ fn definition_owner_name(db: &RootDatabase, def: Definition, edition: Edition) -
                             "{}::{}",
                             name.display(db, edition),
                             it.name(db)?.display(db, edition)
-                        ))
+                        ));
                     }
                     None => it.name(db),
                 }
@@ -466,8 +463,7 @@ pub(super) fn path(
     item_name: Option<String>,
     edition: Edition,
 ) -> String {
-    let crate_name =
-        db.crate_graph()[module.krate().into()].display_name.as_ref().map(|it| it.to_string());
+    let crate_name = module.krate().display_name(db).as_ref().map(|it| it.to_string());
     let module_path = module
         .path_to_root(db)
         .into_iter()
@@ -482,12 +478,12 @@ pub(super) fn definition(
     famous_defs: Option<&FamousDefs<'_, '_>>,
     notable_traits: &[(Trait, Vec<(Option<Type>, Name)>)],
     macro_arm: Option<u32>,
-    hovered_definition: bool,
+    render_extras: bool,
     subst_types: Option<&Vec<(Symbol, Type)>>,
     config: &HoverConfig,
     edition: Edition,
     display_target: DisplayTarget,
-) -> Markup {
+) -> (Markup, Option<DocsRangeMap>) {
     let mod_path = definition_path(db, &def, edition);
     let label = match def {
         Definition::Trait(trait_) => trait_
@@ -523,7 +519,12 @@ pub(super) fn definition(
         }
         _ => def.label(db, display_target),
     };
-    let docs = def.docs(db, famous_defs, display_target);
+    let (docs, range_map) =
+        if let Some((docs, doc_range)) = def.docs_with_rangemap(db, famous_defs, display_target) {
+            (Some(docs), doc_range)
+        } else {
+            (None, None)
+        };
     let value = || match def {
         Definition::Variant(it) => {
             if !it.parent_enum(db).is_data_carrying(db) {
@@ -629,22 +630,58 @@ pub(super) fn definition(
                 }
             },
             |_| None,
+            |_| None,
         ),
-        Definition::Adt(it) => {
-            render_memory_layout(config.memory_layout, || it.layout(db), |_| None, |_| None)
-        }
+        Definition::Adt(it @ Adt::Struct(strukt)) => render_memory_layout(
+            config.memory_layout,
+            || it.layout(db),
+            |_| None,
+            |layout| {
+                let mut field_size =
+                    |i: usize| Some(strukt.fields(db).get(i)?.layout(db).ok()?.size());
+                if strukt.repr(db).is_some_and(|it| it.inhibit_struct_field_reordering()) {
+                    Some(("tail padding", layout.tail_padding(&mut field_size)?))
+                } else {
+                    Some(("largest padding", layout.largest_padding(&mut field_size)?))
+                }
+            },
+            |_| None,
+        ),
+        Definition::Adt(it) => render_memory_layout(
+            config.memory_layout,
+            || it.layout(db),
+            |_| None,
+            |_| None,
+            |_| None,
+        ),
         Definition::Variant(it) => render_memory_layout(
             config.memory_layout,
             || it.layout(db),
             |_| None,
+            |_| None,
             |layout| layout.enum_tag_size(),
         ),
-        Definition::TypeAlias(it) => {
-            render_memory_layout(config.memory_layout, || it.ty(db).layout(db), |_| None, |_| None)
-        }
-        Definition::Local(it) => {
-            render_memory_layout(config.memory_layout, || it.ty(db).layout(db), |_| None, |_| None)
-        }
+        Definition::TypeAlias(it) => render_memory_layout(
+            config.memory_layout,
+            || it.ty(db).layout(db),
+            |_| None,
+            |_| None,
+            |_| None,
+        ),
+        Definition::Local(it) => render_memory_layout(
+            config.memory_layout,
+            || it.ty(db).layout(db),
+            |_| None,
+            |_| None,
+            |_| None,
+        ),
+        Definition::SelfType(it) => render_memory_layout(
+            config.memory_layout,
+            || it.self_ty(db).layout(db),
+            |_| None,
+            |_| None,
+            |_| None,
+        ),
         _ => None,
     };
 
@@ -717,18 +754,17 @@ pub(super) fn definition(
             }
             _ => return None,
         };
-        let rendered_drop_glue = match drop_info.drop_glue {
-            DropGlue::None => "does not contain types with destructors (drop glue)",
-            DropGlue::DependOnParams => {
-                "may contain types with destructors (drop glue) depending on type parameters"
+        let rendered_drop_glue = if drop_info.has_dtor == Some(true) {
+            "impl Drop"
+        } else {
+            match drop_info.drop_glue {
+                DropGlue::HasDropGlue => "needs Drop",
+                DropGlue::None => "no Drop",
+                DropGlue::DependOnParams => "type param may need Drop",
             }
-            DropGlue::HasDropGlue => "contain types with destructors (drop glue)",
         };
-        Some(match drop_info.has_dtor {
-            Some(true) => format!("{}; has a destructor", rendered_drop_glue),
-            Some(false) => format!("{}; doesn't have a destructor", rendered_drop_glue),
-            None => rendered_drop_glue.to_owned(),
-        })
+
+        Some(rendered_drop_glue.to_owned())
     };
 
     let dyn_compatibility_info = || match def {
@@ -746,7 +782,7 @@ pub(super) fn definition(
     };
 
     let mut extra = String::new();
-    if hovered_definition {
+    if render_extras {
         if let Some(notable_traits) =
             render_notable_trait(db, notable_traits, edition, display_target)
         {
@@ -760,14 +796,17 @@ pub(super) fn definition(
         if let Some(layout_info) = layout_info() {
             extra.push_str("\n___\n");
             extra.push_str(&layout_info);
+            if let Some(drop_info) = drop_info() {
+                extra.push_str(", ");
+                extra.push_str(&drop_info)
+            }
+        } else if let Some(drop_info) = drop_info() {
+            extra.push_str("\n___\n");
+            extra.push_str(&drop_info);
         }
         if let Some(dyn_compatibility_info) = dyn_compatibility_info() {
             extra.push_str("\n___\n");
             extra.push_str(&dyn_compatibility_info);
-        }
-        if let Some(drop_info) = drop_info() {
-            extra.push_str("\n___\n");
-            extra.push_str(&drop_info);
         }
     }
     let mut desc = String::new();
@@ -804,6 +843,7 @@ pub(super) fn definition(
 
     markup(
         docs.map(Into::into),
+        range_map,
         desc,
         extra.is_empty().not().then_some(extra),
         mod_path,
@@ -906,9 +946,9 @@ fn render_notable_trait(
     let mut needs_impl_header = true;
     for (trait_, assoc_types) in notable_traits {
         desc.push_str(if mem::take(&mut needs_impl_header) {
-            "Implements notable traits: "
+            "Implements notable traits: `"
         } else {
-            ", "
+            "`, `"
         });
         format_to!(desc, "{}", trait_.name(db).display(db, edition));
         if !assoc_types.is_empty() {
@@ -928,7 +968,12 @@ fn render_notable_trait(
             desc.push('>');
         }
     }
-    desc.is_empty().not().then_some(desc)
+    if desc.is_empty() {
+        None
+    } else {
+        desc.push('`');
+        Some(desc)
+    }
 }
 
 fn type_info(
@@ -955,37 +1000,12 @@ fn type_info(
     res.markup = if let Some(adjusted_ty) = adjusted {
         walk_and_push_ty(db, &adjusted_ty, &mut push_new_def);
 
-        let notable = {
-            let mut desc = String::new();
-            let mut needs_impl_header = true;
-            for (trait_, assoc_types) in notable_traits(db, &original) {
-                desc.push_str(if mem::take(&mut needs_impl_header) {
-                    "Implements Notable Traits: "
-                } else {
-                    ", "
-                });
-                format_to!(desc, "{}", trait_.name(db).display(db, edition));
-                if !assoc_types.is_empty() {
-                    desc.push('<');
-                    format_to!(
-                        desc,
-                        "{}",
-                        assoc_types.into_iter().format_with(", ", |(ty, name), f| {
-                            f(&name.display(db, edition))?;
-                            f(&" = ")?;
-                            match ty {
-                                Some(ty) => f(&ty.display(db, display_target)),
-                                None => f(&"?"),
-                            }
-                        })
-                    );
-                    desc.push('>');
-                }
-            }
-            if !desc.is_empty() {
-                desc.push('\n');
-            }
-            desc
+        let notable = if let Some(notable) =
+            render_notable_trait(db, &notable_traits(db, &original), edition, display_target)
+        {
+            format!("{notable}\n")
+        } else {
+            String::new()
         };
 
         let original = original.display(db, display_target).to_string();
@@ -1065,9 +1085,13 @@ fn closure_ty(
     if let Some(trait_) = c.fn_trait(sema.db).get_id(sema.db, original.krate(sema.db).into()) {
         push_new_def(hir::Trait::from(trait_).into())
     }
-    if let Some(layout) =
-        render_memory_layout(config.memory_layout, || original.layout(sema.db), |_| None, |_| None)
-    {
+    if let Some(layout) = render_memory_layout(
+        config.memory_layout,
+        || original.layout(sema.db),
+        |_| None,
+        |_| None,
+        |_| None,
+    ) {
         format_to!(markup, "\n___\n{layout}");
     }
     format_to!(markup, "{adjusted}\n\n## Captures\n{}", captures_rendered,);
@@ -1100,11 +1124,12 @@ fn definition_path(db: &RootDatabase, &def: &Definition, edition: Edition) -> Op
 
 fn markup(
     docs: Option<String>,
+    range_map: Option<DocsRangeMap>,
     rust: String,
     extra: Option<String>,
     mod_path: Option<String>,
     subst_types: String,
-) -> Markup {
+) -> (Markup, Option<DocsRangeMap>) {
     let mut buf = String::new();
 
     if let Some(mod_path) = mod_path {
@@ -1123,9 +1148,15 @@ fn markup(
     }
 
     if let Some(doc) = docs {
-        format_to!(buf, "\n___\n\n{}", doc);
+        format_to!(buf, "\n___\n\n");
+        let offset = TextSize::new(buf.len() as u32);
+        let buf_range_map = range_map.map(|range_map| range_map.shift_docstring_line_range(offset));
+        format_to!(buf, "{}", doc);
+
+        (buf.into(), buf_range_map)
+    } else {
+        (buf.into(), None)
     }
-    buf.into()
 }
 
 fn find_std_module(
@@ -1145,6 +1176,7 @@ fn render_memory_layout(
     config: Option<MemoryLayoutHoverConfig>,
     layout: impl FnOnce() -> Result<Layout, LayoutError>,
     offset: impl FnOnce(&Layout) -> Option<u64>,
+    padding: impl FnOnce(&Layout) -> Option<(&str, u64)>,
     tag: impl FnOnce(&Layout) -> Option<usize>,
 ) -> Option<String> {
     let config = config?;
@@ -1196,6 +1228,23 @@ fn render_memory_layout(
                 }
                 MemoryLayoutHoverRenderKind::Both => {
                     format_to!(label, "{offset}")
+                }
+            }
+            format_to!(label, ", ");
+        }
+    }
+
+    if let Some(render) = config.padding {
+        if let Some((padding_name, padding)) = padding(&layout) {
+            format_to!(label, "{padding_name} = ");
+            match render {
+                MemoryLayoutHoverRenderKind::Decimal => format_to!(label, "{padding}"),
+                MemoryLayoutHoverRenderKind::Hexadecimal => format_to!(label, "{padding:#X}"),
+                MemoryLayoutHoverRenderKind::Both if padding >= 10 => {
+                    format_to!(label, "{padding} ({padding:#X})")
+                }
+                MemoryLayoutHoverRenderKind::Both => {
+                    format_to!(label, "{padding}")
                 }
             }
             format_to!(label, ", ");

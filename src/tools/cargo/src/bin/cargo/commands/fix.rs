@@ -67,7 +67,7 @@ pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
         args.get_one::<String>("profile").map(String::as_str),
         Some("test")
     );
-    let mode = CompileMode::Check { test };
+    let intent = UserIntent::Check { test };
 
     // Unlike other commands default `cargo fix` to all targets to fix as much
     // code as we can.
@@ -79,29 +79,37 @@ pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
     let lockfile_path = args.lockfile_path(gctx)?;
     ws.set_requested_lockfile_path(lockfile_path.clone());
 
-    let mut opts = args.compile_options(gctx, mode, Some(&ws), ProfileChecking::LegacyTestOnly)?;
+    let mut opts =
+        args.compile_options(gctx, intent, Some(&ws), ProfileChecking::LegacyTestOnly)?;
 
-    if !opts.filter.is_specific() {
-        // cargo fix with no target selection implies `--all-targets`.
+    let edition = args.flag("edition") || args.flag("edition-idioms");
+    if !opts.filter.is_specific() && edition {
+        // When `cargo fix` is run without specifying targets but with `--edition` or `--edition-idioms`,
+        // it should default to fixing all targets.
+        // See: https://github.com/rust-lang/cargo/issues/13527
         opts.filter = ops::CompileFilter::new_all_targets();
     }
 
     let allow_dirty = args.flag("allow-dirty");
 
-    ops::fix(
-        gctx,
-        &ws,
-        &root_manifest,
-        &mut ops::FixOptions {
-            edition: args.flag("edition"),
-            idioms: args.flag("edition-idioms"),
-            compile_opts: opts,
-            allow_dirty,
-            allow_staged: allow_dirty || args.flag("allow-staged"),
-            allow_no_vcs: args.flag("allow-no-vcs"),
-            broken_code: args.flag("broken-code"),
-            requested_lockfile_path: lockfile_path,
-        },
-    )?;
+    let mut opts = ops::FixOptions {
+        edition: args
+            .flag("edition")
+            .then_some(ops::EditionFixMode::NextRelative),
+        idioms: args.flag("edition-idioms"),
+        compile_opts: opts,
+        allow_dirty,
+        allow_staged: allow_dirty || args.flag("allow-staged"),
+        allow_no_vcs: args.flag("allow-no-vcs"),
+        broken_code: args.flag("broken-code"),
+        requested_lockfile_path: lockfile_path,
+    };
+
+    if let Some(fe) = &gctx.cli_unstable().fix_edition {
+        ops::fix_edition(gctx, &ws, &mut opts, fe)?;
+    } else {
+        ops::fix(gctx, &ws, &mut opts)?;
+    }
+
     Ok(())
 }

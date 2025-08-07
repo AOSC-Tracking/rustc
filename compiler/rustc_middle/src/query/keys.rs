@@ -328,6 +328,14 @@ impl Key for (DefId, SimplifiedType) {
     }
 }
 
+impl Key for (DefId, ty::SizedTraitKind) {
+    type Cache<V> = DefaultCache<Self, V>;
+
+    fn default_span(&self, tcx: TyCtxt<'_>) -> Span {
+        self.0.default_span(tcx)
+    }
+}
+
 impl<'tcx> Key for GenericArgsRef<'tcx> {
     type Cache<V> = DefaultCache<Self, V>;
 
@@ -586,7 +594,7 @@ impl Key for HirId {
     type Cache<V> = DefaultCache<Self, V>;
 
     fn default_span(&self, tcx: TyCtxt<'_>) -> Span {
-        tcx.hir().span(*self)
+        tcx.hir_span(*self)
     }
 
     #[inline(always)]
@@ -599,7 +607,7 @@ impl Key for (LocalDefId, HirId) {
     type Cache<V> = DefaultCache<Self, V>;
 
     fn default_span(&self, tcx: TyCtxt<'_>) -> Span {
-        tcx.hir().span(self.1)
+        tcx.hir_span(self.1)
     }
 
     #[inline(always)]

@@ -1,4 +1,5 @@
 use crate::core::{Dependency, PackageId, SourceId};
+use crate::util::closest_msg;
 use crate::util::interning::InternedString;
 use crate::util::CargoResult;
 use anyhow::bail;
@@ -241,9 +242,10 @@ fn build_feature_map(
                 Feature(f) => {
                     if !features.contains_key(f) {
                         if !is_any_dep {
+                            let closest = closest_msg(f, features.keys(), |k| k, "feature");
                             bail!(
                                 "feature `{feature}` includes `{fv}` which is neither a dependency \
-                                 nor another feature"
+                                 nor another feature{closest}"
                               );
                         }
                         if is_optional_dep {
@@ -375,15 +377,15 @@ impl FeatureValue {
             Some((dep, dep_feat)) => {
                 let dep_name = dep.strip_suffix('?');
                 FeatureValue::DepFeature {
-                    dep_name: InternedString::new(dep_name.unwrap_or(dep)),
-                    dep_feature: InternedString::new(dep_feat),
+                    dep_name: dep_name.unwrap_or(dep).into(),
+                    dep_feature: dep_feat.into(),
                     weak: dep_name.is_some(),
                 }
             }
             None => {
                 if let Some(dep_name) = feature.strip_prefix("dep:") {
                     FeatureValue::Dep {
-                        dep_name: InternedString::new(dep_name),
+                        dep_name: dep_name.into(),
                     }
                 } else {
                     FeatureValue::Feature(feature)

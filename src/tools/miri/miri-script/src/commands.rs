@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::fmt::Write as _;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, BufWriter, Write as _};
 use std::ops::Not;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -169,7 +170,8 @@ impl Command {
             | Command::Toolchain { .. }
             | Command::Bench { .. }
             | Command::RustcPull { .. }
-            | Command::RustcPush { .. } => {}
+            | Command::RustcPush { .. }
+            | Command::Squash => {}
         }
         // Then run the actual command.
         match self {
@@ -188,6 +190,7 @@ impl Command {
             Command::Toolchain { flags } => Self::toolchain(flags),
             Command::RustcPull { commit } => Self::rustc_pull(commit.clone()),
             Command::RustcPush { github_user, branch } => Self::rustc_push(github_user, branch),
+            Command::Squash => Self::squash(),
         }
     }
 
@@ -383,6 +386,93 @@ impl Command {
         Ok(())
     }
 
+    fn squash() -> Result<()> {
+        let sh = Shell::new()?;
+        sh.change_dir(miri_dir()?);
+        // Figure out base wrt latest upstream master.
+        // (We can't trust any of the local ones, they can all be outdated.)
+        let origin_master = {
+            cmd!(sh, "git fetch https://github.com/rust-lang/miri/")
+                .quiet()
+                .ignore_stdout()
+                .ignore_stderr()
+                .run()?;
+            cmd!(sh, "git rev-parse FETCH_HEAD").read()?
+        };
+        let base = cmd!(sh, "git merge-base HEAD {origin_master}").read()?;
+        // Rebase onto that, setting ourselves as the sequence editor so that we can edit the sequence programmatically.
+        // We want to forward the host stdin so apparently we cannot use `cmd!`.
+        let mut cmd = process::Command::new("git");
+        cmd.arg("rebase").arg(&base).arg("--interactive");
+        let current_exe = {
+            if cfg!(windows) {
+                // Apparently git-for-Windows gets confused by backslashes if we just use
+                // `current_exe()` here. So replace them by forward slashes if this is not a "magic"
+                // path starting with "\\". This is clearly a git bug but we work around it here.
+                // Also see <https://github.com/rust-lang/miri/issues/4340>.
+                let bin = env::current_exe()?;
+                match bin.into_os_string().into_string() {
+                    Err(not_utf8) => not_utf8.into(), // :shrug:
+                    Ok(str) => {
+                        if str.starts_with(r"\\") {
+                            str.into() // don't touch these magic paths, they must use backslashes
+                        } else {
+                            str.replace('\\', "/").into()
+                        }
+                    }
+                }
+            } else {
+                env::current_exe()?
+            }
+        };
+        cmd.env("GIT_SEQUENCE_EDITOR", current_exe);
+        cmd.env("MIRI_SCRIPT_IS_GIT_SEQUENCE_EDITOR", "1");
+        cmd.current_dir(sh.current_dir());
+        let result = cmd.status()?;
+        if !result.success() {
+            bail!("`git rebase` failed");
+        }
+        Ok(())
+    }
+
+    pub fn squash_sequence_editor() -> Result<()> {
+        let sequence_file = env::args().nth(1).expect("git should pass us a filename");
+        if sequence_file == "fmt" {
+            // This is probably us being called as a git hook as part of the rebase. Let's just
+            // ignore this. Sadly `git rebase` does not have a flag to skip running hooks.
+            return Ok(());
+        }
+        // Read the provided sequence and adjust it.
+        let rebase_sequence = {
+            let mut rebase_sequence = String::new();
+            let file = fs::File::open(&sequence_file).with_context(|| {
+                format!("failed to read rebase sequence from {sequence_file:?}")
+            })?;
+            let file = io::BufReader::new(file);
+            for line in file.lines() {
+                let line = line?;
+                // The first line is left unchanged.
+                if rebase_sequence.is_empty() {
+                    writeln!(rebase_sequence, "{line}").unwrap();
+                    continue;
+                }
+                // If this is a "pick" like, make it "squash".
+                if let Some(rest) = line.strip_prefix("pick ") {
+                    writeln!(rebase_sequence, "squash {rest}").unwrap();
+                    continue;
+                }
+                // We've reached the end of the relevant part of the sequence, and we can stop.
+                break;
+            }
+            rebase_sequence
+        };
+        // Write out the adjusted sequence.
+        fs::write(&sequence_file, rebase_sequence).with_context(|| {
+            format!("failed to write adjusted rebase sequence to {sequence_file:?}")
+        })?;
+        Ok(())
+    }
+
     fn bench(
         target: Option<String>,
         no_install: bool,
@@ -420,7 +510,9 @@ impl Command {
             sh.read_dir(benches_dir)?
                 .into_iter()
                 .filter(|path| path.is_dir())
-                .map(|path| path.into_os_string().into_string().unwrap())
+                // Only keep the basename: that matches the usage with a manual bench list,
+                // and it ensure the path concatenations below work as intended.
+                .map(|path| path.file_name().unwrap().to_owned().into_string().unwrap())
                 .collect()
         } else {
             benches.into_iter().collect()
@@ -461,14 +553,16 @@ impl Command {
             stddev: f64,
         }
 
-        let gather_results = || -> Result<HashMap<&str, BenchResult>> {
+        let gather_results = || -> Result<BTreeMap<&str, BenchResult>> {
             let baseline_temp_dir = results_json_dir.unwrap();
-            let mut results = HashMap::new();
+            let mut results = BTreeMap::new();
             for bench in &benches {
-                let result = File::open(path!(baseline_temp_dir / format!("{bench}.bench.json")))?;
-                let mut result: serde_json::Value =
-                    serde_json::from_reader(BufReader::new(result))?;
-                let result: BenchResult = serde_json::from_value(result["results"][0].take())?;
+                let result = File::open(path!(baseline_temp_dir / format!("{bench}.bench.json")))
+                    .context("failed to read hyperfine JSON")?;
+                let mut result: serde_json::Value = serde_json::from_reader(BufReader::new(result))
+                    .context("failed to parse hyperfine JSON")?;
+                let result: BenchResult = serde_json::from_value(result["results"][0].take())
+                    .context("failed to interpret hyperfine JSON")?;
                 results.insert(bench as &str, result);
             }
             Ok(results)
@@ -480,15 +574,15 @@ impl Command {
             serde_json::to_writer_pretty(BufWriter::new(baseline), &results)?;
         } else if let Some(baseline_file) = load_baseline {
             let new_results = gather_results()?;
-            let baseline_results: HashMap<String, BenchResult> = {
+            let baseline_results: BTreeMap<String, BenchResult> = {
                 let f = File::open(baseline_file)?;
                 serde_json::from_reader(BufReader::new(f))?
             };
             println!(
                 "Comparison with baseline (relative speed, lower is better for the new results):"
             );
-            for (bench, new_result) in new_results.iter() {
-                let Some(baseline_result) = baseline_results.get(*bench) else { continue };
+            for (bench, new_result) in new_results {
+                let Some(baseline_result) = baseline_results.get(bench) else { continue };
 
                 // Compare results (inspired by hyperfine)
                 let ratio = new_result.mean / baseline_result.mean;
@@ -606,11 +700,9 @@ impl Command {
         let mut early_flags = Vec::<OsString>::new();
 
         // In `dep` mode, the target is already passed via `MIRI_TEST_TARGET`
-        if !dep {
-            if let Some(target) = &target {
-                early_flags.push("--target".into());
-                early_flags.push(target.into());
-            }
+        if !dep && let Some(target) = &target {
+            early_flags.push("--target".into());
+            early_flags.push(target.into());
         }
         early_flags.push("--edition".into());
         early_flags.push(edition.as_deref().unwrap_or("2021").into());
@@ -638,10 +730,8 @@ impl Command {
         // Add Miri flags
         let mut cmd = cmd.args(&miri_flags).args(&early_flags).args(&flags);
         // For `--dep` we also need to set the target in the env var.
-        if dep {
-            if let Some(target) = &target {
-                cmd = cmd.env("MIRI_TEST_TARGET", target);
-            }
+        if dep && let Some(target) = &target {
+            cmd = cmd.env("MIRI_TEST_TARGET", target);
         }
         // Finally, run the thing.
         Ok(cmd.run()?)

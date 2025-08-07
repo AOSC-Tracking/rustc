@@ -74,13 +74,13 @@ pub(crate) const WORKSPACES: &[(&str, ExceptionList, Option<(&[&str], &[&str])>,
     ("compiler/rustc_codegen_gcc", EXCEPTIONS_GCC, None, &[]),
     ("src/bootstrap", EXCEPTIONS_BOOTSTRAP, None, &[]),
     ("src/ci/docker/host-x86_64/test-various/uefi_qemu_test", EXCEPTIONS_UEFI_QEMU_TEST, None, &[]),
-    ("src/etc/test-float-parse", EXCEPTIONS, None, &[]),
     ("src/tools/cargo", EXCEPTIONS_CARGO, None, &["src/tools/cargo"]),
     //("src/tools/miri/test-cargo-miri", &[], None), // FIXME uncomment once all deps are vendored
     //("src/tools/miri/test_dependencies", &[], None), // FIXME uncomment once all deps are vendored
     ("src/tools/rust-analyzer", EXCEPTIONS_RUST_ANALYZER, None, &[]),
     ("src/tools/rustbook", EXCEPTIONS_RUSTBOOK, None, &["src/doc/book", "src/doc/reference"]),
     ("src/tools/rustc-perf", EXCEPTIONS_RUSTC_PERF, None, &["src/tools/rustc-perf"]),
+    ("src/tools/test-float-parse", EXCEPTIONS, None, &[]),
     // tidy-alphabetical-end
 ];
 
@@ -132,21 +132,23 @@ const EXCEPTIONS_CARGO: ExceptionList = &[
     ("fiat-crypto", "MIT OR Apache-2.0 OR BSD-1-Clause"),
     ("foldhash", "Zlib"),
     ("im-rc", "MPL-2.0+"),
+    ("libz-rs-sys", "Zlib"),
     ("normalize-line-endings", "Apache-2.0"),
     ("openssl", "Apache-2.0"),
     ("ryu", "Apache-2.0 OR BSL-1.0"), // BSL is not acceptble, but we use it under Apache-2.0
-    ("sha1_smol", "BSD-3-Clause"),
     ("similar", "Apache-2.0"),
     ("sized-chunks", "MPL-2.0+"),
     ("subtle", "BSD-3-Clause"),
     ("supports-hyperlinks", "Apache-2.0"),
     ("unicode-bom", "Apache-2.0"),
+    ("zlib-rs", "Zlib"),
     // tidy-alphabetical-end
 ];
 
 const EXCEPTIONS_RUST_ANALYZER: ExceptionList = &[
     // tidy-alphabetical-start
     ("dissimilar", "Apache-2.0"),
+    ("foldhash", "Zlib"),
     ("notify", "CC0-1.0"),
     ("option-ext", "MPL-2.0"),
     ("pulldown-cmark-to-cmark", "Apache-2.0"),
@@ -164,7 +166,6 @@ const EXCEPTIONS_RUSTC_PERF: ExceptionList = &[
     ("brotli-decompressor", "BSD-3-Clause/MIT"),
     ("encoding_rs", "(Apache-2.0 OR MIT) AND BSD-3-Clause"),
     ("inferno", "CDDL-1.0"),
-    ("instant", "BSD-3-Clause"),
     ("ring", NON_STANDARD_LICENSE), // see EXCEPTIONS_NON_STANDARD_LICENSE_DEPS for more.
     ("ryu", "Apache-2.0 OR BSL-1.0"),
     ("snap", "BSD-3-Clause"),
@@ -174,6 +175,9 @@ const EXCEPTIONS_RUSTC_PERF: ExceptionList = &[
 
 const EXCEPTIONS_RUSTBOOK: ExceptionList = &[
     // tidy-alphabetical-start
+    ("cssparser", "MPL-2.0"),
+    ("cssparser-macros", "MPL-2.0"),
+    ("dtoa-short", "MPL-2.0"),
     ("mdbook", "MPL-2.0"),
     ("ryu", "Apache-2.0 OR BSL-1.0"),
     // tidy-alphabetical-end
@@ -181,6 +185,8 @@ const EXCEPTIONS_RUSTBOOK: ExceptionList = &[
 
 const EXCEPTIONS_CRANELIFT: ExceptionList = &[
     // tidy-alphabetical-start
+    ("cranelift-assembler-x64", "Apache-2.0 WITH LLVM-exception"),
+    ("cranelift-assembler-x64-meta", "Apache-2.0 WITH LLVM-exception"),
     ("cranelift-bforest", "Apache-2.0 WITH LLVM-exception"),
     ("cranelift-bitset", "Apache-2.0 WITH LLVM-exception"),
     ("cranelift-codegen", "Apache-2.0 WITH LLVM-exception"),
@@ -194,6 +200,7 @@ const EXCEPTIONS_CRANELIFT: ExceptionList = &[
     ("cranelift-module", "Apache-2.0 WITH LLVM-exception"),
     ("cranelift-native", "Apache-2.0 WITH LLVM-exception"),
     ("cranelift-object", "Apache-2.0 WITH LLVM-exception"),
+    ("cranelift-srcgen", "Apache-2.0 WITH LLVM-exception"),
     ("foldhash", "Zlib"),
     ("mach2", "BSD-2-Clause OR MIT OR Apache-2.0"),
     ("regalloc2", "Apache-2.0 WITH LLVM-exception"),
@@ -252,14 +259,12 @@ const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
     "blake3",
     "block-buffer",
     "bstr",
-    "byteorder", // via ruzstd in object in thorin-dwp
     "cc",
     "cfg-if",
     "cfg_aliases",
     "constant_time_eq",
     "cpufeatures",
     "crc32fast",
-    "crossbeam-channel",
     "crossbeam-deque",
     "crossbeam-epoch",
     "crossbeam-utils",
@@ -269,7 +274,6 @@ const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
     "darling_core",
     "darling_macro",
     "datafrog",
-    "deranged",
     "derive-where",
     "derive_setters",
     "digest",
@@ -295,7 +299,6 @@ const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
     "gimli",
     "gsgdt",
     "hashbrown",
-    "hermit-abi",
     "icu_list",
     "icu_list_data",
     "icu_locid",
@@ -310,6 +313,8 @@ const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
     "intl_pluralrules",
     "itertools",
     "itoa",
+    "jiff",
+    "jiff-static",
     "jobserver",
     "lazy_static",
     "leb128",
@@ -327,8 +332,6 @@ const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
     "miniz_oxide",
     "nix",
     "nu-ansi-term",
-    "num-conv",
-    "num_cpus",
     "object",
     "odht",
     "once_cell",
@@ -340,7 +343,7 @@ const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
     "pin-project-lite",
     "polonius-engine",
     "portable-atomic", // dependency for platforms doesn't support `AtomicU64` in std
-    "powerfmt",
+    "portable-atomic-util",
     "ppv-lite86",
     "proc-macro-hack",
     "proc-macro2",
@@ -349,9 +352,11 @@ const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
     "pulldown-cmark-escape",
     "punycode",
     "quote",
+    "r-efi",
     "rand",
     "rand_chacha",
     "rand_core",
+    "rand_xorshift", // dependency for doc-tests in rustc_thread_pool
     "rand_xoshiro",
     "redox_syscall",
     "regex",
@@ -359,8 +364,7 @@ const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
     "regex-syntax",
     "rustc-demangle",
     "rustc-hash",
-    "rustc-rayon",
-    "rustc-rayon-core",
+    "rustc-literal-escaper",
     "rustc-stable-hash",
     "rustc_apfloat",
     "rustix",
@@ -392,9 +396,6 @@ const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
     "thorin-dwp",
     "thread_local",
     "tikv-jemalloc-sys",
-    "time",
-    "time-core",
-    "time-macros",
     "tinystr",
     "tinyvec",
     "tinyvec_macros",
@@ -429,13 +430,18 @@ const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
     "winapi-util",
     "winapi-x86_64-pc-windows-gnu",
     "windows",
+    "windows-collections",
     "windows-core",
+    "windows-future",
     "windows-implement",
     "windows-interface",
+    "windows-link",
+    "windows-numerics",
     "windows-result",
     "windows-strings",
     "windows-sys",
     "windows-targets",
+    "windows-threading",
     "windows_aarch64_gnullvm",
     "windows_aarch64_msvc",
     "windows_i686_gnu",
@@ -444,7 +450,7 @@ const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
     "windows_x86_64_gnu",
     "windows_x86_64_gnullvm",
     "windows_x86_64_msvc",
-    "wit-bindgen-rt@0.33.0", // via wasi
+    "wit-bindgen-rt@0.39.0", // pinned to a specific version due to using a binary blob: <https://github.com/rust-lang/rust/pull/136395#issuecomment-2692769062>
     "writeable",
     "yoke",
     "yoke-derive",
@@ -461,7 +467,6 @@ const PERMITTED_STDLIB_DEPENDENCIES: &[&str] = &[
     // tidy-alphabetical-start
     "addr2line",
     "adler2",
-    "allocator-api2",
     "cc",
     "cfg-if",
     "compiler_builtins",
@@ -475,17 +480,14 @@ const PERMITTED_STDLIB_DEPENDENCIES: &[&str] = &[
     "memchr",
     "miniz_oxide",
     "object",
-    "proc-macro2",
-    "quote",
     "r-efi",
     "r-efi-alloc",
     "rand",
     "rand_core",
     "rand_xorshift",
     "rustc-demangle",
+    "rustc-literal-escaper",
     "shlex",
-    "syn",
-    "unicode-ident",
     "unicode-width",
     "unwinding",
     "wasi",
@@ -499,8 +501,6 @@ const PERMITTED_STDLIB_DEPENDENCIES: &[&str] = &[
     "windows_x86_64_gnu",
     "windows_x86_64_gnullvm",
     "windows_x86_64_msvc",
-    "zerocopy",
-    "zerocopy-derive",
     // tidy-alphabetical-end
 ];
 
@@ -512,6 +512,8 @@ const PERMITTED_CRANELIFT_DEPENDENCIES: &[&str] = &[
     "bitflags",
     "bumpalo",
     "cfg-if",
+    "cranelift-assembler-x64",
+    "cranelift-assembler-x64-meta",
     "cranelift-bforest",
     "cranelift-bitset",
     "cranelift-codegen",
@@ -525,6 +527,7 @@ const PERMITTED_CRANELIFT_DEPENDENCIES: &[&str] = &[
     "cranelift-module",
     "cranelift-native",
     "cranelift-object",
+    "cranelift-srcgen",
     "crc32fast",
     "equivalent",
     "fallible-iterator",
@@ -680,8 +683,10 @@ pub static CRATES: &[&str] = &[
 pub fn has_missing_submodule(root: &Path, submodules: &[&str]) -> bool {
     !CiEnv::is_ci()
         && submodules.iter().any(|submodule| {
+            let path = root.join(submodule);
+            !path.exists()
             // If the directory is empty, we can consider it as an uninitialized submodule.
-            read_dir(root.join(submodule)).unwrap().next().is_none()
+            || read_dir(path).unwrap().next().is_none()
         })
 }
 

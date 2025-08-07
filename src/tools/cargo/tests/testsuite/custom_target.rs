@@ -11,8 +11,18 @@ const MINIMAL_LIB: &str = r#"
 #![feature(lang_items)]
 #![no_core]
 
+#[lang = "pointee_sized"]
+pub trait PointeeSized {
+    // Empty.
+}
+
+#[lang = "meta_sized"]
+pub trait MetaSized: PointeeSized {
+    // Empty.
+}
+
 #[lang = "sized"]
-pub trait Sized {
+pub trait Sized: MetaSized {
     // Empty.
 }
 #[lang = "copy"]
@@ -36,8 +46,7 @@ const SIMPLE_SPEC: &str = r#"
 }
 "#;
 
-#[ignore = "1-86 beta betaport"]
-#[cargo_test]
+#[cargo_test(nightly, reason = "requires features no_core, lang_items")]
 fn custom_target_minimal() {
     let p = project()
         .file(
@@ -59,8 +68,8 @@ fn custom_target_minimal() {
         .run();
 
     // Ensure that the correct style of flag is passed to --target with doc tests.
-    p.cargo("test --doc --target src/../custom-target.json -v -Zdoctest-xcompile")
-        .masquerade_as_nightly_cargo(&["doctest-xcompile", "no_core", "lang_items"])
+    p.cargo("test --doc --target src/../custom-target.json -v")
+        .masquerade_as_nightly_cargo(&["no_core", "lang_items"])
         .with_stderr_data(str![[r#"
 [FRESH] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s

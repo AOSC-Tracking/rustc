@@ -44,8 +44,8 @@ impl UNICODE_STRING {
     }
 }
 
-impl Default for OBJECT_ATTRIBUTES {
-    fn default() -> Self {
+impl OBJECT_ATTRIBUTES {
+    pub fn with_length() -> Self {
         Self {
             Length: size_of::<Self>() as _,
             RootDirectory: ptr::null_mut(),
@@ -118,6 +118,23 @@ if #[cfg(not(target_vendor = "uwp"))] {
 unsafe extern "system" {
     pub fn ProcessPrng(pbdata: *mut u8, cbdata: usize) -> BOOL;
 }
+
+windows_targets::link!("ntdll.dll" "system" fn NtCreateNamedPipeFile(
+    filehandle: *mut HANDLE,
+    desiredaccess: FILE_ACCESS_RIGHTS,
+    objectattributes: *const OBJECT_ATTRIBUTES,
+    iostatusblock: *mut IO_STATUS_BLOCK,
+    shareaccess: FILE_SHARE_MODE,
+    createdisposition: NTCREATEFILE_CREATE_DISPOSITION,
+    createoptions: NTCREATEFILE_CREATE_OPTIONS,
+    namedpipetype: u32,
+    readmode: u32,
+    completionmode: u32,
+    maximuminstances: u32,
+    inboundquota: u32,
+    outboundquota: u32,
+    defaulttimeout: *const u64,
+) -> NTSTATUS);
 
 // Functions that aren't available on every version of Windows that we support,
 // but we still use them and just provide some form of a fallback implementation.

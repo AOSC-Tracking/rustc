@@ -35,29 +35,25 @@ impl Display for ChangeSeverity {
     }
 }
 
-pub fn find_recent_config_change_ids(current_id: usize) -> Vec<ChangeInfo> {
-    if !CONFIG_CHANGE_HISTORY.iter().any(|config| config.change_id == current_id) {
+pub fn find_recent_config_change_ids(current_id: usize) -> &'static [ChangeInfo] {
+    if let Some(index) =
+        CONFIG_CHANGE_HISTORY.iter().position(|config| config.change_id == current_id)
+    {
+        // Skip the current_id and IDs before it
+        &CONFIG_CHANGE_HISTORY[index + 1..]
+    } else {
         // If the current change-id is greater than the most recent one, return
         // an empty list (it may be due to switching from a recent branch to an
         // older one); otherwise, return the full list (assuming the user provided
         // the incorrect change-id by accident).
-        if let Some(config) = CONFIG_CHANGE_HISTORY.iter().max_by_key(|config| config.change_id) {
-            if current_id > config.change_id {
-                return Vec::new();
-            }
+        if let Some(config) = CONFIG_CHANGE_HISTORY.iter().max_by_key(|config| config.change_id)
+            && current_id > config.change_id
+        {
+            return &[];
         }
 
-        return CONFIG_CHANGE_HISTORY.to_vec();
+        CONFIG_CHANGE_HISTORY
     }
-
-    let index =
-        CONFIG_CHANGE_HISTORY.iter().position(|config| config.change_id == current_id).unwrap();
-
-    CONFIG_CHANGE_HISTORY
-        .iter()
-        .skip(index + 1) // Skip the current_id and IDs before it
-        .cloned()
-        .collect()
 }
 
 pub fn human_readable_changes(changes: &[ChangeInfo]) -> String {
@@ -394,5 +390,40 @@ pub const CONFIG_CHANGE_HISTORY: &[ChangeInfo] = &[
         change_id: 138986,
         severity: ChangeSeverity::Info,
         summary: "You can now use `change-id = \"ignore\"` to suppress `change-id ` warnings in the console.",
+    },
+    ChangeInfo {
+        change_id: 139386,
+        severity: ChangeSeverity::Info,
+        summary: "Added a new option `build.compiletest-use-stage0-libtest` to force `compiletest` to use the stage 0 libtest.",
+    },
+    ChangeInfo {
+        change_id: 138934,
+        severity: ChangeSeverity::Info,
+        summary: "Added new option `include` to create config extensions.",
+    },
+    ChangeInfo {
+        change_id: 140438,
+        severity: ChangeSeverity::Info,
+        summary: "Added a new option `rust.debug-assertions-tools` to control debug asssertions for tools.",
+    },
+    ChangeInfo {
+        change_id: 140732,
+        severity: ChangeSeverity::Info,
+        summary: "`./x run` now supports running in-tree `rustfmt`, e.g., `./x run rustfmt -- --check /path/to/file.rs`.",
+    },
+    ChangeInfo {
+        change_id: 119899,
+        severity: ChangeSeverity::Warning,
+        summary: "Stage0 library no longer matches the in-tree library, which means stage1 compiler now uses the beta library.",
+    },
+    ChangeInfo {
+        change_id: 141970,
+        severity: ChangeSeverity::Info,
+        summary: "Added new bootstrap flag `--skip-std-check-if-no-download-rustc` that skips std checks when download-rustc is unavailable. Mainly intended for developers to reduce RA overhead.",
+    },
+    ChangeInfo {
+        change_id: 142379,
+        severity: ChangeSeverity::Info,
+        summary: "Added new option `tool.TOOL_NAME.features` to specify the features to compile a tool with",
     },
 ];

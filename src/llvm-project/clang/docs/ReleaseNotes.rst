@@ -314,6 +314,9 @@ C++2c Feature Support
 
 - Implemented `P3176R1 The Oxford variadic comma <https://wg21.link/P3176R1>`_
 
+- The error produced when doing arithmetic operations on enums of different types
+  can be disabled with ``-Wno-enum-enum-conversion``. (#GH92340)
+
 C++23 Feature Support
 ^^^^^^^^^^^^^^^^^^^^^
 - Removed the restriction to literal types in constexpr functions in C++23 mode.
@@ -545,6 +548,11 @@ New Compiler Flags
 - The ``-Warray-compare-cxx26`` warning has been added to warn about array comparison
   starting from C++26, this warning is enabled as an error by default.
 
+- The ``-Wnontrivial-memcall`` warning has been added to warn about
+  passing non-trivially-copyable destination parameter to ``memcpy``,
+  ``memset`` and similar functions for which it is a documented undefined
+  behavior. It is implied by ``-Wnontrivial-memaccess``
+
 - clang-cl and clang-dxc now support ``-fdiagnostics-color=[auto|never|always]``
   in addition to ``-f[no-]color-diagnostics``.
 
@@ -575,11 +583,6 @@ Modified Compiler Flags
   ``-fveclib=ArmPL`` and ``-fveclib=SLEEF``. This gives Clang more opportunities
   to utilize these vector libraries. The behavior for all other vector function
   libraries remains unchanged.
-
-- The ``-Wnontrivial-memcall`` warning has been added to warn about
-  passing non-trivially-copyable destination parameter to ``memcpy``,
-  ``memset`` and similar functions for which it is a documented undefined
-  behavior. It is implied by ``-Wnontrivial-memaccess``
 
 - Added ``-fmodules-reduced-bmi`` flag corresponding to
   ``-fexperimental-modules-reduced-bmi`` flag. The ``-fmodules-reduced-bmi`` flag
@@ -693,6 +696,16 @@ Improvements to Clang's diagnostics
 - Clang now properly explains the reason a template template argument failed to
   match a template template parameter, in terms of the C++17 relaxed matching rules
   instead of the old ones.
+
+- No longer diagnosing idiomatic function pointer casts on Windows under
+  ``-Wcast-function-type-mismatch`` (which is enabled by ``-Wextra``). Clang
+  would previously warn on this construct, but will no longer do so on Windows:
+
+  .. code-block:: c
+
+    typedef void (WINAPI *PGNSI)(LPSYSTEM_INFO);
+    HMODULE Lib = LoadLibrary("kernel32");
+    PGNSI FnPtr = (PGNSI)GetProcAddress(Lib, "GetNativeSystemInfo");
 
 - Don't emit duplicated dangling diagnostics. (#GH93386).
 
@@ -899,6 +912,8 @@ Bug Fixes in This Version
   being deleted has a potentially throwing destructor (#GH118660).
 - Clang now outputs correct values when #embed data contains bytes with negative
   signed char values (#GH102798).
+- Fix crash due to unknown references and pointer implementation and handling of
+  base classes. (GH139452)
 
 Bug Fixes to Compiler Builtins
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1058,8 +1073,13 @@ Bug Fixes to C++ Support
 - Fixed a substitution bug in transforming CTAD aliases when the type alias contains a non-pack template argument
   corresponding to a pack parameter (#GH124715)
 - Clang is now better at keeping track of friend function template instance contexts. (#GH55509)
+- Fixes matching of nested template template parameters. (#GH130362)
+- Correctly diagnoses template template paramters which have a pack parameter
+  not in the last position.
 - Fixed an integer overflow bug in computing template parameter depths when synthesizing CTAD guides. (#GH128691)
 - Fixed an incorrect pointer access when checking access-control on concepts. (#GH131530)
+- Fixed various alias CTAD bugs involving variadic template arguments. (#GH123591), (#GH127539), (#GH129077),
+  (#GH129620), and (#GH129998).
 
 Bug Fixes to AST Handling
 ^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1098,6 +1118,7 @@ Miscellaneous Clang Crashes Fixed
 
 - Fixed a crash when an unscoped enumeration declared by an opaque-enum-declaration within a class template
   with a dependent underlying type is subject to integral promotion. (#GH117960)
+- Fix code completion crash involving PCH serialzied templates. (#GH139019)
 
 OpenACC Specific Changes
 ------------------------
@@ -1251,6 +1272,8 @@ RISC-V Support
 
 - The option ``-mcmodel=large`` for the large code model is supported.
 - Bump RVV intrinsic to version 1.0, the spec: https://github.com/riscv-non-isa/rvv-intrinsic-doc/releases/tag/v1.0.0-rc4
+
+- `Zicsr` / `Zifencei` are allowed to be duplicated in the presence of `g` in `-march`.
 
 CUDA/HIP Language Changes
 ^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1449,6 +1472,9 @@ Crash and bug fixes
 
 - The ``unix.BlockInCriticalSection`` now recognizes the ``lock()`` member function
   as expected, even if it's inherited from a base class. Fixes (#GH104241).
+
+- Fixed a crash when C++20 parenthesized initializer lists are used. This issue
+  was causing a crash in clang-tidy. (#GH136041)
 
 Improvements
 ^^^^^^^^^^^^

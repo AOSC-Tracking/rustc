@@ -195,7 +195,7 @@ fn slugify(c: char) -> Option<char> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Playground {
     pub crate_name: Option<Symbol>,
     pub url: String,
@@ -246,7 +246,7 @@ impl<'a, I: Iterator<Item = Event<'a>>> Iterator for CodeBlocks<'_, 'a, I> {
             match kind {
                 CodeBlockKind::Fenced(ref lang) => {
                     let parse_result =
-                        LangString::parse_without_check(lang, self.check_error_codes, false);
+                        LangString::parse_without_check(lang, self.check_error_codes);
                     if !parse_result.rust {
                         let added_classes = parse_result.added_classes;
                         let lang_string = if let Some(lang) = parse_result.unknown.first() {
@@ -300,11 +300,15 @@ impl<'a, I: Iterator<Item = Event<'a>>> Iterator for CodeBlocks<'_, 'a, I> {
                 crate_name: krate.map(String::from).unwrap_or_default(),
                 no_crate_inject: false,
                 insert_indent_space: true,
-                attrs: vec![],
                 args_file: PathBuf::new(),
             };
-            let doctest = doctest::DocTestBuilder::new(&test, krate, edition, false, None, None);
-            let (test, _) = doctest.generate_unique_doctest(&test, false, &opts, krate);
+            let mut builder = doctest::BuildDocTestBuilder::new(&test).edition(edition);
+            if let Some(krate) = krate {
+                builder = builder.crate_name(krate);
+            }
+            let doctest = builder.build(None);
+            let (wrapped, _) = doctest.generate_unique_doctest(&test, false, &opts, krate);
+            let test = wrapped.to_string();
             let channel = if test.contains("#![feature(") { "&amp;version=nightly" } else { "" };
 
             let test_escaped = small_url_encode(test);
@@ -316,8 +320,10 @@ impl<'a, I: Iterator<Item = Event<'a>>> Iterator for CodeBlocks<'_, 'a, I> {
             ))
         });
 
-        let tooltip = if ignore != Ignore::None {
-            highlight::Tooltip::Ignore
+        let tooltip = if ignore == Ignore::All {
+            highlight::Tooltip::IgnoreAll
+        } else if let Ignore::Some(platforms) = ignore {
+            highlight::Tooltip::IgnoreSome(platforms)
         } else if compile_fail {
             highlight::Tooltip::CompileFail
         } else if should_panic {
@@ -707,21 +713,19 @@ pub(crate) fn find_testable_code<T: doctest::DocTestVisitor>(
     doc: &str,
     tests: &mut T,
     error_codes: ErrorCodes,
-    enable_per_target_ignores: bool,
     extra_info: Option<&ExtraInfo<'_>>,
 ) {
-    find_codes(doc, tests, error_codes, enable_per_target_ignores, extra_info, false)
+    find_codes(doc, tests, error_codes, extra_info, false)
 }
 
 pub(crate) fn find_codes<T: doctest::DocTestVisitor>(
     doc: &str,
     tests: &mut T,
     error_codes: ErrorCodes,
-    enable_per_target_ignores: bool,
     extra_info: Option<&ExtraInfo<'_>>,
     include_non_rust: bool,
 ) {
-    let mut parser = Parser::new(doc).into_offset_iter();
+    let mut parser = Parser::new_ext(doc, main_body_opts()).into_offset_iter();
     let mut prev_offset = 0;
     let mut nb_lines = 0;
     let mut register_header = None;
@@ -733,12 +737,7 @@ pub(crate) fn find_codes<T: doctest::DocTestVisitor>(
                         if lang.is_empty() {
                             Default::default()
                         } else {
-                            LangString::parse(
-                                lang,
-                                error_codes,
-                                enable_per_target_ignores,
-                                extra_info,
-                            )
+                            LangString::parse(lang, error_codes, extra_info)
                         }
                     }
                     CodeBlockKind::Indented => Default::default(),
@@ -1162,18 +1161,13 @@ impl Default for LangString {
 }
 
 impl LangString {
-    fn parse_without_check(
-        string: &str,
-        allow_error_code_check: ErrorCodes,
-        enable_per_target_ignores: bool,
-    ) -> Self {
-        Self::parse(string, allow_error_code_check, enable_per_target_ignores, None)
+    fn parse_without_check(string: &str, allow_error_code_check: ErrorCodes) -> Self {
+        Self::parse(string, allow_error_code_check, None)
     }
 
     fn parse(
         string: &str,
         allow_error_code_check: ErrorCodes,
-        enable_per_target_ignores: bool,
         extra: Option<&ExtraInfo<'_>>,
     ) -> Self {
         let allow_error_code_check = allow_error_code_check.as_bool();
@@ -1203,10 +1197,8 @@ impl LangString {
                     LangStringToken::LangToken(x)
                         if let Some(ignore) = x.strip_prefix("ignore-") =>
                     {
-                        if enable_per_target_ignores {
-                            ignores.push(ignore.to_owned());
-                            seen_rust_tags = !seen_other_tags;
-                        }
+                        ignores.push(ignore.to_owned());
+                        seen_rust_tags = !seen_other_tags;
                     }
                     LangStringToken::LangToken("rust") => {
                         data.rust = true;
@@ -1968,7 +1960,7 @@ pub(crate) fn rust_code_blocks(md: &str, extra_info: &ExtraInfo<'_>) -> Vec<Rust
                     let lang_string = if syntax.is_empty() {
                         Default::default()
                     } else {
-                        LangString::parse(syntax, ErrorCodes::Yes, false, Some(extra_info))
+                        LangString::parse(syntax, ErrorCodes::Yes, Some(extra_info))
                     };
                     if !lang_string.rust {
                         continue;

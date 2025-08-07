@@ -1,4 +1,5 @@
 use std::borrow::Borrow;
+use std::hash::{Hash, Hasher};
 use std::{fmt, ptr};
 
 use libc::{c_char, c_uint};
@@ -25,6 +26,14 @@ impl PartialEq for Type {
     }
 }
 
+impl Eq for Type {}
+
+impl Hash for Type {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        ptr::hash(self, state);
+    }
+}
+
 impl fmt::Debug for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(
@@ -48,13 +57,6 @@ impl<'ll, CX: Borrow<SCx<'ll>>> GenericCx<'ll, CX> {
     }
     pub(crate) fn type_void(&self) -> &'ll Type {
         unsafe { llvm::LLVMVoidTypeInContext(self.llcx()) }
-    }
-    pub(crate) fn type_token(&self) -> &'ll Type {
-        unsafe { llvm::LLVMTokenTypeInContext(self.llcx()) }
-    }
-
-    pub(crate) fn type_metadata(&self) -> &'ll Type {
-        unsafe { llvm::LLVMMetadataTypeInContext(self.llcx()) }
     }
 
     ///x Creates an integer type with the given number of bits, e.g., i24
@@ -126,6 +128,10 @@ impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
 impl<'ll, CX: Borrow<SCx<'ll>>> GenericCx<'ll, CX> {
     pub(crate) fn llcx(&self) -> &'ll llvm::Context {
         (**self).borrow().llcx
+    }
+
+    pub(crate) fn llmod(&self) -> &'ll llvm::Module {
+        (**self).borrow().llmod
     }
 
     pub(crate) fn isize_ty(&self) -> &'ll Type {

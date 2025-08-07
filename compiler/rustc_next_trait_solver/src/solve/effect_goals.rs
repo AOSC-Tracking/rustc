@@ -4,6 +4,7 @@
 use rustc_type_ir::fast_reject::DeepRejectCtxt;
 use rustc_type_ir::inherent::*;
 use rustc_type_ir::lang_items::TraitSolverLangItem;
+use rustc_type_ir::solve::SizedTraitKind;
 use rustc_type_ir::solve::inspect::ProbeKind;
 use rustc_type_ir::{self as ty, Interner, elaborate};
 use tracing::instrument;
@@ -36,39 +37,39 @@ where
         self.def_id()
     }
 
-    fn probe_and_match_goal_against_assumption(
+    fn fast_reject_assumption(
         ecx: &mut EvalCtxt<'_, D>,
-        source: rustc_type_ir::solve::CandidateSource<I>,
         goal: Goal<I, Self>,
-        assumption: <I as Interner>::Clause,
-        then: impl FnOnce(&mut EvalCtxt<'_, D>) -> QueryResult<I>,
-    ) -> Result<Candidate<I>, NoSolution> {
+        assumption: I::Clause,
+    ) -> Result<(), NoSolution> {
         if let Some(host_clause) = assumption.as_host_effect_clause() {
             if host_clause.def_id() == goal.predicate.def_id()
                 && host_clause.constness().satisfies(goal.predicate.constness)
             {
-                if !DeepRejectCtxt::relate_rigid_rigid(ecx.cx()).args_may_unify(
+                if DeepRejectCtxt::relate_rigid_rigid(ecx.cx()).args_may_unify(
                     goal.predicate.trait_ref.args,
                     host_clause.skip_binder().trait_ref.args,
                 ) {
-                    return Err(NoSolution);
+                    return Ok(());
                 }
-
-                ecx.probe_trait_candidate(source).enter(|ecx| {
-                    let assumption_trait_pred = ecx.instantiate_binder_with_infer(host_clause);
-                    ecx.eq(
-                        goal.param_env,
-                        goal.predicate.trait_ref,
-                        assumption_trait_pred.trait_ref,
-                    )?;
-                    then(ecx)
-                })
-            } else {
-                Err(NoSolution)
             }
-        } else {
-            Err(NoSolution)
         }
+
+        Err(NoSolution)
+    }
+
+    fn match_assumption(
+        ecx: &mut EvalCtxt<'_, D>,
+        goal: Goal<I, Self>,
+        assumption: I::Clause,
+        then: impl FnOnce(&mut EvalCtxt<'_, D>) -> QueryResult<I>,
+    ) -> QueryResult<I> {
+        let host_clause = assumption.as_host_effect_clause().unwrap();
+
+        let assumption_trait_pred = ecx.instantiate_binder_with_infer(host_clause);
+        ecx.eq(goal.param_env, goal.predicate.trait_ref, assumption_trait_pred.trait_ref)?;
+
+        then(ecx)
     }
 
     /// Register additional assumptions for aliases corresponding to `~const` item bounds.
@@ -124,7 +125,7 @@ where
     fn consider_impl_candidate(
         ecx: &mut EvalCtxt<'_, D>,
         goal: Goal<I, Self>,
-        impl_def_id: <I as Interner>::DefId,
+        impl_def_id: I::DefId,
     ) -> Result<Candidate<I>, NoSolution> {
         let cx = ecx.cx();
 
@@ -178,7 +179,7 @@ where
 
     fn consider_error_guaranteed_candidate(
         ecx: &mut EvalCtxt<'_, D>,
-        _guar: <I as Interner>::ErrorGuaranteed,
+        _guar: I::ErrorGuaranteed,
     ) -> Result<Candidate<I>, NoSolution> {
         ecx.probe_builtin_trait_candidate(BuiltinImplSource::Misc)
             .enter(|ecx| ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes))
@@ -198,11 +199,12 @@ where
         unreachable!("trait aliases are never const")
     }
 
-    fn consider_builtin_sized_candidate(
+    fn consider_builtin_sizedness_candidates(
         _ecx: &mut EvalCtxt<'_, D>,
         _goal: Goal<I, Self>,
+        _sizedness: SizedTraitKind,
     ) -> Result<Candidate<I>, NoSolution> {
-        unreachable!("Sized is never const")
+        unreachable!("Sized/MetaSized is never const")
     }
 
     fn consider_builtin_copy_clone_candidate(
@@ -336,13 +338,6 @@ where
         unreachable!("DiscriminantKind is not const")
     }
 
-    fn consider_builtin_async_destruct_candidate(
-        _ecx: &mut EvalCtxt<'_, D>,
-        _goal: Goal<I, Self>,
-    ) -> Result<Candidate<I>, NoSolution> {
-        unreachable!("AsyncDestruct is not const")
-    }
-
     fn consider_builtin_destruct_candidate(
         ecx: &mut EvalCtxt<'_, D>,
         goal: Goal<I, Self>,
@@ -399,12 +394,11 @@ where
         &mut self,
         goal: Goal<I, ty::HostEffectPredicate<I>>,
     ) -> QueryResult<I> {
-        let candidates = self.assemble_and_evaluate_candidates(goal);
         let (_, proven_via) = self.probe(|_| ProbeKind::ShadowedEnvProbing).enter(|ecx| {
             let trait_goal: Goal<I, ty::TraitPredicate<I>> =
                 goal.with(ecx.cx(), goal.predicate.trait_ref);
             ecx.compute_trait_goal(trait_goal)
         })?;
-        self.merge_candidates(proven_via, candidates, |_ecx| Err(NoSolution))
+        self.assemble_and_merge_candidates(proven_via, goal, |_ecx| Err(NoSolution))
     }
 }

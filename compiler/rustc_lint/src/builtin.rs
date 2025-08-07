@@ -21,14 +21,16 @@ use rustc_ast::tokenstream::{TokenStream, TokenTree};
 use rustc_ast::visit::{FnCtxt, FnKind};
 use rustc_ast::{self as ast, *};
 use rustc_ast_pretty::pprust::expr_to_string;
+use rustc_attr_data_structures::{AttributeKind, find_attr};
 use rustc_errors::{Applicability, LintDiagnostic};
-use rustc_feature::{AttributeGate, BuiltinAttribute, GateIssue, Stability, deprecated_attributes};
+use rustc_feature::GateIssue;
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
 use rustc_hir::intravisit::FnKind as HirFnKind;
 use rustc_hir::{Body, FnDecl, GenericParamKind, PatKind, PredicateOrigin};
 use rustc_middle::bug;
+use rustc_middle::lint::LevelAndSource;
 use rustc_middle::ty::layout::LayoutOf;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt, Upcast, VariantDef};
@@ -38,7 +40,7 @@ pub use rustc_session::lint::builtin::*;
 use rustc_session::{declare_lint, declare_lint_pass, impl_lint_pass};
 use rustc_span::edition::Edition;
 use rustc_span::source_map::Spanned;
-use rustc_span::{BytePos, Ident, InnerSpan, Span, Symbol, kw, sym};
+use rustc_span::{BytePos, DUMMY_SP, Ident, InnerSpan, Span, Symbol, kw, sym};
 use rustc_target::asm::InlineAsmArch;
 use rustc_trait_selection::infer::{InferCtxtExt, TyCtxtInferExt};
 use rustc_trait_selection::traits::misc::type_allowed_to_implement_copy;
@@ -47,8 +49,7 @@ use rustc_trait_selection::traits::{self};
 
 use crate::errors::BuiltinEllipsisInclusiveRangePatterns;
 use crate::lints::{
-    BuiltinAnonymousParams, BuiltinConstNoMangle, BuiltinDeprecatedAttrLink,
-    BuiltinDeprecatedAttrLinkSuggestion, BuiltinDerefNullptr, BuiltinDoubleNegations,
+    BuiltinAnonymousParams, BuiltinConstNoMangle, BuiltinDerefNullptr, BuiltinDoubleNegations,
     BuiltinDoubleNegationsAddParens, BuiltinEllipsisInclusiveRangePatternsLint,
     BuiltinExplicitOutlives, BuiltinExplicitOutlivesSuggestion, BuiltinFeatureIssueNote,
     BuiltinIncompleteFeatures, BuiltinIncompleteFeaturesHelp, BuiltinInternalFeatures,
@@ -330,7 +331,6 @@ impl EarlyLintPass for UnsafeCode {
         if let FnKind::Fn(
             ctxt,
             _,
-            _,
             ast::Fn {
                 sig: ast::FnSig { header: ast::FnHeader { safety: ast::Safety::Unsafe(_), .. }, .. },
                 body,
@@ -545,22 +545,22 @@ impl<'tcx> LateLintPass<'tcx> for MissingCopyImplementations {
             return;
         }
         let (def, ty) = match item.kind {
-            hir::ItemKind::Struct(_, _, ast_generics) => {
-                if !ast_generics.params.is_empty() {
+            hir::ItemKind::Struct(_, generics, _) => {
+                if !generics.params.is_empty() {
                     return;
                 }
                 let def = cx.tcx.adt_def(item.owner_id);
                 (def, Ty::new_adt(cx.tcx, def, ty::List::empty()))
             }
-            hir::ItemKind::Union(_, _, ast_generics) => {
-                if !ast_generics.params.is_empty() {
+            hir::ItemKind::Union(_, generics, _) => {
+                if !generics.params.is_empty() {
                     return;
                 }
                 let def = cx.tcx.adt_def(item.owner_id);
                 (def, Ty::new_adt(cx.tcx, def, ty::List::empty()))
             }
-            hir::ItemKind::Enum(_, _, ast_generics) => {
-                if !ast_generics.params.is_empty() {
+            hir::ItemKind::Enum(_, generics, _) => {
+                if !generics.params.is_empty() {
                     return;
                 }
                 let def = cx.tcx.adt_def(item.owner_id);
@@ -635,7 +635,8 @@ fn type_implements_negative_copy_modulo_regions<'tcx>(
     typing_env: ty::TypingEnv<'tcx>,
 ) -> bool {
     let (infcx, param_env) = tcx.infer_ctxt().build_with_typing_env(typing_env);
-    let trait_ref = ty::TraitRef::new(tcx, tcx.require_lang_item(hir::LangItem::Copy, None), [ty]);
+    let trait_ref =
+        ty::TraitRef::new(tcx, tcx.require_lang_item(hir::LangItem::Copy, DUMMY_SP), [ty]);
     let pred = ty::TraitPredicate { trait_ref, polarity: ty::PredicatePolarity::Negative };
     let obligation = traits::Obligation {
         cause: traits::ObligationCause::dummy(),
@@ -695,7 +696,8 @@ impl<'tcx> LateLintPass<'tcx> for MissingDebugImplementations {
         }
 
         // Avoid listing trait impls if the trait is allowed.
-        let (level, _) = cx.tcx.lint_level_at_node(MISSING_DEBUG_IMPLEMENTATIONS, item.hir_id());
+        let LevelAndSource { level, .. } =
+            cx.tcx.lint_level_at_node(MISSING_DEBUG_IMPLEMENTATIONS, item.hir_id());
         if level == Level::Allow {
             return;
         }
@@ -778,69 +780,20 @@ impl EarlyLintPass for AnonymousParameters {
         }
         if let ast::AssocItemKind::Fn(box Fn { ref sig, .. }) = it.kind {
             for arg in sig.decl.inputs.iter() {
-                if let ast::PatKind::Ident(_, ident, None) = arg.pat.kind {
-                    if ident.name == kw::Empty {
-                        let ty_snip = cx.sess().source_map().span_to_snippet(arg.ty.span);
+                if let ast::PatKind::Missing = arg.pat.kind {
+                    let ty_snip = cx.sess().source_map().span_to_snippet(arg.ty.span);
 
-                        let (ty_snip, appl) = if let Ok(ref snip) = ty_snip {
-                            (snip.as_str(), Applicability::MachineApplicable)
-                        } else {
-                            ("<type>", Applicability::HasPlaceholders)
-                        };
-                        cx.emit_span_lint(
-                            ANONYMOUS_PARAMETERS,
-                            arg.pat.span,
-                            BuiltinAnonymousParams { suggestion: (arg.pat.span, appl), ty_snip },
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Check for use of attributes which have been deprecated.
-#[derive(Clone)]
-pub struct DeprecatedAttr {
-    // This is not free to compute, so we want to keep it around, rather than
-    // compute it for every attribute.
-    depr_attrs: Vec<&'static BuiltinAttribute>,
-}
-
-impl_lint_pass!(DeprecatedAttr => []);
-
-impl Default for DeprecatedAttr {
-    fn default() -> Self {
-        DeprecatedAttr { depr_attrs: deprecated_attributes() }
-    }
-}
-
-impl EarlyLintPass for DeprecatedAttr {
-    fn check_attribute(&mut self, cx: &EarlyContext<'_>, attr: &ast::Attribute) {
-        for BuiltinAttribute { name, gate, .. } in &self.depr_attrs {
-            if attr.ident().map(|ident| ident.name) == Some(*name) {
-                if let &AttributeGate::Gated(
-                    Stability::Deprecated(link, suggestion),
-                    name,
-                    reason,
-                    _,
-                ) = gate
-                {
-                    let suggestion = match suggestion {
-                        Some(msg) => {
-                            BuiltinDeprecatedAttrLinkSuggestion::Msg { suggestion: attr.span, msg }
-                        }
-                        None => {
-                            BuiltinDeprecatedAttrLinkSuggestion::Default { suggestion: attr.span }
-                        }
+                    let (ty_snip, appl) = if let Ok(ref snip) = ty_snip {
+                        (snip.as_str(), Applicability::MachineApplicable)
+                    } else {
+                        ("<type>", Applicability::HasPlaceholders)
                     };
                     cx.emit_span_lint(
-                        DEPRECATED,
-                        attr.span,
-                        BuiltinDeprecatedAttrLink { name, reason, link, suggestion },
+                        ANONYMOUS_PARAMETERS,
+                        arg.pat.span,
+                        BuiltinAnonymousParams { suggestion: (arg.pat.span, appl), ty_snip },
                     );
                 }
-                return;
             }
         }
     }
@@ -949,7 +902,7 @@ declare_lint! {
     ///
     /// ### Example
     ///
-    /// ```rust,compile_fail
+    /// ```rust,compile_fail,edition2021
     /// #[no_mangle]
     /// const FOO: i32 = 5;
     /// ```
@@ -977,6 +930,9 @@ declare_lint! {
     /// ```rust
     /// #[unsafe(no_mangle)]
     /// fn foo<T>(t: T) {}
+    ///
+    /// #[unsafe(export_name = "bar")]
+    /// fn bar<T>(t: T) {}
     /// ```
     ///
     /// {{produces}}
@@ -984,10 +940,11 @@ declare_lint! {
     /// ### Explanation
     ///
     /// A function with generics must have its symbol mangled to accommodate
-    /// the generic parameter. The [`no_mangle` attribute] has no effect in
-    /// this situation, and should be removed.
+    /// the generic parameter. The [`no_mangle`] and [`export_name`] attributes
+    /// have no effect in this situation, and should be removed.
     ///
-    /// [`no_mangle` attribute]: https://doc.rust-lang.org/reference/abi.html#the-no_mangle-attribute
+    /// [`no_mangle`]: https://doc.rust-lang.org/reference/abi.html#the-no_mangle-attribute
+    /// [`export_name`]: https://doc.rust-lang.org/reference/abi.html#the-export_name-attribute
     NO_MANGLE_GENERIC_ITEMS,
     Warn,
     "generic items must be mangled"
@@ -998,7 +955,7 @@ declare_lint_pass!(InvalidNoMangleItems => [NO_MANGLE_CONST_ITEMS, NO_MANGLE_GEN
 impl<'tcx> LateLintPass<'tcx> for InvalidNoMangleItems {
     fn check_item(&mut self, cx: &LateContext<'_>, it: &hir::Item<'_>) {
         let attrs = cx.tcx.hir_attrs(it.hir_id());
-        let check_no_mangle_on_generic_fn = |no_mangle_attr: &hir::Attribute,
+        let check_no_mangle_on_generic_fn = |attr_span: Span,
                                              impl_generics: Option<&hir::Generics<'_>>,
                                              generics: &hir::Generics<'_>,
                                              span| {
@@ -1011,7 +968,7 @@ impl<'tcx> LateLintPass<'tcx> for InvalidNoMangleItems {
                         cx.emit_span_lint(
                             NO_MANGLE_GENERIC_ITEMS,
                             span,
-                            BuiltinNoMangleGeneric { suggestion: no_mangle_attr.span() },
+                            BuiltinNoMangleGeneric { suggestion: attr_span },
                         );
                         break;
                     }
@@ -1020,12 +977,15 @@ impl<'tcx> LateLintPass<'tcx> for InvalidNoMangleItems {
         };
         match it.kind {
             hir::ItemKind::Fn { generics, .. } => {
-                if let Some(no_mangle_attr) = attr::find_by_name(attrs, sym::no_mangle) {
-                    check_no_mangle_on_generic_fn(no_mangle_attr, None, generics, it.span);
+                if let Some(attr_span) = attr::find_by_name(attrs, sym::export_name)
+                    .map(|at| at.span())
+                    .or_else(|| find_attr!(attrs, AttributeKind::NoMangle(span) => *span))
+                {
+                    check_no_mangle_on_generic_fn(attr_span, None, generics, it.span);
                 }
             }
             hir::ItemKind::Const(..) => {
-                if attr::contains_name(attrs, sym::no_mangle) {
+                if find_attr!(attrs, AttributeKind::NoMangle(..)) {
                     // account for "pub const" (#45562)
                     let start = cx
                         .tcx
@@ -1049,11 +1009,13 @@ impl<'tcx> LateLintPass<'tcx> for InvalidNoMangleItems {
             hir::ItemKind::Impl(hir::Impl { generics, items, .. }) => {
                 for it in *items {
                     if let hir::AssocItemKind::Fn { .. } = it.kind {
-                        if let Some(no_mangle_attr) =
-                            attr::find_by_name(cx.tcx.hir_attrs(it.id.hir_id()), sym::no_mangle)
+                        let attrs = cx.tcx.hir_attrs(it.id.hir_id());
+                        if let Some(attr_span) = attr::find_by_name(attrs, sym::export_name)
+                            .map(|at| at.span())
+                            .or_else(|| find_attr!(attrs, AttributeKind::NoMangle(span) => *span))
                         {
                             check_no_mangle_on_generic_fn(
-                                no_mangle_attr,
+                                attr_span,
                                 Some(generics),
                                 cx.tcx.hir_get_generics(it.id.owner_id.def_id).unwrap(),
                                 it.span,
@@ -1416,7 +1378,7 @@ impl TypeAliasBounds {
 
 impl<'tcx> LateLintPass<'tcx> for TypeAliasBounds {
     fn check_item(&mut self, cx: &LateContext<'_>, item: &hir::Item<'_>) {
-        let hir::ItemKind::TyAlias(_, hir_ty, generics) = item.kind else { return };
+        let hir::ItemKind::TyAlias(_, generics, hir_ty) = item.kind else { return };
 
         // There must not be a where clause.
         if generics.predicates.is_empty() {
@@ -1989,7 +1951,7 @@ impl ExplicitOutlivesRequirements {
 
         inferred_outlives
             .filter_map(|(clause, _)| match clause.kind().skip_binder() {
-                ty::ClauseKind::RegionOutlives(ty::OutlivesPredicate(a, b)) => match *a {
+                ty::ClauseKind::RegionOutlives(ty::OutlivesPredicate(a, b)) => match a.kind() {
                     ty::ReEarlyParam(ebr)
                         if item_generics.region_param(ebr, tcx).def_id == lifetime.to_def_id() =>
                     {
@@ -2039,7 +2001,7 @@ impl ExplicitOutlivesRequirements {
                 let is_inferred = match tcx.named_bound_var(lifetime.hir_id) {
                     Some(ResolvedArg::EarlyBound(def_id)) => inferred_outlives
                         .iter()
-                        .any(|r| matches!(**r, ty::ReEarlyParam(ebr) if { item_generics.region_param(ebr, tcx).def_id == def_id.to_def_id() })),
+                        .any(|r| matches!(r.kind(), ty::ReEarlyParam(ebr) if { item_generics.region_param(ebr, tcx).def_id == def_id.to_def_id() })),
                     _ => false,
                 };
 
@@ -2119,9 +2081,9 @@ impl<'tcx> LateLintPass<'tcx> for ExplicitOutlivesRequirements {
         use rustc_middle::middle::resolve_bound_vars::ResolvedArg;
 
         let def_id = item.owner_id.def_id;
-        if let hir::ItemKind::Struct(_, _, hir_generics)
-        | hir::ItemKind::Enum(_, _, hir_generics)
-        | hir::ItemKind::Union(_, _, hir_generics) = item.kind
+        if let hir::ItemKind::Struct(_, generics, _)
+        | hir::ItemKind::Enum(_, generics, _)
+        | hir::ItemKind::Union(_, generics, _) = item.kind
         {
             let inferred_outlives = cx.tcx.inferred_outlives_of(def_id);
             if inferred_outlives.is_empty() {
@@ -2129,7 +2091,7 @@ impl<'tcx> LateLintPass<'tcx> for ExplicitOutlivesRequirements {
             }
 
             let ty_generics = cx.tcx.generics_of(def_id);
-            let num_where_predicates = hir_generics
+            let num_where_predicates = generics
                 .predicates
                 .iter()
                 .filter(|predicate| predicate.kind.in_where_clause())
@@ -2139,7 +2101,7 @@ impl<'tcx> LateLintPass<'tcx> for ExplicitOutlivesRequirements {
             let mut lint_spans = Vec::new();
             let mut where_lint_spans = Vec::new();
             let mut dropped_where_predicate_count = 0;
-            for (i, where_predicate) in hir_generics.predicates.iter().enumerate() {
+            for (i, where_predicate) in generics.predicates.iter().enumerate() {
                 let (relevant_lifetimes, bounds, predicate_span, in_where_clause) =
                     match where_predicate.kind {
                         hir::WherePredicateKind::RegionPredicate(predicate) => {
@@ -2222,7 +2184,7 @@ impl<'tcx> LateLintPass<'tcx> for ExplicitOutlivesRequirements {
                     } else if i + 1 < num_where_predicates {
                         // If all the bounds on a predicate were inferable and there are
                         // further predicates, we want to eat the trailing comma.
-                        let next_predicate_span = hir_generics.predicates[i + 1].span;
+                        let next_predicate_span = generics.predicates[i + 1].span;
                         if next_predicate_span.from_expansion() {
                             where_lint_spans.push(predicate_span);
                         } else {
@@ -2231,7 +2193,7 @@ impl<'tcx> LateLintPass<'tcx> for ExplicitOutlivesRequirements {
                         }
                     } else {
                         // Eat the optional trailing comma after the last predicate.
-                        let where_span = hir_generics.where_clause_span;
+                        let where_span = generics.where_clause_span;
                         if where_span.from_expansion() {
                             where_lint_spans.push(predicate_span);
                         } else {
@@ -2249,18 +2211,18 @@ impl<'tcx> LateLintPass<'tcx> for ExplicitOutlivesRequirements {
 
             // If all predicates in where clause are inferable, drop the entire clause
             // (including the `where`)
-            if hir_generics.has_where_clause_predicates
+            if generics.has_where_clause_predicates
                 && dropped_where_predicate_count == num_where_predicates
             {
-                let where_span = hir_generics.where_clause_span;
+                let where_span = generics.where_clause_span;
                 // Extend the where clause back to the closing `>` of the
                 // generics, except for tuple struct, which have the `where`
                 // after the fields of the struct.
                 let full_where_span =
-                    if let hir::ItemKind::Struct(_, hir::VariantData::Tuple(..), _) = item.kind {
+                    if let hir::ItemKind::Struct(_, _, hir::VariantData::Tuple(..)) = item.kind {
                         where_span
                     } else {
-                        hir_generics.span.shrink_to_hi().to(where_span)
+                        generics.span.shrink_to_hi().to(where_span)
                     };
 
                 // Due to macro expansions, the `full_where_span` might not actually contain all
@@ -3116,6 +3078,7 @@ impl EarlyLintPass for SpecialModuleName {
         for item in &krate.items {
             if let ast::ItemKind::Mod(
                 _,
+                ident,
                 ast::ModKind::Unloaded | ast::ModKind::Loaded(_, ast::Inline::No, _, _),
             ) = item.kind
             {
@@ -3123,7 +3086,7 @@ impl EarlyLintPass for SpecialModuleName {
                     continue;
                 }
 
-                match item.ident.name.as_str() {
+                match ident.name.as_str() {
                     "lib" => cx.emit_span_lint(
                         SPECIAL_MODULE_NAME,
                         item.span,

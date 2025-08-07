@@ -2,6 +2,7 @@ use crate::core::compiler::{
     BuildConfig, CompileKind, MessageFormat, RustcTargetData, TimingOutput,
 };
 use crate::core::resolver::{CliFeatures, ForceAllTargets, HasDevUnits};
+use crate::core::Dependency;
 use crate::core::{profiles::Profiles, shell, Edition, Package, Target, TargetKind, Workspace};
 use crate::ops::lockfile::LOCKFILE_NAME;
 use crate::ops::registry::RegistryOrIndex;
@@ -23,13 +24,15 @@ use cargo_util_schemas::manifest::RegistryName;
 use cargo_util_schemas::manifest::StringOrVec;
 use clap::builder::UnknownArgumentValueParser;
 use home::cargo_home_with_cwd;
+use indexmap::IndexSet;
+use itertools::Itertools;
 use semver::Version;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::path::PathBuf;
 
-pub use crate::core::compiler::CompileMode;
+pub use crate::core::compiler::UserIntent;
 pub use crate::{CliError, CliResult, GlobalContext};
 pub use clap::{value_parser, Arg, ArgAction, ArgMatches};
 
@@ -518,6 +521,10 @@ pub trait CommandExt: Sized {
             .hide(true),
         )
     }
+
+    fn arg_compile_time_deps(self) -> Self {
+        self._arg(flag("compile-time-deps", "").hide(true))
+    }
 }
 
 impl CommandExt for Command {
@@ -681,7 +688,7 @@ Run `{cmd}` to see possible targets."
             (Some(name @ ("dev" | "test" | "bench" | "check")), ProfileChecking::LegacyRustc)
             // `cargo fix` and `cargo check` has legacy handling of this profile name
             | (Some(name @ "test"), ProfileChecking::LegacyTestOnly) => {
-                return Ok(InternedString::new(name));
+                return Ok(name.into());
             }
             _ => {}
         }
@@ -708,7 +715,7 @@ Run `{cmd}` to see possible targets."
             }
         };
 
-        Ok(InternedString::new(name))
+        Ok(name.into())
     }
 
     fn packages_from_flags(&self) -> CargoResult<Packages> {
@@ -723,7 +730,7 @@ Run `{cmd}` to see possible targets."
     fn compile_options(
         &self,
         gctx: &GlobalContext,
-        mode: CompileMode,
+        mode: UserIntent,
         workspace: Option<&Workspace<'_>>,
         profile_checking: ProfileChecking,
     ) -> CargoResult<CompileOptions> {
@@ -803,6 +810,7 @@ Run `{cmd}` to see possible targets."
         build_config.build_plan = self.flag("build-plan");
         build_config.unit_graph = self.flag("unit-graph");
         build_config.future_incompat_report = self.flag("future-incompat-report");
+        build_config.compile_time_deps_only = self.flag("compile-time-deps");
 
         if self._contains("timings") {
             for timing_output in self._values_of("timings") {
@@ -836,6 +844,10 @@ Run `{cmd}` to see possible targets."
         if build_config.unit_graph {
             gctx.cli_unstable()
                 .fail_if_stable_opt("--unit-graph", 8002)?;
+        }
+        if build_config.compile_time_deps_only {
+            gctx.cli_unstable()
+                .fail_if_stable_opt("--compile-time-deps", 14434)?;
         }
 
         let opts = CompileOptions {
@@ -887,7 +899,7 @@ Run `{cmd}` to see possible targets."
     fn compile_options_for_single_package(
         &self,
         gctx: &GlobalContext,
-        mode: CompileMode,
+        mode: UserIntent,
         workspace: Option<&Workspace<'_>>,
         profile_checking: ProfileChecking,
     ) -> CargoResult<CompileOptions> {
@@ -1133,7 +1145,7 @@ fn get_profile_candidates() -> Vec<clap_complete::CompletionCandidate> {
 fn get_workspace_profile_candidates() -> CargoResult<Vec<clap_complete::CompletionCandidate>> {
     let gctx = new_gctx_for_completions()?;
     let ws = Workspace::new(&find_root_manifest_for_wd(gctx.cwd())?, &gctx)?;
-    let profiles = Profiles::new(&ws, InternedString::new("dev"))?;
+    let profiles = Profiles::new(&ws, "dev".into())?;
 
     let mut candidates = Vec::new();
     for name in profiles.profile_names() {
@@ -1402,6 +1414,56 @@ fn get_packages() -> CargoResult<Vec<Package>> {
         .collect::<Vec<_>>();
 
     Ok(packages)
+}
+
+pub fn get_direct_dependencies_pkg_name_candidates() -> Vec<clap_complete::CompletionCandidate> {
+    let (current_package_deps, all_package_deps) = match get_dependencies_from_metadata() {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let current_package_deps_package_names = current_package_deps
+        .into_iter()
+        .map(|dep| dep.package_name().to_string())
+        .sorted();
+    let all_package_deps_package_names = all_package_deps
+        .into_iter()
+        .map(|dep| dep.package_name().to_string())
+        .sorted();
+
+    let mut package_names_set = IndexSet::new();
+    package_names_set.extend(current_package_deps_package_names);
+    package_names_set.extend(all_package_deps_package_names);
+
+    package_names_set
+        .into_iter()
+        .map(|name| name.into())
+        .collect_vec()
+}
+
+fn get_dependencies_from_metadata() -> CargoResult<(Vec<Dependency>, Vec<Dependency>)> {
+    let cwd = std::env::current_dir()?;
+    let gctx = GlobalContext::new(shell::Shell::new(), cwd.clone(), cargo_home_with_cwd(&cwd)?);
+    let ws = Workspace::new(&find_root_manifest_for_wd(&cwd)?, &gctx)?;
+    let current_package = ws.current().ok();
+
+    let current_package_dependencies = ws
+        .current()
+        .map(|current| current.dependencies())
+        .unwrap_or_default()
+        .to_vec();
+    let all_other_packages_dependencies = ws
+        .members()
+        .filter(|&member| Some(member) != current_package)
+        .flat_map(|pkg| pkg.dependencies().into_iter().cloned())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    Ok((
+        current_package_dependencies,
+        all_other_packages_dependencies,
+    ))
 }
 
 pub fn new_gctx_for_completions() -> CargoResult<GlobalContext> {

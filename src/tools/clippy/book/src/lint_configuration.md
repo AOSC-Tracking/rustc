@@ -71,6 +71,16 @@ Whether `dbg!` should be allowed in test functions or `#[cfg(test)]`
 * [`dbg_macro`](https://rust-lang.github.io/rust-clippy/master/index.html#dbg_macro)
 
 
+## `allow-exact-repetitions`
+Whether an item should be allowed to have the same name as its containing module
+
+**Default Value:** `true`
+
+---
+**Affected lints:**
+* [`module_name_repetitions`](https://rust-lang.github.io/rust-clippy/master/index.html#module_name_repetitions)
+
+
 ## `allow-expect-in-consts`
 Whether `expect` should be allowed in code always evaluated at compile time
 
@@ -425,6 +435,33 @@ Whether to check MSRV compatibility in `#[test]` and `#[cfg(test)]` code.
 * [`incompatible_msrv`](https://rust-lang.github.io/rust-clippy/master/index.html#incompatible_msrv)
 
 
+## `check-inconsistent-struct-field-initializers`
+Whether to suggest reordering constructor fields when initializers are present.
+
+Warnings produced by this configuration aren't necessarily fixed by just reordering the fields. Even if the
+suggested code would compile, it can change semantics if the initializer expressions have side effects. The
+following example [from rust-clippy#11846] shows how the suggestion can run into borrow check errors:
+
+```rust
+struct MyStruct {
+    vector: Vec<u32>,
+    length: usize
+}
+fn main() {
+    let vector = vec![1,2,3];
+    MyStruct { length: vector.len(), vector};
+}
+```
+
+[from rust-clippy#11846]: https://github.com/rust-lang/rust-clippy/issues/11846#issuecomment-1820747924
+
+**Default Value:** `false`
+
+---
+**Affected lints:**
+* [`inconsistent_struct_constructor`](https://rust-lang.github.io/rust-clippy/master/index.html#inconsistent_struct_constructor)
+
+
 ## `check-private-items`
 Whether to also run the listed lints on private items.
 
@@ -613,31 +650,15 @@ The maximum size of the `Err`-variant in a `Result` returned from a function
 * [`result_large_err`](https://rust-lang.github.io/rust-clippy/master/index.html#result_large_err)
 
 
-## `lint-inconsistent-struct-field-initializers`
-Whether to suggest reordering constructor fields when initializers are present.
-
-Warnings produced by this configuration aren't necessarily fixed by just reordering the fields. Even if the
-suggested code would compile, it can change semantics if the initializer expressions have side effects. The
-following example [from rust-clippy#11846] shows how the suggestion can run into borrow check errors:
-
-```rust
-struct MyStruct {
-    vector: Vec<u32>,
-    length: usize
-}
-fn main() {
-    let vector = vec![1,2,3];
-    MyStruct { length: vector.len(), vector};
-}
-```
-
-[from rust-clippy#11846]: https://github.com/rust-lang/rust-clippy/issues/11846#issuecomment-1820747924
+## `lint-commented-code`
+Whether collapsible `if` chains are linted if they contain comments inside the parts
+that would be collapsed.
 
 **Default Value:** `false`
 
 ---
 **Affected lints:**
-* [`inconsistent_struct_constructor`](https://rust-lang.github.io/rust-clippy/master/index.html#inconsistent_struct_constructor)
+* [`collapsible_if`](https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if)
 
 
 ## `literal-representation-threshold`
@@ -723,6 +744,16 @@ Minimum chars an ident can have, anything below or equal to this will be linted.
 * [`min_ident_chars`](https://rust-lang.github.io/rust-clippy/master/index.html#min_ident_chars)
 
 
+## `missing-docs-allow-unused`
+Whether to allow fields starting with an underscore to skip documentation requirements
+
+**Default Value:** `false`
+
+---
+**Affected lints:**
+* [`missing_docs_in_private_items`](https://rust-lang.github.io/rust-clippy/master/index.html#missing_docs_in_private_items)
+
+
 ## `missing-docs-in-crate-items`
 Whether to **only** check for missing documentation in items visible within the current
 crate. For example, `pub(crate)` items.
@@ -786,6 +817,7 @@ The minimum rust version that the project supports. Defaults to the `rust-versio
 * [`iter_kv_map`](https://rust-lang.github.io/rust-clippy/master/index.html#iter_kv_map)
 * [`legacy_numeric_constants`](https://rust-lang.github.io/rust-clippy/master/index.html#legacy_numeric_constants)
 * [`lines_filter_map_ok`](https://rust-lang.github.io/rust-clippy/master/index.html#lines_filter_map_ok)
+* [`manual_abs_diff`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_abs_diff)
 * [`manual_bits`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_bits)
 * [`manual_c_str_literals`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_c_str_literals)
 * [`manual_clamp`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_clamp)
@@ -793,6 +825,7 @@ The minimum rust version that the project supports. Defaults to the `rust-versio
 * [`manual_flatten`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_flatten)
 * [`manual_hash_one`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_hash_one)
 * [`manual_is_ascii_check`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_is_ascii_check)
+* [`manual_is_power_of_two`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_is_power_of_two)
 * [`manual_let_else`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_let_else)
 * [`manual_midpoint`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_midpoint)
 * [`manual_non_exhaustive`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_non_exhaustive)
@@ -803,6 +836,7 @@ The minimum rust version that the project supports. Defaults to the `rust-versio
 * [`manual_repeat_n`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_repeat_n)
 * [`manual_retain`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_retain)
 * [`manual_slice_fill`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_slice_fill)
+* [`manual_slice_size_calculation`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_slice_size_calculation)
 * [`manual_split_once`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_split_once)
 * [`manual_str_repeat`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_str_repeat)
 * [`manual_strip`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_strip)
@@ -826,6 +860,7 @@ The minimum rust version that the project supports. Defaults to the `rust-versio
 * [`same_item_push`](https://rust-lang.github.io/rust-clippy/master/index.html#same_item_push)
 * [`seek_from_current`](https://rust-lang.github.io/rust-clippy/master/index.html#seek_from_current)
 * [`seek_rewind`](https://rust-lang.github.io/rust-clippy/master/index.html#seek_rewind)
+* [`to_digit_is_some`](https://rust-lang.github.io/rust-clippy/master/index.html#to_digit_is_some)
 * [`transmute_ptr_to_ref`](https://rust-lang.github.io/rust-clippy/master/index.html#transmute_ptr_to_ref)
 * [`tuple_array_conversions`](https://rust-lang.github.io/rust-clippy/master/index.html#tuple_array_conversions)
 * [`type_repetition_in_bounds`](https://rust-lang.github.io/rust-clippy/master/index.html#type_repetition_in_bounds)
@@ -991,7 +1026,7 @@ The order of associated items in traits.
 The maximum size (in bytes) to consider a `Copy` type for passing by value instead of by
 reference.
 
-**Default Value:** `target_pointer_width * 2`
+**Default Value:** `target_pointer_width`
 
 ---
 **Affected lints:**
@@ -1059,7 +1094,8 @@ The maximum allowed size of a bit mask before suggesting to use 'trailing_zeros'
 
 
 ## `warn-on-all-wildcard-imports`
-Whether to allow certain wildcard imports (prelude, super in tests).
+Whether to emit warnings on all wildcard imports, including those from `prelude`, from `super` in tests,
+or for `pub use` reexports.
 
 **Default Value:** `false`
 

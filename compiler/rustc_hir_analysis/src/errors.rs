@@ -23,7 +23,7 @@ pub(crate) struct AmbiguousAssocItem<'a> {
     #[label]
     pub span: Span,
     pub assoc_kind: &'static str,
-    pub assoc_name: Ident,
+    pub assoc_ident: Ident,
     pub qself: &'a str,
 }
 
@@ -75,7 +75,7 @@ pub(crate) struct AssocItemIsPrivate {
 pub(crate) struct AssocItemNotFound<'a> {
     #[primary_span]
     pub span: Span,
-    pub assoc_name: Ident,
+    pub assoc_ident: Ident,
     pub assoc_kind: &'static str,
     pub qself: &'a str,
     #[subdiagnostic]
@@ -159,15 +159,6 @@ pub(crate) enum AssocItemNotFoundSugg<'a> {
         assoc_kind: &'static str,
         suggested_name: Symbol,
     },
-}
-
-#[derive(Diagnostic)]
-#[diag(hir_analysis_unrecognized_atomic_operation, code = E0092)]
-pub(crate) struct UnrecognizedAtomicOperation<'a> {
-    #[primary_span]
-    #[label]
-    pub span: Span,
-    pub op: &'a str,
 }
 
 #[derive(Diagnostic)]
@@ -642,7 +633,7 @@ pub(crate) struct VariadicFunctionCompatibleConvention<'a> {
     #[primary_span]
     #[label]
     pub span: Span,
-    pub conventions: &'a str,
+    pub convention: &'a str,
 }
 
 #[derive(Diagnostic)]
@@ -1327,7 +1318,7 @@ pub(crate) struct ImplForTyRequires {
 }
 
 #[derive(Diagnostic)]
-#[diag(hir_analysis_traits_with_defualt_impl, code = E0321)]
+#[diag(hir_analysis_traits_with_default_impl, code = E0321)]
 #[note]
 pub(crate) struct TraitsWithDefaultImpl<'a> {
     #[primary_span]
@@ -1675,14 +1666,6 @@ pub(crate) struct CmseEntryGeneric {
     pub span: Span,
 }
 
-#[derive(Diagnostic)]
-#[diag(hir_analysis_register_type_unstable)]
-pub(crate) struct RegisterTypeUnstable<'a> {
-    #[primary_span]
-    pub span: Span,
-    pub ty: Ty<'a>,
-}
-
 #[derive(LintDiagnostic)]
 #[diag(hir_analysis_supertrait_item_shadowing)]
 pub(crate) struct SupertraitItemShadowing {
@@ -1706,4 +1689,34 @@ pub(crate) enum SupertraitItemShadowee {
         spans: MultiSpan,
         traits: DiagSymbolList,
     },
+}
+
+#[derive(Diagnostic)]
+#[diag(hir_analysis_self_in_type_alias, code = E0411)]
+pub(crate) struct SelfInTypeAlias {
+    #[primary_span]
+    #[label]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(hir_analysis_abi_custom_clothed_function)]
+pub(crate) struct AbiCustomClothedFunction {
+    #[primary_span]
+    pub span: Span,
+    #[suggestion(
+        hir_analysis_suggestion,
+        applicability = "maybe-incorrect",
+        code = "#[unsafe(naked)]\n",
+        style = "short"
+    )]
+    pub naked_span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(hir_analysis_async_drop_without_sync_drop)]
+#[help]
+pub(crate) struct AsyncDropWithoutSyncDrop {
+    #[primary_span]
+    pub span: Span,
 }

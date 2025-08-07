@@ -250,6 +250,19 @@ macro_rules! l_t_t {
         u8
     };
 
+    (vector_bool_long_long ) => {
+        u64
+    };
+    (vector_bool_int ) => {
+        u32
+    };
+    (vector_bool_short ) => {
+        u16
+    };
+    (vector_bool_char ) => {
+        u8
+    };
+
     (vector_float) => {
         f32
     };
@@ -338,6 +351,9 @@ macro_rules! t_u {
     (vector_bool_int) => {
         vector_unsigned_int
     };
+    (vector_bool_long_long) => {
+        vector_unsigned_long_long
+    };
     (vector_unsigned_char) => {
         vector_unsigned_char
     };
@@ -379,6 +395,9 @@ macro_rules! t_b {
     };
     (vector_bool_int) => {
         vector_bool_int
+    };
+    (vector_bool_long_long) => {
+        vector_bool_long_long
     };
     (vector_signed_char) => {
         vector_bool_char

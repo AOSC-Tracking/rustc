@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rustc_literal_escaper::{Mode, unescape_unicode};
 use walkdir::WalkDir;
 
 mod groups;
@@ -214,6 +215,16 @@ impl<'a> LintExtractor<'a> {
                         let line = line.trim();
                         if let Some(text) = line.strip_prefix("/// ") {
                             doc_lines.push(text.to_string());
+                        } else if let Some(text) = line.strip_prefix("#[doc = \"") {
+                            let escaped = text.strip_suffix("\"]").unwrap();
+                            let mut buf = String::new();
+                            unescape_unicode(escaped, Mode::Str, &mut |_, c| match c {
+                                Ok(c) => buf.push(c),
+                                Err(err) => {
+                                    assert!(!err.is_fatal(), "failed to unescape string literal")
+                                }
+                            });
+                            doc_lines.push(buf);
                         } else if line == "///" {
                             doc_lines.push("".to_string());
                         } else if line.starts_with("// ") {
@@ -312,6 +323,7 @@ impl<'a> LintExtractor<'a> {
         if matches!(
             lint.name.as_str(),
             "unused_features" // broken lint
+            | "soft_unstable" // cannot have a stable example
         ) {
             return Ok(());
         }
@@ -444,21 +456,15 @@ impl<'a> LintExtractor<'a> {
         fs::write(&tempfile, source)
             .map_err(|e| format!("failed to write {}: {}", tempfile.display(), e))?;
         let mut cmd = Command::new(self.rustc_path);
-        if options.contains(&"edition2024") {
-            cmd.arg("--edition=2024");
-            cmd.arg("-Zunstable-options");
-        } else if options.contains(&"edition2021") {
-            cmd.arg("--edition=2021");
-        } else if options.contains(&"edition2018") {
-            cmd.arg("--edition=2018");
-        } else if options.contains(&"edition2015") {
-            cmd.arg("--edition=2015");
-        } else if options.contains(&"edition") {
-            panic!("lint-docs: unknown edition");
-        } else {
+        let edition = options
+            .iter()
+            .filter_map(|opt| opt.strip_prefix("edition"))
+            .next()
             // defaults to latest edition
-            cmd.arg("--edition=2021");
-        }
+            .unwrap_or("2024");
+        cmd.arg(format!("--edition={edition}"));
+        // Just in case this is an unstable edition.
+        cmd.arg("-Zunstable-options");
         cmd.arg("--error-format=json");
         cmd.arg("--target").arg(self.rustc_target);
         if let Some(target_linker) = self.rustc_linker {

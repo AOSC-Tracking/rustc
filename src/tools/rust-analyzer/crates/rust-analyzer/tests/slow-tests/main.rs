@@ -18,17 +18,17 @@ mod testdir;
 use std::{collections::HashMap, path::PathBuf, time::Instant};
 
 use lsp_types::{
+    CodeActionContext, CodeActionParams, CompletionParams, DidOpenTextDocumentParams,
+    DocumentFormattingParams, DocumentRangeFormattingParams, FileRename, FormattingOptions,
+    GotoDefinitionParams, HoverParams, InlayHint, InlayHintLabel, InlayHintParams,
+    PartialResultParams, Position, Range, RenameFilesParams, TextDocumentItem,
+    TextDocumentPositionParams, WorkDoneProgressParams,
     notification::DidOpenTextDocument,
     request::{
         CodeActionRequest, Completion, Formatting, GotoTypeDefinition, HoverRequest,
         InlayHintRequest, InlayHintResolveRequest, RangeFormatting, WillRenameFiles,
         WorkspaceSymbolRequest,
     },
-    CodeActionContext, CodeActionParams, CompletionParams, DidOpenTextDocumentParams,
-    DocumentFormattingParams, DocumentRangeFormattingParams, FileRename, FormattingOptions,
-    GotoDefinitionParams, HoverParams, InlayHint, InlayHintLabel, InlayHintParams,
-    PartialResultParams, Position, Range, RenameFilesParams, TextDocumentItem,
-    TextDocumentPositionParams, WorkDoneProgressParams,
 };
 use rust_analyzer::lsp::ext::{OnEnter, Runnables, RunnablesParams};
 use serde_json::json;
@@ -37,7 +37,7 @@ use stdx::format_to_acc;
 use test_utils::skip_slow_tests;
 use testdir::TestDir;
 
-use crate::support::{project, Project};
+use crate::support::{Project, project};
 
 #[test]
 fn completes_items_from_standard_library() {
@@ -975,10 +975,6 @@ version = \"0.0.0\"
 }
 
 fn out_dirs_check_impl(root_contains_symlink: bool) {
-    if skip_slow_tests() {
-        return;
-    }
-
     let mut server = Project::with_fixture(
         r###"
 //- /Cargo.toml
@@ -1064,7 +1060,7 @@ fn main() {
         ),
         work_done_progress_params: Default::default(),
     });
-    assert!(res.to_string().contains("&str"));
+    assert!(res.to_string().contains("&'static str"));
 
     let res = server.send_request::<HoverRequest>(HoverParams {
         text_document_position_params: TextDocumentPositionParams::new(
@@ -1073,7 +1069,7 @@ fn main() {
         ),
         work_done_progress_params: Default::default(),
     });
-    assert!(res.to_string().contains("&str"));
+    assert!(res.to_string().contains("&'static str"));
 
     server.request::<GotoTypeDefinition>(
         GotoDefinitionParams {
@@ -1130,35 +1126,27 @@ fn main() {
 
 #[test]
 fn out_dirs_check() {
+    if skip_slow_tests() {
+        return;
+    }
     out_dirs_check_impl(false);
 }
 
 #[test]
 #[cfg(not(windows))] // windows requires elevated permissions to create symlinks
 fn root_contains_symlink_out_dirs_check() {
+    if skip_slow_tests() {
+        return;
+    }
     out_dirs_check_impl(true);
 }
 
 #[test]
-#[cfg(any(feature = "sysroot-abi", rust_analyzer))]
 fn resolve_proc_macro() {
     use expect_test::expect;
-    use vfs::AbsPathBuf;
     if skip_slow_tests() {
         return;
     }
-
-    let mut sysroot = project_model::Sysroot::discover(
-        &AbsPathBuf::assert_utf8(std::env::current_dir().unwrap()),
-        &Default::default(),
-    );
-    let loaded_sysroot =
-        sysroot.load_workspace(&project_model::RustSourceWorkspaceConfig::default_cargo());
-    if let Some(loaded_sysroot) = loaded_sysroot {
-        sysroot.set_workspace(loaded_sysroot);
-    }
-
-    let proc_macro_server_path = sysroot.discover_proc_macro_srv().unwrap();
 
     let server = Project::with_fixture(
         r###"
@@ -1171,12 +1159,8 @@ edition = "2021"
 bar = {path = "../bar"}
 
 //- /foo/src/main.rs
-#![allow(internal_features)]
-#![feature(rustc_attrs, decl_macro)]
 use bar::Bar;
 
-#[rustc_builtin_macro]
-macro derive($item:item) {}
 trait Bar {
   fn bar();
 }
@@ -1233,11 +1217,10 @@ pub fn foo(_input: TokenStream) -> TokenStream {
             "buildScripts": {
                 "enable": true
             },
-            "sysroot": null,
+            "sysroot": "discover",
         },
         "procMacro": {
             "enable": true,
-            "server": proc_macro_server_path.as_path().as_str(),
         }
     }))
     .root("foo")
@@ -1248,7 +1231,7 @@ pub fn foo(_input: TokenStream) -> TokenStream {
     let res = server.send_request::<HoverRequest>(HoverParams {
         text_document_position_params: TextDocumentPositionParams::new(
             server.doc_id("foo/src/main.rs"),
-            Position::new(12, 9),
+            Position::new(8, 9),
         ),
         work_done_progress_params: Default::default(),
     });

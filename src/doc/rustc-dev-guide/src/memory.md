@@ -1,4 +1,4 @@
-# Memory Management in Rustc
+# Memory management in rustc
 
 Generally rustc tries to be pretty careful how it manages memory.
 The compiler allocates _a lot_ of data structures throughout compilation,
@@ -63,7 +63,7 @@ represented as a slice `&'tcx [tcx.types.i32, tcx.types.u32]`).
 [`mk_args`]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/context/struct.TyCtxt.html#method.mk_args
 [adtdefid]: ./ty_module/generic_arguments.md#adtdef-and-defid
 [`Predicate`]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.Predicate.html
-[`TraitRef`]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TraitRef.html
+[`TraitRef`]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/type.TraitRef.html
 [`ty::TyKind`]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/sty/type.TyKind.html
 [traits]: ./traits/resolution.md
 

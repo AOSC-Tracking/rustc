@@ -397,6 +397,20 @@ fn bad_version() {
 }
 
 #[cargo_test]
+fn missing_at_symbol_before_version() {
+    pkg("foo", "0.0.1");
+    cargo_process("install foo=0.2.0")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] invalid character `=` in package name: `foo=0.2.0`, characters must be Unicode XID characters (numbers, `-`, `_`, or most letters)
+
+[HELP] if this is meant to be a package name followed by a version, insert an `@` like `foo@=0.2.0`
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
 fn bad_paths() {
     cargo_process("install")
         .with_status(101)
@@ -752,7 +766,7 @@ fn multiple_crates_git_all() {
         )
         .build();
 
-    cargo_process(&format!("install --git {} bin1 bin2", p.url().to_string())).run();
+    cargo_process(&format!("install --git {} bin1 bin2", p.url())).run();
 }
 
 #[cargo_test]
@@ -2134,7 +2148,7 @@ fn git_install_reads_workspace_manifest() {
         )
         .build();
 
-    cargo_process(&format!("install --git {}", p.url().to_string()))
+    cargo_process(&format!("install --git {}", p.url()))
         .with_status(101)
         .with_stderr_data(str![[r#"
 [UPDATING] git repository `[ROOTURL]/foo`
@@ -2884,4 +2898,20 @@ fn dry_run_remove_orphan() {
     assert_has_installed_exe(paths::cargo_home(), "client");
     // Ensure server is still installed after the dry run
     assert_has_installed_exe(paths::cargo_home(), "server");
+}
+
+#[cargo_test]
+fn prefixed_v_in_version() {
+    pkg("foo", "0.0.1");
+    cargo_process("install foo@v0.0.1")
+        .with_status(1)
+        .with_stderr_data(str![[r#"
+[ERROR] invalid value 'foo@v0.0.1' for '[CRATE[@<VER>]]...': the version provided, `v0.0.1` is not a valid SemVer requirement
+
+[HELP] try changing the version to `0.0.1`
+
+For more information, try '--help'.
+
+"#]])
+        .run();
 }

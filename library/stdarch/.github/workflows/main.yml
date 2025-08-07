@@ -35,20 +35,6 @@ jobs:
       run: rustup update nightly --no-self-update && rustup default nightly
     - run: cargo test --manifest-path crates/stdarch-verify/Cargo.toml
 
-  env_override:
-    name: Env Override
-    needs: [style]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust
-      run: rustup update nightly --no-self-update && rustup default nightly
-    - run: RUST_STD_DETECT_UNSTABLE=avx cargo test --features=std_detect_env_override --manifest-path crates/std_detect/Cargo.toml env_override_no_avx
-      shell: bash
-
   test:
     needs: [style]
     name: Test
@@ -64,17 +50,21 @@ jobs:
           os: ubuntu-latest
         - tuple: x86_64-unknown-linux-gnu
           os: ubuntu-latest
-        - tuple: x86_64-unknown-linux-gnu-emulated
-          os: ubuntu-latest
         - tuple: arm-unknown-linux-gnueabihf
           os: ubuntu-latest
         - tuple: armv7-unknown-linux-gnueabihf
           os: ubuntu-latest
         - tuple: aarch64-unknown-linux-gnu
           os: ubuntu-latest
+        - tuple: aarch64_be-unknown-linux-gnu
+          os: ubuntu-latest
+        - tuple: riscv32gc-unknown-linux-gnu
+          os: ubuntu-latest
         - tuple: riscv64gc-unknown-linux-gnu
           os: ubuntu-latest
         - tuple: powerpc-unknown-linux-gnu
+          os: ubuntu-latest
+        - tuple: powerpc64-unknown-linux-gnu
           os: ubuntu-latest
         - tuple: powerpc64le-unknown-linux-gnu
           os: ubuntu-latest
@@ -109,36 +99,80 @@ jobs:
 
         # macOS targets
         - tuple: x86_64-apple-darwin
-          os: macos-13
+          os: macos-15-large
         - tuple: x86_64-apple-ios-macabi
-          os: macos-13
+          os: macos-15-large
         - tuple: aarch64-apple-darwin
-          os: macos-latest
+          os: macos-15
         - tuple: aarch64-apple-ios-macabi
-          os: macos-latest
+          os: macos-15
         # FIXME: gh-actions build environment doesn't have linker support
         # - tuple: i686-apple-darwin
         #   os: macos-13
 
         # Windows targets
         - tuple: x86_64-pc-windows-msvc
-          os: windows-latest
+          os: windows-2025
         - tuple: i686-pc-windows-msvc
-          os: windows-latest
+          os: windows-2025
         - tuple: aarch64-pc-windows-msvc
-          os: windows-latest
+          os: windows-11-arm
         - tuple: x86_64-pc-windows-gnu
-          os: windows-latest
+          os: windows-2025
         # - tuple: i686-pc-windows-gnu
         #   os: windows-latest
 
         # Add additional variables to the matrix variations generated above using `include`:
         include:
+        # `TEST_EVERYTHING` setups - there should be at least 1 for each architecture
         - target:
-            tuple: x86_64-unknown-linux-gnu-emulated
+            tuple: aarch64-unknown-linux-gnu
             os: ubuntu-latest
           test_everything: true
-          rustflags: --cfg stdarch_intel_sde
+        - target:
+            tuple: aarch64_be-unknown-linux-gnu
+            os: ubuntu-latest
+          test_everything: true
+          build_std: true
+        - target:
+            tuple: armv7-unknown-linux-gnueabihf
+            os: ubuntu-latest
+          test_everything: true
+        - target:
+            tuple: loongarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          test_everything: true
+        - target:
+            tuple: powerpc-unknown-linux-gnu
+            os: ubuntu-latest
+          disable_assert_instr: true
+          test_everything: true
+        - target:
+            tuple: powerpc64-unknown-linux-gnu
+            os: ubuntu-latest
+          disable_assert_instr: true
+          test_everything: true
+        - target:
+            tuple: powerpc64le-unknown-linux-gnu
+            os: ubuntu-latest
+          test_everything: true
+        - target:
+            tuple: riscv32gc-unknown-linux-gnu
+            os: ubuntu-latest
+          test_everything: true
+          build_std: true
+        - target:
+            tuple: riscv64gc-unknown-linux-gnu
+            os: ubuntu-latest
+          test_everything: true
+        - target:
+            tuple: s390x-unknown-linux-gnu
+            os: ubuntu-latest
+          test_everything: true
+        - target:
+            tuple: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          test_everything: true
         # MIPS targets disabled since they are dropped to tier 3.
         # See https://github.com/rust-lang/compiler-team/issues/648
         #- target:
@@ -158,37 +192,38 @@ jobs:
         #    os: ubuntu-latest
         #  norun: true
         - target:
-            tuple: powerpc-unknown-linux-gnu
-            os: ubuntu-latest
-          disable_assert_instr: true
-        - target:
-            tuple: powerpc64le-unknown-linux-gnu
-            os: ubuntu-latest
-          disable_assert_instr: true
-        - target:
             tuple: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-15
           norun: true # https://github.com/rust-lang/stdarch/issues/1206
         - target:
             tuple: aarch64-apple-ios-macabi
-            os: macos-latest
+            os: macos-15
           norun: true # https://github.com/rust-lang/stdarch/issues/1206
-        - target:
-            tuple: aarch64-pc-windows-msvc
-            os: windows-latest
-          norun: true
 
     steps:
     - uses: actions/checkout@v4
-      with:
-        submodules: recursive
     - name: Install Rust
       run: |
         rustup update nightly --no-self-update
         rustup default nightly
+      shell: bash
+      if: matrix.target.os != 'windows-11-arm'
+    - name: Install Rust for `windows-11-arm` runners
+      # The arm runners don't have Rust pre-installed (https://github.com/actions/partner-runner-images/issues/77)
+      run: |
+        curl https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      shell: bash
+      if: matrix.target.os == 'windows-11-arm'
+
     - run: rustup target add ${{ matrix.target.tuple }}
-      if: "!endsWith(matrix.target.tuple, 'emulated')"
-    - run: cargo generate-lockfile
+      shell: bash
+      if: matrix.build_std == ''
+    - run: |
+        rustup component add rust-src
+        echo "CARGO_UNSTABLE_BUILD_STD=std" >> $GITHUB_ENV
+      shell: bash
+      if: matrix.build_std != ''
 
     # Configure some env vars based on matrix configuration
     - run: echo "PROFILE=--profile=${{matrix.profile}}" >> $GITHUB_ENV
@@ -199,9 +234,6 @@ jobs:
     - run: echo "STDARCH_TEST_EVERYTHING=1" >> $GITHUB_ENV
       shell: bash
       if: matrix.test_everything != ''
-    - run: echo "RUSTFLAGS=${{ matrix.rustflags }}" >> $GITHUB_ENV
-      shell: bash
-      if: matrix.rustflags != ''
     - run: echo "STDARCH_DISABLE_ASSERT_INSTR=1" >> $GITHUB_ENV
       shell: bash
       if: matrix.disable_assert_instr != ''
@@ -219,7 +251,7 @@ jobs:
     # ... while Linux goes to `run-docker.sh`
     - run: ./ci/run-docker.sh ${{ matrix.target.tuple }}
       shell: bash
-      if: "matrix.target.os == 'ubuntu-latest' && !startsWith(matrix.target.tuple, 'thumb')"
+      if: matrix.target.os == 'ubuntu-latest' && !startsWith(matrix.target.tuple, 'thumb')
       env:
         TARGET: ${{ matrix.target.tuple }}
 
@@ -237,7 +269,6 @@ jobs:
     needs:
       - docs
       - verify
-      - env_override
       - test
       - build-std-detect
     runs-on: ubuntu-latest

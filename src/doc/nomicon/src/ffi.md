@@ -590,7 +590,6 @@ are:
 * `vectorcall`
 This is currently hidden behind the `abi_vectorcall` gate and is subject to change.
 * `Rust`
-* `rust-intrinsic`
 * `system`
 * `C`
 * `win64`
@@ -913,8 +912,8 @@ By including at least one private field and no constructor,
 we create an opaque type that we can't instantiate outside of this module.
 (A struct with no field could be instantiated by anyone.)
 We also want to use this type in FFI, so we have to add `#[repr(C)]`.
-The marker ensures the compiler does not mark the struct as `Send`, `Sync` and `Unpin` are
-not applied to the struct. (`*mut u8` is not `Send` or `Sync`, `PhantomPinned` is not `Unpin`)
+The marker ensures the compiler does not mark the struct as `Send`, `Sync`, and
+`Unpin`. (`*mut u8` is not `Send` or `Sync`, `PhantomPinned` is not `Unpin`)
 
 But because our `Foo` and `Bar` types are
 different, we’ll get type safety between the two of them, so we cannot

@@ -9,7 +9,7 @@ use crate::ffi::CStr;
 use crate::mem::ManuallyDrop;
 use crate::num::NonZero;
 use crate::ptr::NonNull;
-use crate::sync::atomic::{AtomicUsize, Ordering};
+use crate::sync::atomic::{Atomic, AtomicUsize, Ordering};
 use crate::time::Duration;
 use crate::{hint, io};
 
@@ -64,7 +64,7 @@ struct ThreadInner {
     ///                 '--> JOIN_FINALIZE ---'
     ///                          (-1)
     ///
-    lifecycle: AtomicUsize,
+    lifecycle: Atomic<usize>,
 }
 
 // Safety: The only `!Sync` field, `ThreadInner::start`, is only touched by
@@ -86,7 +86,11 @@ impl Thread {
     /// # Safety
     ///
     /// See `thread::Builder::spawn_unchecked` for safety requirements.
-    pub unsafe fn new(stack: usize, p: Box<dyn FnOnce()>) -> io::Result<Thread> {
+    pub unsafe fn new(
+        stack: usize,
+        _name: Option<&str>,
+        p: Box<dyn FnOnce()>,
+    ) -> io::Result<Thread> {
         let inner = Box::new(ThreadInner {
             start: UnsafeCell::new(ManuallyDrop::new(p)),
             lifecycle: AtomicUsize::new(LIFECYCLE_INIT),

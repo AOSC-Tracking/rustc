@@ -14,17 +14,16 @@ use rustc_data_structures::jobserver::{self, Acquired};
 use rustc_data_structures::memmap::Mmap;
 use rustc_data_structures::profiling::{SelfProfilerRef, VerboseTimingGuard};
 use rustc_errors::emitter::Emitter;
-use rustc_errors::translation::Translate;
+use rustc_errors::translation::Translator;
 use rustc_errors::{
-    Diag, DiagArgMap, DiagCtxt, DiagMessage, ErrCode, FatalError, FluentBundle, Level, MultiSpan,
-    Style, Suggestions,
+    Diag, DiagArgMap, DiagCtxt, DiagMessage, ErrCode, FatalError, Level, MultiSpan, Style,
+    Suggestions,
 };
 use rustc_fs_util::link_or_copy;
 use rustc_hir::def_id::{CrateNum, LOCAL_CRATE};
 use rustc_incremental::{
     copy_cgu_workproduct_to_incr_comp_cache_dir, in_incr_comp_dir, in_incr_comp_dir_sess,
 };
-use rustc_metadata::EncodedMetadata;
 use rustc_metadata::fs::copy_to_stdout;
 use rustc_middle::bug;
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
@@ -142,7 +141,6 @@ impl ModuleConfig {
             || match kind {
                 ModuleKind::Regular => sess.opts.output_types.contains_key(&OutputType::Object),
                 ModuleKind::Allocator => false,
-                ModuleKind::Metadata => sess.opts.output_types.contains_key(&OutputType::Metadata),
             };
 
         let emit_obj = if !should_emit_obj {
@@ -306,14 +304,18 @@ impl TargetMachineFactoryConfig {
             cgcx.output_filenames.split_dwarf_path(
                 cgcx.split_debuginfo,
                 cgcx.split_dwarf_kind,
-                Some(module_name),
+                module_name,
+                cgcx.invocation_temp.as_deref(),
             )
         } else {
             None
         };
 
-        let output_obj_file =
-            Some(cgcx.output_filenames.temp_path(OutputType::Object, Some(module_name)));
+        let output_obj_file = Some(cgcx.output_filenames.temp_path_for_cgu(
+            OutputType::Object,
+            module_name,
+            cgcx.invocation_temp.as_deref(),
+        ));
         TargetMachineFactoryConfig { split_dwarf_file, output_obj_file }
     }
 }
@@ -344,15 +346,15 @@ pub struct CodegenContext<B: WriteBackendMethods> {
     pub crate_types: Vec<CrateType>,
     pub each_linked_rlib_for_lto: Vec<(CrateNum, PathBuf)>,
     pub output_filenames: Arc<OutputFilenames>,
+    pub invocation_temp: Option<String>,
     pub regular_module_config: Arc<ModuleConfig>,
-    pub metadata_module_config: Arc<ModuleConfig>,
     pub allocator_module_config: Arc<ModuleConfig>,
     pub tm_factory: TargetMachineFactoryFn<B>,
     pub msvc_imps_needed: bool,
     pub is_pe_coff: bool,
     pub target_can_use_split_dwarf: bool,
     pub target_arch: String,
-    pub target_is_like_osx: bool,
+    pub target_is_like_darwin: bool,
     pub target_is_like_aix: bool,
     pub split_debuginfo: rustc_target::spec::SplitDebuginfo,
     pub split_dwarf_kind: rustc_session::config::SplitDwarfKind,
@@ -378,7 +380,7 @@ pub struct CodegenContext<B: WriteBackendMethods> {
     pub coordinator_send: Sender<Box<dyn Any + Send>>,
     /// `true` if the codegen should be run in parallel.
     ///
-    /// Depends on [`CodegenBackend::supports_parallel()`] and `-Zno_parallel_backend`.
+    /// Depends on [`ExtraBackendMethods::supports_parallel()`] and `-Zno_parallel_backend`.
     pub parallel: bool,
 }
 
@@ -390,7 +392,6 @@ impl<B: WriteBackendMethods> CodegenContext<B> {
     pub fn config(&self, kind: ModuleKind) -> &ModuleConfig {
         match kind {
             ModuleKind::Regular => &self.regular_module_config,
-            ModuleKind::Metadata => &self.metadata_module_config,
             ModuleKind::Allocator => &self.allocator_module_config,
         }
     }
@@ -411,8 +412,7 @@ fn generate_lto_work<B: ExtraBackendMethods>(
             B::run_fat_lto(cgcx, needs_fat_lto, import_only_modules).unwrap_or_else(|e| e.raise());
         if cgcx.lto == Lto::Fat && !autodiff.is_empty() {
             let config = cgcx.config(ModuleKind::Regular);
-            module =
-                unsafe { module.autodiff(cgcx, autodiff, config).unwrap_or_else(|e| e.raise()) };
+            module = module.autodiff(cgcx, autodiff, config).unwrap_or_else(|e| e.raise());
         }
         // We are adding a single work item, so the cost doesn't matter.
         vec![(WorkItem::LTO(module), 0)]
@@ -470,8 +470,6 @@ pub(crate) fn start_async_codegen<B: ExtraBackendMethods>(
     backend: B,
     tcx: TyCtxt<'_>,
     target_cpu: String,
-    metadata: EncodedMetadata,
-    metadata_module: Option<CompiledModule>,
 ) -> OngoingCodegen<B> {
     let (coordinator_send, coordinator_receive) = channel();
 
@@ -481,7 +479,6 @@ pub(crate) fn start_async_codegen<B: ExtraBackendMethods>(
     let crate_info = CrateInfo::new(tcx, target_cpu);
 
     let regular_config = ModuleConfig::new(ModuleKind::Regular, tcx, no_builtins);
-    let metadata_config = ModuleConfig::new(ModuleKind::Metadata, tcx, no_builtins);
     let allocator_config = ModuleConfig::new(ModuleKind::Allocator, tcx, no_builtins);
 
     let (shared_emitter, shared_emitter_main) = SharedEmitter::new();
@@ -495,15 +492,12 @@ pub(crate) fn start_async_codegen<B: ExtraBackendMethods>(
         codegen_worker_send,
         coordinator_receive,
         Arc::new(regular_config),
-        Arc::new(metadata_config),
         Arc::new(allocator_config),
         coordinator_send.clone(),
     );
 
     OngoingCodegen {
         backend,
-        metadata,
-        metadata_module,
         crate_info,
 
         codegen_worker_receive,
@@ -582,8 +576,11 @@ fn produce_final_output_artifacts(
         if let [module] = &compiled_modules.modules[..] {
             // 1) Only one codegen unit. In this case it's no difficulty
             //    to copy `foo.0.x` to `foo.x`.
-            let module_name = Some(&module.name[..]);
-            let path = crate_output.temp_path(output_type, module_name);
+            let path = crate_output.temp_path_for_cgu(
+                output_type,
+                &module.name,
+                sess.invocation_temp.as_deref(),
+            );
             let output = crate_output.path(output_type);
             if !output_type.is_text_output() && output.is_tty() {
                 sess.dcx()
@@ -596,22 +593,15 @@ fn produce_final_output_artifacts(
                 ensure_removed(sess.dcx(), &path);
             }
         } else {
-            let extension = crate_output
-                .temp_path(output_type, None)
-                .extension()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_owned();
-
             if crate_output.outputs.contains_explicit_name(&output_type) {
                 // 2) Multiple codegen units, with `--emit foo=some_name`. We have
                 //    no good solution for this case, so warn the user.
-                sess.dcx().emit_warn(errors::IgnoringEmitPath { extension });
+                sess.dcx()
+                    .emit_warn(errors::IgnoringEmitPath { extension: output_type.extension() });
             } else if crate_output.single_output_file.is_some() {
                 // 3) Multiple codegen units, with `-o some_name`. We have
                 //    no good solution for this case, so warn the user.
-                sess.dcx().emit_warn(errors::IgnoringOutput { extension });
+                sess.dcx().emit_warn(errors::IgnoringOutput { extension: output_type.extension() });
             } else {
                 // 4) Multiple codegen units, but no explicit name. We
                 //    just leave the `foo.0.x` files in place.
@@ -843,12 +833,6 @@ pub(crate) fn compute_per_cgu_lto_type(
     sess_crate_types: &[CrateType],
     module_kind: ModuleKind,
 ) -> ComputedLtoType {
-    // Metadata modules never participate in LTO regardless of the lto
-    // settings.
-    if module_kind == ModuleKind::Metadata {
-        return ComputedLtoType::No;
-    }
-
     // If the linker does LTO, we don't have to do it. Note that we
     // keep doing full LTO, if it is requested, as not to break the
     // assumption that the output will be a single module.
@@ -886,9 +870,7 @@ fn execute_optimize_work_item<B: ExtraBackendMethods>(
     let dcx = cgcx.create_dcx();
     let dcx = dcx.handle();
 
-    unsafe {
-        B::optimize(cgcx, dcx, &mut module, module_config)?;
-    }
+    B::optimize(cgcx, dcx, &mut module, module_config)?;
 
     // After we've done the initial round of optimizations we need to
     // decide whether to synchronously codegen this module or ship it
@@ -967,7 +949,12 @@ fn execute_copy_from_cache_work_item<B: ExtraBackendMethods>(
         module.source.saved_files.get("dwo").as_ref().and_then(|saved_dwarf_object_file| {
             let dwarf_obj_out = cgcx
                 .output_filenames
-                .split_dwarf_path(cgcx.split_debuginfo, cgcx.split_dwarf_kind, Some(&module.name))
+                .split_dwarf_path(
+                    cgcx.split_debuginfo,
+                    cgcx.split_dwarf_kind,
+                    &module.name,
+                    cgcx.invocation_temp.as_deref(),
+                )
                 .expect(
                     "saved dwarf object in work product but `split_dwarf_path` returned `None`",
                 );
@@ -977,7 +964,11 @@ fn execute_copy_from_cache_work_item<B: ExtraBackendMethods>(
     let mut load_from_incr_cache = |perform, output_type: OutputType| {
         if perform {
             let saved_file = module.source.saved_files.get(output_type.extension())?;
-            let output_path = cgcx.output_filenames.temp_path(output_type, Some(&module.name));
+            let output_path = cgcx.output_filenames.temp_path_for_cgu(
+                output_type,
+                &module.name,
+                cgcx.invocation_temp.as_deref(),
+            );
             load_from_incr_comp_dir(output_path, &saved_file)
         } else {
             None
@@ -1010,7 +1001,7 @@ fn execute_lto_work_item<B: ExtraBackendMethods>(
     module: lto::LtoModuleCodegen<B>,
     module_config: &ModuleConfig,
 ) -> Result<WorkItemResult<B>, FatalError> {
-    let module = unsafe { module.optimize(cgcx)? };
+    let module = module.optimize(cgcx)?;
     finish_intra_module_work(cgcx, module, module_config)
 }
 
@@ -1022,11 +1013,8 @@ fn finish_intra_module_work<B: ExtraBackendMethods>(
     let dcx = cgcx.create_dcx();
     let dcx = dcx.handle();
 
-    if !cgcx.opts.unstable_opts.combine_cgu
-        || module.kind == ModuleKind::Metadata
-        || module.kind == ModuleKind::Allocator
-    {
-        let module = unsafe { B::codegen(cgcx, dcx, module, module_config)? };
+    if !cgcx.opts.unstable_opts.combine_cgu || module.kind == ModuleKind::Allocator {
+        let module = B::codegen(cgcx, dcx, module, module_config)?;
         Ok(WorkItemResult::Finished(module))
     } else {
         Ok(WorkItemResult::NeedsLink(module))
@@ -1116,7 +1104,6 @@ fn start_executing_work<B: ExtraBackendMethods>(
     codegen_worker_send: Sender<CguMessage>,
     coordinator_receive: Receiver<Box<dyn Any + Send>>,
     regular_config: Arc<ModuleConfig>,
-    metadata_config: Arc<ModuleConfig>,
     allocator_config: Arc<ModuleConfig>,
     tx_to_llvm_workers: Sender<Box<dyn Any + Send>>,
 ) -> thread::JoinHandle<Result<CompiledModules, ()>> {
@@ -1209,19 +1196,19 @@ fn start_executing_work<B: ExtraBackendMethods>(
         diag_emitter: shared_emitter.clone(),
         output_filenames: Arc::clone(tcx.output_filenames(())),
         regular_module_config: regular_config,
-        metadata_module_config: metadata_config,
         allocator_module_config: allocator_config,
         tm_factory: backend.target_machine_factory(tcx.sess, ol, backend_features),
         msvc_imps_needed: msvc_imps_needed(tcx),
         is_pe_coff: tcx.sess.target.is_like_windows,
         target_can_use_split_dwarf: tcx.sess.target_can_use_split_dwarf(),
         target_arch: tcx.sess.target.arch.to_string(),
-        target_is_like_osx: tcx.sess.target.is_like_osx,
+        target_is_like_darwin: tcx.sess.target.is_like_darwin,
         target_is_like_aix: tcx.sess.target.is_like_aix,
         split_debuginfo: tcx.sess.split_debuginfo(),
         split_dwarf_kind: tcx.sess.opts.unstable_opts.split_dwarf_kind,
         parallel: backend.supports_parallel() && !sess.opts.unstable_opts.no_parallel_backend,
         pointer_size: tcx.data_layout.pointer_size,
+        invocation_temp: sess.invocation_temp.clone(),
     };
 
     // This is the "main loop" of parallel work happening for parallel codegen.
@@ -1665,7 +1652,6 @@ fn start_executing_work<B: ExtraBackendMethods>(
                                     assert!(compiled_allocator_module.is_none());
                                     compiled_allocator_module = Some(compiled_module);
                                 }
-                                ModuleKind::Metadata => bug!("Should be handled separately"),
                             }
                         }
                         Ok(WorkItemResult::NeedsLink(module)) => {
@@ -1714,9 +1700,8 @@ fn start_executing_work<B: ExtraBackendMethods>(
             let dcx = cgcx.create_dcx();
             let dcx = dcx.handle();
             let module = B::run_link(&cgcx, dcx, needs_link).map_err(|_| ())?;
-            let module = unsafe {
-                B::codegen(&cgcx, dcx, module, cgcx.config(ModuleKind::Regular)).map_err(|_| ())?
-            };
+            let module =
+                B::codegen(&cgcx, dcx, module, cgcx.config(ModuleKind::Regular)).map_err(|_| ())?;
             compiled_modules.push(module);
         }
 
@@ -1904,16 +1889,6 @@ impl SharedEmitter {
     }
 }
 
-impl Translate for SharedEmitter {
-    fn fluent_bundle(&self) -> Option<&FluentBundle> {
-        None
-    }
-
-    fn fallback_fluent_bundle(&self) -> &FluentBundle {
-        panic!("shared emitter attempted to translate a diagnostic");
-    }
-}
-
 impl Emitter for SharedEmitter {
     fn emit_diagnostic(
         &mut self,
@@ -1946,6 +1921,10 @@ impl Emitter for SharedEmitter {
 
     fn source_map(&self) -> Option<&SourceMap> {
         None
+    }
+
+    fn translator(&self) -> &Translator {
+        panic!("shared emitter attempted to translate a diagnostic");
     }
 }
 
@@ -2048,8 +2027,6 @@ impl<B: ExtraBackendMethods> Drop for Coordinator<B> {
 
 pub struct OngoingCodegen<B: ExtraBackendMethods> {
     pub backend: B,
-    pub metadata: EncodedMetadata,
-    pub metadata_module: Option<CompiledModule>,
     pub crate_info: CrateInfo,
     pub codegen_worker_receive: Receiver<CguMessage>,
     pub shared_emitter_main: SharedEmitterMain,
@@ -2089,12 +2066,10 @@ impl<B: ExtraBackendMethods> OngoingCodegen<B> {
 
         (
             CodegenResults {
-                metadata: self.metadata,
                 crate_info: self.crate_info,
 
                 modules: compiled_modules.modules,
                 allocator_module: compiled_modules.allocator_module,
-                metadata_module: self.metadata_module,
             },
             work_products,
         )
@@ -2186,7 +2161,7 @@ fn msvc_imps_needed(tcx: TyCtxt<'_>) -> bool {
     // indirectly from ThinLTO. In theory these are not needed as ThinLTO could resolve
     // these, but it currently does not do so.
     let can_have_static_objects =
-        tcx.sess.lto() == Lto::Thin || tcx.crate_types().iter().any(|ct| *ct == CrateType::Rlib);
+        tcx.sess.lto() == Lto::Thin || tcx.crate_types().contains(&CrateType::Rlib);
 
     tcx.sess.target.is_like_windows &&
     can_have_static_objects   &&

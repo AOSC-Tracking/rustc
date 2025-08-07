@@ -126,6 +126,7 @@ impl Layout {
     #[rustc_const_stable(feature = "const_alloc_layout_unchecked", since = "1.36.0")]
     #[must_use]
     #[inline]
+    #[track_caller]
     pub const unsafe fn from_size_align_unchecked(size: usize, align: usize) -> Self {
         assert_unsafe_precondition!(
             check_library_ub,
@@ -519,6 +520,14 @@ impl Layout {
             // And `Alignment` guarantees it's a power of two.
             unsafe { Ok(Layout::from_size_align_unchecked(array_size, align.as_usize())) }
         }
+    }
+
+    /// Perma-unstable access to `align` as `Alignment` type.
+    #[unstable(issue = "none", feature = "std_internals")]
+    #[doc(hidden)]
+    #[inline]
+    pub const fn alignment(&self) -> Alignment {
+        self.align
     }
 }
 

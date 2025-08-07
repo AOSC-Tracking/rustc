@@ -71,7 +71,7 @@ pub fn assert(shim_addr: usize, fnname: &str, expected: &str) {
     //eprintln!("  function: {:?}", function);
 
     let mut instrs = &function.instrs[..];
-    while instrs.last().map_or(false, |s| s == "nop" || s == "int3") {
+    while instrs.last().is_some_and(|s| s == "nop" || s == "int3") {
         instrs = &instrs[..instrs.len() - 1];
     }
 
@@ -104,7 +104,12 @@ pub fn assert(shim_addr: usize, fnname: &str, expected: &str) {
             // failed inlining something.
             s[0].starts_with("call ") && s[1].starts_with("pop") // FIXME: original logic but does not match comment
         })
-    } else if cfg!(any(target_arch = "aarch64", target_arch = "arm64ec")) {
+    } else if cfg!(any(
+        target_arch = "aarch64",
+        target_arch = "arm64ec",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    )) {
         instrs.iter().any(|s| s.starts_with("bl "))
     } else {
         // FIXME: Add detection for other archs
@@ -159,7 +164,15 @@ pub fn assert(shim_addr: usize, fnname: &str, expected: &str) {
                 // Original limit was 20 instructions, but ARM DSP Intrinsics
                 // are exactly 20 instructions long. So, bump the limit to 22
                 // instead of adding here a long list of exceptions.
-                _ => 22,
+                _ => {
+                    // aarch64_be may add reverse instructions which increases
+                    // the number of instructions generated.
+                    if cfg!(all(target_endian = "big", target_arch = "aarch64")) {
+                        32
+                    } else {
+                        22
+                    }
+                }
             },
             |v| v.parse().unwrap(),
         );
@@ -203,6 +216,3 @@ pub fn assert_skip_test_ok(name: &str, missing_features: &[&str]) {
         Err(_) => println!("Set STDARCH_TEST_EVERYTHING to make this an error."),
     }
 }
-
-// See comment in `assert-instr-macro` crate for why this exists
-pub static mut _DONT_DEDUP: *const u8 = std::ptr::null();

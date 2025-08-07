@@ -2,27 +2,30 @@ r[cfg]
 # Conditional compilation
 
 r[cfg.syntax]
-> **<sup>Syntax</sup>**\
-> _ConfigurationPredicate_ :\
-> &nbsp;&nbsp; &nbsp;&nbsp; _ConfigurationOption_\
-> &nbsp;&nbsp; | _ConfigurationAll_\
-> &nbsp;&nbsp; | _ConfigurationAny_\
-> &nbsp;&nbsp; | _ConfigurationNot_
->
-> _ConfigurationOption_ :\
-> &nbsp;&nbsp; [IDENTIFIER]&nbsp;(`=` ([STRING_LITERAL] | [RAW_STRING_LITERAL]))<sup>?</sup>
->
-> _ConfigurationAll_\
-> &nbsp;&nbsp; `all` `(` _ConfigurationPredicateList_<sup>?</sup> `)`
->
-> _ConfigurationAny_\
-> &nbsp;&nbsp; `any` `(` _ConfigurationPredicateList_<sup>?</sup> `)`
->
-> _ConfigurationNot_\
-> &nbsp;&nbsp; `not` `(` _ConfigurationPredicate_ `)`
->
-> _ConfigurationPredicateList_\
-> &nbsp;&nbsp; _ConfigurationPredicate_ (`,` _ConfigurationPredicate_)<sup>\*</sup> `,`<sup>?</sup>
+```grammar,configuration
+ConfigurationPredicate ->
+      ConfigurationOption
+    | ConfigurationAll
+    | ConfigurationAny
+    | ConfigurationNot
+    | `true`
+    | `false`
+
+ConfigurationOption ->
+    IDENTIFIER ( `=` ( STRING_LITERAL | RAW_STRING_LITERAL ) )?
+
+ConfigurationAll ->
+    `all` `(` ConfigurationPredicateList? `)`
+
+ConfigurationAny ->
+    `any` `(` ConfigurationPredicateList? `)`
+
+ConfigurationNot ->
+    `not` `(` ConfigurationPredicate `)`
+
+ConfigurationPredicateList ->
+    ConfigurationPredicate (`,` ConfigurationPredicate)* `,`?
+```
 
 r[cfg.general]
 *Conditionally compiled source code* is source code that is compiled only under certain conditions.
@@ -48,6 +51,9 @@ r[cfg.predicate.any]
 
 r[cfg.predicate.not]
 * `not()` with a configuration predicate. It is true if its predicate is false and false if its predicate is true.
+
+r[cfg.predicate.literal]
+* `true` or `false` literals, which are always true or false respectively.
 
 r[cfg.option-spec]
 _Configuration options_ are either names or key-value pairs, and are either set or unset.
@@ -263,7 +269,6 @@ r[cfg.target_has_atomic.stdlib]
 When this cfg is present, all of the stable [`core::sync::atomic`] APIs are available for
 the relevant atomic width.
 
-
 r[cfg.target_has_atomic.values]
 Possible values:
 
@@ -277,13 +282,11 @@ Possible values:
 r[cfg.test]
 ### `test`
 
-
 Enabled when compiling the test harness. Done with `rustc` by using the
 [`--test`] flag. See [Testing] for more on testing support.
 
 r[cfg.debug_assertions]
 ### `debug_assertions`
-
 
 Enabled by default when compiling without optimizations.
 This can be used to enable extra debugging code in development but not in
@@ -292,7 +295,6 @@ production.  For example, it controls the behavior of the standard library's
 
 r[cfg.proc_macro]
 ### `proc_macro`
-
 
 Set when the crate being compiled is being compiled with the `proc_macro`
 [crate type].
@@ -317,9 +319,9 @@ r[cfg.attr]
 ### The `cfg` attribute
 
 r[cfg.attr.syntax]
-> **<sup>Syntax</sup>**\
-> _CfgAttrAttribute_ :\
-> &nbsp;&nbsp; `cfg` `(` _ConfigurationPredicate_ `)`
+```grammar,configuration
+@root CfgAttribute -> `cfg` `(` ConfigurationPredicate `)`
+```
 
 <!-- should we say they're active attributes here? -->
 
@@ -384,12 +386,11 @@ r[cfg.cfg_attr]
 ### The `cfg_attr` attribute
 
 r[cfg.cfg_attr.syntax]
-> **<sup>Syntax</sup>**\
-> _CfgAttrAttribute_ :\
-> &nbsp;&nbsp; `cfg_attr` `(` _ConfigurationPredicate_ `,` _CfgAttrs_<sup>?</sup> `)`
->
-> _CfgAttrs_ :\
-> &nbsp;&nbsp; [_Attr_]&nbsp;(`,` [_Attr_])<sup>\*</sup> `,`<sup>?</sup>
+```grammar,configuration
+@root CfgAttrAttribute -> `cfg_attr` `(` ConfigurationPredicate `,` CfgAttrs? `)`
+
+CfgAttrs -> Attr (`,` Attr)* `,`?
+```
 
 r[cfg.cfg_attr.general]
 The `cfg_attr` [attribute] conditionally includes [attributes] based on a
@@ -451,11 +452,7 @@ let machine_kind = if cfg!(unix) {
 println!("I'm running on a {} machine!", machine_kind);
 ```
 
-[IDENTIFIER]: identifiers.md
-[RAW_STRING_LITERAL]: tokens.md#raw-string-literals
-[STRING_LITERAL]: tokens.md#string-literals
 [Testing]: attributes/testing.md
-[_Attr_]: attributes.md
 [`--cfg`]: ../rustc/command-line-arguments.html#--cfg-configure-the-compilation-environment
 [`--test`]: ../rustc/command-line-arguments.html#--test-build-a-test-harness
 [`cfg`]: #the-cfg-attribute

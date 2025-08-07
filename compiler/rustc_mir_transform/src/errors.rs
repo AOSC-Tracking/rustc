@@ -158,13 +158,6 @@ pub(crate) struct MustNotSuspendReason {
     pub reason: String,
 }
 
-#[derive(LintDiagnostic)]
-#[diag(mir_transform_undefined_transmute)]
-#[note]
-#[note(mir_transform_note2)]
-#[help]
-pub(crate) struct UndefinedTransmute;
-
 #[derive(Diagnostic)]
 #[diag(mir_transform_force_inline)]
 #[note]

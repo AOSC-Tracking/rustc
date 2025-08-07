@@ -2,10 +2,10 @@ use std::str::FromStr;
 
 use rustc_abi::ExternAbi;
 use rustc_ast::expand::autodiff_attrs::{AutoDiffAttrs, DiffActivity, DiffMode};
-use rustc_ast::{MetaItem, MetaItemInner, attr};
-use rustc_attr_parsing::ReprAttr::ReprAlign;
-use rustc_attr_parsing::{AttributeKind, InlineAttr, InstructionSetAttr, OptimizeAttr};
-use rustc_data_structures::fx::FxHashMap;
+use rustc_ast::{LitKind, MetaItem, MetaItemInner, attr};
+use rustc_attr_data_structures::{
+    AttributeKind, InlineAttr, InstructionSetAttr, OptimizeAttr, ReprAttr, find_attr,
+};
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LOCAL_CRATE, LocalDefId};
 use rustc_hir::weak_lang_items::WEAK_LANG_ITEMS;
@@ -17,14 +17,16 @@ use rustc_middle::mir::mono::Linkage;
 use rustc_middle::query::Providers;
 use rustc_middle::span_bug;
 use rustc_middle::ty::{self as ty, TyCtxt};
+use rustc_session::lint;
 use rustc_session::parse::feature_err;
-use rustc_session::{Session, lint};
 use rustc_span::{Ident, Span, sym};
 use rustc_target::spec::SanitizerSet;
-use tracing::debug;
 
 use crate::errors;
-use crate::target_features::{check_target_feature_trait_unsafe, from_target_feature_attr};
+use crate::errors::NoMangleNameless;
+use crate::target_features::{
+    check_target_feature_trait_unsafe, check_tied_features, from_target_feature_attr,
+};
 
 fn linkage_by_name(tcx: TyCtxt<'_>, def_id: LocalDefId, name: &str) -> Linkage {
     use rustc_middle::mir::mono::Linkage::*;
@@ -83,7 +85,6 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
 
     let rust_target_features = tcx.rust_target_features(LOCAL_CRATE);
 
-    let mut inline_span = None;
     let mut link_ordinal_span = None;
     let mut no_sanitize_span = None;
     let mut mixed_export_name_no_mangle_lint_state = MixedExportNameAndNoMangleState::default();
@@ -114,19 +115,47 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                 AttributeKind::Repr(reprs) => {
                     codegen_fn_attrs.alignment = reprs
                         .iter()
-                        .find_map(|(r, _)| if let ReprAlign(x) = r { Some(*x) } else { None });
+                        .filter_map(
+                            |(r, _)| if let ReprAttr::ReprAlign(x) = r { Some(*x) } else { None },
+                        )
+                        .max();
                 }
-
+                AttributeKind::Cold(_) => codegen_fn_attrs.flags |= CodegenFnAttrFlags::COLD,
+                AttributeKind::Align { align, .. } => codegen_fn_attrs.alignment = Some(*align),
+                AttributeKind::NoMangle(attr_span) => {
+                    if tcx.opt_item_name(did.to_def_id()).is_some() {
+                        codegen_fn_attrs.flags |= CodegenFnAttrFlags::NO_MANGLE;
+                        mixed_export_name_no_mangle_lint_state.track_no_mangle(
+                            *attr_span,
+                            tcx.local_def_id_to_hir_id(did),
+                            attr,
+                        );
+                    } else {
+                        tcx.dcx().emit_err(NoMangleNameless {
+                            span: *attr_span,
+                            definition: format!(
+                                "{} {}",
+                                tcx.def_descr_article(did.to_def_id()),
+                                tcx.def_descr(did.to_def_id())
+                            ),
+                        });
+                    }
+                }
                 _ => {}
             }
         }
+
+        // Apply the minimum function alignment here, so that individual backends don't have to.
+        codegen_fn_attrs.alignment = Ord::max(
+            codegen_fn_attrs.alignment,
+            tcx.sess.opts.unstable_opts.min_function_alignment,
+        );
 
         let Some(Ident { name, .. }) = attr.ident() else {
             continue;
         };
 
         match name {
-            sym::cold => codegen_fn_attrs.flags |= CodegenFnAttrFlags::COLD,
             sym::rustc_allocator => codegen_fn_attrs.flags |= CodegenFnAttrFlags::ALLOCATOR,
             sym::ffi_pure => codegen_fn_attrs.flags |= CodegenFnAttrFlags::FFI_PURE,
             sym::ffi_const => codegen_fn_attrs.flags |= CodegenFnAttrFlags::FFI_CONST,
@@ -137,27 +166,6 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                 codegen_fn_attrs.flags |= CodegenFnAttrFlags::ALLOCATOR_ZEROED
             }
             sym::naked => codegen_fn_attrs.flags |= CodegenFnAttrFlags::NAKED,
-            sym::no_mangle => {
-                if tcx.opt_item_name(did.to_def_id()).is_some() {
-                    codegen_fn_attrs.flags |= CodegenFnAttrFlags::NO_MANGLE;
-                    mixed_export_name_no_mangle_lint_state.track_no_mangle(
-                        attr.span(),
-                        tcx.local_def_id_to_hir_id(did),
-                        attr,
-                    );
-                } else {
-                    tcx.dcx()
-                        .struct_span_err(
-                            attr.span(),
-                            format!(
-                                "`#[no_mangle]` cannot be used on {} {} as it has no name",
-                                tcx.def_descr_article(did.to_def_id()),
-                                tcx.def_descr(did.to_def_id()),
-                            ),
-                        )
-                        .emit();
-                }
-            }
             sym::rustc_std_internal_symbol => {
                 codegen_fn_attrs.flags |= CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL
             }
@@ -186,41 +194,16 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                             )
                             .emit();
                         }
-                        codegen_fn_attrs.flags |= CodegenFnAttrFlags::USED;
+                        codegen_fn_attrs.flags |= CodegenFnAttrFlags::USED_COMPILER;
                     }
                     Some(_) => {
                         tcx.dcx().emit_err(errors::ExpectedUsedSymbol { span: attr.span() });
                     }
                     None => {
-                        // Unfortunately, unconditionally using `llvm.used` causes
-                        // issues in handling `.init_array` with the gold linker,
-                        // but using `llvm.compiler.used` caused a nontrivial amount
-                        // of unintentional ecosystem breakage -- particularly on
-                        // Mach-O targets.
-                        //
-                        // As a result, we emit `llvm.compiler.used` only on ELF
-                        // targets. This is somewhat ad-hoc, but actually follows
-                        // our pre-LLVM 13 behavior (prior to the ecosystem
-                        // breakage), and seems to match `clang`'s behavior as well
-                        // (both before and after LLVM 13), possibly because they
-                        // have similar compatibility concerns to us. See
-                        // https://github.com/rust-lang/rust/issues/47384#issuecomment-1019080146
-                        // and following comments for some discussion of this, as
-                        // well as the comments in `rustc_codegen_llvm` where these
-                        // flags are handled.
-                        //
-                        // Anyway, to be clear: this is still up in the air
-                        // somewhat, and is subject to change in the future (which
-                        // is a good thing, because this would ideally be a bit
-                        // more firmed up).
-                        let is_like_elf = !(tcx.sess.target.is_like_osx
-                            || tcx.sess.target.is_like_windows
-                            || tcx.sess.target.is_like_wasm);
-                        codegen_fn_attrs.flags |= if is_like_elf {
-                            CodegenFnAttrFlags::USED
-                        } else {
-                            CodegenFnAttrFlags::USED_LINKER
-                        };
+                        // Unconditionally using `llvm.used` causes issues in handling
+                        // `.init_array` with the gold linker. Luckily gold has been
+                        // deprecated with GCC 15 and rustc now warns about using gold.
+                        codegen_fn_attrs.flags |= CodegenFnAttrFlags::USED_LINKER
                     }
                 }
             }
@@ -296,6 +279,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                 }
                 from_target_feature_attr(
                     tcx,
+                    did,
                     attr,
                     rust_target_features,
                     &mut codegen_fn_attrs.target_features,
@@ -345,20 +329,26 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                 no_sanitize_span = Some(attr.span());
                 if let Some(list) = attr.meta_item_list() {
                     for item in list.iter() {
-                        match item.name_or_empty() {
-                            sym::address => {
+                        match item.name() {
+                            Some(sym::address) => {
                                 codegen_fn_attrs.no_sanitize |=
                                     SanitizerSet::ADDRESS | SanitizerSet::KERNELADDRESS
                             }
-                            sym::cfi => codegen_fn_attrs.no_sanitize |= SanitizerSet::CFI,
-                            sym::kcfi => codegen_fn_attrs.no_sanitize |= SanitizerSet::KCFI,
-                            sym::memory => codegen_fn_attrs.no_sanitize |= SanitizerSet::MEMORY,
-                            sym::memtag => codegen_fn_attrs.no_sanitize |= SanitizerSet::MEMTAG,
-                            sym::shadow_call_stack => {
+                            Some(sym::cfi) => codegen_fn_attrs.no_sanitize |= SanitizerSet::CFI,
+                            Some(sym::kcfi) => codegen_fn_attrs.no_sanitize |= SanitizerSet::KCFI,
+                            Some(sym::memory) => {
+                                codegen_fn_attrs.no_sanitize |= SanitizerSet::MEMORY
+                            }
+                            Some(sym::memtag) => {
+                                codegen_fn_attrs.no_sanitize |= SanitizerSet::MEMTAG
+                            }
+                            Some(sym::shadow_call_stack) => {
                                 codegen_fn_attrs.no_sanitize |= SanitizerSet::SHADOWCALLSTACK
                             }
-                            sym::thread => codegen_fn_attrs.no_sanitize |= SanitizerSet::THREAD,
-                            sym::hwaddress => {
+                            Some(sym::thread) => {
+                                codegen_fn_attrs.no_sanitize |= SanitizerSet::THREAD
+                            }
+                            Some(sym::hwaddress) => {
                                 codegen_fn_attrs.no_sanitize |= SanitizerSet::HWADDRESS
                             }
                             _ => {
@@ -378,7 +368,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                                 [sym::arm, sym::a32 | sym::t32]
                                     if !tcx.sess.target.has_thumb_interworking =>
                                 {
-                                    tcx.dcx().emit_err(errors::UnsuportedInstructionSet {
+                                    tcx.dcx().emit_err(errors::UnsupportedInstructionSet {
                                         span: attr.span(),
                                     });
                                     None
@@ -419,9 +409,9 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                             continue;
                         };
 
-                        let attrib_to_write = match meta_item.name_or_empty() {
-                            sym::prefix_nops => &mut prefix,
-                            sym::entry_nops => &mut entry,
+                        let attrib_to_write = match meta_item.name() {
+                            Some(sym::prefix_nops) => &mut prefix,
+                            Some(sym::entry_nops) => &mut entry,
                             _ => {
                                 tcx.dcx().emit_err(errors::UnexpectedParameterName {
                                     span: item.span(),
@@ -464,48 +454,14 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
 
     mixed_export_name_no_mangle_lint_state.lint_if_mixed(tcx);
 
-    codegen_fn_attrs.inline = attrs.iter().fold(InlineAttr::None, |ia, attr| {
-        if !attr.has_name(sym::inline) {
-            return ia;
-        }
-
-        if attr.is_word() {
-            return InlineAttr::Hint;
-        }
-        let Some(ref items) = attr.meta_item_list() else {
-            return ia;
-        };
-        inline_span = Some(attr.span());
-
-        let [item] = &items[..] else {
-            tcx.dcx().emit_err(errors::ExpectedOneArgument { span: attr.span() });
-            return InlineAttr::None;
-        };
-
-        if item.has_name(sym::always) {
-            InlineAttr::Always
-        } else if item.has_name(sym::never) {
-            InlineAttr::Never
-        } else {
-            tcx.dcx().emit_err(errors::InvalidArgument { span: items[0].span() });
-
-            InlineAttr::None
-        }
-    });
-    codegen_fn_attrs.inline = attrs.iter().fold(codegen_fn_attrs.inline, |ia, attr| {
-        if !attr.has_name(sym::rustc_force_inline) || !tcx.features().rustc_attrs() {
-            return ia;
-        }
-
-        if attr.is_word() {
-            InlineAttr::Force { attr_span: attr.span(), reason: None }
-        } else if let Some(val) = attr.value_str() {
-            InlineAttr::Force { attr_span: attr.span(), reason: Some(val) }
-        } else {
-            debug!("`rustc_force_inline` not checked by attribute validation");
-            ia
-        }
-    });
+    let inline_span;
+    (codegen_fn_attrs.inline, inline_span) = if let Some((inline_attr, span)) =
+        find_attr!(attrs, AttributeKind::Inline(i, span) => (*i, *span))
+    {
+        (inline_attr, Some(span))
+    } else {
+        (InlineAttr::None, None)
+    };
 
     // naked function MUST NOT be inlined! This attribute is required for the rust compiler itself,
     // but not for the code generation backend because at that point the naked function will just be
@@ -514,34 +470,8 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
         codegen_fn_attrs.inline = InlineAttr::Never;
     }
 
-    codegen_fn_attrs.optimize = attrs.iter().fold(OptimizeAttr::Default, |ia, attr| {
-        if !attr.has_name(sym::optimize) {
-            return ia;
-        }
-        if attr.is_word() {
-            tcx.dcx().emit_err(errors::ExpectedOneArgumentOptimize { span: attr.span() });
-            return ia;
-        }
-        let Some(ref items) = attr.meta_item_list() else {
-            return OptimizeAttr::Default;
-        };
-
-        inline_span = Some(attr.span());
-        let [item] = &items[..] else {
-            tcx.dcx().emit_err(errors::ExpectedOneArgumentOptimize { span: attr.span() });
-            return OptimizeAttr::Default;
-        };
-        if item.has_name(sym::size) {
-            OptimizeAttr::Size
-        } else if item.has_name(sym::speed) {
-            OptimizeAttr::Speed
-        } else if item.has_name(sym::none) {
-            OptimizeAttr::DoNotOptimize
-        } else {
-            tcx.dcx().emit_err(errors::InvalidArgumentOptimize { span: item.span() });
-            OptimizeAttr::Default
-        }
-    });
+    codegen_fn_attrs.optimize =
+        find_attr!(attrs, AttributeKind::Optimize(i, _) => *i).unwrap_or(OptimizeAttr::Default);
 
     // #73631: closures inherit `#[target_feature]` annotations
     //
@@ -604,7 +534,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
     if let Some((name, _)) = lang_items::extract(attrs)
         && let Some(lang_item) = LangItem::from_name(name)
     {
-        if WEAK_LANG_ITEMS.iter().any(|&l| l == lang_item) {
+        if WEAK_LANG_ITEMS.contains(&lang_item) {
             codegen_fn_attrs.flags |= CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL;
         }
         if let Some(link_name) = lang_item.link_name() {
@@ -613,6 +543,37 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
         }
     }
     check_link_name_xor_ordinal(tcx, &codegen_fn_attrs, link_ordinal_span);
+
+    if codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL)
+        && codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::NO_MANGLE)
+    {
+        let no_mangle_span =
+            find_attr!(attrs, AttributeKind::NoMangle(no_mangle_span) => *no_mangle_span)
+                .unwrap_or_default();
+        let lang_item =
+            lang_items::extract(attrs).map_or(None, |(name, _span)| LangItem::from_name(name));
+        let mut err = tcx
+            .dcx()
+            .struct_span_err(
+                no_mangle_span,
+                "`#[no_mangle]` cannot be used on internal language items",
+            )
+            .with_note("Rustc requires this item to have a specific mangled name.")
+            .with_span_label(tcx.def_span(did), "should be the internal language item");
+        if let Some(lang_item) = lang_item {
+            if let Some(link_name) = lang_item.link_name() {
+                err = err
+                    .with_note("If you are trying to prevent mangling to ease debugging, many")
+                    .with_note(format!(
+                        "debuggers support a command such as `rbreak {link_name}` to"
+                    ))
+                    .with_note(format!(
+                        "match `.*{link_name}.*` instead of `break {link_name}` on a specific name"
+                    ))
+            }
+        }
+        err.emit();
+    }
 
     // Any linkage to LLVM intrinsics for now forcibly marks them all as never
     // unwinds since LLVM sometimes can't handle codegen which `invoke`s
@@ -645,25 +606,6 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
     }
 
     codegen_fn_attrs
-}
-
-/// Given a map from target_features to whether they are enabled or disabled, ensure only valid
-/// combinations are allowed.
-pub fn check_tied_features(
-    sess: &Session,
-    features: &FxHashMap<&str, bool>,
-) -> Option<&'static [&'static str]> {
-    if !features.is_empty() {
-        for tied in sess.target.tied_target_features() {
-            // Tied features must be set to the same value, or not set at all
-            let mut tied_iter = tied.iter();
-            let enabled = features.get(tied_iter.next().unwrap());
-            if tied_iter.any(|f| enabled != features.get(f)) {
-                return Some(tied);
-            }
-        }
-    }
-    None
 }
 
 /// Checks if the provided DefId is a method in a trait impl for a trait which has track_caller
@@ -785,8 +727,7 @@ impl<'a> MixedExportNameAndNoMangleState<'a> {
 fn autodiff_attrs(tcx: TyCtxt<'_>, id: DefId) -> Option<AutoDiffAttrs> {
     let attrs = tcx.get_attrs(id, sym::rustc_autodiff);
 
-    let attrs =
-        attrs.filter(|attr| attr.name_or_empty() == sym::rustc_autodiff).collect::<Vec<_>>();
+    let attrs = attrs.filter(|attr| attr.has_name(sym::rustc_autodiff)).collect::<Vec<_>>();
 
     // check for exactly one autodiff attribute on placeholder functions.
     // There should only be one, since we generate a new placeholder per ad macro.
@@ -805,8 +746,8 @@ fn autodiff_attrs(tcx: TyCtxt<'_>, id: DefId) -> Option<AutoDiffAttrs> {
         return Some(AutoDiffAttrs::source());
     }
 
-    let [mode, input_activities @ .., ret_activity] = &list[..] else {
-        span_bug!(attr.span(), "rustc_autodiff attribute must contain mode and activities");
+    let [mode, width_meta, input_activities @ .., ret_activity] = &list[..] else {
+        span_bug!(attr.span(), "rustc_autodiff attribute must contain mode, width and activities");
     };
     let mode = if let MetaItemInner::MetaItem(MetaItem { path: p1, .. }) = mode {
         p1.segments.first().unwrap().ident
@@ -820,6 +761,30 @@ fn autodiff_attrs(tcx: TyCtxt<'_>, id: DefId) -> Option<AutoDiffAttrs> {
         "Reverse" => DiffMode::Reverse,
         _ => {
             span_bug!(mode.span, "rustc_autodiff attribute contains invalid mode");
+        }
+    };
+
+    let width: u32 = match width_meta {
+        MetaItemInner::MetaItem(MetaItem { path: p1, .. }) => {
+            let w = p1.segments.first().unwrap().ident;
+            match w.as_str().parse() {
+                Ok(val) => val,
+                Err(_) => {
+                    span_bug!(w.span, "rustc_autodiff width should fit u32");
+                }
+            }
+        }
+        MetaItemInner::Lit(lit) => {
+            if let LitKind::Int(val, _) = lit.kind {
+                match val.get().try_into() {
+                    Ok(val) => val,
+                    Err(_) => {
+                        span_bug!(lit.span, "rustc_autodiff width should fit u32");
+                    }
+                }
+            } else {
+                span_bug!(lit.span, "rustc_autodiff width should be an integer");
+            }
         }
     };
 
@@ -860,7 +825,7 @@ fn autodiff_attrs(tcx: TyCtxt<'_>, id: DefId) -> Option<AutoDiffAttrs> {
         }
     }
 
-    Some(AutoDiffAttrs { mode, ret_activity, input_activity: arg_activities })
+    Some(AutoDiffAttrs { mode, width, ret_activity, input_activity: arg_activities })
 }
 
 pub(crate) fn provide(providers: &mut Providers) {

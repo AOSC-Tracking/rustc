@@ -21,6 +21,7 @@ mod project_goals;
 mod search_graph;
 mod trait_goals;
 
+use derive_where::derive_where;
 use rustc_type_ir::inherent::*;
 pub use rustc_type_ir::solve::*;
 use rustc_type_ir::{self as ty, Interner, TypingMode};
@@ -66,6 +67,17 @@ fn has_no_inference_or_external_constraints<I: Interner>(
     } = *response.value.external_constraints;
     response.value.var_values.is_identity()
         && region_constraints.is_empty()
+        && opaque_types.is_empty()
+        && normalization_nested_goals.is_empty()
+}
+
+fn has_only_region_constraints<I: Interner>(response: ty::Canonical<I, Response<I>>) -> bool {
+    let ExternalConstraintsData {
+        region_constraints: _,
+        ref opaque_types,
+        ref normalization_nested_goals,
+    } = *response.value.external_constraints;
+    response.value.var_values.is_identity_modulo_regions()
         && opaque_types.is_empty()
         && normalization_nested_goals.is_empty()
 }
@@ -126,7 +138,7 @@ where
     }
 
     #[instrument(level = "trace", skip(self))]
-    fn compute_well_formed_goal(&mut self, goal: Goal<I, I::GenericArg>) -> QueryResult<I> {
+    fn compute_well_formed_goal(&mut self, goal: Goal<I, I::Term>) -> QueryResult<I> {
         match self.well_formed_goals(goal.param_env, goal.predicate) {
             Some(goals) => {
                 self.add_goals(GoalSource::Misc, goals);
@@ -225,8 +237,8 @@ where
             return None;
         }
 
-        // FIXME(-Znext-solver): We should instead try to find a `Certainty::Yes` response with
-        // a subset of the constraints that all the other responses have.
+        // FIXME(-Znext-solver): Add support to merge region constraints in
+        // responses to deal with trait-system-refactor-initiative#27.
         let one = responses[0];
         if responses[1..].iter().all(|&resp| resp == one) {
             return Some(one);
@@ -242,16 +254,18 @@ where
     }
 
     fn bail_with_ambiguity(&mut self, responses: &[CanonicalResponse<I>]) -> CanonicalResponse<I> {
-        debug_assert!(!responses.is_empty());
-        if let Certainty::Maybe(maybe_cause) =
-            responses.iter().fold(Certainty::AMBIGUOUS, |certainty, response| {
-                certainty.unify_with(response.value.certainty)
-            })
-        {
-            self.make_ambiguous_response_no_constraints(maybe_cause)
-        } else {
-            panic!("expected flounder response to be ambiguous")
-        }
+        debug_assert!(responses.len() > 1);
+        let maybe_cause = responses.iter().fold(MaybeCause::Ambiguity, |maybe_cause, response| {
+            // Pull down the certainty of `Certainty::Yes` to ambiguity when combining
+            // these responses, b/c we're combining more than one response and this we
+            // don't know which one applies.
+            let candidate = match response.value.certainty {
+                Certainty::Yes => MaybeCause::Ambiguity,
+                Certainty::Maybe(candidate) => candidate,
+            };
+            maybe_cause.or(candidate)
+        });
+        self.make_ambiguous_response_no_constraints(maybe_cause)
     }
 
     /// If we fail to merge responses we flounder and return overflow or ambiguity.
@@ -329,7 +343,8 @@ where
             TypingMode::Coherence | TypingMode::PostAnalysis => false,
             // During analysis, opaques are rigid unless they may be defined by
             // the current body.
-            TypingMode::Analysis { defining_opaque_types: non_rigid_opaques }
+            TypingMode::Analysis { defining_opaque_types_and_generators: non_rigid_opaques }
+            | TypingMode::Borrowck { defining_opaque_types: non_rigid_opaques }
             | TypingMode::PostBorrowckAnalysis { defined_opaque_types: non_rigid_opaques } => {
                 !def_id.as_local().is_some_and(|def_id| non_rigid_opaques.contains(&def_id))
             }
@@ -340,7 +355,7 @@ where
 fn response_no_constraints_raw<I: Interner>(
     cx: I,
     max_universe: ty::UniverseIndex,
-    variables: I::CanonicalVars,
+    variables: I::CanonicalVarKinds,
     certainty: Certainty,
 ) -> CanonicalResponse<I> {
     ty::Canonical {
@@ -354,4 +369,22 @@ fn response_no_constraints_raw<I: Interner>(
             certainty,
         },
     }
+}
+
+/// The result of evaluating a goal.
+pub struct GoalEvaluation<I: Interner> {
+    pub certainty: Certainty,
+    pub has_changed: HasChanged,
+    /// If the [`Certainty`] was `Maybe`, then keep track of whether the goal has changed
+    /// before rerunning it.
+    pub stalled_on: Option<GoalStalledOn<I>>,
+}
+
+/// The conditions that must change for a goal to warrant
+#[derive_where(Clone, Debug; I: Interner)]
+pub struct GoalStalledOn<I: Interner> {
+    pub num_opaques: usize,
+    pub stalled_vars: Vec<I::GenericArg>,
+    /// The cause that will be returned on subsequent evaluations if this goal remains stalled.
+    pub stalled_cause: MaybeCause,
 }

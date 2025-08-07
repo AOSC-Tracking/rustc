@@ -427,7 +427,7 @@ fn has_custom_linkage(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
         // FIXME(nbdd0121): `#[used]` are marked as reachable here so it's picked up by
         // `linked_symbols` in cg_ssa. They won't be exported in binary or cdylib due to their
         // `SymbolExportLevel::Rust` export level but may end up being exported in dylibs.
-        || codegen_attrs.flags.contains(CodegenFnAttrFlags::USED)
+        || codegen_attrs.flags.contains(CodegenFnAttrFlags::USED_COMPILER)
         || codegen_attrs.flags.contains(CodegenFnAttrFlags::USED_LINKER)
 }
 
@@ -435,10 +435,12 @@ fn has_custom_linkage(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
 fn reachable_set(tcx: TyCtxt<'_>, (): ()) -> LocalDefIdSet {
     let effective_visibilities = &tcx.effective_visibilities(());
 
-    let any_library = tcx
-        .crate_types()
-        .iter()
-        .any(|ty| *ty == CrateType::Rlib || *ty == CrateType::Dylib || *ty == CrateType::ProcMacro);
+    let any_library = tcx.crate_types().iter().any(|ty| {
+        *ty == CrateType::Rlib
+            || *ty == CrateType::Dylib
+            || *ty == CrateType::ProcMacro
+            || *ty == CrateType::Sdylib
+    });
     let mut reachable_context = ReachableContext {
         tcx,
         maybe_typeck_results: None,

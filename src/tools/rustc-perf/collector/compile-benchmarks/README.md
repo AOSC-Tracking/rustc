@@ -15,55 +15,44 @@ There are three categories of compile-time benchmarks, **Primary**, **Secondary*
 These are real programs that are important in some way, and worth tracking.
 They mostly consist of real-world crates.
 
-- **bitmaps-3.1.0**: A bitmaps implementation. Stresses the compiler's trait
+- **bitmaps-3.2.1**: A bitmaps implementation. Stresses the compiler's trait
   handling by implementing a trait `Bits` for the type `BitsImpl<N>` for every
   `N` value from 1 to 1024.
-- **cargo-0.60.0**: The Rust package manager. A large program, and an important
+- **cargo-0.87.1**: The Rust package manager. A large program, and an important
   part of the Rust ecosystem.
-- **clap-3.1.6**: A command line argument parser library. A crate used by many
-  Rust programs.
-- **cranelift-codegen-0.82.1**: The largest crate from a code generator. Used by
-  wasmtime. Stresses obligation processing.
-- **diesel-1.4.8**: A type safe SQL query builder. Utilizes the type system to
-  ensure a lot of invariants. Stresses anything related to resolving
-  trait bounds, by having a lot of trait impls for a large number of different
-  types.
-- **exa-0.10.1**: An `ls` replacement. A widely-used utility, and a binary
-  crate.
+- **clap_derive-4.5.32**: The proc macro sub-crate of a command line argument parser library that is used by many Rust programs.
+- **cranelift-codegen-0.119.0**: The largest crate from a code generator. Used by wasmtime. Stresses obligation processing.
+- **diesel-2.2:10**: A type-safe SQL query builder. Utilizes the type system to ensure a lot of invariants. Stresses anything related to resolving trait bounds, by having a lot of trait impls for a large number of different types.
+- **eza-0.21.2**: An `ls` replacement. A widely-used utility, and a binary crate. Fork of `exa`.
 - **helloworld**: A trivial program. Gives a lower bound on compile time.
-- **html5ever-0.26.0**: An HTML parser. Stresses macro parsing code.
-- **hyper-0.14.18**: A fairly large crate. Utilizes async/await, and used by
-  many Rust programs. The crate uses cargo features to enable large portions of its
-  structure and is built with `--features=client,http1,http2,server,stream`.
-- **image-0.24.1**: Basic image processing functions and methods for 
-  converting to and from various image formats. Used often in graphics 
+- **html5ever-0.31.0**: An HTML parser. Stresses macro parsing code.
+- **hyper-1.6.0**: Utilizes async/await, and is used by
+  many Rust programs. The crate uses cargo features to enable large portions of its structure and is built with `--features=full`.
+- **image-0.25.6**: Basic image processing functions and methods for
+  converting to and from various image formats. Used often in graphics
   programming.
-- **libc-0.2.124**: An interface to `libc`. Contains many declarations of
-  types, constants, and functions, but relatively little normal code. Stresses
-  the parser. A very widely-used crate.
+- **libc-0.2.172**: An interface to `libc`. Contains many declarations of
+  types, constants, and functions, but relatively little normal code. Stresses the parser. A very widely-used crate.
 - **nalgebra-0.33.0**: A linear algebra library. It exercises the new trait solver
   in different ways than the old solver.
-- **regex-1.5.5**: A regular expression parser. Used by many Rust programs.
-- **ripgrep-13.0.0**: A line-oriented search tool. A widely-used utility, and a
+- **regex-automata-0.4.8**: A regular expression matching engine. Used by `regex`, which is used by
+  many Rust programs.
+- **ripgrep-14.1.1**: A line-oriented search tool. A widely-used utility, and a
   binary crate.
-- **serde-1.0.136**: A serialization/deserialization crate. Used by many other
+- **serde-1.0.219**: A serialization/deserialization crate. Used by many other
   Rust programs.
-- **serde_derive-1.0.136**: A proc-macro sub-crate used by `serde`. Used by
+- **serde_derive-1.0.219**: A proc-macro sub-crate used by `serde`. Used by
   many other Rust programs. Stresses declarative macro expansion somewhat.
-- **stm32f4-0.14.0**: A crate that has many thousands of blanket impl blocks.
+- **stm32f4-0.15.1**: A crate that has many thousands of blanket impl blocks.
   It uses cargo features to enable large portions of its structure and is
   built with `--features=stm32f410` to have faster benchmarking times.
-- **syn-1.0.89**: A library for parsing Rust code. An important part of the Rust
+- **syn-2.0.101**: A library for parsing Rust code. An important part of the Rust
   ecosystem.
-- **typenum-1.17.0**: A library that encodes integer computation within the trait system. Serves as
+- **typenum-1.18.0**: A library that encodes integer computation within the trait system. Serves as
   a stress test for the trait solver, but at the same time it is also a very popular crate.
-- **unicode-normalization-0.1.19**: Unicode character composition and decomposition
+- **unicode-normalization-0.1.24**: Unicode character composition and decomposition
   utilities. Uses huge `match` statements that stress the compiler in unusual
   ways.
-- **webrender-2022**: A web renderer. A large, complex crate used by Firefox
-  and Servo. Webrender isn't released regularly so this is a development
-  version (revision da1df33). The `-2022` suffix distinguishes it from earlier
-  Webrender versions that used to be used in this benchmark suite.
 
 ## Secondary
 
@@ -97,6 +86,9 @@ compiler in interesting ways.
 - **issue-88862**: A MCVE of a program that had a
   [severe performance regression](https://github.com/rust-lang/rust/issues/88862)
   when trying to normalize large opaque types with late-bound regions.
+- **large-workspace**: A stress test for searching for and loading metadata of a
+  large number (hundreds) of (both directly and indirectly) dependent crates,
+  and instantiating generic/inlined code from them.
 - **many-assoc-items**: Contains a struct with many associated items, which
   caused [quadratic behavior](https://github.com/rust-lang/rust/issues/68957)
   in the past.
@@ -111,8 +103,8 @@ compiler in interesting ways.
   actix-web and other libraries with similarly nested type combinators.
 - **regression-31157**: A small program that caused a [large performance
   regression](https://github.com/rust-lang/rust/issues/31157) from the past.
-- **ripgrep-13.0.0-tiny**: A line-oriented search tool, optimized with flags that should reduce
-  binary size.
+- **ripgrep-14.1.1-tiny**: A line-oriented search tool, optimized with flags
+  that should reduce binary size.
 - **token-stream-stress**: A proc-macro crate. Constructs a long token stream
   much like the `quote` crate does, which caused [quadratic
   behavior](https://github.com/rust-lang/rust/issues/65080) in the past.
@@ -177,9 +169,10 @@ Rust code being written today.
     anything we should be aware of when using this crate as a compile-time
     benchmark.
   - Look at [crates.io](https://crates.io) to find the latest (non-prerelease) version.
-  - Download it with `collector download -c $CATEGORY -a $ARTIFACT crate $NAME $VERSION`.
-    The `$CATEGORY` is probably `primary`. `$ARTIFACT` is either `library` or `binary`, depending
-    on what kind of artifact does the benchmark build.
+  - Download it with `target/release/collector download -c $CATEGORY -a
+    $ARTIFACT crate $NAME $VERSION`. The `$CATEGORY` is probably `Primary`.
+    `$ARTIFACT` is either `library` or `binary`, depending on what kind of
+    artifact does the benchmark build.
 - It makes it easier for reviewers if you split things into two commits.
 - In the first commit, just add the code for the entire benchmark.
   - Do this by doing `git add` on the new directory.
@@ -250,6 +243,7 @@ Rust code being written today.
   - Do this with `git rm -r` on the directory.
 - In the second commit do everything else.
   - Remove the entry from `collector/compile-benchmarks/README.md`.
+  - Remove the entry from `collector/compile-benchmarks/REUSE.toml`.
   - `git grep` for occurrences of the old benchmark name (e.g. in
     `.github/workflows/ci.yml` or `ci/check-*.sh`) and see if anything needs
     changing... usually not.
@@ -310,3 +304,5 @@ Costs of this approach:
 History:
 - The first mass update of third-party crates occurred in [March/April
   2022](https://hackmd.io/d9uE7qgtTWKDLivy0uoVQw).
+- The second mass update of third-party crates occurred in [April/May
+  2025](https://github.com/rust-lang/rustc-perf/issues/2024).

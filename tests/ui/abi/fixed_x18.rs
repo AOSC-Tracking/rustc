@@ -2,7 +2,6 @@
 // Behavior on aarch64 is tested by tests/codegen/fixed-x18.rs.
 //
 //@ revisions: x64 i686 arm riscv32 riscv64
-//@ error-pattern: the `-Zfixed-x18` flag is not supported
 //@ dont-check-compiler-stderr
 //
 //@ compile-flags: -Zfixed-x18
@@ -21,5 +20,11 @@
 #![feature(no_core, lang_items)]
 #![no_core]
 
+#[lang = "pointee_sized"]
+trait PointeeSized {}
+#[lang = "meta_sized"]
+trait MetaSized: PointeeSized {}
 #[lang = "sized"]
-trait Sized {}
+trait Sized: MetaSized {}
+
+//~? ERROR the `-Zfixed-x18` flag is not supported on the `

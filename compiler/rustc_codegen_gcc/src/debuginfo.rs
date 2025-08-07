@@ -52,10 +52,6 @@ impl<'a, 'gcc, 'tcx> DebugInfoBuilderMethods for Builder<'a, 'gcc, 'tcx> {
     fn clear_dbg_loc(&mut self) {
         self.location = None;
     }
-
-    fn get_dbg_loc(&self) -> Option<Self::DILocation> {
-        self.location
-    }
 }
 
 /// Generate the `debug_context` in an MIR Body.
@@ -126,14 +122,15 @@ fn make_mir_scope<'gcc, 'tcx>(
         return;
     };
 
-    if let Some(ref vars) = *variables {
-        if !vars.contains(scope) && scope_data.inlined.is_none() {
-            // Do not create a DIScope if there are no variables defined in this
-            // MIR `SourceScope`, and it's not `inlined`, to avoid debuginfo bloat.
-            debug_context.scopes[scope] = parent_scope;
-            instantiated.insert(scope);
-            return;
-        }
+    if let Some(ref vars) = *variables
+        && !vars.contains(scope)
+        && scope_data.inlined.is_none()
+    {
+        // Do not create a DIScope if there are no variables defined in this
+        // MIR `SourceScope`, and it's not `inlined`, to avoid debuginfo bloat.
+        debug_context.scopes[scope] = parent_scope;
+        instantiated.insert(scope);
+        return;
     }
 
     let loc = cx.lookup_debug_loc(scope_data.span.lo());
@@ -288,7 +285,7 @@ impl<'gcc, 'tcx> DebugInfoCodegenMethods<'tcx> for CodegenCx<'gcc, 'tcx> {
     ) -> Self::DILocation {
         let pos = span.lo();
         let DebugLoc { file, line, col } = self.lookup_debug_loc(pos);
-        let loc = match file.name {
+        match file.name {
             rustc_span::FileName::Real(ref name) => match *name {
                 rustc_span::RealFileName::LocalPath(ref name) => {
                     if let Some(name) = name.to_str() {
@@ -313,7 +310,6 @@ impl<'gcc, 'tcx> DebugInfoCodegenMethods<'tcx> for CodegenCx<'gcc, 'tcx> {
                 }
             },
             _ => Location::null(),
-        };
-        loc
+        }
     }
 }

@@ -3,7 +3,7 @@ on:
   push:
     branches:
       - master
-  pull_request: {}
+  pull_request: { }
   schedule:
     - cron: "0 12 * * 1" # Every Monday at 12:00 UTC
 
@@ -14,6 +14,17 @@ jobs:
   test_and_deploy:
     name: Test and deploy
     runs-on: ubuntu-22.04
+    env:
+      TEST_DB_URL: postgres://postgres:testpass@localhost:5432/postgres
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
     steps:
       - name: Checkout the source code
         uses: actions/checkout@v4
@@ -26,7 +37,7 @@ jobs:
           rustup default $RUST_TOOLCHAIN_VERSION
           rustup component add --toolchain $RUST_TOOLCHAIN_VERSION rustfmt clippy
         env:
-          RUST_TOOLCHAIN_VERSION: 1.75.0
+          RUST_TOOLCHAIN_VERSION: 1.81.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -114,8 +125,8 @@ jobs:
         #
         # We want the four parts to have similar runtimes.
         BENCH_INCLUDE_EXCLUDE_OPTS: [
-          "--include cargo-0.60.0,stm32f4-0.14.0,webrender-2022",
-          "--exclude cargo-0.60.0,stm32f4-0.14.0,webrender-2022",
+          "--include cargo-0.87.1,stm32f4-0.15.1",
+          "--exclude cargo-0.87.1,stm32f4-0.15.1",
         ]
         PROFILES: [
           "Check,Debug,Doc",
@@ -383,7 +394,7 @@ jobs:
 
       - name: Gather data
         run: |
-          cargo run --bin collector bench_local `which rustc` --include syn --id version1 \
+          cargo run --bin collector bench_local `rustup which rustc` --include syn --id version1 \
             --self-profile \
             --db postgresql://postgres:postgres@127.0.0.1:5432/postgres
           cargo run --bin collector bench_local `rustup +nightly which rustc` --include syn --id version2 \

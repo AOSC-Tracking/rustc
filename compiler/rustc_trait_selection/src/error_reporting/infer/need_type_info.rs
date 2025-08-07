@@ -6,7 +6,7 @@ use rustc_errors::codes::*;
 use rustc_errors::{Diag, IntoDiagArg};
 use rustc_hir as hir;
 use rustc_hir::def::{CtorOf, DefKind, Namespace, Res};
-use rustc_hir::def_id::{DefId, LOCAL_CRATE, LocalDefId};
+use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::{Body, Closure, Expr, ExprKind, FnRetTy, HirId, LetStmt, LocalSource};
 use rustc_middle::bug;
@@ -14,11 +14,10 @@ use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::adjustment::{Adjust, Adjustment, AutoBorrow};
 use rustc_middle::ty::print::{FmtPrinter, PrettyPrinter, Print, Printer};
 use rustc_middle::ty::{
-    self, GenericArg, GenericArgKind, GenericArgsRef, InferConst, IsSuggestable, Ty, TyCtxt,
-    TypeFoldable, TypeFolder, TypeSuperFoldable, TypeckResults,
+    self, GenericArg, GenericArgKind, GenericArgsRef, InferConst, IsSuggestable, Term, TermKind,
+    Ty, TyCtxt, TypeFoldable, TypeFolder, TypeSuperFoldable, TypeVisitableExt, TypeckResults,
 };
-use rustc_span::{BytePos, DUMMY_SP, FileName, Ident, Span, sym};
-use rustc_type_ir::TypeVisitableExt;
+use rustc_span::{BytePos, DUMMY_SP, Ident, Span, sym};
 use tracing::{debug, instrument, warn};
 
 use super::nice_region_error::placeholder_error::Highlighted;
@@ -216,7 +215,7 @@ impl<'a, 'tcx> TypeFolder<TyCtxt<'tcx>> for ClosureEraser<'a, 'tcx> {
                                 // `_` because then we'd end up with `Vec<_, _>`, instead of
                                 // `Vec<_>`.
                                 arg
-                            } else if let GenericArgKind::Type(_) = arg.unpack() {
+                            } else if let GenericArgKind::Type(_) = arg.kind() {
                                 // We don't replace lifetime or const params, only type params.
                                 self.new_infer().into()
                             } else {
@@ -344,12 +343,12 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
     /// which were stuck during inference.
     pub fn extract_inference_diagnostics_data(
         &self,
-        arg: GenericArg<'tcx>,
+        term: Term<'tcx>,
         highlight: ty::print::RegionHighlightMode<'tcx>,
     ) -> InferenceDiagnosticsData {
         let tcx = self.tcx;
-        match arg.unpack() {
-            GenericArgKind::Type(ty) => {
+        match term.kind() {
+            TermKind::Ty(ty) => {
                 if let ty::Infer(ty::TyVar(ty_vid)) = *ty.kind() {
                     let var_origin = self.infcx.type_var_origin(ty_vid);
                     if let Some(def_id) = var_origin.param_def_id
@@ -375,7 +374,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                     parent: None,
                 }
             }
-            GenericArgKind::Const(ct) => {
+            TermKind::Const(ct) => {
                 if let ty::ConstKind::Infer(InferConst::Var(vid)) = ct.kind() {
                     let origin = self.const_var_origin(vid).expect("expected unresolved const var");
                     if let Some(def_id) = origin.param_def_id {
@@ -411,7 +410,6 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                     }
                 }
             }
-            GenericArgKind::Lifetime(_) => bug!("unexpected lifetime"),
         }
     }
 
@@ -440,7 +438,6 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                 bad_label,
                 was_written: false,
                 path: Default::default(),
-                time_version: false,
             }),
             TypeAnnotationNeeded::E0283 => self.dcx().create_err(AmbiguousImpl {
                 span,
@@ -472,13 +469,13 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         &self,
         body_def_id: LocalDefId,
         failure_span: Span,
-        arg: GenericArg<'tcx>,
+        term: Term<'tcx>,
         error_code: TypeAnnotationNeeded,
         should_label_span: bool,
     ) -> Diag<'a> {
-        let arg = self.resolve_vars_if_possible(arg);
-        let arg_data =
-            self.extract_inference_diagnostics_data(arg, ty::print::RegionHighlightMode::default());
+        let term = self.resolve_vars_if_possible(term);
+        let arg_data = self
+            .extract_inference_diagnostics_data(term, ty::print::RegionHighlightMode::default());
 
         let Some(typeck_results) = &self.typeck_results else {
             // If we don't have any typeck results we're outside
@@ -487,7 +484,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
             return self.bad_inference_failure_err(failure_span, arg_data, error_code);
         };
 
-        let mut local_visitor = FindInferSourceVisitor::new(self, typeck_results, arg);
+        let mut local_visitor = FindInferSourceVisitor::new(self, typeck_results, term);
         if let Some(body) = self.tcx.hir_maybe_body_owned_by(
             self.tcx.typeck_root_def_id(body_def_id.to_def_id()).expect_local(),
         ) {
@@ -542,7 +539,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                 have_turbofish,
             } => {
                 let generics = self.tcx.generics_of(generics_def_id);
-                let is_type = matches!(arg.unpack(), GenericArgKind::Type(_));
+                let is_type = term.as_type().is_some();
 
                 let (parent_exists, parent_prefix, parent_name) =
                     InferenceDiagnosticsParentData::for_parent_def_id(self.tcx, generics_def_id)
@@ -571,7 +568,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                                 return arg;
                             }
 
-                            match arg.unpack() {
+                            match arg.kind() {
                                 GenericArgKind::Lifetime(_) => bug!("unexpected lifetime"),
                                 GenericArgKind::Type(_) => self.next_ty_var(DUMMY_SP).into(),
                                 GenericArgKind::Const(_) => self.next_const_var(DUMMY_SP).into(),
@@ -632,10 +629,6 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                 }
             }
         }
-
-        let time_version =
-            self.detect_old_time_crate_version(failure_span, &kind, &mut infer_subdiags);
-
         match error_code {
             TypeAnnotationNeeded::E0282 => self.dcx().create_err(AnnotationRequired {
                 span,
@@ -647,7 +640,6 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                 bad_label: None,
                 was_written: path.is_some(),
                 path: path.unwrap_or_default(),
-                time_version,
             }),
             TypeAnnotationNeeded::E0283 => self.dcx().create_err(AmbiguousImpl {
                 span,
@@ -672,42 +664,6 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                 path: path.unwrap_or_default(),
             }),
         }
-    }
-
-    /// Detect the inference regression on crate `time` <= 0.3.35 and emit a more targeted error.
-    /// <https://github.com/rust-lang/rust/issues/127343>
-    // FIXME: we should figure out a more generic version of doing this, ideally in cargo itself.
-    fn detect_old_time_crate_version(
-        &self,
-        span: Option<Span>,
-        kind: &InferSourceKind<'_>,
-        // We will clear the non-actionable suggestion from the error to reduce noise.
-        infer_subdiags: &mut Vec<SourceKindSubdiag<'_>>,
-    ) -> bool {
-        // FIXME(#129461): We are time-boxing this code in the compiler. It'll start failing
-        // compilation once we promote 1.89 to beta, which will happen in 9 months from now.
-        #[cfg(not(version("1.89")))]
-        const fn version_check() {}
-        #[cfg(version("1.89"))]
-        const fn version_check() {
-            panic!("remove this check as presumably the ecosystem has moved from needing it");
-        }
-        const { version_check() };
-        // Only relevant when building the `time` crate.
-        if self.infcx.tcx.crate_name(LOCAL_CRATE) == sym::time
-            && let Some(span) = span
-            && let InferSourceKind::LetBinding { pattern_name, .. } = kind
-            && let Some(name) = pattern_name
-            && name.as_str() == "items"
-            && let FileName::Real(file) = self.infcx.tcx.sess.source_map().span_to_filename(span)
-        {
-            let path = file.local_path_if_available().to_string_lossy();
-            if path.contains("format_description") && path.contains("parse") {
-                infer_subdiags.clear();
-                return true;
-            }
-        }
-        false
     }
 }
 
@@ -811,7 +767,7 @@ struct FindInferSourceVisitor<'a, 'tcx> {
     tecx: &'a TypeErrCtxt<'a, 'tcx>,
     typeck_results: &'a TypeckResults<'tcx>,
 
-    target: GenericArg<'tcx>,
+    target: Term<'tcx>,
 
     attempt: usize,
     infer_source_cost: usize,
@@ -822,7 +778,7 @@ impl<'a, 'tcx> FindInferSourceVisitor<'a, 'tcx> {
     fn new(
         tecx: &'a TypeErrCtxt<'a, 'tcx>,
         typeck_results: &'a TypeckResults<'tcx>,
-        target: GenericArg<'tcx>,
+        target: Term<'tcx>,
     ) -> Self {
         FindInferSourceVisitor {
             tecx,
@@ -847,7 +803,7 @@ impl<'a, 'tcx> FindInferSourceVisitor<'a, 'tcx> {
         }
         impl<'tcx> CostCtxt<'tcx> {
             fn arg_cost(self, arg: GenericArg<'tcx>) -> usize {
-                match arg.unpack() {
+                match arg.kind() {
                     GenericArgKind::Lifetime(_) => 0, // erased
                     GenericArgKind::Type(ty) => self.ty_cost(ty),
                     GenericArgKind::Const(_) => 3, // some non-zero value
@@ -938,12 +894,12 @@ impl<'a, 'tcx> FindInferSourceVisitor<'a, 'tcx> {
     // Check whether this generic argument is the inference variable we
     // are looking for.
     fn generic_arg_is_target(&self, arg: GenericArg<'tcx>) -> bool {
-        if arg == self.target {
+        if arg == self.target.into() {
             return true;
         }
 
-        match (arg.unpack(), self.target.unpack()) {
-            (GenericArgKind::Type(inner_ty), GenericArgKind::Type(target_ty)) => {
+        match (arg.kind(), self.target.kind()) {
+            (GenericArgKind::Type(inner_ty), TermKind::Ty(target_ty)) => {
                 use ty::{Infer, TyVar};
                 match (inner_ty.kind(), target_ty.kind()) {
                     (&Infer(TyVar(a_vid)), &Infer(TyVar(b_vid))) => {
@@ -952,7 +908,7 @@ impl<'a, 'tcx> FindInferSourceVisitor<'a, 'tcx> {
                     _ => false,
                 }
             }
-            (GenericArgKind::Const(inner_ct), GenericArgKind::Const(target_ct)) => {
+            (GenericArgKind::Const(inner_ct), TermKind::Const(target_ct)) => {
                 use ty::InferConst::*;
                 match (inner_ct.kind(), target_ct.kind()) {
                     (ty::ConstKind::Infer(Var(a_vid)), ty::ConstKind::Infer(Var(b_vid))) => {
@@ -973,7 +929,7 @@ impl<'a, 'tcx> FindInferSourceVisitor<'a, 'tcx> {
             if self.generic_arg_is_target(inner) {
                 return true;
             }
-            match inner.unpack() {
+            match inner.kind() {
                 GenericArgKind::Lifetime(_) => {}
                 GenericArgKind::Type(ty) => {
                     if matches!(
@@ -1051,7 +1007,7 @@ impl<'a, 'tcx> FindInferSourceVisitor<'a, 'tcx> {
                             None?
                         }
                         let args = self.node_args_opt(expr.hir_id)?;
-                        let span = tcx.hir().span(segment.hir_id);
+                        let span = tcx.hir_span(segment.hir_id);
                         let insert_span = segment.ident.span.shrink_to_hi().with_hi(span.hi());
                         InsertableGenericArgs {
                             insert_span,
@@ -1110,7 +1066,7 @@ impl<'a, 'tcx> FindInferSourceVisitor<'a, 'tcx> {
                 if generics.has_impl_trait() {
                     return None;
                 }
-                let span = tcx.hir().span(segment.hir_id);
+                let span = tcx.hir_span(segment.hir_id);
                 let insert_span = segment.ident.span.shrink_to_hi().with_hi(span.hi());
                 Some(InsertableGenericArgs {
                     insert_span,
@@ -1144,7 +1100,7 @@ impl<'a, 'tcx> FindInferSourceVisitor<'a, 'tcx> {
                     if !segment.infer_args || generics.has_impl_trait() {
                         do yeet ();
                     }
-                    let span = tcx.hir().span(segment.hir_id);
+                    let span = tcx.hir_span(segment.hir_id);
                     let insert_span = segment.ident.span.shrink_to_hi().with_hi(span.hi());
                     InsertableGenericArgs {
                         insert_span,

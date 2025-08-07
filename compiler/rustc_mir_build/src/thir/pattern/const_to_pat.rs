@@ -15,7 +15,7 @@ use rustc_middle::ty::{
 };
 use rustc_middle::{mir, span_bug};
 use rustc_span::def_id::DefId;
-use rustc_span::{Span, sym};
+use rustc_span::{DUMMY_SP, Span, sym};
 use rustc_trait_selection::traits::ObligationCause;
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt;
 use tracing::{debug, instrument, trace};
@@ -58,25 +58,13 @@ struct ConstToPat<'tcx> {
     span: Span,
     id: hir::HirId,
 
-    treat_byte_string_as_slice: bool,
-
     c: ty::Const<'tcx>,
 }
 
 impl<'tcx> ConstToPat<'tcx> {
     fn new(pat_ctxt: &PatCtxt<'_, 'tcx>, id: hir::HirId, span: Span, c: ty::Const<'tcx>) -> Self {
         trace!(?pat_ctxt.typeck_results.hir_owner);
-        ConstToPat {
-            tcx: pat_ctxt.tcx,
-            typing_env: pat_ctxt.typing_env,
-            span,
-            id,
-            treat_byte_string_as_slice: pat_ctxt
-                .typeck_results
-                .treat_byte_string_as_slice
-                .contains(&id.local_id),
-            c,
-        }
+        ConstToPat { tcx: pat_ctxt.tcx, typing_env: pat_ctxt.typing_env, span, id, c }
     }
 
     fn type_marked_structural(&self, ty: Ty<'tcx>) -> bool {
@@ -108,8 +96,6 @@ impl<'tcx> ConstToPat<'tcx> {
         uv: ty::UnevaluatedConst<'tcx>,
         ty: Ty<'tcx>,
     ) -> Box<Pat<'tcx>> {
-        trace!(self.treat_byte_string_as_slice);
-
         // It's not *technically* correct to be revealing opaque types here as borrowcheck has
         // not run yet. However, CTFE itself uses `TypingMode::PostAnalysis` unconditionally even
         // during typeck and not doing so has a lot of (undesirable) fallout (#101478, #119821).
@@ -145,7 +131,7 @@ impl<'tcx> ConstToPat<'tcx> {
                     .dcx()
                     .create_err(ConstPatternDependsOnGenericParameter { span: self.span });
                 for arg in uv.args {
-                    if let ty::GenericArgKind::Type(ty) = arg.unpack()
+                    if let ty::GenericArgKind::Type(ty) = arg.kind()
                         && let ty::Param(param_ty) = ty.kind()
                     {
                         let def_id = self.tcx.hir_enclosing_body_owner(self.id);
@@ -196,7 +182,10 @@ impl<'tcx> ConstToPat<'tcx> {
             }
         }
 
-        inlined_const_as_pat
+        // Wrap the pattern in a marker node to indicate that it is the result of lowering a
+        // constant. This is used for diagnostics, and for unsafety checking of inline const blocks.
+        let kind = PatKind::ExpandedConstant { subpattern: inlined_const_as_pat, def_id: uv.def };
+        Box::new(Pat { kind, ty, span: self.span })
     }
 
     fn field_pats(
@@ -291,6 +280,16 @@ impl<'tcx> ConstToPat<'tcx> {
                 slice: None,
                 suffix: Box::new([]),
             },
+            ty::Str => {
+                // String literal patterns may have type `str` if `deref_patterns` is enabled, in
+                // order to allow `deref!("..."): String`. Since we need a `&str` for the comparison
+                // when lowering to MIR in `Builder::perform_test`, treat the constant as a `&str`.
+                // This works because `str` and `&str` have the same valtree representation.
+                let ref_str_ty = Ty::new_imm_ref(tcx, tcx.lifetimes.re_erased, ty);
+                PatKind::Constant {
+                    value: mir::Const::Ty(ref_str_ty, ty::Const::new_value(tcx, cv, ref_str_ty)),
+                }
+            }
             ty::Ref(_, pointee_ty, ..) => match *pointee_ty.kind() {
                 // `&str` is represented as a valtree, let's keep using this
                 // optimization for now.
@@ -307,21 +306,8 @@ impl<'tcx> ConstToPat<'tcx> {
                             ty,
                         );
                     } else {
-                        // `b"foo"` produces a `&[u8; 3]`, but you can't use constants of array type when
-                        // matching against references, you can only use byte string literals.
-                        // The typechecker has a special case for byte string literals, by treating them
-                        // as slices. This means we turn `&[T; N]` constants into slice patterns, which
-                        // has no negative effects on pattern matching, even if we're actually matching on
-                        // arrays.
-                        let pointee_ty = match *pointee_ty.kind() {
-                            ty::Array(elem_ty, _) if self.treat_byte_string_as_slice => {
-                                Ty::new_slice(tcx, elem_ty)
-                            }
-                            _ => *pointee_ty,
-                        };
                         // References have the same valtree representation as their pointee.
-                        let subpattern = self.valtree_to_pat(cv, pointee_ty);
-                        PatKind::Deref { subpattern }
+                        PatKind::Deref { subpattern: self.valtree_to_pat(cv, *pointee_ty) }
                     }
                 }
             },
@@ -396,6 +382,9 @@ fn extend_type_not_partial_eq<'tcx>(
         fn visit_ty(&mut self, ty: Ty<'tcx>) -> Self::Result {
             match ty.kind() {
                 ty::Dynamic(..) => return ControlFlow::Break(()),
+                // Unsafe binders never implement `PartialEq`, so avoid walking into them
+                // which would require instantiating its binder with placeholders too.
+                ty::UnsafeBinder(..) => return ControlFlow::Break(()),
                 ty::FnPtr(..) => return ControlFlow::Continue(()),
                 ty::Adt(def, _args) => {
                     let ty_def_id = def.did();
@@ -491,8 +480,9 @@ fn type_has_partial_eq_impl<'tcx>(
     // (If there isn't, then we can safely issue a hard
     // error, because that's never worked, due to compiler
     // using `PartialEq::eq` in this scenario in the past.)
-    let partial_eq_trait_id = tcx.require_lang_item(hir::LangItem::PartialEq, None);
-    let structural_partial_eq_trait_id = tcx.require_lang_item(hir::LangItem::StructuralPeq, None);
+    let partial_eq_trait_id = tcx.require_lang_item(hir::LangItem::PartialEq, DUMMY_SP);
+    let structural_partial_eq_trait_id =
+        tcx.require_lang_item(hir::LangItem::StructuralPeq, DUMMY_SP);
 
     let partial_eq_obligation = Obligation::new(
         tcx,

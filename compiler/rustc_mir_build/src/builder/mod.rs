@@ -13,7 +13,7 @@ use rustc_data_structures::sorted_map::SortedIndexMultiMap;
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LocalDefId};
-use rustc_hir::{self as hir, BindingMode, ByRef, HirId, Node};
+use rustc_hir::{self as hir, BindingMode, ByRef, HirId, ItemLocalId, Node};
 use rustc_index::bit_set::GrowableBitSet;
 use rustc_index::{Idx, IndexSlice, IndexVec};
 use rustc_infer::infer::{InferCtxt, TyCtxtInferExt};
@@ -48,11 +48,11 @@ pub(crate) fn closure_saved_names_of_captured_variables<'tcx>(
 /// this directly; instead use the cached version via `mir_built`.
 pub fn build_mir<'tcx>(tcx: TyCtxt<'tcx>, def: LocalDefId) -> Body<'tcx> {
     tcx.ensure_done().thir_abstract_const(def);
-    if let Err(e) = tcx.check_match(def) {
+    if let Err(e) = tcx.ensure_ok().check_match(def) {
         return construct_error(tcx, def, e);
     }
 
-    if let Err(err) = tcx.check_tail_calls(def) {
+    if let Err(err) = tcx.ensure_ok().check_tail_calls(def) {
         return construct_error(tcx, def, err);
     }
 
@@ -66,8 +66,7 @@ pub fn build_mir<'tcx>(tcx: TyCtxt<'tcx>, def: LocalDefId) -> Body<'tcx> {
                 }
             };
 
-            // this must run before MIR dump, because
-            // "not all control paths return a value" is reported here.
+            // Checking liveness after building the THIR ensures there were no typeck errors.
             //
             // maybe move the check to a MIR pass?
             tcx.ensure_ok().check_liveness(def);
@@ -221,7 +220,7 @@ struct Builder<'a, 'tcx> {
     coverage_info: Option<coverageinfo::CoverageInfoBuilder>,
 }
 
-type CaptureMap<'tcx> = SortedIndexMultiMap<usize, HirId, Capture<'tcx>>;
+type CaptureMap<'tcx> = SortedIndexMultiMap<usize, ItemLocalId, Capture<'tcx>>;
 
 #[derive(Debug)]
 struct Capture<'tcx> {
@@ -451,13 +450,9 @@ fn construct_fn<'tcx>(
     let span = tcx.def_span(fn_def);
     let fn_id = tcx.local_def_id_to_hir_id(fn_def);
 
-    // The representation of thir for `-Zunpretty=thir-tree` relies on
-    // the entry expression being the last element of `thir.exprs`.
-    assert_eq!(expr.as_usize(), thir.exprs.len() - 1);
-
     // Figure out what primary body this item has.
     let body = tcx.hir_body_owned_by(fn_def);
-    let span_with_body = tcx.hir().span_with_body(fn_id);
+    let span_with_body = tcx.hir_span_with_body(fn_id);
     let return_ty_span = tcx
         .hir_fn_decl_by_hir_id(fn_id)
         .unwrap_or_else(|| span_bug!(span, "can't build MIR for {:?}", fn_def))
@@ -485,7 +480,7 @@ fn construct_fn<'tcx>(
     };
 
     if let Some(custom_mir_attr) =
-        tcx.hir_attrs(fn_id).iter().find(|attr| attr.name_or_empty() == sym::custom_mir)
+        tcx.hir_attrs(fn_id).iter().find(|attr| attr.has_name(sym::custom_mir))
     {
         return custom::build_custom_mir(
             tcx,
@@ -563,7 +558,7 @@ fn construct_const<'a, 'tcx>(
     // Figure out what primary body this item has.
     let (span, const_ty_span) = match tcx.hir_node(hir_id) {
         Node::Item(hir::Item {
-            kind: hir::ItemKind::Static(_, ty, _, _) | hir::ItemKind::Const(_, ty, _, _),
+            kind: hir::ItemKind::Static(_, _, ty, _) | hir::ItemKind::Const(_, _, ty, _),
             span,
             ..
         })
@@ -853,6 +848,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         let capture_tys = upvar_args.upvar_tys();
 
         let tcx = self.tcx;
+        let mut upvar_owner = None;
         self.upvars = tcx
             .closure_captures(self.def_id)
             .iter()
@@ -866,6 +862,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     HirPlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
                     _ => bug!("Expected an upvar"),
                 };
+                let upvar_base = upvar_owner.get_or_insert(var_id.owner);
+                assert_eq!(*upvar_base, var_id.owner);
+                let var_id = var_id.local_id;
 
                 let mutability = captured_place.mutability;
 
@@ -994,7 +993,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             self.source_scope = source_scope;
         }
 
-        if self.tcx.intrinsic(self.def_id).is_some_and(|i| i.must_be_overridden) {
+        if self.tcx.intrinsic(self.def_id).is_some_and(|i| i.must_be_overridden)
+            || self.tcx.is_sdylib_interface_build()
+        {
             let source_info = self.source_info(rustc_span::DUMMY_SP);
             self.cfg.terminate(block, source_info, TerminatorKind::Unreachable);
             self.cfg.start_new_block().unit()

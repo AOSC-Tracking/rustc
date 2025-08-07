@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt;
 use std::hash::Hash;
 
@@ -150,6 +151,7 @@ impl<'tcx> MonoItem<'tcx> {
 
         // If the function is #[naked] or contains any other attribute that requires exactly-once
         // instantiation:
+        // We emit an unused_attributes lint for this case, which should be kept in sync if possible.
         let codegen_fn_attrs = tcx.codegen_fn_attrs(instance.def_id());
         if codegen_fn_attrs.contains_extern_indicator()
             || codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::NAKED)
@@ -317,7 +319,7 @@ impl<'tcx> fmt::Display for MonoItem<'tcx> {
         match *self {
             MonoItem::Fn(instance) => write!(f, "fn {instance}"),
             MonoItem::Static(def_id) => {
-                write!(f, "static {}", Instance::new(def_id, GenericArgs::empty()))
+                write!(f, "static {}", Instance::new_raw(def_id, GenericArgs::empty()))
             }
             MonoItem::GlobalAsm(..) => write!(f, "global_asm"),
         }
@@ -467,6 +469,29 @@ impl<'tcx> CodegenUnit<'tcx> {
         hash.as_u128().to_base_fixed_len(CASE_INSENSITIVE)
     }
 
+    pub fn shorten_name(human_readable_name: &str) -> Cow<'_, str> {
+        // Set a limit a somewhat below the common platform limits for file names.
+        const MAX_CGU_NAME_LENGTH: usize = 200;
+        const TRUNCATED_NAME_PREFIX: &str = "-trunc-";
+        if human_readable_name.len() > MAX_CGU_NAME_LENGTH {
+            let mangled_name = Self::mangle_name(human_readable_name);
+            // Determine a safe byte offset to truncate the name to
+            let truncate_to = human_readable_name.floor_char_boundary(
+                MAX_CGU_NAME_LENGTH - TRUNCATED_NAME_PREFIX.len() - mangled_name.len(),
+            );
+            format!(
+                "{}{}{}",
+                &human_readable_name[..truncate_to],
+                TRUNCATED_NAME_PREFIX,
+                mangled_name
+            )
+            .into()
+        } else {
+            // If the name is short enough, we can just return it as is.
+            human_readable_name.into()
+        }
+    }
+
     pub fn compute_size_estimate(&mut self) {
         // The size of a codegen unit as the sum of the sizes of the items
         // within it.
@@ -529,6 +554,8 @@ impl<'tcx> CodegenUnit<'tcx> {
                             | InstanceKind::CloneShim(..)
                             | InstanceKind::ThreadLocalShim(..)
                             | InstanceKind::FnPtrAddrShim(..)
+                            | InstanceKind::AsyncDropGlue(..)
+                            | InstanceKind::FutureDropPollShim(..)
                             | InstanceKind::AsyncDropGlueCtorShim(..) => None,
                         }
                     }
@@ -601,7 +628,7 @@ impl<'tcx> CodegenUnitNameBuilder<'tcx> {
         let cgu_name = self.build_cgu_name_no_mangle(cnum, components, special_suffix);
 
         if self.tcx.sess.opts.unstable_opts.human_readable_cgu_names {
-            cgu_name
+            Symbol::intern(&CodegenUnit::shorten_name(cgu_name.as_str()))
         } else {
             Symbol::intern(&CodegenUnit::mangle_name(cgu_name.as_str()))
         }

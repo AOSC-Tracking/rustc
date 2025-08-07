@@ -5,7 +5,7 @@ use std::num::NonZero;
 
 use rustc_ast::NodeId;
 use rustc_attr_data_structures::{
-    self as attr, ConstStability, DefaultBodyStability, DeprecatedSince, Deprecation, Stability,
+    self as attrs, ConstStability, DefaultBodyStability, DeprecatedSince, Deprecation, Stability,
 };
 use rustc_data_structures::unord::UnordMap;
 use rustc_errors::{Applicability, Diag, EmissionGuarantee};
@@ -255,7 +255,7 @@ fn late_report_deprecation(
     // Calculating message for lint involves calling `self.def_path_str`,
     // which will by default invoke the expensive `visible_parent_map` query.
     // Skip all that work if the lint is allowed anyway.
-    if tcx.lint_level_at_node(lint, hir_id).0 == Level::Allow {
+    if tcx.lint_level_at_node(lint, hir_id).level == Level::Allow {
         return;
     }
 
@@ -411,7 +411,7 @@ impl<'tcx> TyCtxt<'tcx> {
 
         match stability {
             Some(Stability {
-                level: attr::StabilityLevel::Unstable { reason, issue, is_soft, implied_by },
+                level: attrs::StabilityLevel::Unstable { reason, issue, is_soft, implied_by, .. },
                 feature,
                 ..
             }) => {
@@ -494,7 +494,7 @@ impl<'tcx> TyCtxt<'tcx> {
 
         match stability {
             Some(DefaultBodyStability {
-                level: attr::StabilityLevel::Unstable { reason, issue, is_soft, .. },
+                level: attrs::StabilityLevel::Unstable { reason, issue, is_soft, .. },
                 feature,
             }) => {
                 if span.allows_unstable(feature) {
@@ -643,7 +643,7 @@ impl<'tcx> TyCtxt<'tcx> {
 
         match stability {
             Some(ConstStability {
-                level: attr::StabilityLevel::Unstable { reason, issue, is_soft, implied_by, .. },
+                level: attrs::StabilityLevel::Unstable { reason, issue, is_soft, implied_by, .. },
                 feature,
                 ..
             }) => {

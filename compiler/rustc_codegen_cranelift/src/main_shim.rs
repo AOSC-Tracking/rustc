@@ -1,6 +1,6 @@
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use rustc_hir::LangItem;
-use rustc_middle::ty::{AssocKind, GenericArg};
+use rustc_middle::ty::{AssocTag, GenericArg};
 use rustc_session::config::EntryFnType;
 use rustc_span::{DUMMY_SP, Ident};
 
@@ -101,13 +101,13 @@ pub(crate) fn maybe_create_entry_wrapper(
                 let call_inst = bcx.ins().call(main_func_ref, &[]);
                 let call_results = bcx.func.dfg.inst_results(call_inst).to_owned();
 
-                let termination_trait = tcx.require_lang_item(LangItem::Termination, None);
+                let termination_trait = tcx.require_lang_item(LangItem::Termination, DUMMY_SP);
                 let report = tcx
                     .associated_items(termination_trait)
-                    .find_by_name_and_kind(
+                    .find_by_ident_and_kind(
                         tcx,
                         Ident::from_str("report"),
-                        AssocKind::Fn,
+                        AssocTag::Fn,
                         termination_trait,
                     )
                     .unwrap();
@@ -136,7 +136,7 @@ pub(crate) fn maybe_create_entry_wrapper(
                 }
             } else {
                 // Regular main fn invoked via start lang item.
-                let start_def_id = tcx.require_lang_item(LangItem::Start, None);
+                let start_def_id = tcx.require_lang_item(LangItem::Start, DUMMY_SP);
                 let start_instance = Instance::expect_resolve(
                     tcx,
                     ty::TypingEnv::fully_monomorphized(),

@@ -99,6 +99,7 @@ In summary, the supported environment variables are:
 * `CARGO_BUILD_RUSTDOCFLAGS` --- Extra `rustdoc` flags, see [`build.rustdocflags`].
 * `CARGO_BUILD_INCREMENTAL` --- Incremental compilation, see [`build.incremental`].
 * `CARGO_BUILD_DEP_INFO_BASEDIR` --- Dep-info relative directory, see [`build.dep-info-basedir`].
+* `CARGO_CACHE_AUTO_CLEAN_FREQUENCY` --- Configures how often automatic cache cleaning runs, see [`cache.auto-clean-frequency`].
 * `CARGO_CARGO_NEW_VCS` --- The default source control system with [`cargo new`], see [`cargo-new.vcs`].
 * `CARGO_FUTURE_INCOMPAT_REPORT_FREQUENCY` --- How often we should generate a future incompat report notification, see [`future-incompat-report.frequency`].
 * `CARGO_HTTP_DEBUG` --- Enables HTTP debugging, see [`http.debug`].
@@ -163,6 +164,7 @@ In summary, the supported environment variables are:
 [`build.incremental`]: config.md#buildincremental
 [`build.dep-info-basedir`]: config.md#builddep-info-basedir
 [`doc.browser`]: config.md#docbrowser
+[`cache.auto-clean-frequency`]: config.md#cacheauto-clean-frequency
 [`cargo-new.name`]: config.md#cargo-newname
 [`cargo-new.email`]: config.md#cargo-newemail
 [`cargo-new.vcs`]: config.md#cargo-newvcs
@@ -350,7 +352,7 @@ let out_dir = env::var("OUT_DIR").unwrap();
     * `CARGO_CFG_TARGET_ARCH=x86_64` --- The CPU [target architecture].
     * `CARGO_CFG_TARGET_VENDOR=apple` --- The [target vendor].
     * `CARGO_CFG_TARGET_ENV=gnu` --- The [target environment] ABI.
-    * `CARGO_CFG_TARGET_ABI=sim` --- The [target ABI].
+    * `CARGO_CFG_TARGET_ABI=eabihf` --- The [target ABI].
     * `CARGO_CFG_TARGET_POINTER_WIDTH=64` --- The CPU [pointer width].
     * `CARGO_CFG_TARGET_ENDIAN=little` --- The CPU [target endianness].
     * `CARGO_CFG_TARGET_FEATURE=mmx,sse` --- List of CPU [target features] enabled.

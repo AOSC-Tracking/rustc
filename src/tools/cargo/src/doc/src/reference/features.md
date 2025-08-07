@@ -187,7 +187,7 @@ The [`default` features](#the-default-feature) can be disabled using
 
 ```toml
 [dependencies]
-flate2 = { version = "1.0.3", default-features = false, features = ["zlib"] }
+flate2 = { version = "1.0.3", default-features = false, features = ["zlib-rs"] }
 ```
 
 > **Note**: This may not ensure the default features are disabled. If another
@@ -244,12 +244,11 @@ enabled:
   "foo bar"`). If building multiple packages in a [workspace], the
   `package-name/feature-name` syntax can be used to specify features for
   specific workspace members.
-
-* `--all-features`: Activates all features of all packages selected on the
-  command-line.
-
+* `--all-features`: Activates all features of all packages selected on the command line.
 * `--no-default-features`: Does not activate the [`default`
   feature](#the-default-feature) of the selected packages.
+  
+**NOTE**: check the individual subcommand documentation for details. Not all flags are available for all subcommands.
 
 [workspace]: workspaces.md
 

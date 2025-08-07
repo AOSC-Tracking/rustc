@@ -181,7 +181,6 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             let closure = self.add_moved_or_invoked_closure_note(location, used_place, &mut err);
 
             let mut is_loop_move = false;
-            let mut in_pattern = false;
             let mut seen_spans = FxIndexSet::default();
 
             for move_site in &move_site_vec {
@@ -204,7 +203,6 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                     self.suggest_ref_or_clone(
                         mpi,
                         &mut err,
-                        &mut in_pattern,
                         move_spans,
                         moved_place.as_ref(),
                         &mut has_suggest_reborrow,
@@ -256,15 +254,6 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             let place = &self.move_data.move_paths[mpi].place;
             let ty = place.ty(self.body, self.infcx.tcx).ty;
 
-            // If we're in pattern, we do nothing in favor of the previous suggestion (#80913).
-            // Same for if we're in a loop, see #101119.
-            if is_loop_move & !in_pattern && !matches!(use_spans, UseSpans::ClosureUse { .. }) {
-                if let ty::Ref(_, _, hir::Mutability::Mut) = ty.kind() {
-                    // We have a `&mut` ref, we need to reborrow on each iteration (#62112).
-                    self.suggest_reborrow(&mut err, span, moved_place);
-                }
-            }
-
             if self.infcx.param_env.caller_bounds().iter().any(|c| {
                 c.as_trait_clause().is_some_and(|pred| {
                     pred.skip_binder().self_ty() == ty && self.infcx.tcx.is_fn_trait(pred.def_id())
@@ -274,7 +263,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                 // something that already has `Fn`-like bounds (or is a closure), so we can't
                 // restrict anyways.
             } else {
-                let copy_did = self.infcx.tcx.require_lang_item(LangItem::Copy, Some(span));
+                let copy_did = self.infcx.tcx.require_lang_item(LangItem::Copy, span);
                 self.suggest_adding_bounds(&mut err, ty, copy_did, span);
             }
 
@@ -330,7 +319,6 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
         &self,
         mpi: MovePathIndex,
         err: &mut Diag<'infcx>,
-        in_pattern: &mut bool,
         move_spans: UseSpans<'tcx>,
         moved_place: PlaceRef<'tcx>,
         has_suggest_reborrow: &mut bool,
@@ -545,7 +533,6 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                 && !move_span.is_dummy()
                 && !self.infcx.tcx.sess.source_map().is_imported(move_span)
             {
-                *in_pattern = true;
                 let mut sugg = vec![(pat.span.shrink_to_lo(), "ref ".to_string())];
                 if let Some(pat) = finder.parent_pat {
                     sugg.insert(0, (pat.span.shrink_to_lo(), "ref ".to_string()));
@@ -660,7 +647,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                     && tc.polarity() == ty::PredicatePolarity::Positive
                     && supertrait_def_ids(tcx, tc.def_id())
                         .flat_map(|trait_did| tcx.associated_items(trait_did).in_definition_order())
-                        .any(|item| item.fn_has_self_parameter)
+                        .any(|item| item.is_method())
             })
         }) {
             return None;
@@ -1278,12 +1265,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                 && let CallKind::FnCall { fn_trait_id, self_ty } = kind
                 && let ty::Param(_) = self_ty.kind()
                 && ty == self_ty
-                && [
-                    self.infcx.tcx.lang_items().fn_once_trait(),
-                    self.infcx.tcx.lang_items().fn_mut_trait(),
-                    self.infcx.tcx.lang_items().fn_trait(),
-                ]
-                .contains(&Some(fn_trait_id))
+                && self.infcx.tcx.fn_trait_kind_from_def_id(fn_trait_id).is_some()
             {
                 // Do not suggest `F: FnOnce() + Clone`.
                 false
@@ -1364,7 +1346,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
         }
         // Try to find predicates on *generic params* that would allow copying `ty`
         let mut suggestion =
-            if let Some(symbol) = tcx.hir().maybe_get_struct_pattern_shorthand_field(expr) {
+            if let Some(symbol) = tcx.hir_maybe_get_struct_pattern_shorthand_field(expr) {
                 format!(": {symbol}.clone()")
             } else {
                 ".clone()".to_owned()
@@ -1933,7 +1915,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
 
         let local_ty = self.body.local_decls[place.local].ty;
         let typeck_results = tcx.typeck(self.mir_def_id());
-        let clone = tcx.require_lang_item(LangItem::Clone, Some(body.span));
+        let clone = tcx.require_lang_item(LangItem::Clone, body.span);
         for expr in expr_finder.clones {
             if let hir::ExprKind::MethodCall(_, rcvr, _, span) = expr.kind
                 && let Some(rcvr_ty) = typeck_results.node_type_opt(rcvr.hir_id)
@@ -2513,11 +2495,11 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
         );
         let ty::Tuple(params) = tupled_params.kind() else { return };
 
-        // Find the first argument with a matching type, get its name
-        let Some(this_name) = params.iter().zip(tcx.hir_body_param_names(closure.body)).find_map(
-            |(param_ty, name)| {
+        // Find the first argument with a matching type and get its identifier.
+        let Some(this_name) = params.iter().zip(tcx.hir_body_param_idents(closure.body)).find_map(
+            |(param_ty, ident)| {
                 // FIXME: also support deref for stuff like `Rc` arguments
-                if param_ty.peel_refs() == local_ty { name } else { None }
+                if param_ty.peel_refs() == local_ty { ident } else { None }
             },
         ) else {
             return;
@@ -2972,21 +2954,22 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             }
         }
 
-        let mut err = self.path_does_not_live_long_enough(borrow_span, &format!("`{name}`"));
+        let name = format!("`{name}`");
+
+        let mut err = self.path_does_not_live_long_enough(borrow_span, &name);
 
         if let Some(annotation) = self.annotate_argument_and_return_for_borrow(borrow) {
             let region_name = annotation.emit(self, &mut err);
 
             err.span_label(
                 borrow_span,
-                format!("`{name}` would have to be valid for `{region_name}`..."),
+                format!("{name} would have to be valid for `{region_name}`..."),
             );
 
             err.span_label(
                 drop_span,
                 format!(
-                    "...but `{}` will be dropped here, when the {} returns",
-                    name,
+                    "...but {name} will be dropped here, when the {} returns",
                     self.infcx
                         .tcx
                         .opt_item_name(self.mir_def_id().to_def_id())
@@ -3024,7 +3007,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             }
         } else {
             err.span_label(borrow_span, "borrowed value does not live long enough");
-            err.span_label(drop_span, format!("`{name}` dropped here while still borrowed"));
+            err.span_label(drop_span, format!("{name} dropped here while still borrowed"));
 
             borrow_spans.args_subdiag(&mut err, |args_span| {
                 crate::session_diagnostics::CaptureArgLabel::Capture {
@@ -3218,14 +3201,6 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                         let expr_ty: Option<Ty<'_>> =
                             visitor.prop_expr.map(|expr| typeck_results.expr_ty(expr).peel_refs());
 
-                        let is_format_arguments_item = if let Some(expr_ty) = expr_ty
-                            && let ty::Adt(adt, _) = expr_ty.kind()
-                        {
-                            self.infcx.tcx.is_lang_item(adt.did(), LangItem::FormatArguments)
-                        } else {
-                            false
-                        };
-
                         if visitor.found == 0
                             && stmt.span.contains(proper_span)
                             && let Some(p) = sm.span_to_margin(stmt.span)
@@ -3246,20 +3221,24 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                                     Applicability::MaybeIncorrect,
                                 );
                             }
-                            if !is_format_arguments_item {
-                                let addition = format!("let binding = {};\n{}", s, " ".repeat(p));
-                                err.multipart_suggestion_verbose(
-                                    msg,
-                                    vec![
-                                        (stmt.span.shrink_to_lo(), addition),
-                                        (proper_span, "binding".to_string()),
-                                    ],
-                                    Applicability::MaybeIncorrect,
-                                );
+
+                            let mutability = if matches!(borrow.kind(), BorrowKind::Mut { .. }) {
+                                "mut "
                             } else {
-                                err.note("the result of `format_args!` can only be assigned directly if no placeholders in its arguments are used");
-                                err.note("to learn more, visit <https://doc.rust-lang.org/std/macro.format_args.html>");
-                            }
+                                ""
+                            };
+
+                            let addition =
+                                format!("let {}binding = {};\n{}", mutability, s, " ".repeat(p));
+                            err.multipart_suggestion_verbose(
+                                msg,
+                                vec![
+                                    (stmt.span.shrink_to_lo(), addition),
+                                    (proper_span, "binding".to_string()),
+                                ],
+                                Applicability::MaybeIncorrect,
+                            );
+
                             suggested = true;
                             break;
                         }
@@ -3331,7 +3310,13 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                     "function parameter".to_string(),
                     "function parameter borrowed here".to_string(),
                 ),
-                LocalKind::Temp if self.body.local_decls[local].is_user_variable() => {
+                LocalKind::Temp
+                    if self.body.local_decls[local].is_user_variable()
+                        && !self.body.local_decls[local]
+                            .source_info
+                            .span
+                            .in_external_macro(self.infcx.tcx.sess.source_map()) =>
+                {
                     ("local binding".to_string(), "local binding introduced here".to_string())
                 }
                 LocalKind::ReturnPointer | LocalKind::Temp => {
@@ -3389,10 +3374,15 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
 
         let (sugg_span, suggestion) = match tcx.sess.source_map().span_to_snippet(args_span) {
             Ok(string) => {
-                let coro_prefix = if string.starts_with("async") {
-                    // `async` is 5 chars long. Not using `.len()` to avoid the cast from `usize`
-                    // to `u32`.
-                    Some(5)
+                let coro_prefix = if let Some(sub) = string.strip_prefix("async") {
+                    let trimmed_sub = sub.trim_end();
+                    if trimmed_sub.ends_with("gen") {
+                        // `async` is 5 chars long.
+                        Some((trimmed_sub.len() + 5) as _)
+                    } else {
+                        // `async` is 5 chars long.
+                        Some(5)
+                    }
                 } else if string.starts_with("gen") {
                     // `gen` is 3 chars long
                     Some(3)
@@ -3787,7 +3777,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                 method_args,
                 *fn_span,
                 call_source.from_hir_call(),
-                self.infcx.tcx.fn_arg_names(method_did)[0],
+                self.infcx.tcx.fn_arg_idents(method_did)[0],
             )
         {
             err.note(format!("borrow occurs due to deref coercion to `{deref_target_ty}`"));

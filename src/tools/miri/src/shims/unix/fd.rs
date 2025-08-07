@@ -121,7 +121,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             throw_unsup_format!("unsupported flags {:#x}", op);
         };
 
-        let result = fd.as_unix().flock(this.machine.communicate(), parsed_op)?;
+        let result = fd.as_unix(this).flock(this.machine.communicate(), parsed_op)?;
         // return `0` if flock is successful
         let result = result.map(|()| 0i32);
         interp_ok(Scalar::from_i32(this.try_unwrap_io_result(result)?))
@@ -141,6 +141,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         let f_getfd = this.eval_libc_i32("F_GETFD");
         let f_dupfd = this.eval_libc_i32("F_DUPFD");
         let f_dupfd_cloexec = this.eval_libc_i32("F_DUPFD_CLOEXEC");
+        let f_getfl = this.eval_libc_i32("F_GETFL");
+        let f_setfl = this.eval_libc_i32("F_SETFL");
 
         // We only support getting the flags for a descriptor.
         match cmd {
@@ -174,6 +176,25 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 } else {
                     this.set_last_error_and_return_i32(LibcError("EBADF"))
                 }
+            }
+            cmd if cmd == f_getfl => {
+                // Check if this is a valid open file descriptor.
+                let Some(fd) = this.machine.fds.get(fd_num) else {
+                    return this.set_last_error_and_return_i32(LibcError("EBADF"));
+                };
+
+                fd.get_flags(this)
+            }
+            cmd if cmd == f_setfl => {
+                // Check if this is a valid open file descriptor.
+                let Some(fd) = this.machine.fds.get(fd_num) else {
+                    return this.set_last_error_and_return_i32(LibcError("EBADF"));
+                };
+
+                let [flag] = check_min_vararg_count("fcntl(fd, F_SETFL, ...)", varargs)?;
+                let flag = this.read_scalar(flag)?.to_i32()?;
+
+                fd.set_flags(flag, this)
             }
             cmd if this.tcx.sess.target.os == "macos"
                 && cmd == this.eval_libc_i32("F_FULLFSYNC") =>
@@ -226,7 +247,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         trace!("Reading from FD {}, size {}", fd_num, count);
 
         // Check that the *entire* buffer is actually valid memory.
-        this.check_ptr_access(buf, Size::from_bytes(count), CheckInAllocMsg::MemoryAccessTest)?;
+        this.check_ptr_access(buf, Size::from_bytes(count), CheckInAllocMsg::MemoryAccess)?;
 
         // We cap the number of read bytes to the largest value that we are able to fit in both the
         // host's and target's `isize`. This saves us from having to handle overflows later.
@@ -273,7 +294,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 let Ok(offset) = u64::try_from(offset) else {
                     return this.set_last_error_and_return(LibcError("EINVAL"), dest);
                 };
-                fd.as_unix().pread(communicate, offset, buf, count, this, finish)?
+                fd.as_unix(this).pread(communicate, offset, buf, count, this, finish)?
             }
         };
         interp_ok(())
@@ -292,7 +313,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         // Isolation check is done via `FileDescription` trait.
 
         // Check that the *entire* buffer is actually valid memory.
-        this.check_ptr_access(buf, Size::from_bytes(count), CheckInAllocMsg::MemoryAccessTest)?;
+        this.check_ptr_access(buf, Size::from_bytes(count), CheckInAllocMsg::MemoryAccess)?;
 
         // We cap the number of written bytes to the largest value that we are able to fit in both the
         // host's and target's `isize`. This saves us from having to handle overflows later.
@@ -333,7 +354,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 let Ok(offset) = u64::try_from(offset) else {
                     return this.set_last_error_and_return(LibcError("EINVAL"), dest);
                 };
-                fd.as_unix().pwrite(communicate, buf, count, offset, this, finish)?
+                fd.as_unix(this).pwrite(communicate, buf, count, offset, this, finish)?
             }
         };
         interp_ok(())

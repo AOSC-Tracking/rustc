@@ -1,7 +1,7 @@
 //! Validates the MIR to ensure that invariants are upheld.
 
 use rustc_abi::{ExternAbi, FIRST_VARIANT, Size};
-use rustc_attr_parsing::InlineAttr;
+use rustc_attr_data_structures::InlineAttr;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::LangItem;
 use rustc_index::IndexVec;
@@ -221,12 +221,11 @@ impl<'a, 'tcx> CfgChecker<'a, 'tcx> {
 
         // Check for cycles
         let mut stack = FxHashSet::default();
-        for i in 0..parent.len() {
-            let mut bb = BasicBlock::from_usize(i);
+        for (mut bb, parent) in parent.iter_enumerated_mut() {
             stack.clear();
             stack.insert(bb);
             loop {
-                let Some(parent) = parent[bb].take() else { break };
+                let Some(parent) = parent.take() else { break };
                 let no_cycle = stack.insert(parent);
                 if !no_cycle {
                     self.fail(
@@ -373,9 +372,12 @@ impl<'a, 'tcx> Visitor<'tcx> for CfgChecker<'a, 'tcx> {
                     );
                 }
             }
-            TerminatorKind::Drop { target, unwind, .. } => {
+            TerminatorKind::Drop { target, unwind, drop, .. } => {
                 self.check_edge(location, *target, EdgeKind::Normal);
                 self.check_unwind_edge(location, *unwind);
+                if let Some(drop) = drop {
+                    self.check_edge(location, *drop, EdgeKind::Normal);
+                }
             }
             TerminatorKind::Call { func, args, .. }
             | TerminatorKind::TailCall { func, args, .. } => {
@@ -748,7 +750,9 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                             // since we may be in the process of computing this MIR in the
                             // first place.
                             let layout = if def_id == self.caller_body.source.def_id() {
-                                self.caller_body.coroutine_layout_raw()
+                                self.caller_body
+                                    .coroutine_layout_raw()
+                                    .or_else(|| self.tcx.coroutine_layout(def_id, args).ok())
                             } else if self.tcx.needs_coroutine_by_move_body_def_id(def_id)
                                 && let ty::ClosureKind::FnOnce =
                                     args.as_coroutine().kind_ty().to_opt_closure_kind().unwrap()
@@ -758,7 +762,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                                 // Same if this is the by-move body of a coroutine-closure.
                                 self.caller_body.coroutine_layout_raw()
                             } else {
-                                self.tcx.coroutine_layout(def_id, args.as_coroutine().kind_ty())
+                                self.tcx.coroutine_layout(def_id, args).ok()
                             };
 
                             let Some(layout) = layout else {
@@ -1249,7 +1253,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                             self.tcx,
                             self.tcx.require_lang_item(
                                 LangItem::CoerceUnsized,
-                                Some(self.body.source_info(location).span),
+                                self.body.source_info(location).span,
                             ),
                             [op_ty, *target_type],
                         )) {
@@ -1304,37 +1308,27 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                         }
                     }
                     CastKind::Transmute => {
-                        if let MirPhase::Runtime(..) = self.body.phase {
-                            // Unlike `mem::transmute`, a MIR `Transmute` is well-formed
-                            // for any two `Sized` types, just potentially UB to run.
+                        // Unlike `mem::transmute`, a MIR `Transmute` is well-formed
+                        // for any two `Sized` types, just potentially UB to run.
 
-                            if !self
-                                .tcx
-                                .normalize_erasing_regions(self.typing_env, op_ty)
-                                .is_sized(self.tcx, self.typing_env)
-                            {
-                                self.fail(
-                                    location,
-                                    format!("Cannot transmute from non-`Sized` type {op_ty}"),
-                                );
-                            }
-                            if !self
-                                .tcx
-                                .normalize_erasing_regions(self.typing_env, *target_type)
-                                .is_sized(self.tcx, self.typing_env)
-                            {
-                                self.fail(
-                                    location,
-                                    format!("Cannot transmute to non-`Sized` type {target_type:?}"),
-                                );
-                            }
-                        } else {
+                        if !self
+                            .tcx
+                            .normalize_erasing_regions(self.typing_env, op_ty)
+                            .is_sized(self.tcx, self.typing_env)
+                        {
                             self.fail(
                                 location,
-                                format!(
-                                    "Transmute is not supported in non-runtime phase {:?}.",
-                                    self.body.phase
-                                ),
+                                format!("Cannot transmute from non-`Sized` type {op_ty}"),
+                            );
+                        }
+                        if !self
+                            .tcx
+                            .normalize_erasing_regions(self.typing_env, *target_type)
+                            .is_sized(self.tcx, self.typing_env)
+                        {
+                            self.fail(
+                                location,
+                                format!("Cannot transmute to non-`Sized` type {target_type:?}"),
                             );
                         }
                     }

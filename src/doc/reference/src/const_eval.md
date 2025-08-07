@@ -83,8 +83,9 @@ r[const-eval.const-expr.builtin-arith-logic]
 r[const-eval.const-expr.borrows]
 * All forms of [borrow]s, including raw borrows, with one limitation:
   mutable borrows and shared borrows to values with interior mutability
-  are only allowed to refer to *transient* places. A place is *transient*
+  are only allowed to refer to *transient* places or to *static* places. A place is *transient*
   if its lifetime is strictly contained inside the current [const context].
+  A place is *static* if it is a `static` item or a [promoted expression].
 
 r[const-eval.const-expr.deref]
 * The [dereference operator] except for raw pointers.
@@ -102,15 +103,14 @@ r[const-eval.const-expr.const-fn]
 * Calls of [const functions] and const methods.
 
 r[const-eval.const-expr.loop]
-* [loop], [while] and [`while let`] expressions.
+* [loop] and [while] expressions.
 
 r[const-eval.const-expr.if-match]
-* [if], [`if let`] and [match] expressions.
-
-## Const context
-[const context]: #const-context
+* [if] and [match] expressions.
 
 r[const-eval.const-context]
+## Const context
+[const context]: #const-context
 
 r[const-eval.const-context.general]
 A _const context_ is one of the following:
@@ -186,7 +186,6 @@ of whether you are building on a `64` bit or a `32` bit system.
 [grouped]:              expressions/grouped-expr.md
 [interior mutability]:  interior-mutability.md
 [if]:                   expressions/if-expr.md#if-expressions
-[`if let`]:             expressions/if-expr.md#if-let-expressions
 [lazy boolean]:         expressions/operator-expr.md#lazy-boolean-operators
 [let statements]:       statements.md#let-statements
 [literals]:             expressions/literal-expr.md
@@ -197,10 +196,10 @@ of whether you are building on a `64` bit or a `32` bit system.
 [overflow]:             expressions/operator-expr.md#overflow
 [paths]:                expressions/path-expr.md
 [patterns]:             patterns.md
+[promoted expression]:  destructors.md#constant-promotion
 [range expressions]:    expressions/range-expr.md
 [slice]:                types/slice.md
 [statics]:              items/static-items.md
 [struct]:               expressions/struct-expr.md
 [tuple expressions]:    expressions/tuple-expr.md
 [while]:                expressions/loop-expr.md#predicate-loops
-[`while let`]:          expressions/loop-expr.md#predicate-pattern-loops

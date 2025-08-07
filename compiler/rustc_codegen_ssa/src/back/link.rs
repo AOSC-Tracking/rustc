@@ -3,10 +3,10 @@ mod raw_dylib;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions, read};
-use std::io::{BufWriter, Write};
+use std::io::{BufReader, BufWriter, Write};
 use std::ops::{ControlFlow, Deref};
 use std::path::{Path, PathBuf};
-use std::process::{ExitStatus, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::{env, fmt, fs, io, mem, str};
 
 use cc::windows_registry;
@@ -18,12 +18,13 @@ use rustc_data_structures::fx::FxIndexSet;
 use rustc_data_structures::memmap::Mmap;
 use rustc_data_structures::temp_dir::MaybeTempDir;
 use rustc_errors::{DiagCtxtHandle, LintDiagnostic};
-use rustc_fs_util::{fix_windows_verbatim_for_gcc, try_canonicalize};
+use rustc_fs_util::{TempDirBuilder, fix_windows_verbatim_for_gcc, try_canonicalize};
 use rustc_hir::def_id::{CrateNum, LOCAL_CRATE};
 use rustc_macros::LintDiagnostic;
 use rustc_metadata::fs::{METADATA_FILENAME, copy_to_stdout, emit_wrapper_file};
 use rustc_metadata::{
-    NativeLibSearchFallback, find_native_static_library, walk_native_lib_search_dirs,
+    EncodedMetadata, NativeLibSearchFallback, find_native_static_library,
+    walk_native_lib_search_dirs,
 };
 use rustc_middle::bug;
 use rustc_middle::lint::lint_level;
@@ -48,7 +49,6 @@ use rustc_target::spec::{
     LinkerFeatures, LinkerFlavor, LinkerFlavorCli, Lld, PanicStrategy, RelocModel, RelroLevel,
     SanitizerSet, SplitDebuginfo,
 };
-use tempfile::Builder as TempFileBuilder;
 use tracing::{debug, info, warn};
 
 use super::archive::{ArchiveBuilder, ArchiveBuilderBuilder};
@@ -75,6 +75,7 @@ pub fn link_binary(
     sess: &Session,
     archive_builder_builder: &dyn ArchiveBuilderBuilder,
     codegen_results: CodegenResults,
+    metadata: EncodedMetadata,
     outputs: &OutputFilenames,
 ) {
     let _timer = sess.timer("link_binary");
@@ -100,7 +101,7 @@ pub fn link_binary(
         });
 
         if outputs.outputs.should_link() {
-            let tmpdir = TempFileBuilder::new()
+            let tmpdir = TempDirBuilder::new()
                 .prefix("rustc")
                 .tempdir()
                 .unwrap_or_else(|error| sess.dcx().emit_fatal(errors::CreateTempDir { error }));
@@ -112,8 +113,12 @@ pub fn link_binary(
                 codegen_results.crate_info.local_crate_name,
             );
             let crate_name = format!("{}", codegen_results.crate_info.local_crate_name);
-            let out_filename =
-                output.file_for_writing(outputs, OutputType::Exe, Some(crate_name.as_str()));
+            let out_filename = output.file_for_writing(
+                outputs,
+                OutputType::Exe,
+                &crate_name,
+                sess.invocation_temp.as_deref(),
+            );
             match crate_type {
                 CrateType::Rlib => {
                     let _timer = sess.timer("link_rlib");
@@ -122,6 +127,7 @@ pub fn link_binary(
                         sess,
                         archive_builder_builder,
                         &codegen_results,
+                        &metadata,
                         RlibFlavor::Normal,
                         &path,
                     )
@@ -132,6 +138,7 @@ pub fn link_binary(
                         sess,
                         archive_builder_builder,
                         &codegen_results,
+                        &metadata,
                         &out_filename,
                         &path,
                     );
@@ -143,6 +150,7 @@ pub fn link_binary(
                         crate_type,
                         &out_filename,
                         &codegen_results,
+                        &metadata,
                         path.as_ref(),
                     );
                 }
@@ -162,6 +170,12 @@ pub fn link_binary(
                     artifact_name.to_string_lossy(),
                     file_size,
                 );
+            }
+
+            if sess.target.binary_format == BinaryFormat::Elf {
+                if let Err(err) = warn_if_linked_with_gold(sess, &out_filename) {
+                    info!(?err, "Error while checking if gold was the linker");
+                }
             }
 
             if output.is_stdout() {
@@ -198,11 +212,7 @@ pub fn link_binary(
         let remove_temps_from_module =
             |module: &CompiledModule| maybe_remove_temps_from_module(false, false, module);
 
-        // Otherwise, always remove the metadata and allocator module temporaries.
-        if let Some(ref metadata_module) = codegen_results.metadata_module {
-            remove_temps_from_module(metadata_module);
-        }
-
+        // Otherwise, always remove the allocator module temporaries.
         if let Some(ref allocator_module) = codegen_results.allocator_module {
             remove_temps_from_module(allocator_module);
         }
@@ -284,6 +294,7 @@ fn link_rlib<'a>(
     sess: &'a Session,
     archive_builder_builder: &dyn ArchiveBuilderBuilder,
     codegen_results: &CodegenResults,
+    metadata: &EncodedMetadata,
     flavor: RlibFlavor,
     tmpdir: &MaybeTempDir,
 ) -> Box<dyn ArchiveBuilder + 'a> {
@@ -291,12 +302,9 @@ fn link_rlib<'a>(
 
     let trailing_metadata = match flavor {
         RlibFlavor::Normal => {
-            let (metadata, metadata_position) = create_wrapper_file(
-                sess,
-                ".rmeta".to_string(),
-                codegen_results.metadata.raw_data(),
-            );
-            let metadata = emit_wrapper_file(sess, &metadata, tmpdir, METADATA_FILENAME);
+            let (metadata, metadata_position) =
+                create_wrapper_file(sess, ".rmeta".to_string(), metadata.stub_or_full());
+            let metadata = emit_wrapper_file(sess, &metadata, tmpdir.as_ref(), METADATA_FILENAME);
             match metadata_position {
                 MetadataPosition::First => {
                     // Most of the time metadata in rlib files is wrapped in a "dummy" object
@@ -364,7 +372,7 @@ fn link_rlib<'a>(
             let src = read(path)
                 .unwrap_or_else(|e| sess.dcx().emit_fatal(errors::ReadFileError { message: e }));
             let (data, _) = create_wrapper_file(sess, ".bundled_lib".to_string(), &src);
-            let wrapper_file = emit_wrapper_file(sess, &data, tmpdir, filename.as_str());
+            let wrapper_file = emit_wrapper_file(sess, &data, tmpdir.as_ref(), filename.as_str());
             packed_bundled_libs.push(wrapper_file);
         } else {
             let path = find_native_static_library(lib.name.as_str(), lib.verbatim, sess);
@@ -445,6 +453,7 @@ fn link_staticlib(
     sess: &Session,
     archive_builder_builder: &dyn ArchiveBuilderBuilder,
     codegen_results: &CodegenResults,
+    metadata: &EncodedMetadata,
     out_filename: &Path,
     tempdir: &MaybeTempDir,
 ) {
@@ -453,6 +462,7 @@ fn link_staticlib(
         sess,
         archive_builder_builder,
         codegen_results,
+        metadata,
         RlibFlavor::StaticlibBase,
         tempdir,
     );
@@ -666,6 +676,7 @@ fn link_natively(
     crate_type: CrateType,
     out_filename: &Path,
     codegen_results: &CodegenResults,
+    metadata: &EncodedMetadata,
     tmpdir: &Path,
 ) {
     info!("preparing {:?} to {:?}", crate_type, out_filename);
@@ -690,6 +701,7 @@ fn link_natively(
         tmpdir,
         temp_filename,
         codegen_results,
+        metadata,
         self_contained_components,
     );
 
@@ -714,13 +726,10 @@ fn link_natively(
 
     // Invoke the system linker
     info!("{cmd:?}");
-    let retry_on_segfault = env::var("RUSTC_RETRY_LINKER_ON_SEGFAULT").is_ok();
     let unknown_arg_regex =
         Regex::new(r"(unknown|unrecognized) (command line )?(option|argument)").unwrap();
     let mut prog;
-    let mut i = 0;
     loop {
-        i += 1;
         prog = sess.time("run_linker", || exec_linker(sess, &cmd, out_filename, flavor, tmpdir));
         let Ok(ref output) = prog else {
             break;
@@ -765,7 +774,7 @@ fn link_natively(
             && cmd.get_args().iter().any(|e| e.to_string_lossy() == "-fuse-ld=lld")
         {
             info!("linker output: {:?}", out);
-            warn!("The linker driver does not support `-fuse-ld=lld`. Retrying without it.");
+            info!("The linker driver does not support `-fuse-ld=lld`. Retrying without it.");
             for arg in cmd.take_args() {
                 if arg.to_string_lossy() != "-fuse-ld=lld" {
                     cmd.arg(arg);
@@ -836,54 +845,7 @@ fn link_natively(
             continue;
         }
 
-        // Here's a terribly awful hack that really shouldn't be present in any
-        // compiler. Here an environment variable is supported to automatically
-        // retry the linker invocation if the linker looks like it segfaulted.
-        //
-        // Gee that seems odd, normally segfaults are things we want to know
-        // about!  Unfortunately though in rust-lang/rust#38878 we're
-        // experiencing the linker segfaulting on Travis quite a bit which is
-        // causing quite a bit of pain to land PRs when they spuriously fail
-        // due to a segfault.
-        //
-        // The issue #38878 has some more debugging information on it as well,
-        // but this unfortunately looks like it's just a race condition in
-        // macOS's linker with some thread pool working in the background. It
-        // seems that no one currently knows a fix for this so in the meantime
-        // we're left with this...
-        if !retry_on_segfault || i > 3 {
-            break;
-        }
-        let msg_segv = "clang: error: unable to execute command: Segmentation fault: 11";
-        let msg_bus = "clang: error: unable to execute command: Bus error: 10";
-        if out.contains(msg_segv) || out.contains(msg_bus) {
-            warn!(
-                ?cmd, %out,
-                "looks like the linker segfaulted when we tried to call it, \
-                 automatically retrying again",
-            );
-            continue;
-        }
-
-        if is_illegal_instruction(&output.status) {
-            warn!(
-                ?cmd, %out, status = %output.status,
-                "looks like the linker hit an illegal instruction when we \
-                 tried to call it, automatically retrying again.",
-            );
-            continue;
-        }
-
-        #[cfg(unix)]
-        fn is_illegal_instruction(status: &ExitStatus) -> bool {
-            use std::os::unix::prelude::*;
-            status.signal() == Some(libc::SIGILL)
-        }
-
-        #[cfg(not(unix))]
-        fn is_illegal_instruction(_status: &ExitStatus) -> bool {
-            false
-        }
+        break;
     }
 
     match prog {
@@ -959,9 +921,9 @@ fn link_natively(
                 }
             }
 
-            let (level, src) = codegen_results.crate_info.lint_levels.linker_messages;
+            let level = codegen_results.crate_info.lint_levels.linker_messages;
             let lint = |msg| {
-                lint_level(sess, LINKER_MESSAGES, level, src, None, |diag| {
+                lint_level(sess, LINKER_MESSAGES, level, None, |diag| {
                     LinkerOutput { inner: msg }.decorate_lint(diag)
                 })
             };
@@ -1012,7 +974,7 @@ fn link_natively(
         // On macOS the external `dsymutil` tool is used to create the packed
         // debug information. Note that this will read debug information from
         // the objects on the filesystem which we'll clean up later.
-        SplitDebuginfo::Packed if sess.target.is_like_osx => {
+        SplitDebuginfo::Packed if sess.target.is_like_darwin => {
             let prog = Command::new("dsymutil").arg(out_filename).output();
             match prog {
                 Ok(prog) => {
@@ -1043,16 +1005,17 @@ fn link_natively(
 
     let strip = sess.opts.cg.strip;
 
-    if sess.target.is_like_osx {
+    if sess.target.is_like_darwin {
         let stripcmd = "rust-objcopy";
         match (strip, crate_type) {
             (Strip::Debuginfo, _) => {
                 strip_with_external_utility(sess, stripcmd, out_filename, &["--strip-debug"])
             }
             // Per the manpage, `-x` is the maximum safe strip level for dynamic libraries. (#93988)
-            (Strip::Symbols, CrateType::Dylib | CrateType::Cdylib | CrateType::ProcMacro) => {
-                strip_with_external_utility(sess, stripcmd, out_filename, &["-x"])
-            }
+            (
+                Strip::Symbols,
+                CrateType::Dylib | CrateType::Cdylib | CrateType::ProcMacro | CrateType::Sdylib,
+            ) => strip_with_external_utility(sess, stripcmd, out_filename, &["-x"]),
             (Strip::Symbols, _) => {
                 strip_with_external_utility(sess, stripcmd, out_filename, &["--strip-all"])
             }
@@ -1086,11 +1049,11 @@ fn link_natively(
         match strip {
             Strip::Debuginfo => {
                 // FIXME: AIX's strip utility only offers option to strip line number information.
-                strip_with_external_utility(sess, stripcmd, out_filename, &["-X32_64", "-l"])
+                strip_with_external_utility(sess, stripcmd, temp_filename, &["-X32_64", "-l"])
             }
             Strip::Symbols => {
                 // Must be noted this option might remove symbol __aix_rust_metadata and thus removes .info section which contains metadata.
-                strip_with_external_utility(sess, stripcmd, out_filename, &["-X32_64", "-r"])
+                strip_with_external_utility(sess, stripcmd, temp_filename, &["-X32_64", "-r"])
             }
             Strip::None => {}
         }
@@ -1240,8 +1203,10 @@ fn add_sanitizer_libraries(
     // which should be linked to both executables and dynamic libraries.
     // Everywhere else the runtimes are currently distributed as static
     // libraries which should be linked to executables only.
-    if matches!(crate_type, CrateType::Dylib | CrateType::Cdylib | CrateType::ProcMacro)
-        && !(sess.target.is_like_osx || sess.target.is_like_msvc)
+    if matches!(
+        crate_type,
+        CrateType::Dylib | CrateType::Cdylib | CrateType::ProcMacro | CrateType::Sdylib
+    ) && !(sess.target.is_like_darwin || sess.target.is_like_msvc)
     {
         return;
     }
@@ -1294,7 +1259,7 @@ fn link_sanitizer_runtime(
     let channel =
         option_env!("CFG_RELEASE_CHANNEL").map(|channel| format!("-{channel}")).unwrap_or_default();
 
-    if sess.target.is_like_osx {
+    if sess.target.is_like_darwin {
         // On Apple platforms, the sanitizer is always built as a dylib, and
         // LLVM will link to `@rpath/*.dylib`, so we need to specify an
         // rpath to the library as well (the rpath should be absolute, see
@@ -1935,6 +1900,7 @@ fn add_late_link_args(
     codegen_results: &CodegenResults,
 ) {
     let any_dynamic_crate = crate_type == CrateType::Dylib
+        || crate_type == CrateType::Sdylib
         || codegen_results.crate_info.dependency_formats.iter().any(|(ty, list)| {
             *ty == crate_type && list.iter().any(|&linkage| linkage == Linkage::Dynamic)
         });
@@ -1979,7 +1945,7 @@ fn add_post_link_args(cmd: &mut dyn Linker, sess: &Session, flavor: LinkerFlavor
 /// This method creates a synthetic object file, which contains undefined references to all symbols
 /// that are necessary for the linking. They are only present in symbol table but not actually
 /// used in any sections, so the linker will therefore pick relevant rlibs for linking, but
-/// unused `#[no_mangle]` or `#[used]` can still be discard by GC sections.
+/// unused `#[no_mangle]` or `#[used(compiler)]` can still be discard by GC sections.
 ///
 /// There's a few internal crates in the standard library (aka libcore and
 /// libstd) which actually have a circular dependence upon one another. This
@@ -2013,7 +1979,8 @@ fn add_linked_symbol_object(
 
     if file.format() == object::BinaryFormat::MachO {
         // Divide up the sections into sub-sections via symbols for dead code stripping.
-        // Without this flag, unused `#[no_mangle]` or `#[used]` cannot be discard on MachO targets.
+        // Without this flag, unused `#[no_mangle]` or `#[used(compiler)]` cannot be
+        // discard on MachO targets.
         file.set_subsections_via_symbols();
     }
 
@@ -2112,17 +2079,25 @@ fn add_local_crate_allocator_objects(cmd: &mut dyn Linker, codegen_results: &Cod
 /// Add object files containing metadata for the current crate.
 fn add_local_crate_metadata_objects(
     cmd: &mut dyn Linker,
+    sess: &Session,
+    archive_builder_builder: &dyn ArchiveBuilderBuilder,
     crate_type: CrateType,
+    tmpdir: &Path,
     codegen_results: &CodegenResults,
+    metadata: &EncodedMetadata,
 ) {
     // When linking a dynamic library, we put the metadata into a section of the
     // executable. This metadata is in a separate object file from the main
-    // object file, so we link that in here.
-    if matches!(crate_type, CrateType::Dylib | CrateType::ProcMacro)
-        && let Some(m) = &codegen_results.metadata_module
-        && let Some(obj) = &m.object
-    {
-        cmd.add_object(obj);
+    // object file, so we create and link it in here.
+    if matches!(crate_type, CrateType::Dylib | CrateType::ProcMacro) {
+        let data = archive_builder_builder.create_dylib_metadata_wrapper(
+            sess,
+            &metadata,
+            &codegen_results.crate_info.metadata_symbol,
+        );
+        let obj = emit_wrapper_file(sess, &data, tmpdir, "rmeta.o");
+
+        cmd.add_object(&obj);
     }
 }
 
@@ -2188,7 +2163,7 @@ fn add_rpath_args(
         let rpath_config = RPathConfig {
             libs: &*libs,
             out_filename: out_filename.to_path_buf(),
-            is_like_osx: sess.target.is_like_osx,
+            is_like_darwin: sess.target.is_like_darwin,
             linker_is_gnu: sess.target.linker_flavor.is_gnu(),
         };
         cmd.link_args(&rpath::get_rpath_linker_args(&rpath_config));
@@ -2212,6 +2187,7 @@ fn linker_with_args(
     tmpdir: &Path,
     out_filename: &Path,
     codegen_results: &CodegenResults,
+    metadata: &EncodedMetadata,
     self_contained_components: LinkSelfContainedComponents,
 ) -> Command {
     let self_contained_crt_objects = self_contained_components.is_crt_objects_enabled();
@@ -2286,7 +2262,15 @@ fn linker_with_args(
     // in this DAG so far because they can only depend on other native libraries
     // and such dependencies are also required to be specified.
     add_local_crate_regular_objects(cmd, codegen_results);
-    add_local_crate_metadata_objects(cmd, crate_type, codegen_results);
+    add_local_crate_metadata_objects(
+        cmd,
+        sess,
+        archive_builder_builder,
+        crate_type,
+        tmpdir,
+        codegen_results,
+        metadata,
+    );
     add_local_crate_allocator_objects(cmd, codegen_results);
 
     // Avoid linking to dynamic libraries unless they satisfy some undefined symbols
@@ -3050,7 +3034,7 @@ pub(crate) fn are_upstream_rust_objects_already_included(sess: &Session) -> bool
 /// - The deployment target.
 /// - The SDK version.
 fn add_apple_link_args(cmd: &mut dyn Linker, sess: &Session, flavor: LinkerFlavor) {
-    if !sess.target.is_like_osx {
+    if !sess.target.is_like_darwin {
         return;
     }
     let LinkerFlavor::Darwin(cc, _) = flavor else {
@@ -3121,8 +3105,7 @@ fn add_apple_link_args(cmd: &mut dyn Linker, sess: &Session, flavor: LinkerFlavo
             _ => bug!("invalid OS/ABI combination for Apple target: {target_os}, {target_abi}"),
         };
 
-        let (major, minor, patch) = apple::deployment_target(sess);
-        let min_version = format!("{major}.{minor}.{patch}");
+        let min_version = sess.apple_deployment_target().fmt_full().to_string();
 
         // The SDK version is used at runtime when compiling with a newer SDK / version of Xcode:
         // - By dyld to give extra warnings and errors, see e.g.:
@@ -3191,10 +3174,10 @@ fn add_apple_link_args(cmd: &mut dyn Linker, sess: &Session, flavor: LinkerFlavo
 
             // The presence of `-mmacosx-version-min` makes CC default to
             // macOS, and it sets the deployment target.
-            let (major, minor, patch) = apple::deployment_target(sess);
+            let version = sess.apple_deployment_target().fmt_full();
             // Intentionally pass this as a single argument, Clang doesn't
             // seem to like it otherwise.
-            cmd.cc_arg(&format!("-mmacosx-version-min={major}.{minor}.{patch}"));
+            cmd.cc_arg(&format!("-mmacosx-version-min={version}"));
 
             // macOS has no environment, so with these two, we've told CC the
             // four desired parameters.
@@ -3399,4 +3382,55 @@ fn add_lld_args(
             cmd.cc_arg(format!("--target={}", versioned_llvm_target(sess)));
         }
     }
+}
+
+// gold has been deprecated with binutils 2.44
+// and is known to behave incorrectly around Rust programs.
+// There have been reports of being unable to bootstrap with gold:
+// https://github.com/rust-lang/rust/issues/139425
+// Additionally, gold miscompiles SHF_GNU_RETAIN sections, which are
+// emitted with `#[used(linker)]`.
+fn warn_if_linked_with_gold(sess: &Session, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use object::read::elf::{FileHeader, SectionHeader};
+    use object::read::{ReadCache, ReadRef, Result};
+    use object::{Endianness, elf};
+
+    fn elf_has_gold_version_note<'a>(
+        elf: &impl FileHeader,
+        data: impl ReadRef<'a>,
+    ) -> Result<bool> {
+        let endian = elf.endian()?;
+
+        let section =
+            elf.sections(endian, data)?.section_by_name(endian, b".note.gnu.gold-version");
+        if let Some((_, section)) = section {
+            if let Some(mut notes) = section.notes(endian, data)? {
+                return Ok(notes.any(|note| {
+                    note.is_ok_and(|note| note.n_type(endian) == elf::NT_GNU_GOLD_VERSION)
+                }));
+            }
+        }
+
+        Ok(false)
+    }
+
+    let data = ReadCache::new(BufReader::new(File::open(path)?));
+
+    let was_linked_with_gold = if sess.target.pointer_width == 64 {
+        let elf = elf::FileHeader64::<Endianness>::parse(&data)?;
+        elf_has_gold_version_note(elf, &data)?
+    } else if sess.target.pointer_width == 32 {
+        let elf = elf::FileHeader32::<Endianness>::parse(&data)?;
+        elf_has_gold_version_note(elf, &data)?
+    } else {
+        return Ok(());
+    };
+
+    if was_linked_with_gold {
+        let mut warn =
+            sess.dcx().struct_warn("the gold linker is deprecated and has known bugs with Rust");
+        warn.help("consider using LLD or ld from GNU binutils instead");
+        warn.emit();
+    }
+    Ok(())
 }

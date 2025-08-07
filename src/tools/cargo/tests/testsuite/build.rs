@@ -5,12 +5,11 @@ use std::fs;
 use std::io::Read;
 use std::process::Stdio;
 
-use cargo::{
-    core::compiler::CompileMode,
-    core::{Shell, Workspace},
-    ops::CompileOptions,
-    GlobalContext,
-};
+use cargo::core::compiler::UserIntent;
+use cargo::core::Shell;
+use cargo::core::Workspace;
+use cargo::ops::CompileOptions;
+use cargo::GlobalContext;
 use cargo_test_support::compare::assert_e2e;
 use cargo_test_support::paths::root;
 use cargo_test_support::prelude::*;
@@ -665,7 +664,7 @@ fn cargo_compile_api_exposes_artifact_paths() {
     let shell = Shell::from_write(Box::new(Vec::new()));
     let gctx = GlobalContext::new(shell, env::current_dir().unwrap(), paths::home());
     let ws = Workspace::new(&p.root().join("Cargo.toml"), &gctx).unwrap();
-    let compile_options = CompileOptions::new(ws.gctx(), CompileMode::Build).unwrap();
+    let compile_options = CompileOptions::new(ws.gctx(), UserIntent::Build).unwrap();
 
     let result = cargo::ops::compile(&ws, &compile_options).unwrap();
 
@@ -6748,4 +6747,92 @@ fn renamed_uplifted_artifact_remains_unmodified_after_rebuild() {
 
     let not_the_same = !same_file::is_same_file(bin, renamed_bin).unwrap();
     assert!(not_the_same, "renamed uplifted artifact must be unmodified");
+}
+
+#[cargo_test(nightly, reason = "-Zembed-metadata is nightly only")]
+fn embed_metadata() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+
+                name = "foo"
+                version = "0.5.0"
+                edition = "2015"
+
+                [dependencies.bar]
+                path = "bar"
+            "#,
+        )
+        .file("src/main.rs", &main_file(r#""{}", bar::gimme()"#, &[]))
+        .file("bar/Cargo.toml", &basic_lib_manifest("bar"))
+        .file(
+            "bar/src/bar.rs",
+            r#"
+                pub fn gimme() -> &'static str {
+                    "test passed"
+                }
+            "#,
+        )
+        .build();
+
+    p.cargo("build -Z no-embed-metadata")
+        .masquerade_as_nightly_cargo(&["-Z no-embed-metadata"])
+        .arg("-v")
+        .with_stderr_contains("[RUNNING] `[..]-Z embed-metadata=no[..]`")
+        .with_stderr_contains(
+            "[RUNNING] `[..]--extern bar=[ROOT]/foo/target/debug/deps/libbar-[HASH].rmeta[..]`",
+        )
+        .run();
+}
+
+// Make sure that cargo passes --extern=<dep>.rmeta even if <dep>
+// is compiled as a dylib.
+#[cargo_test(nightly, reason = "-Zembed-metadata is nightly only")]
+fn embed_metadata_dylib_dep() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.5.0"
+                edition = "2015"
+
+                [dependencies.bar]
+                path = "bar"
+            "#,
+        )
+        .file("src/main.rs", &main_file(r#""{}", bar::gimme()"#, &[]))
+        .file(
+            "bar/Cargo.toml",
+            r#"
+                [package]
+                name = "bar"
+                version = "0.5.0"
+                edition = "2015"
+
+                [lib]
+                crate-type = ["dylib"]
+            "#,
+        )
+        .file(
+            "bar/src/lib.rs",
+            r#"
+                pub fn gimme() -> &'static str {
+                    "test passed"
+                }
+            "#,
+        )
+        .build();
+
+    p.cargo("build -Z no-embed-metadata")
+        .masquerade_as_nightly_cargo(&["-Z no-embed-metadata"])
+        .arg("-v")
+        .with_stderr_contains("[RUNNING] `[..]-Z embed-metadata=no[..]`")
+        .with_stderr_contains(
+            "[RUNNING] `[..]--extern bar=[ROOT]/foo/target/debug/deps/libbar.rmeta[..]`",
+        )
+        .run();
 }

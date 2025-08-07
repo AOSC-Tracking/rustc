@@ -2,7 +2,7 @@ use std::any::Any;
 use std::mem;
 use std::sync::Arc;
 
-use rustc_attr_parsing::Deprecation;
+use rustc_attr_data_structures::Deprecation;
 use rustc_hir::def::{CtorKind, DefKind, Res};
 use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, LOCAL_CRATE};
 use rustc_hir::definitions::{DefKey, DefPath, DefPathHash};
@@ -286,7 +286,7 @@ provide! { tcx, def_id, other, cdata,
     rendered_const => { table }
     rendered_precise_capturing_args => { table }
     asyncness => { table_direct }
-    fn_arg_names => { table }
+    fn_arg_idents => { table }
     coroutine_kind => { table_direct }
     coroutine_for_closure => { table }
     coroutine_by_move_body_def_id => { table }
@@ -330,14 +330,8 @@ provide! { tcx, def_id, other, cdata,
 
     visibility => { cdata.get_visibility(def_id.index) }
     adt_def => { cdata.get_adt_def(def_id.index, tcx) }
-    adt_destructor => {
-        let _ = cdata;
-        tcx.calculate_dtor(def_id, |_,_| Ok(()))
-    }
-    adt_async_destructor => {
-        let _ = cdata;
-        tcx.calculate_async_dtor(def_id, |_,_| Ok(()))
-    }
+    adt_destructor => { table }
+    adt_async_destructor => { table }
     associated_item_def_ids => {
         tcx.arena.alloc_from_iter(cdata.get_associated_item_or_field_def_ids(def_id.index))
     }
@@ -412,6 +406,8 @@ provide! { tcx, def_id, other, cdata,
     used_crate_source => { Arc::clone(&cdata.source) }
     debugger_visualizers => { cdata.get_debugger_visualizers() }
 
+    exportable_items => { tcx.arena.alloc_from_iter(cdata.get_exportable_items()) }
+    stable_order_of_exportable_impls => { tcx.arena.alloc(cdata.get_stable_order_of_exportable_impls().collect()) }
     exported_symbols => {
         let syms = cdata.exported_symbols(tcx);
 
@@ -429,6 +425,7 @@ provide! { tcx, def_id, other, cdata,
     doc_link_traits_in_scope => {
         tcx.arena.alloc_from_iter(cdata.get_doc_link_traits_in_scope(def_id.index))
     }
+    anon_const_kind => { table }
 }
 
 pub(in crate::rmeta) fn provide(providers: &mut Providers) {
@@ -552,8 +549,9 @@ pub(in crate::rmeta) fn provide(providers: &mut Providers) {
         has_global_allocator: |tcx, LocalCrate| CStore::from_tcx(tcx).has_global_allocator(),
         has_alloc_error_handler: |tcx, LocalCrate| CStore::from_tcx(tcx).has_alloc_error_handler(),
         postorder_cnums: |tcx, ()| {
-            tcx.arena
-                .alloc_slice(&CStore::from_tcx(tcx).crate_dependencies_in_postorder(LOCAL_CRATE))
+            tcx.arena.alloc_from_iter(
+                CStore::from_tcx(tcx).crate_dependencies_in_postorder(LOCAL_CRATE).into_iter(),
+            )
         },
         crates: |tcx, ()| {
             // The list of loaded crates is now frozen in query cache,

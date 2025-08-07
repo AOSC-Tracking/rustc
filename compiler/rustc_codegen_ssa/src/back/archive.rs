@@ -13,12 +13,13 @@ use object::read::archive::ArchiveFile;
 use object::read::macho::FatArch;
 use rustc_data_structures::fx::FxIndexSet;
 use rustc_data_structures::memmap::Mmap;
+use rustc_fs_util::TempDirBuilder;
+use rustc_metadata::EncodedMetadata;
 use rustc_session::Session;
 use rustc_span::Symbol;
-use tempfile::Builder as TempFileBuilder;
 use tracing::trace;
 
-use super::metadata::search_for_section;
+use super::metadata::{create_compressed_metadata_file, search_for_section};
 use crate::common;
 // Re-exporting for rustc_codegen_llvm::back::archive
 pub use crate::errors::{ArchiveBuildFailure, ExtractBundledLibsError, UnknownArchiveKind};
@@ -57,6 +58,15 @@ impl From<ImportLibraryItem> for COFFShortExport {
 
 pub trait ArchiveBuilderBuilder {
     fn new_archive_builder<'a>(&self, sess: &'a Session) -> Box<dyn ArchiveBuilder + 'a>;
+
+    fn create_dylib_metadata_wrapper(
+        &self,
+        sess: &Session,
+        metadata: &EncodedMetadata,
+        symbol_name: &str,
+    ) -> Vec<u8> {
+        create_compressed_metadata_file(sess, metadata, symbol_name)
+    }
 
     /// Creates a DLL Import Library <https://docs.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-creation#creating-an-import-library>.
     /// and returns the path on disk to that import library.
@@ -501,7 +511,7 @@ impl<'a> ArArchiveBuilder<'a> {
         // it creates. We need it to be the default mode for back compat reasons however. (See
         // #107495) To handle this we are telling tempfile to create a temporary directory instead
         // and then inside this directory create a file using File::create.
-        let archive_tmpdir = TempFileBuilder::new()
+        let archive_tmpdir = TempDirBuilder::new()
             .suffix(".temp-archive")
             .tempdir_in(output.parent().unwrap_or_else(|| Path::new("")))
             .map_err(|err| {

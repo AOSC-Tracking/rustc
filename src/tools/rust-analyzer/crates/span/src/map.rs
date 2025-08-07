@@ -6,8 +6,8 @@ use std::{fmt, hash::Hash};
 use stdx::{always, itertools::Itertools};
 
 use crate::{
-    EditionedFileId, ErasedFileAstId, Span, SpanAnchor, SpanData, SyntaxContextId, TextRange,
-    TextSize, ROOT_ERASED_FILE_AST_ID,
+    EditionedFileId, ErasedFileAstId, ROOT_ERASED_FILE_AST_ID, Span, SpanAnchor, SpanData,
+    SyntaxContext, TextRange, TextSize,
 };
 
 /// Maps absolute text ranges for the corresponding file to the relevant span data.
@@ -169,7 +169,7 @@ impl fmt::Display for RealSpanMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "RealSpanMap({:?}):", self.file_id)?;
         for span in self.pairs.iter() {
-            writeln!(f, "{}: {}", u32::from(span.0), span.1.into_raw())?;
+            writeln!(f, "{}: {:#?}", u32::from(span.0), span.1)?;
         }
         Ok(())
     }
@@ -208,7 +208,7 @@ impl RealSpanMap {
         Span {
             range: range - offset,
             anchor: SpanAnchor { file_id: self.file_id, ast_id },
-            ctx: SyntaxContextId::root(self.file_id.edition()),
+            ctx: SyntaxContext::root(self.file_id.edition()),
         }
     }
 }

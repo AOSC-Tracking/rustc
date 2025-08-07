@@ -1101,7 +1101,6 @@ function preLoadCss(cssUrl) {
         });
     }());
 
-    // @ts-expect-error
     window.rustdoc_add_line_numbers_to_examples = () => {
         // @ts-expect-error
         function generateLine(nb) {
@@ -1123,7 +1122,6 @@ function preLoadCss(cssUrl) {
         });
     };
 
-    // @ts-expect-error
     window.rustdoc_remove_line_numbers_from_examples = () => {
         onEachLazy(
             document.querySelectorAll(".rustdoc:not(.src) :not(.scraped-example) > .example-wrap"),
@@ -1132,7 +1130,6 @@ function preLoadCss(cssUrl) {
     };
 
     if (getSettingValue("line-numbers") === "true") {
-        // @ts-expect-error
         window.rustdoc_add_line_numbers_to_examples();
     }
 
@@ -1182,8 +1179,10 @@ function preLoadCss(cssUrl) {
 
     onEachLazy(document.querySelectorAll(".toggle > summary:not(.hideme)"), el => {
         // @ts-expect-error
+        // Clicking on the summary's contents should not collapse it,
+        // but links within should still fire.
         el.addEventListener("click", e => {
-            if (e.target.tagName !== "SUMMARY" && e.target.tagName !== "A") {
+            if (!e.target.matches("summary, a, a *")) {
                 e.preventDefault();
             }
         });
@@ -1596,7 +1595,7 @@ function preLoadCss(cssUrl) {
     /**
      * Hide popover menus, clickable tooltips, and the sidebar (if applicable).
      *
-     * Pass "true" to reset focus for tooltip popovers.
+     * Pass `true` to reset focus for tooltip popovers.
      */
     window.hideAllModals = switchFocus => {
         hideSidebar();

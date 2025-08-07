@@ -1831,6 +1831,9 @@ fn test_run_implicit_example_target() {
                 [[example]]
                 name = "myexm2"
                 test = true
+
+                [profile.test]
+                panic = "abort" # this should be ignored by default Cargo targets set.
             "#,
         )
         .file(
@@ -1852,11 +1855,13 @@ fn test_run_implicit_example_target() {
         )
         .build();
 
-    // Compiles myexm1 as normal, but does not run it.
+    // Compiles myexm1 as normal binary (without --test), but does not run it.
     prj.cargo("test -v")
         .with_stderr_contains("[RUNNING] `rustc [..]myexm1.rs [..]--crate-type bin[..]")
         .with_stderr_contains("[RUNNING] `rustc [..]myexm2.rs [..]--test[..]")
         .with_stderr_does_not_contain("[RUNNING] [..]myexm1-[..]")
+        // profile.test panic settings shouldn't be applied even to myexm1
+        .with_stderr_line_without(&["[RUNNING] `rustc --crate-name myexm1"], &["panic=abort"])
         .with_stderr_contains("[RUNNING] [..]target/debug/examples/myexm2-[..]")
         .run();
 
@@ -3890,8 +3895,6 @@ fn cargo_test_env() {
     let cargo = format!(
         "{}[EXE]",
         cargo_exe()
-            .canonicalize()
-            .unwrap()
             .with_extension("")
             .to_str()
             .unwrap()
@@ -3913,8 +3916,6 @@ test env_test ... ok
     let stderr_other_cargo = format!(
         "{}[EXE]",
         other_cargo_path
-            .canonicalize()
-            .unwrap()
             .with_extension("")
             .to_str()
             .unwrap()
@@ -4011,7 +4012,7 @@ fn cyclical_dep_with_missing_feature() {
     ... required by package `foo v0.1.0 ([ROOT]/foo)`
 versions that meet the requirements `*` are: 0.1.0
 
-the package `foo` depends on `foo`, with features: `missing` but `foo` does not have these features.
+package `foo` depends on `foo` with feature `missing` but `foo` does not have that feature.
 
 
 failed to select a version for `foo` which could resolve this conflict
@@ -4740,11 +4741,12 @@ fn test_dep_with_dev() {
         .run();
 }
 
-#[ignore = "1-86 beta betaport"]
-#[cargo_test]
+#[cargo_test(
+    nightly,
+    reason = "waiting for 1.88 to be stable for doctest xcompile flags"
+)]
 fn cargo_test_doctest_xcompile_ignores() {
-    // -Zdoctest-xcompile also enables --enable-per-target-ignores which
-    // allows the ignore-TARGET syntax.
+    // Check ignore-TARGET syntax.
     let p = project()
         .file("Cargo.toml", &basic_lib_manifest("foo"))
         .file(
@@ -4771,28 +4773,6 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         .run();
     #[cfg(target_arch = "x86_64")]
     p.cargo("test")
-        .with_status(101)
-        .with_stdout_data(str![[r#"
-...
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in [ELAPSED]s
-...
-"#]],
-        )
-        .run();
-
-    #[cfg(not(target_arch = "x86_64"))]
-    p.cargo("test -Zdoctest-xcompile")
-        .masquerade_as_nightly_cargo(&["doctest-xcompile"])
-        .with_stdout_data(str![[r#"
-...
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in [ELAPSED]s
-...
-"#]])
-        .run();
-
-    #[cfg(target_arch = "x86_64")]
-    p.cargo("test -Zdoctest-xcompile")
-        .masquerade_as_nightly_cargo(&["doctest-xcompile"])
         .with_stdout_data(str![[r#"
 ...
 test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in [ELAPSED]s
@@ -4801,51 +4781,10 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
         .run();
 }
 
-#[ignore = "1-86 beta betaport"]
-#[cargo_test]
-fn cargo_test_doctest_xcompile() {
-    if !cross_compile::can_run_on_host() {
-        return;
-    }
-    let p = project()
-        .file("Cargo.toml", &basic_lib_manifest("foo"))
-        .file(
-            "src/lib.rs",
-            r#"
-
-            ///```
-            ///assert!(1 == 1);
-            ///```
-            pub fn foo() -> u8 {
-                4
-            }
-            "#,
-        )
-        .build();
-
-    p.cargo("build").run();
-    p.cargo(&format!("test --target {}", cross_compile::alternate()))
-        .with_stdout_data(str![[r#"
-...
-running 0 tests
-...
-"#]])
-        .run();
-    p.cargo(&format!(
-        "test --target {} -Zdoctest-xcompile",
-        cross_compile::alternate()
-    ))
-    .masquerade_as_nightly_cargo(&["doctest-xcompile"])
-    .with_stdout_data(str![[r#"
-...
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in [ELAPSED]s
-...
-"#]])
-    .run();
-}
-
-#[ignore = "1-86 beta betaport"]
-#[cargo_test]
+#[cargo_test(
+    nightly,
+    reason = "waiting for 1.88 to be stable for doctest xcompile flags"
+)]
 fn cargo_test_doctest_xcompile_runner() {
     if !cross_compile::can_run_on_host() {
         return;
@@ -4914,26 +4853,24 @@ running 0 tests
 ...
 "#]])
         .run();
-    p.cargo(&format!(
-        "test --target {} -Zdoctest-xcompile",
-        cross_compile::alternate()
-    ))
-    .masquerade_as_nightly_cargo(&["doctest-xcompile"])
-    .with_stdout_data(str![[r#"
+    p.cargo(&format!("test --target {}", cross_compile::alternate()))
+        .with_stdout_data(str![[r#"
 ...
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in [ELAPSED]s
 ...
 "#]])
-    .with_stderr_data(str![[r#"
+        .with_stderr_data(str![[r#"
 ...
 this is a runner
 ...
 "#]])
-    .run();
+        .run();
 }
 
-#[ignore = "1-86 beta betaport"]
-#[cargo_test]
+#[cargo_test(
+    nightly,
+    reason = "waiting for 1.88 to be stable for doctest xcompile flags"
+)]
 fn cargo_test_doctest_xcompile_no_runner() {
     if !cross_compile::can_run_on_host() {
         return;
@@ -4965,17 +4902,13 @@ running 0 tests
 ...
 "#]])
         .run();
-    p.cargo(&format!(
-        "test --target {} -Zdoctest-xcompile",
-        cross_compile::alternate()
-    ))
-    .masquerade_as_nightly_cargo(&["doctest-xcompile"])
-    .with_stdout_data(str![[r#"
+    p.cargo(&format!("test --target {}", cross_compile::alternate()))
+        .with_stdout_data(str![[r#"
 ...
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in [ELAPSED]s
 ...
 "#]])
-    .run();
+        .run();
 }
 
 #[cargo_test(nightly, reason = "-Zpanic-abort-tests in rustc is unstable")]

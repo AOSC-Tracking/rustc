@@ -6,33 +6,36 @@
 //! to a new platform, and allows for an unprecedented level of control over how
 //! the compiler works.
 //!
-//! # Using custom targets
+//! # Using targets and target.json
 //!
-//! A target tuple, as passed via `rustc --target=TUPLE`, will first be
-//! compared against the list of built-in targets. This is to ease distributing
-//! rustc (no need for configuration files) and also to hold these built-in
-//! targets as immutable and sacred. If `TUPLE` is not one of the built-in
-//! targets, rustc will check if a file named `TUPLE` exists. If it does, it
-//! will be loaded as the target configuration. If the file does not exist,
-//! rustc will search each directory in the environment variable
-//! `RUST_TARGET_PATH` for a file named `TUPLE.json`. The first one found will
-//! be loaded. If no file is found in any of those directories, a fatal error
-//! will be given.
+//! Invoking "rustc --target=${TUPLE}" will result in rustc initiating the [`Target::search`] by
+//! - checking if "$TUPLE" is a complete path to a json (ending with ".json") and loading if so
+//! - checking builtin targets for "${TUPLE}"
+//! - checking directories in "${RUST_TARGET_PATH}" for "${TUPLE}.json"
+//! - checking for "${RUSTC_SYSROOT}/lib/rustlib/${TUPLE}/target.json"
 //!
-//! Projects defining their own targets should use
-//! `--target=path/to/my-awesome-platform.json` instead of adding to
-//! `RUST_TARGET_PATH`.
+//! Code will then be compiled using the first discovered target spec.
 //!
 //! # Defining a new target
 //!
-//! Targets are defined using [JSON](https://json.org/). The `Target` struct in
-//! this module defines the format the JSON file should take, though each
-//! underscore in the field names should be replaced with a hyphen (`-`) in the
-//! JSON file. Some fields are required in every target specification, such as
-//! `llvm-target`, `target-endian`, `target-pointer-width`, `data-layout`,
-//! `arch`, and `os`. In general, options passed to rustc with `-C` override
-//! the target's settings, though `target-feature` and `link-args` will *add*
-//! to the list specified by the target, rather than replace.
+//! Targets are defined using a struct which additionally has serialization to and from [JSON].
+//! The `Target` struct in this module loosely corresponds with the format the JSON takes.
+//! We usually try to make the fields equivalent but we have given up on a 1:1 correspondence
+//! between the JSON and the actual structure itself.
+//!
+//! Some fields are required in every target spec, and they should be embedded in Target directly.
+//! Optional keys are in TargetOptions, but Target derefs to it, for no practical difference.
+//! Most notable is the "data-layout" field which specifies Rust's notion of sizes and alignments
+//! for several key types, such as f64, pointers, and so on.
+//!
+//! At one point we felt `-C` options should override the target's settings, like in C compilers,
+//! but that was an essentially-unmarked route for making code incorrect and Rust unsound.
+//! Confronted with programmers who prefer a compiler with a good UX instead of a lethal weapon,
+//! we have almost-entirely recanted that notion, though we hope "target modifiers" will offer
+//! a way to have a decent UX yet still extend the necessary compiler controls, without
+//! requiring a new target spec for each and every single possible target micro-variant.
+//!
+//! [JSON]: https://json.org
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -42,7 +45,9 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fmt, io};
 
-use rustc_abi::{Endian, ExternAbi, Integer, Size, TargetDataLayout, TargetDataLayoutErrors};
+use rustc_abi::{
+    Align, CanonAbi, Endian, ExternAbi, Integer, Size, TargetDataLayout, TargetDataLayoutErrors,
+};
 use rustc_data_structures::fx::{FxHashSet, FxIndexSet};
 use rustc_fs_util::try_canonicalize;
 use rustc_macros::{Decodable, Encodable, HashStable_Generic};
@@ -51,15 +56,17 @@ use rustc_span::{Symbol, kw, sym};
 use serde_json::Value;
 use tracing::debug;
 
-use crate::callconv::Conv;
 use crate::json::{Json, ToJson};
 use crate::spec::crt_objects::CrtObjects;
 
 pub mod crt_objects;
 
+mod abi_map;
 mod base;
 mod json;
 
+pub use abi_map::{AbiMap, AbiMapping};
+pub use base::apple;
 pub use base::avr::ef_avr_arch;
 
 /// Linker is called through a C/C++ compiler.
@@ -81,7 +88,7 @@ pub enum Lld {
 /// of classes that we call "linker flavors".
 ///
 /// Technically, it's not even necessary, we can nearly always infer the flavor from linker name
-/// and target properties like `is_like_windows`/`is_like_osx`/etc. However, the PRs originally
+/// and target properties like `is_like_windows`/`is_like_darwin`/etc. However, the PRs originally
 /// introducing `-Clinker-flavor` (#40018 and friends) were aiming to reduce this kind of inference
 /// and provide something certain and explicitly specified instead, and that design goal is still
 /// relevant now.
@@ -1693,6 +1700,12 @@ impl ToJson for BinaryFormat {
     }
 }
 
+impl ToJson for Align {
+    fn to_json(&self) -> Json {
+        self.bits().to_json()
+    }
+}
+
 macro_rules! supported_targets {
     ( $(($tuple:literal, $module:ident),)+ ) => {
         mod targets {
@@ -1977,6 +1990,8 @@ supported_targets! {
 
     ("sparc-unknown-none-elf", sparc_unknown_none_elf),
 
+    ("loongarch32-unknown-none", loongarch32_unknown_none),
+    ("loongarch32-unknown-none-softfloat", loongarch32_unknown_none_softfloat),
     ("loongarch64-unknown-none", loongarch64_unknown_none),
     ("loongarch64-unknown-none-softfloat", loongarch64_unknown_none_softfloat),
 
@@ -2077,6 +2092,7 @@ supported_targets! {
     ("riscv32imafc-unknown-nuttx-elf", riscv32imafc_unknown_nuttx_elf),
     ("riscv64imac-unknown-nuttx-elf", riscv64imac_unknown_nuttx_elf),
     ("riscv64gc-unknown-nuttx-elf", riscv64gc_unknown_nuttx_elf),
+    ("x86_64-lynx-lynxos178", x86_64_lynx_lynxos178),
 
     ("x86_64-pc-cygwin", x86_64_pc_cygwin),
 }
@@ -2200,18 +2216,10 @@ impl Target {
             });
         }
 
-        dl.c_enum_min_size = self
-            .c_enum_min_bits
-            .map_or_else(
-                || {
-                    self.c_int_width
-                        .parse()
-                        .map_err(|_| String::from("failed to parse c_int_width"))
-                },
-                Ok,
-            )
-            .and_then(|i| Integer::from_size(Size::from_bits(i)))
-            .map_err(|err| TargetDataLayoutErrors::InvalidBitsSize { err })?;
+        dl.c_enum_min_size = Integer::from_size(Size::from_bits(
+            self.c_enum_min_bits.unwrap_or(self.c_int_width as _),
+        ))
+        .map_err(|err| TargetDataLayoutErrors::InvalidBitsSize { err })?;
 
         Ok(dl)
     }
@@ -2226,22 +2234,6 @@ impl HasTargetSpec for Target {
     fn target_spec(&self) -> &Target {
         self
     }
-}
-
-/// Which C ABI to use for `wasm32-unknown-unknown`.
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub enum WasmCAbi {
-    /// Spec-compliant C ABI.
-    Spec,
-    /// Legacy ABI. Which is non-spec-compliant.
-    Legacy {
-        /// Indicates whether the `wasm_c_abi` lint should be emitted.
-        with_lint: bool,
-    },
-}
-
-pub trait HasWasmCAbiOpt {
-    fn wasm_c_abi_opt(&self) -> WasmCAbi;
 }
 
 /// x86 (32-bit) abi options.
@@ -2273,7 +2265,7 @@ pub struct TargetOptions {
     /// Used as the `target_endian` `cfg` variable. Defaults to little endian.
     pub endian: Endian,
     /// Width of c_int type. Defaults to "32".
-    pub c_int_width: StaticCow<str>,
+    pub c_int_width: u16,
     /// OS name to use for conditional compilation (`target_os`). Defaults to "none".
     /// "none" implies a bare metal target without `std` library.
     /// A couple of targets having `std` also use "unknown" as an `os` value,
@@ -2406,7 +2398,7 @@ pub struct TargetOptions {
     /// in particular running dsymutil and some other stuff like `-dead_strip`. Defaults to false.
     /// Also indicates whether to use Apple-specific ABI changes, such as extending function
     /// parameters to 32-bits.
-    pub is_like_osx: bool,
+    pub is_like_darwin: bool,
     /// Whether the target toolchain is like Solaris's.
     /// Only useful for compiling against Illumos/Solaris,
     /// as they have a different set of linker flags. Defaults to false.
@@ -2508,7 +2500,7 @@ pub struct TargetOptions {
     pub stack_probes: StackProbeType,
 
     /// The minimum alignment for global symbols.
-    pub min_global_align: Option<u64>,
+    pub min_global_align: Option<Align>,
 
     /// Default number of codegen units to use in debug mode
     pub default_codegen_units: Option<u64>,
@@ -2651,9 +2643,9 @@ pub struct TargetOptions {
     /// Default value is "main"
     pub entry_name: StaticCow<str>,
 
-    /// The ABI of entry function.
-    /// Default value is `Conv::C`, i.e. C call convention
-    pub entry_abi: Conv,
+    /// The ABI of the entry function.
+    /// Default value is `CanonAbi::C`
+    pub entry_abi: CanonAbi,
 
     /// Whether the target supports XRay instrumentation.
     pub supports_xray: bool,
@@ -2700,7 +2692,7 @@ fn add_link_args(link_args: &mut LinkArgs, flavor: LinkerFlavor, args: &[&'stati
 impl TargetOptions {
     pub fn supports_comdat(&self) -> bool {
         // XCOFF and MachO don't support COMDAT.
-        !self.is_like_aix && !self.is_like_osx
+        !self.is_like_aix && !self.is_like_darwin
     }
 }
 
@@ -2770,7 +2762,7 @@ impl Default for TargetOptions {
     fn default() -> TargetOptions {
         TargetOptions {
             endian: Endian::Little,
-            c_int_width: "32".into(),
+            c_int_width: 32,
             os: "none".into(),
             env: "".into(),
             abi: "".into(),
@@ -2804,7 +2796,7 @@ impl Default for TargetOptions {
             families: cvs![],
             abi_return_struct_as_int: false,
             is_like_aix: false,
-            is_like_osx: false,
+            is_like_darwin: false,
             is_like_solaris: false,
             is_like_windows: false,
             is_like_msvc: false,
@@ -2884,7 +2876,7 @@ impl Default for TargetOptions {
             generate_arange_section: true,
             supports_stack_protector: true,
             entry_name: "main".into(),
-            entry_abi: Conv::C,
+            entry_abi: CanonAbi::C,
             supports_xray: false,
             small_data_threshold_support: SmallDataThresholdSupport::DefaultForArch,
         }
@@ -2910,119 +2902,9 @@ impl DerefMut for Target {
 }
 
 impl Target {
-    /// Given a function ABI, turn it into the correct ABI for this target.
-    pub fn adjust_abi(&self, abi: ExternAbi, c_variadic: bool) -> ExternAbi {
-        use ExternAbi::*;
-        match abi {
-            // On Windows, `extern "system"` behaves like msvc's `__stdcall`.
-            // `__stdcall` only applies on x86 and on non-variadic functions:
-            // https://learn.microsoft.com/en-us/cpp/cpp/stdcall?view=msvc-170
-            System { unwind } => {
-                if self.is_like_windows && self.arch == "x86" && !c_variadic {
-                    Stdcall { unwind }
-                } else {
-                    C { unwind }
-                }
-            }
-
-            EfiApi => {
-                if self.arch == "arm" {
-                    Aapcs { unwind: false }
-                } else if self.arch == "x86_64" {
-                    Win64 { unwind: false }
-                } else {
-                    C { unwind: false }
-                }
-            }
-
-            // See commentary in `is_abi_supported`.
-            Stdcall { unwind } | Thiscall { unwind } | Fastcall { unwind } => {
-                if self.arch == "x86" { abi } else { C { unwind } }
-            }
-            Vectorcall { unwind } => {
-                if ["x86", "x86_64"].contains(&&*self.arch) {
-                    abi
-                } else {
-                    C { unwind }
-                }
-            }
-
-            // The Windows x64 calling convention we use for `extern "Rust"`
-            // <https://learn.microsoft.com/en-us/cpp/build/x64-software-conventions#register-volatility-and-preservation>
-            // expects the callee to save `xmm6` through `xmm15`, but `PreserveMost`
-            // (that we use by default for `extern "rust-cold"`) doesn't save any of those.
-            // So to avoid bloating callers, just use the Rust convention here.
-            RustCold if self.is_like_windows && self.arch == "x86_64" => Rust,
-
-            abi => abi,
-        }
-    }
-
     pub fn is_abi_supported(&self, abi: ExternAbi) -> bool {
-        use ExternAbi::*;
-        match abi {
-            Rust
-            | C { .. }
-            | System { .. }
-            | RustIntrinsic
-            | RustCall
-            | Unadjusted
-            | Cdecl { .. }
-            | RustCold => true,
-            EfiApi => {
-                ["arm", "aarch64", "riscv32", "riscv64", "x86", "x86_64"].contains(&&self.arch[..])
-            }
-            X86Interrupt => ["x86", "x86_64"].contains(&&self.arch[..]),
-            Aapcs { .. } => "arm" == self.arch,
-            CCmseNonSecureCall | CCmseNonSecureEntry => {
-                ["thumbv8m.main-none-eabi", "thumbv8m.main-none-eabihf", "thumbv8m.base-none-eabi"]
-                    .contains(&&self.llvm_target[..])
-            }
-            Win64 { .. } | SysV64 { .. } => self.arch == "x86_64",
-            PtxKernel => self.arch == "nvptx64",
-            GpuKernel => ["amdgpu", "nvptx64"].contains(&&self.arch[..]),
-            Msp430Interrupt => self.arch == "msp430",
-            RiscvInterruptM | RiscvInterruptS => ["riscv32", "riscv64"].contains(&&self.arch[..]),
-            AvrInterrupt | AvrNonBlockingInterrupt => self.arch == "avr",
-            Thiscall { .. } => self.arch == "x86",
-            // On windows these fall-back to platform native calling convention (C) when the
-            // architecture is not supported.
-            //
-            // This is I believe a historical accident that has occurred as part of Microsoft
-            // striving to allow most of the code to "just" compile when support for 64-bit x86
-            // was added and then later again, when support for ARM architectures was added.
-            //
-            // This is well documented across MSDN. Support for this in Rust has been added in
-            // #54576. This makes much more sense in context of Microsoft's C++ than it does in
-            // Rust, but there isn't much leeway remaining here to change it back at the time this
-            // comment has been written.
-            //
-            // Following are the relevant excerpts from the MSDN documentation.
-            //
-            // > The __vectorcall calling convention is only supported in native code on x86 and
-            // x64 processors that include Streaming SIMD Extensions 2 (SSE2) and above.
-            // > ...
-            // > On ARM machines, __vectorcall is accepted and ignored by the compiler.
-            //
-            // -- https://docs.microsoft.com/en-us/cpp/cpp/vectorcall?view=msvc-160
-            //
-            // > On ARM and x64 processors, __stdcall is accepted and ignored by the compiler;
-            //
-            // -- https://docs.microsoft.com/en-us/cpp/cpp/stdcall?view=msvc-160
-            //
-            // > In most cases, keywords or compiler switches that specify an unsupported
-            // > convention on a particular platform are ignored, and the platform default
-            // > convention is used.
-            //
-            // -- https://docs.microsoft.com/en-us/cpp/cpp/argument-passing-and-naming-conventions
-            Stdcall { .. } | Fastcall { .. } | Vectorcall { .. } if self.is_like_windows => true,
-            // Outside of Windows we want to only support these calling conventions for the
-            // architectures for which these calling conventions are actually well defined.
-            Stdcall { .. } | Fastcall { .. } if self.arch == "x86" => true,
-            Vectorcall { .. } if ["x86", "x86_64"].contains(&&self.arch[..]) => true,
-            // Reject these calling conventions everywhere else.
-            Stdcall { .. } | Fastcall { .. } | Vectorcall { .. } => false,
-        }
+        let abi_map = AbiMap::from_target(self);
+        abi_map.canonize_abi(abi, false).is_mapped()
     }
 
     /// Minimum integer size in bits that this target can perform atomic
@@ -3070,9 +2952,9 @@ impl Target {
         }
 
         check_eq!(
-            self.is_like_osx,
+            self.is_like_darwin,
             self.vendor == "apple",
-            "`is_like_osx` must be set if and only if `vendor` is `apple`"
+            "`is_like_darwin` must be set if and only if `vendor` is `apple`"
         );
         check_eq!(
             self.is_like_solaris,
@@ -3098,9 +2980,9 @@ impl Target {
 
         // Check that default linker flavor is compatible with some other key properties.
         check_eq!(
-            self.is_like_osx,
+            self.is_like_darwin,
             matches!(self.linker_flavor, LinkerFlavor::Darwin(..)),
-            "`linker_flavor` must be `darwin` if and only if `is_like_osx` is set"
+            "`linker_flavor` must be `darwin` if and only if `is_like_darwin` is set"
         );
         check_eq!(
             self.is_like_msvc,
@@ -3516,7 +3398,7 @@ impl Target {
                     Err("the `i586-pc-windows-msvc` target has been removed. Use the `i686-pc-windows-msvc` target instead.\n\
                         Windows 10 (the minimum required OS version) requires a CPU baseline of at least i686 so you can safely switch".into())
                 } else {
-                    Err(format!("Could not find specification for target {target_tuple:?}"))
+                    Err(format!("could not find specification for target {target_tuple:?}"))
                 }
             }
             TargetTuple::TargetJson { ref contents, .. } => {
@@ -3568,7 +3450,19 @@ impl Target {
             "x86" => (Architecture::I386, None),
             "s390x" => (Architecture::S390x, None),
             "mips" | "mips32r6" => (Architecture::Mips, None),
-            "mips64" | "mips64r6" => (Architecture::Mips64, None),
+            "mips64" | "mips64r6" => (
+                // While there are currently no builtin targets
+                // using the N32 ABI, it is possible to specify
+                // it using a custom target specification. N32
+                // is an ILP32 ABI like the Aarch64_Ilp32
+                // and X86_64_X32 cases above and below this one.
+                if self.options.llvm_abiname.as_ref() == "n32" {
+                    Architecture::Mips64_N32
+                } else {
+                    Architecture::Mips64
+                },
+                None,
+            ),
             "x86_64" => (
                 if self.pointer_width == 32 {
                     Architecture::X86_64_X32
@@ -3595,12 +3489,32 @@ impl Target {
             "msp430" => (Architecture::Msp430, None),
             "hexagon" => (Architecture::Hexagon, None),
             "bpf" => (Architecture::Bpf, None),
+            "loongarch32" => (Architecture::LoongArch32, None),
             "loongarch64" => (Architecture::LoongArch64, None),
             "csky" => (Architecture::Csky, None),
             "arm64ec" => (Architecture::Aarch64, Some(object::SubArchitecture::Arm64EC)),
             // Unsupported architecture.
             _ => return None,
         })
+    }
+
+    /// Returns whether this target is known to have unreliable alignment:
+    /// native C code for the target fails to align some data to the degree
+    /// required by the C standard. We can't *really* do anything about that
+    /// since unsafe Rust code may assume alignment any time, but we can at least
+    /// inhibit some optimizations, and we suppress the alignment checks that
+    /// would detect this unsoundness.
+    ///
+    /// Every target that returns less than `Align::MAX` here is still has a soundness bug.
+    pub fn max_reliable_alignment(&self) -> Align {
+        // FIXME(#112480) MSVC on x86-32 is unsound and fails to properly align many types with
+        // more-than-4-byte-alignment on the stack. This makes alignments larger than 4 generally
+        // unreliable on 32bit Windows.
+        if self.is_like_windows && self.arch == "x86" {
+            Align::from_bytes(4).unwrap()
+        } else {
+            Align::MAX
+        }
     }
 }
 

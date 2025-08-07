@@ -1,8 +1,6 @@
 //@ run-pass
 //@ edition:2024
-//@ compile-flags: -Z validate-mir
-
-#![feature(let_chains)]
+//@ compile-flags: -Z validate-mir -Z lint-mir
 
 use std::cell::RefCell;
 use std::convert::TryInto;
@@ -20,7 +18,7 @@ impl Drop for LoudDrop<'_> {
 }
 
 impl DropOrderCollector {
-    fn option_loud_drop(&self, n: u32) -> Option<LoudDrop> {
+    fn option_loud_drop(&self, n: u32) -> Option<LoudDrop<'_>> {
         Some(LoudDrop(self, n))
     }
 

@@ -70,6 +70,11 @@ related tests.
 > //!
 > //! Regression test for <https://github.com/rust-lang/rust/issues/123456>.
 > ```
+>
+> One exception to this rule is [crashes tests]: there it is canonical that
+> tests are named only after issue numbers because its purpose is to track
+> snippets from which issues no longer ICE/crash, and they would either be
+> removed or converted into proper ui/other tests in the fix PRs.
 
 ## Test organization
 
@@ -175,6 +180,8 @@ See [compiletest directives] for a listing of directives.
 - For `ignore-*`/`needs-*`/`only-*` directives, unless extremely obvious,
   provide a brief remark on why the directive is needed. E.g. `"//@ ignore-wasi
   (wasi codegens the main symbol differently)"`.
+- When using `//@ ignore-auxiliary`, specify the corresponding main test files,
+  e.g. ``//@ ignore-auxiliary (used by `./foo.rs`)``.
 
 ## FileCheck best practices
 
@@ -192,3 +199,4 @@ See [LLVM FileCheck guide][FileCheck] for details.
 [compiletest directives]: ./directives.md
 [`run-make`]: ./compiletest.md#run-make-tests
 [FileCheck]: https://llvm.org/docs/CommandGuide/FileCheck.html
+[crashes tests]: ./compiletest.md#crashes-tests

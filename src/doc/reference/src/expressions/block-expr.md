@@ -2,17 +2,18 @@ r[expr.block]
 # Block expressions
 
 r[expr.block.syntax]
-> **<sup>Syntax</sup>**\
-> _BlockExpression_ :\
-> &nbsp;&nbsp; `{`\
-> &nbsp;&nbsp; &nbsp;&nbsp; [_InnerAttribute_]<sup>\*</sup>\
-> &nbsp;&nbsp; &nbsp;&nbsp; _Statements_<sup>?</sup>\
-> &nbsp;&nbsp; `}`
->
-> _Statements_ :\
-> &nbsp;&nbsp; &nbsp;&nbsp; [_Statement_]<sup>\+</sup>\
-> &nbsp;&nbsp; | [_Statement_]<sup>\+</sup> [_ExpressionWithoutBlock_]\
-> &nbsp;&nbsp; | [_ExpressionWithoutBlock_]
+```grammar,expressions
+BlockExpression ->
+    `{`
+        InnerAttribute*
+        Statements?
+    `}`
+
+Statements ->
+      Statement+
+    | Statement+ ExpressionWithoutBlock
+    | ExpressionWithoutBlock
+```
 
 r[expr.block.intro]
 A *block expression*, or *block*, is a control flow expression and anonymous namespace scope for items and variable declarations.
@@ -20,7 +21,7 @@ A *block expression*, or *block*, is a control flow expression and anonymous nam
 r[expr.block.sequential-evaluation]
 As a control flow expression, a block sequentially executes its component non-item declaration statements and then its final optional expression.
 
-r[expr.block.namepsace]
+r[expr.block.namespace]
 As an anonymous namespace scope, item declarations are only in scope inside the block itself and variables declared by `let` statements are in scope from the next statement until the end of the block.
 See the [scopes] chapter for more details.
 
@@ -91,9 +92,9 @@ r[expr.block.async]
 ## `async` blocks
 
 r[expr.block.async.syntax]
-> **<sup>Syntax</sup>**\
-> _AsyncBlockExpression_ :\
-> &nbsp;&nbsp; `async` `move`<sup>?</sup> _BlockExpression_
+```grammar,expressions
+AsyncBlockExpression -> `async` `move`? BlockExpression
+```
 
 r[expr.block.async.intro]
 An *async block* is a variant of a block expression which evaluates to a future.
@@ -114,7 +115,9 @@ The actual data format for this type is unspecified.
 > [!NOTE]
 > The future type that rustc generates is roughly equivalent to an enum with one variant per `await` point, where each variant stores the data needed to resume from its corresponding point.
 
-> **Edition differences**: Async blocks are only available beginning with Rust 2018.
+r[expr.block.async.edition2018]
+> [!EDITION-2018]
+> Async blocks are only available beginning with Rust 2018.
 
 r[expr.block.async.capture]
 ### Capture modes
@@ -156,9 +159,9 @@ r[expr.block.const]
 ## `const` blocks
 
 r[expr.block.const.syntax]
-> **<sup>Syntax</sup>**\
-> _ConstBlockExpression_ :\
-> &nbsp;&nbsp; `const` _BlockExpression_
+```grammar,expressions
+ConstBlockExpression -> `const` BlockExpression
+```
 
 r[expr.block.const.intro]
 A *const block* is a variant of a block expression whose body evaluates at compile-time instead of at runtime.
@@ -220,10 +223,12 @@ if false {
 r[expr.block.unsafe]
 ## `unsafe` blocks
 
-> **<sup>Syntax</sup>**\
-> _UnsafeBlockExpression_ :\
-> &nbsp;&nbsp; `unsafe` _BlockExpression_
+r[expr.block.unsafe.syntax]
+```grammar,expressions
+UnsafeBlockExpression -> `unsafe` BlockExpression
+```
 
+r[expr.block.unsafe.intro]
 _See [`unsafe` blocks] for more information on when to use `unsafe`_.
 
 A block of code can be prefixed with the `unsafe` keyword to permit [unsafe operations].
@@ -253,7 +258,7 @@ r[expr.block.attributes.inner-attributes]
 [Inner attributes] are allowed directly after the opening brace of a block expression in the following situations:
 
 * [Function] and [method] bodies.
-* Loop bodies ([`loop`], [`while`], [`while let`], and [`for`]).
+* Loop bodies ([`loop`], [`while`], and [`for`]).
 * Block expressions used as a [statement].
 * Block expressions as elements of [array expressions], [tuple expressions],
   [call expressions], and tuple-style [struct] expressions.
@@ -272,15 +277,11 @@ fn is_unix_platform() -> bool {
 }
 ```
 
-[_ExpressionWithoutBlock_]: ../expressions.md
-[_InnerAttribute_]: ../attributes.md
-[_Statement_]: ../statements.md
 [`await` expressions]: await-expr.md
 [`cfg`]: ../conditional-compilation.md
 [`for`]: loop-expr.md#iterator-loops
 [`loop`]: loop-expr.md#infinite-loops
 [`unsafe` blocks]: ../unsafe-keyword.md#unsafe-blocks-unsafe-
-[`while let`]: loop-expr.md#predicate-pattern-loops
 [`while`]: loop-expr.md#predicate-loops
 [array expressions]: array-expr.md
 [call expressions]: call-expr.md

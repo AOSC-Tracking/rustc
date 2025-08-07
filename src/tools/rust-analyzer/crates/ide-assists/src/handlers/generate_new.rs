@@ -2,13 +2,13 @@ use ide_db::{
     imports::import_assets::item_for_path_search, use_trivial_constructor::use_trivial_constructor,
 };
 use syntax::{
-    ast::{self, edit_in_place::Indent, make, AstNode, HasName, HasVisibility, StructKind},
+    ast::{self, AstNode, HasName, HasVisibility, StructKind, edit_in_place::Indent, make},
     ted,
 };
 
 use crate::{
+    AssistContext, AssistId, Assists,
     utils::{find_struct_impl, generate_impl},
-    AssistContext, AssistId, AssistKind, Assists,
 };
 
 // Assist: generate_new
@@ -48,7 +48,7 @@ pub(crate) fn generate_new(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option
     let current_module = ctx.sema.scope(strukt.syntax())?.module();
 
     let target = strukt.syntax().text_range();
-    acc.add(AssistId("generate_new", AssistKind::Generate), "Generate `new`", target, |builder| {
+    acc.add(AssistId::generate("generate_new"), "Generate `new`", target, |builder| {
         let trivial_constructors = field_list
             .fields()
             .map(|f| {
@@ -129,17 +129,23 @@ pub(crate) fn generate_new(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option
 
         // Get the mutable version of the impl to modify
         let impl_def = if let Some(impl_def) = impl_def {
+            fn_.indent(impl_def.indent_level());
             builder.make_mut(impl_def)
         } else {
             // Generate a new impl to add the method to
             let impl_def = generate_impl(&ast::Adt::Struct(strukt.clone()));
+            let indent_level = strukt.indent_level();
+            fn_.indent(indent_level);
 
             // Insert it after the adt
             let strukt = builder.make_mut(strukt.clone());
 
             ted::insert_all_raw(
                 ted::Position::after(strukt.syntax()),
-                vec![make::tokens::blank_line().into(), impl_def.syntax().clone().into()],
+                vec![
+                    make::tokens::whitespace(&format!("\n\n{indent_level}")).into(),
+                    impl_def.syntax().clone().into(),
+                ],
             );
 
             impl_def
@@ -419,6 +425,135 @@ impl Foo {
     fn qux(&self) {}
     fn baz() -> i32 {
         5
+    }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn non_zero_indent() {
+        check_assist(
+            generate_new,
+            r#"
+mod foo {
+    struct $0Foo {}
+}
+"#,
+            r#"
+mod foo {
+    struct Foo {}
+
+    impl Foo {
+        fn $0new() -> Self {
+            Self {  }
+        }
+    }
+}
+"#,
+        );
+        check_assist(
+            generate_new,
+            r#"
+mod foo {
+    mod bar {
+        struct $0Foo {}
+    }
+}
+"#,
+            r#"
+mod foo {
+    mod bar {
+        struct Foo {}
+
+        impl Foo {
+            fn $0new() -> Self {
+                Self {  }
+            }
+        }
+    }
+}
+"#,
+        );
+        check_assist(
+            generate_new,
+            r#"
+mod foo {
+    struct $0Foo {}
+
+    impl Foo {
+        fn some() {}
+    }
+}
+"#,
+            r#"
+mod foo {
+    struct Foo {}
+
+    impl Foo {
+        fn $0new() -> Self {
+            Self {  }
+        }
+
+        fn some() {}
+    }
+}
+"#,
+        );
+        check_assist(
+            generate_new,
+            r#"
+mod foo {
+    mod bar {
+        struct $0Foo {}
+
+        impl Foo {
+            fn some() {}
+        }
+    }
+}
+"#,
+            r#"
+mod foo {
+    mod bar {
+        struct Foo {}
+
+        impl Foo {
+            fn $0new() -> Self {
+                Self {  }
+            }
+
+            fn some() {}
+        }
+    }
+}
+"#,
+        );
+        check_assist(
+            generate_new,
+            r#"
+mod foo {
+    mod bar {
+struct $0Foo {}
+
+        impl Foo {
+            fn some() {}
+        }
+    }
+}
+"#,
+            r#"
+mod foo {
+    mod bar {
+struct Foo {}
+
+        impl Foo {
+            fn $0new() -> Self {
+                Self {  }
+            }
+
+            fn some() {}
+        }
     }
 }
 "#,

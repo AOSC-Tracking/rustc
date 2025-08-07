@@ -208,14 +208,7 @@ impl Package {
         let crate_features = summary
             .features()
             .iter()
-            .map(|(k, v)| {
-                (
-                    *k,
-                    v.iter()
-                        .map(|fv| InternedString::new(&fv.to_string()))
-                        .collect(),
-                )
-            })
+            .map(|(k, v)| (*k, v.iter().map(|fv| fv.to_string().into()).collect()))
             .collect();
 
         SerializedPackage {
@@ -443,7 +436,7 @@ impl<'gctx> PackageSet<'gctx> {
             ))),
             downloads_finished: 0,
             downloaded_bytes: 0,
-            largest: (0, InternedString::new("")),
+            largest: (0, "".into()),
             success: false,
             updated_at: Cell::new(Instant::now()),
             timeout,
@@ -1182,7 +1175,7 @@ mod tls {
 
     use super::Downloads;
 
-    thread_local!(static PTR: Cell<usize> = Cell::new(0));
+    thread_local!(static PTR: Cell<usize> = const { Cell::new(0) });
 
     pub(crate) fn with<R>(f: impl FnOnce(Option<&Downloads<'_, '_>>) -> R) -> R {
         let ptr = PTR.with(|p| p.get());

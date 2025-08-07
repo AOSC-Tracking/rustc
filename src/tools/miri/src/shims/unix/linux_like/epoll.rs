@@ -4,6 +4,8 @@ use std::io;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
+use rustc_abi::FieldIdx;
+
 use crate::concurrency::VClock;
 use crate::shims::files::{
     DynFileDescriptionRef, FdId, FileDescription, FileDescriptionRef, WeakFileDescriptionRef,
@@ -153,7 +155,7 @@ impl FileDescription for Epoll {
         interp_ok(Ok(()))
     }
 
-    fn as_unix(&self) -> &dyn UnixFileDescription {
+    fn as_unix<'tcx>(&self, _ecx: &MiriInterpCx<'tcx>) -> &dyn UnixFileDescription {
         self
     }
 }
@@ -284,8 +286,9 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
 
         if op == epoll_ctl_add || op == epoll_ctl_mod {
             // Read event bitmask and data from epoll_event passed by caller.
-            let mut events = this.read_scalar(&this.project_field(&event, 0)?)?.to_u32()?;
-            let data = this.read_scalar(&this.project_field(&event, 1)?)?.to_u64()?;
+            let mut events =
+                this.read_scalar(&this.project_field(&event, FieldIdx::ZERO)?)?.to_u32()?;
+            let data = this.read_scalar(&this.project_field(&event, FieldIdx::ONE)?)?.to_u64()?;
 
             // Unset the flag we support to discover if any unsupported flags are used.
             let mut flags = events;
@@ -590,7 +593,7 @@ fn check_and_update_one_event_interest<'tcx>(
     ecx: &MiriInterpCx<'tcx>,
 ) -> InterpResult<'tcx, bool> {
     // Get the bitmask of ready events for a file description.
-    let ready_events_bitmask = fd_ref.as_unix().get_epoll_ready_events()?.get_event_bitmask(ecx);
+    let ready_events_bitmask = fd_ref.as_unix(ecx).get_epoll_ready_events()?.get_event_bitmask(ecx);
     let epoll_event_interest = interest.borrow();
     let epfd = epoll_event_interest.weak_epfd.upgrade().unwrap();
     // This checks if any of the events specified in epoll_event_interest.events

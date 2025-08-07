@@ -32,12 +32,6 @@ pub(super) struct SsaLocals {
     borrowed_locals: DenseBitSet<Local>,
 }
 
-pub(super) enum AssignedValue<'a, 'tcx> {
-    Arg,
-    Rvalue(&'a mut Rvalue<'tcx>),
-    Terminator,
-}
-
 impl SsaLocals {
     pub(super) fn new<'tcx>(
         tcx: TyCtxt<'tcx>,
@@ -150,38 +144,6 @@ impl SsaLocals {
                 None
             }
         })
-    }
-
-    pub(super) fn for_each_assignment_mut<'tcx>(
-        &self,
-        basic_blocks: &mut IndexSlice<BasicBlock, BasicBlockData<'tcx>>,
-        mut f: impl FnMut(Local, AssignedValue<'_, 'tcx>, Location),
-    ) {
-        for &local in &self.assignment_order {
-            match self.assignments[local] {
-                Set1::One(DefLocation::Argument) => f(
-                    local,
-                    AssignedValue::Arg,
-                    Location { block: START_BLOCK, statement_index: 0 },
-                ),
-                Set1::One(DefLocation::Assignment(loc)) => {
-                    let bb = &mut basic_blocks[loc.block];
-                    // `loc` must point to a direct assignment to `local`.
-                    let stmt = &mut bb.statements[loc.statement_index];
-                    let StatementKind::Assign(box (target, ref mut rvalue)) = stmt.kind else {
-                        bug!()
-                    };
-                    assert_eq!(target.as_local(), Some(local));
-                    f(local, AssignedValue::Rvalue(rvalue), loc)
-                }
-                Set1::One(DefLocation::CallReturn { call, .. }) => {
-                    let bb = &mut basic_blocks[call];
-                    let loc = Location { block: call, statement_index: bb.statements.len() };
-                    f(local, AssignedValue::Terminator, loc)
-                }
-                _ => {}
-            }
-        }
     }
 
     /// Compute the equivalence classes for locals, based on copy statements.
@@ -331,6 +293,10 @@ impl<'tcx> Visitor<'tcx> for SsaVisitor<'_, 'tcx> {
 fn compute_copy_classes(ssa: &mut SsaLocals, body: &Body<'_>) {
     let mut direct_uses = std::mem::take(&mut ssa.direct_uses);
     let mut copies = IndexVec::from_fn_n(|l| l, body.local_decls.len());
+    // We must not unify two locals that are borrowed. But this is fine if one is borrowed and
+    // the other is not. This bitset is keyed by *class head* and contains whether any member of
+    // the class is borrowed.
+    let mut borrowed_classes = ssa.borrowed_locals().clone();
 
     for (local, rvalue, _) in ssa.assignments(body) {
         let (Rvalue::Use(Operand::Copy(place) | Operand::Move(place))
@@ -356,6 +322,11 @@ fn compute_copy_classes(ssa: &mut SsaLocals, body: &Body<'_>) {
         // visited before `local`, and we just have to copy the representing local.
         let head = copies[rhs];
 
+        // Do not unify borrowed locals.
+        if borrowed_classes.contains(local) || borrowed_classes.contains(head) {
+            continue;
+        }
+
         if local == RETURN_PLACE {
             // `_0` is special, we cannot rename it. Instead, rename the class of `rhs` to
             // `RETURN_PLACE`. This is only possible if the class head is a temporary, not an
@@ -368,14 +339,21 @@ fn compute_copy_classes(ssa: &mut SsaLocals, body: &Body<'_>) {
                     *h = RETURN_PLACE;
                 }
             }
+            if borrowed_classes.contains(head) {
+                borrowed_classes.insert(RETURN_PLACE);
+            }
         } else {
             copies[local] = head;
+            if borrowed_classes.contains(local) {
+                borrowed_classes.insert(head);
+            }
         }
         direct_uses[rhs] -= 1;
     }
 
     debug!(?copies);
     debug!(?direct_uses);
+    debug!(?borrowed_classes);
 
     // Invariant: `copies` must point to the head of an equivalence class.
     #[cfg(debug_assertions)]
@@ -383,6 +361,13 @@ fn compute_copy_classes(ssa: &mut SsaLocals, body: &Body<'_>) {
         assert_eq!(copies[head], head);
     }
     debug_assert_eq!(copies[RETURN_PLACE], RETURN_PLACE);
+
+    // Invariant: `borrowed_classes` must be true if any member of the class is borrowed.
+    #[cfg(debug_assertions)]
+    for &head in copies.iter() {
+        let any_borrowed = ssa.borrowed_locals.iter().any(|l| copies[l] == head);
+        assert_eq!(borrowed_classes.contains(head), any_borrowed);
+    }
 
     ssa.direct_uses = direct_uses;
     ssa.copy_classes = copies;

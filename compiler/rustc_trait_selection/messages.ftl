@@ -72,8 +72,6 @@ trait_selection_adjust_signature_remove_borrow = consider adjusting the signatur
 
 trait_selection_ascribe_user_type_prove_predicate = ...so that the where clause holds
 
-trait_selection_async_closure_not_fn = async closure does not implement `{$kind}` because it captures state from its environment
-
 trait_selection_await_both_futures = consider `await`ing on both `Future`s
 trait_selection_await_future = consider `await`ing on the `Future`
 trait_selection_await_note = calling an async function returns a future
@@ -123,6 +121,8 @@ trait_selection_closure_kind_requirement = the requirement to implement `{$trait
 
 trait_selection_compare_impl_item_obligation = ...so that the definition in impl matches the definition from the trait
 trait_selection_consider_specifying_length = consider specifying the actual array length
+trait_selection_coro_closure_not_fn = {$coro_kind}closure does not implement `{$kind}` because it captures state from its environment
+
 trait_selection_data_flows = ...but data{$label_var1_exists ->
     [true] {" "}from `{$label_var1}`
     *[false] {""}
@@ -147,9 +147,6 @@ trait_selection_dtcs_has_lifetime_req_label = this has an implicit `'static` lif
 trait_selection_dtcs_has_req_note = the used `impl` has a `'static` requirement
 trait_selection_dtcs_introduces_requirement = calling this method introduces the `impl`'s `'static` requirement
 trait_selection_dtcs_suggestion = consider relaxing the implicit `'static` requirement
-
-trait_selection_empty_on_clause_in_rustc_on_unimplemented = empty `on`-clause in `#[rustc_on_unimplemented]`
-    .label = empty on-clause here
 
 trait_selection_explicit_lifetime_required_sugg_with_ident = add explicit lifetime `{$named}` to the type of `{$simple_ident}`
 
@@ -186,9 +183,6 @@ trait_selection_inherent_projection_normalization_overflow = overflow evaluating
 
 trait_selection_invalid_format_specifier = invalid format specifier
     .help = no format specifier are supported in this position
-
-trait_selection_invalid_on_clause_in_rustc_on_unimplemented = invalid `on`-clause in `#[rustc_on_unimplemented]`
-    .label = invalid on-clause here
 
 trait_selection_label_bad = {$bad_kind ->
     *[other] cannot infer type
@@ -237,10 +231,6 @@ trait_selection_negative_positive_conflict = found both positive and negative im
     .positive_implementation_here = positive implementation here
     .positive_implementation_in_crate = positive implementation in crate `{$positive_impl_cname}`
 
-trait_selection_no_value_in_rustc_on_unimplemented = this attribute must have a valid value
-    .label = expected value here
-    .note = eg `#[rustc_on_unimplemented(message="foo")]`
-
 trait_selection_nothing = {""}
 
 trait_selection_oc_cant_coerce_force_inline =
@@ -264,8 +254,15 @@ trait_selection_oc_no_diverge = `else` clause of `let...else` does not diverge
 trait_selection_oc_no_else = `if` may be missing an `else` clause
 trait_selection_oc_try_compat = `?` operator has incompatible types
 trait_selection_oc_type_compat = type not compatible with trait
+
 trait_selection_opaque_captures_lifetime = hidden type for `{$opaque_ty}` captures lifetime that does not appear in bounds
     .label = opaque type defined here
+trait_selection_opaque_type_non_generic_param =
+    expected generic {$kind} parameter, found `{$arg}`
+    .label = {STREQ($arg, "'static") ->
+        [true] cannot use static lifetime; use a bound lifetime instead or remove the lifetime parameter from the opaque type
+        *[other] this generic parameter must be used with a generic {$kind} parameter
+    }
 
 trait_selection_outlives_bound = lifetime of the source pointer does not outlive lifetime bound of the object type
 trait_selection_outlives_content = lifetime of reference outlives lifetime of borrowed content...
@@ -331,6 +328,24 @@ trait_selection_ril_because_of = because of this returned expression
 trait_selection_ril_introduced_by = requirement introduced by this return type
 trait_selection_ril_introduced_here = `'static` requirement introduced here
 trait_selection_ril_static_introduced_by = "`'static` lifetime requirement introduced by the return type
+
+trait_selection_rustc_on_unimplemented_empty_on_clause = empty `on`-clause in `#[rustc_on_unimplemented]`
+    .label = empty `on`-clause here
+trait_selection_rustc_on_unimplemented_expected_identifier = expected an identifier inside this `on`-clause
+    .label = expected an identifier here, not `{$path}`
+trait_selection_rustc_on_unimplemented_expected_one_predicate_in_not = expected a single predicate in `not(..)`
+    .label = unexpected quantity of predicates here
+trait_selection_rustc_on_unimplemented_invalid_flag = invalid flag in `on`-clause
+    .label = expected one of the `crate_local`, `direct` or `from_desugaring` flags, not `{$invalid_flag}`
+trait_selection_rustc_on_unimplemented_invalid_name = invalid name in `on`-clause
+    .label = expected one of `cause`, `from_desugaring`, `Self` or any generic parameter of the trait, not `{$invalid_name}`
+trait_selection_rustc_on_unimplemented_invalid_predicate = this predicate is invalid
+    .label = expected one of `any`, `all` or `not` here, not `{$invalid_pred}`
+trait_selection_rustc_on_unimplemented_missing_value = this attribute must have a value
+    .label = expected value here
+    .note = e.g. `#[rustc_on_unimplemented(message="foo")]`
+trait_selection_rustc_on_unimplemented_unsupported_literal_in_on = literals inside `on`-clauses are not supported
+    .label = unexpected literal here
 
 trait_selection_source_kind_closure_return =
     try giving this closure an explicit return type
@@ -438,8 +453,6 @@ trait_selection_type_annotations_needed = {$source_kind ->
     *[other] type annotations needed
 }
     .label = type must be known at this point
-
-trait_selection_type_annotations_needed_error_time = this is an inference error on crate `time` caused by an API change in Rust 1.80.0; update `time` to version `>=0.3.35` by calling `cargo update`
 
 trait_selection_types_declared_different = these two types are declared with different lifetimes...
 

@@ -22,7 +22,6 @@
     sse4a_target_feature,
     riscv_target_feature,
     arm_target_feature,
-    avx512_target_feature,
     mips_target_feature,
     powerpc_target_feature,
     s390x_target_feature,
@@ -34,11 +33,10 @@
     decl_macro,
     generic_arg_infer,
     asm_experimental_arch,
-    sha512_sm_x86,
     x86_amx_intrinsics,
     f16,
-    keylocker_x86,
-    aarch64_unstable_target_feature
+    aarch64_unstable_target_feature,
+    bigint_helper_methods
 )]
 #![cfg_attr(test, feature(test, abi_vectorcall, stdarch_internal))]
 #![deny(clippy::missing_inline_in_public_items)]
@@ -71,8 +69,7 @@
     feature(
         stdarch_arm_feature_detection,
         stdarch_powerpc_feature_detection,
-        stdarch_s390x_feature_detection,
-        stdarch_loongarch_feature_detection
+        stdarch_s390x_feature_detection
     )
 )]
 

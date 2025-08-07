@@ -41,9 +41,10 @@ use std::sync::Arc;
 
 use crate::core::compiler::unit_dependencies::build_unit_dependencies;
 use crate::core::compiler::unit_graph::{self, UnitDep, UnitGraph};
+use crate::core::compiler::UserIntent;
 use crate::core::compiler::{apply_env_config, standard_lib, CrateType, TargetInfo};
 use crate::core::compiler::{BuildConfig, BuildContext, BuildRunner, Compilation};
-use crate::core::compiler::{CompileKind, CompileMode, CompileTarget, RustcTargetData, Unit};
+use crate::core::compiler::{CompileKind, CompileTarget, RustcTargetData, Unit};
 use crate::core::compiler::{DefaultExecutor, Executor, UnitInterner};
 use crate::core::profiles::Profiles;
 use crate::core::resolver::features::{self, CliFeatures, FeaturesFor};
@@ -101,11 +102,11 @@ pub struct CompileOptions {
 }
 
 impl CompileOptions {
-    pub fn new(gctx: &GlobalContext, mode: CompileMode) -> CargoResult<CompileOptions> {
+    pub fn new(gctx: &GlobalContext, intent: UserIntent) -> CargoResult<CompileOptions> {
         let jobs = None;
         let keep_going = false;
         Ok(CompileOptions {
-            build_config: BuildConfig::new(gctx, jobs, keep_going, &[], mode)?,
+            build_config: BuildConfig::new(gctx, jobs, keep_going, &[], intent)?,
             cli_features: CliFeatures::new_all(false),
             spec: ops::Packages::Packages(Vec::new()),
             filter: CompileFilter::Default {
@@ -226,19 +227,15 @@ pub fn create_bcx<'a, 'gctx>(
     let gctx = ws.gctx();
 
     // Perform some pre-flight validation.
-    match build_config.mode {
-        CompileMode::Test
-        | CompileMode::Build
-        | CompileMode::Check { .. }
-        | CompileMode::Bench
-        | CompileMode::RunCustomBuild => {
+    match build_config.intent {
+        UserIntent::Test | UserIntent::Build | UserIntent::Check { .. } | UserIntent::Bench => {
             if ws.gctx().get_env("RUST_FLAGS").is_ok() {
                 gctx.shell().warn(
                     "Cargo does not read `RUST_FLAGS` environment variable. Did you mean `RUSTFLAGS`?",
                 )?;
             }
         }
-        CompileMode::Doc { .. } | CompileMode::Doctest | CompileMode::Docscrape => {
+        UserIntent::Doc { .. } | UserIntent::Doctest => {
             if ws.gctx().get_env("RUSTDOC_FLAGS").is_ok() {
                 gctx.shell().warn(
                     "Cargo does not read `RUSTDOC_FLAGS` environment variable. Did you mean `RUSTDOCFLAGS`?"
@@ -264,8 +261,8 @@ pub fn create_bcx<'a, 'gctx>(
                     .any(|target| target.is_example() && target.doc_scrape_examples().is_enabled())
             });
 
-        if filter.need_dev_deps(build_config.mode)
-            || (build_config.mode.is_doc() && any_pkg_has_scrape_enabled)
+        if filter.need_dev_deps(build_config.intent)
+            || (build_config.intent.is_doc() && any_pkg_has_scrape_enabled)
         {
             HasDevUnits::Yes
         } else {
@@ -321,7 +318,7 @@ pub fn create_bcx<'a, 'gctx>(
     for pkg in to_builds.iter() {
         pkg.manifest().print_teapot(gctx);
 
-        if build_config.mode.is_any_test()
+        if build_config.intent.is_any_test()
             && !ws.is_member(pkg)
             && pkg.dependencies().iter().any(|dep| !dep.is_transitive())
         {
@@ -379,7 +376,7 @@ pub fn create_bcx<'a, 'gctx>(
         filter,
         requested_kinds: &build_config.requested_kinds,
         explicit_host_kind,
-        mode: build_config.mode,
+        intent: build_config.intent,
         resolve: &resolve,
         workspace_resolve: &workspace_resolve,
         resolved_features: &resolved_features,
@@ -394,13 +391,9 @@ pub fn create_bcx<'a, 'gctx>(
         override_rustc_crate_types(&mut units, args, interner)?;
     }
 
-    let should_scrape = build_config.mode.is_doc() && gctx.cli_unstable().rustdoc_scrape_examples;
+    let should_scrape = build_config.intent.is_doc() && gctx.cli_unstable().rustdoc_scrape_examples;
     let mut scrape_units = if should_scrape {
-        UnitGenerator {
-            mode: CompileMode::Docscrape,
-            ..generator
-        }
-        .generate_scrape_units(&units)?
+        generator.generate_scrape_units(&units)?
     } else {
         Vec::new()
     };
@@ -431,7 +424,7 @@ pub fn create_bcx<'a, 'gctx>(
         &units,
         &scrape_units,
         &std_roots,
-        build_config.mode,
+        build_config.intent,
         &target_data,
         &profiles,
         interner,
@@ -439,7 +432,7 @@ pub fn create_bcx<'a, 'gctx>(
 
     // TODO: In theory, Cargo should also dedupe the roots, but I'm uncertain
     // what heuristics to use in that case.
-    if matches!(build_config.mode, CompileMode::Doc { deps: true, .. }) {
+    if build_config.intent.wants_deps_docs() {
         remove_duplicate_doc(build_config, &units, &mut unit_graph);
     }
 
@@ -456,6 +449,7 @@ pub fn create_bcx<'a, 'gctx>(
         &units,
         &scrape_units,
         host_kind_requested.then_some(explicit_host_kind),
+        build_config.compile_time_deps_only,
     );
 
     let mut extra_compiler_args = HashMap::new();
@@ -589,12 +583,16 @@ where `<compatible-ver>` is the latest version supporting rustc {rustc_version}"
 /// This is also responsible for adjusting the `debug` setting for host
 /// dependencies, turning off debug if the user has not explicitly enabled it,
 /// and the unit is not shared with a target unit.
+///
+/// This is also responsible for adjusting whether each unit should be compiled
+/// or not regarding `--compile-time-deps` flag.
 fn rebuild_unit_graph_shared(
     interner: &UnitInterner,
     unit_graph: UnitGraph,
     roots: &[Unit],
     scrape_units: &[Unit],
     to_host: Option<CompileKind>,
+    compile_time_deps_only: bool,
 ) -> (Vec<Unit>, Vec<Unit>, UnitGraph) {
     let mut result = UnitGraph::new();
     // Map of the old unit to the new unit, used to avoid recursing into units
@@ -609,8 +607,10 @@ fn rebuild_unit_graph_shared(
                 &mut result,
                 &unit_graph,
                 root,
+                true,
                 false,
                 to_host,
+                compile_time_deps_only,
             )
         })
         .collect();
@@ -635,14 +635,21 @@ fn traverse_and_share(
     new_graph: &mut UnitGraph,
     unit_graph: &UnitGraph,
     unit: &Unit,
+    unit_is_root: bool,
     unit_is_for_host: bool,
     to_host: Option<CompileKind>,
+    compile_time_deps_only: bool,
 ) -> Unit {
     if let Some(new_unit) = memo.get(unit) {
         // Already computed, no need to recompute.
         return new_unit.clone();
     }
     let mut dep_hash = StableHasher::new();
+    let skip_non_compile_time_deps = compile_time_deps_only
+        && (!unit.target.is_compile_time_dependency() ||
+            // Root unit is not a dependency unless other units are dependant
+            // to it.
+            unit_is_root);
     let new_deps: Vec<_> = unit_graph[unit]
         .iter()
         .map(|dep| {
@@ -652,8 +659,13 @@ fn traverse_and_share(
                 new_graph,
                 unit_graph,
                 &dep.unit,
+                false,
                 dep.unit_for.is_for_host(),
                 to_host,
+                // If we should compile the current unit, we should also compile
+                // its dependencies. And if not, we should compile compile time
+                // dependencies only.
+                skip_non_compile_time_deps,
             );
             new_dep_unit.hash(&mut dep_hash);
             UnitDep {
@@ -719,6 +731,7 @@ fn traverse_and_share(
             unit.dep_hash,
             unit.artifact,
             unit.artifact_target_for_features,
+            unit.skip_non_compile_time_dep,
         );
 
         // We can now turn the deferred value into its actual final value.
@@ -749,8 +762,11 @@ fn traverse_and_share(
         // Since `dep_hash` is now filled in, there's no need to specify the artifact target
         // for target-dependent feature resolution
         None,
+        skip_non_compile_time_deps,
     );
-    assert!(memo.insert(unit.clone(), new_unit.clone()).is_none());
+    if !unit_is_root || !compile_time_deps_only {
+        assert!(memo.insert(unit.clone(), new_unit.clone()).is_none());
+    }
     new_graph.entry(new_unit.clone()).or_insert(new_deps);
     new_unit
 }
@@ -911,6 +927,7 @@ fn override_rustc_crate_types(
             unit.dep_hash,
             unit.artifact,
             unit.artifact_target_for_features,
+            unit.skip_non_compile_time_dep,
         )
     };
     units[0] = match unit.target.kind() {

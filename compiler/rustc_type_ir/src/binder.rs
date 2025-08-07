@@ -122,6 +122,10 @@ impl<I: Interner, T: TypeFoldable<I>> TypeFoldable<I> for Binder<I, T> {
     fn try_fold_with<F: FallibleTypeFolder<I>>(self, folder: &mut F) -> Result<Self, F::Error> {
         folder.try_fold_binder(self)
     }
+
+    fn fold_with<F: TypeFolder<I>>(self, folder: &mut F) -> Self {
+        folder.fold_binder(self)
+    }
 }
 
 impl<I: Interner, T: TypeVisitable<I>> TypeVisitable<I> for Binder<I, T> {
@@ -135,7 +139,11 @@ impl<I: Interner, T: TypeFoldable<I>> TypeSuperFoldable<I> for Binder<I, T> {
         self,
         folder: &mut F,
     ) -> Result<Self, F::Error> {
-        self.try_map_bound(|ty| ty.try_fold_with(folder))
+        self.try_map_bound(|t| t.try_fold_with(folder))
+    }
+
+    fn super_fold_with<F: TypeFolder<I>>(self, folder: &mut F) -> Self {
+        self.map_bound(|t| t.fold_with(folder))
     }
 }
 
@@ -668,7 +676,7 @@ impl<'a, I: Interner> TypeFolder<I> for ArgFolder<'a, I> {
         // the specialized routine `ty::replace_late_regions()`.
         match r.kind() {
             ty::ReEarlyParam(data) => {
-                let rk = self.args.get(data.index() as usize).map(|k| k.kind());
+                let rk = self.args.get(data.index() as usize).map(|arg| arg.kind());
                 match rk {
                     Some(ty::GenericArgKind::Lifetime(lt)) => self.shift_region_through_binders(lt),
                     Some(other) => self.region_param_expected(data, r, other),
@@ -703,12 +711,20 @@ impl<'a, I: Interner> TypeFolder<I> for ArgFolder<'a, I> {
             c.super_fold_with(self)
         }
     }
+
+    fn fold_predicate(&mut self, p: I::Predicate) -> I::Predicate {
+        if p.has_param() { p.super_fold_with(self) } else { p }
+    }
+
+    fn fold_clauses(&mut self, c: I::Clauses) -> I::Clauses {
+        if c.has_param() { c.super_fold_with(self) } else { c }
+    }
 }
 
 impl<'a, I: Interner> ArgFolder<'a, I> {
     fn ty_for_param(&self, p: I::ParamTy, source_ty: I::Ty) -> I::Ty {
         // Look up the type in the args. It really should be in there.
-        let opt_ty = self.args.get(p.index() as usize).map(|k| k.kind());
+        let opt_ty = self.args.get(p.index() as usize).map(|arg| arg.kind());
         let ty = match opt_ty {
             Some(ty::GenericArgKind::Type(ty)) => ty,
             Some(kind) => self.type_param_expected(p, source_ty, kind),
@@ -745,7 +761,7 @@ impl<'a, I: Interner> ArgFolder<'a, I> {
 
     fn const_for_param(&self, p: I::ParamConst, source_ct: I::Const) -> I::Const {
         // Look up the const in the args. It really should be in there.
-        let opt_ct = self.args.get(p.index() as usize).map(|k| k.kind());
+        let opt_ct = self.args.get(p.index() as usize).map(|arg| arg.kind());
         let ct = match opt_ct {
             Some(ty::GenericArgKind::Const(ct)) => ct,
             Some(kind) => self.const_param_expected(p, source_ct, kind),

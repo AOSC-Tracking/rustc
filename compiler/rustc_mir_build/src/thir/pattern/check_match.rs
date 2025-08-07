@@ -676,7 +676,7 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             unpeeled_pat = subpattern;
         }
 
-        if let PatKind::ExpandedConstant { def_id, is_inline: false, .. } = unpeeled_pat.kind
+        if let PatKind::ExpandedConstant { def_id, .. } = unpeeled_pat.kind
             && let DefKind::Const = self.tcx.def_kind(def_id)
             && let Ok(snippet) = self.tcx.sess.source_map().span_to_snippet(pat.span)
             // We filter out paths with multiple path::segments.
@@ -1025,7 +1025,7 @@ fn find_fallback_pattern_typo<'tcx>(
     pat: &Pat<'tcx>,
     lint: &mut UnreachablePattern<'_>,
 ) {
-    if let (Level::Allow, _) = cx.tcx.lint_level_at_node(UNREACHABLE_PATTERNS, hir_id) {
+    if let Level::Allow = cx.tcx.lint_level_at_node(UNREACHABLE_PATTERNS, hir_id).level {
         // This is because we use `with_no_trimmed_paths` later, so if we never emit the lint we'd
         // ICE. At the same time, we don't really need to do all of this if we won't emit anything.
         return;
@@ -1047,26 +1047,21 @@ fn find_fallback_pattern_typo<'tcx>(
                 let hir::ItemKind::Use(path, _) = item.kind else {
                     continue;
                 };
-                for res in &path.res {
-                    if let Res::Def(DefKind::Const, id) = res
-                        && infcx.can_eq(param_env, ty, cx.tcx.type_of(id).instantiate_identity())
-                    {
-                        if cx.tcx.visibility(id).is_accessible_from(parent, cx.tcx) {
-                            // The original const is accessible, suggest using it directly.
-                            let item_name = cx.tcx.item_name(*id);
-                            accessible.push(item_name);
-                            accessible_path.push(with_no_trimmed_paths!(cx.tcx.def_path_str(id)));
-                        } else if cx
-                            .tcx
-                            .visibility(item.owner_id)
-                            .is_accessible_from(parent, cx.tcx)
-                        {
-                            // The const is accessible only through the re-export, point at
-                            // the `use`.
-                            let ident = item.kind.ident().unwrap();
-                            imported.push(ident.name);
-                            imported_spans.push(ident.span);
-                        }
+                if let Some(value_ns) = path.res.value_ns
+                    && let Res::Def(DefKind::Const, id) = value_ns
+                    && infcx.can_eq(param_env, ty, cx.tcx.type_of(id).instantiate_identity())
+                {
+                    if cx.tcx.visibility(id).is_accessible_from(parent, cx.tcx) {
+                        // The original const is accessible, suggest using it directly.
+                        let item_name = cx.tcx.item_name(id);
+                        accessible.push(item_name);
+                        accessible_path.push(with_no_trimmed_paths!(cx.tcx.def_path_str(id)));
+                    } else if cx.tcx.visibility(item.owner_id).is_accessible_from(parent, cx.tcx) {
+                        // The const is accessible only through the re-export, point at
+                        // the `use`.
+                        let ident = item.kind.ident().unwrap();
+                        imported.push(ident.name);
+                        imported_spans.push(ident.span);
                     }
                 }
             }
@@ -1174,7 +1169,7 @@ fn report_arm_reachability<'p, 'tcx>(
     for (arm, is_useful) in report.arm_usefulness.iter() {
         if let Usefulness::Redundant(explanation) = is_useful {
             let hir_id = arm.arm_data;
-            let arm_span = cx.tcx.hir().span(hir_id);
+            let arm_span = cx.tcx.hir_span(hir_id);
             let whole_arm_span = if is_match_arm {
                 // If the arm is followed by a comma, extend the span to include it.
                 let with_whitespace = sm.span_extend_while_whitespace(arm_span);
@@ -1296,7 +1291,8 @@ fn report_non_exhaustive_match<'p, 'tcx>(
 
     for &arm in arms {
         let arm = &thir.arms[arm];
-        if let PatKind::ExpandedConstant { def_id, is_inline: false, .. } = arm.pattern.kind
+        if let PatKind::ExpandedConstant { def_id, .. } = arm.pattern.kind
+            && !matches!(cx.tcx.def_kind(def_id), DefKind::InlineConst)
             && let Ok(snippet) = cx.tcx.sess.source_map().span_to_snippet(arm.pattern.span)
             // We filter out paths with multiple path::segments.
             && snippet.chars().all(|c| c.is_alphanumeric() || c == '_')

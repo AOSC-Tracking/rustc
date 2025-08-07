@@ -1,6 +1,6 @@
 //@ check-pass
-//@ revisions: gate nogate
-#![cfg_attr(gate, feature(generic_arg_infer))]
+
+struct Foo<const N: usize>;
 
 fn main() {
     // AST Types preserve parens for pretty printing reasons. This means
@@ -9,4 +9,15 @@ fn main() {
     // but `TyKind::Infer` wrapped in arbitrarily many `TyKind::Paren`.
     let a: Vec<(_)> = vec![1_u8];
     let a: Vec<(((((_)))))> = vec![1_u8];
+
+    // AST Exprs similarly preserve parens for pretty printing reasons.
+    #[rustfmt::skip]
+    let b: [u8; (_)] = [1; (((((_)))))];
+    let b: [u8; 2] = b;
+
+    // This is the same case as AST types as the parser doesn't distinguish between const
+    // and type args when they share syntax
+    let c: Foo<_> = Foo::<1>;
+    let c: Foo<(_)> = Foo::<1>;
+    let c: Foo<(((_)))> = Foo::<1>;
 }

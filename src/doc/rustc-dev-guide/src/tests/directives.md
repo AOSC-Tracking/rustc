@@ -6,7 +6,8 @@
 FIXME(jieyouxu) completely revise this chapter.
 -->
 
-Directives are special comments that tell compiletest how to build and interpret a test. They must appear before the Rust source in the test. They may also appear in `rmake.rs` [run-make tests](compiletest.md#run-make-tests).
+Directives are special comments that tell compiletest how to build and interpret a test.
+They may also appear in `rmake.rs` [run-make tests](compiletest.md#run-make-tests).
 
 They are normally put after the short comment that explains the point of this
 test. Compiletest test suites use `//@` to signal that a comment is a directive.
@@ -58,7 +59,7 @@ not be exhaustive. Directives can generally be found by browsing the
 | `aux-crate`           | Like `aux-build` but makes available as extern prelude                                                | All except `run-make` | `<extern_prelude_name>=<path/to/aux/file.rs>` |
 | `aux-codegen-backend` | Similar to `aux-build` but pass the compiled dylib to `-Zcodegen-backend` when building the main file | `ui-fulldeps`         | Path to codegen backend file                  |
 | `proc-macro`          | Similar to `aux-build`, but for aux forces host and don't use `-Cprefer-dynamic`[^pm].                | All except `run-make` | Path to auxiliary proc-macro `.rs` file       |
-| `build_aux_docs`      | Build docs for auxiliaries as well                                                                    | All except `run-make` | N/A                                           |
+| `build-aux-docs`      | Build docs for auxiliaries as well                                                                    | All except `run-make` | N/A                                           |
 
 [^pm]: please see the Auxiliary proc-macro section in the
     [compiletest](./compiletest.md) chapter for specifics.
@@ -100,6 +101,7 @@ for more details.
 | `normalize-stdout`                | Normalize actual stdout with a rule `"<raw>" -> "<normalized>"` before comparing against snapshot                        | `ui`, `incremental`                          | `"<RAW>" -> "<NORMALIZED>"`, `<RAW>`/`<NORMALIZED>` is regex capture and replace syntax |
 | `dont-check-compiler-stderr`      | Don't check actual compiler stderr vs stderr snapshot                                                                    | `ui`                                         | N/A                                                                                     |
 | `dont-check-compiler-stdout`      | Don't check actual compiler stdout vs stdout snapshot                                                                    | `ui`                                         | N/A                                                                                     |
+| `dont-require-annotations`        | Don't require line annotations for the given diagnostic kind (`//~ KIND`) to be exhaustive                               | `ui`, `incremental`                          | `ERROR`, `WARN`, `NOTE`, `HELP`, `SUGGESTION`                                           |
 | `run-rustfix`                     | Apply all suggestions via `rustfix`, snapshot fixed output, and check fixed output builds                                | `ui`                                         | N/A                                                                                     |
 | `rustfix-only-machine-applicable` | `run-rustfix` but only machine-applicable suggestions                                                                    | `ui`                                         | N/A                                                                                     |
 | `exec-env`                        | Env var to set when executing a test                                                                                     | `ui`, `crashes`                              | `<KEY>=<VALUE>`                                                                         |
@@ -122,6 +124,9 @@ means the test won't be compiled or run.
 * `ignore-X` where `X` is a target detail or other criteria on which to ignore the test (see below)
 * `only-X` is like `ignore-X`, but will *only* run the test on that target or
   stage
+* `ignore-auxiliary` is intended for files that *participate* in one or more other
+  main test files but that `compiletest` should not try to build the file itself.
+  Please backlink to which main test is actually using the auxiliary file.
 * `ignore-test` always ignores the test. This can be used to temporarily disable
   a test if it is currently not working, but you want to keep it in tree to
   re-enable it later.
@@ -190,8 +195,14 @@ settings:
   specified atomic widths, e.g. the test with `//@ needs-target-has-atomic: 8,
   16, ptr` will only run if it supports the comma-separated list of atomic
   widths.
-- `needs-dynamic-linking` - ignores if target does not support dynamic linking
+- `needs-dynamic-linking` — ignores if target does not support dynamic linking
   (which is orthogonal to it being unable to create `dylib` and `cdylib` crate types)
+- `needs-crate-type` — ignores if target platform does not support one or more
+  of the comma-delimited list of specified crate types. For example,
+  `//@ needs-crate-type: cdylib, proc-macro` will cause the test to be ignored
+  on `wasm32-unknown-unknown` target because the target does not support the
+  `proc-macro` crate type.
+- `needs-target-std` — ignores if target platform does not have std support.
 
 The following directives will check LLVM support:
 
@@ -228,34 +239,47 @@ ignoring debuggers.
 
 ### Affecting how tests are built
 
-| Directive           | Explanation                                                                                  | Supported test suites     | Possible values                                                              |
-|---------------------|----------------------------------------------------------------------------------------------|---------------------------|------------------------------------------------------------------------------|
-| `compile-flags`     | Flags passed to `rustc` when building the test or aux file                                   | All except for `run-make` | Any valid `rustc` flags, e.g. `-Awarnings -Dfoo`. Cannot be `-Cincremental`. |
-| `edition`           | Alias for `compile-flags: --edition=xxx`                                                     | All except for `run-make` | Any valid `--edition` value                                                  |
-| `rustc-env`         | Env var to set when running `rustc`                                                          | All except for `run-make` | `<KEY>=<VALUE>`                                                              |
-| `unset-rustc-env`   | Env var to unset when running `rustc`                                                        | All except for `run-make` | Any env var name                                                             |
-| `incremental`       | Proper incremental support for tests outside of incremental test suite                       | `ui`, `crashes`           | N/A                                                                          |
-| `no-prefer-dynamic` | Don't use `-C prefer-dynamic`, don't build as a dylib via a `--crate-type=dylib` preset flag | `ui`, `crashes`           | N/A                                                                          |
+| Directive           | Explanation                                                                                  | Supported test suites     | Possible values                                                                            |
+|---------------------|----------------------------------------------------------------------------------------------|---------------------------|--------------------------------------------------------------------------------------------|
+| `compile-flags`     | Flags passed to `rustc` when building the test or aux file                                   | All except for `run-make` | Any valid `rustc` flags, e.g. `-Awarnings -Dfoo`. Cannot be `-Cincremental` or `--edition` |
+| `edition`           | The edition used to build the test                                                           | All except for `run-make` | Any valid `--edition` value                                                                |
+| `rustc-env`         | Env var to set when running `rustc`                                                          | All except for `run-make` | `<KEY>=<VALUE>`                                                                            |
+| `unset-rustc-env`   | Env var to unset when running `rustc`                                                        | All except for `run-make` | Any env var name                                                                           |
+| `incremental`       | Proper incremental support for tests outside of incremental test suite                       | `ui`, `crashes`           | N/A                                                                                        |
+| `no-prefer-dynamic` | Don't use `-C prefer-dynamic`, don't build as a dylib via a `--crate-type=dylib` preset flag | `ui`, `crashes`           | N/A                                                                                        |
 
 <div class="warning">
+
 Tests (outside of `run-make`) that want to use incremental tests not in the
 incremental test-suite must not pass `-C incremental` via `compile-flags`, and
 must instead use the `//@ incremental` directive.
 
 Consider writing the test as a proper incremental test instead.
+
 </div>
 
 ### Rustdoc
 
 | Directive   | Explanation                                                  | Supported test suites                    | Possible values           |
 |-------------|--------------------------------------------------------------|------------------------------------------|---------------------------|
-| `doc-flags` | Flags passed to `rustdoc` when building the test or aux file | `rustdoc`, `rustdoc-js`, `rustdoc-json` | Any valid `rustdoc` flags |
+| `doc-flags` | Flags passed to `rustdoc` when building the test or aux file | `rustdoc`, `rustdoc-js`, `rustdoc-json`  | Any valid `rustdoc` flags |
 
 <!--
 **FIXME(rustdoc)**: what does `check-test-line-numbers-match` do?
 Asked in
 <https://rust-lang.zulipchat.com/#narrow/stream/266220-t-rustdoc/topic/What.20is.20the.20.60check-test-line-numbers-match.60.20directive.3F>.
 -->
+
+#### Test-suite-specific directives
+
+The test suites [`rustdoc`][rustdoc-html-tests], [`rustdoc-js`/`rustdoc-js-std`][rustdoc-js-tests]
+and [`rustdoc-json`][rustdoc-json-tests] each feature an additional set of directives whose basic
+syntax resembles the one of compiletest directives but which are ultimately read and checked by
+separate tools. For more information, please read their respective chapters as linked above.
+
+[rustdoc-html-tests]: ../rustdoc-internals/rustdoc-test-suite.md
+[rustdoc-js-tests]: ../rustdoc-internals/search.html#testing-the-search-engine
+[rustdoc-json-tests]: ../rustdoc-internals/rustdoc-json-test-suite.md
 
 ### Pretty printing
 

@@ -151,7 +151,7 @@ impl ManifestMetadata {
     /// Whether the given env var should be tracked by Cargo's dep-info.
     pub fn should_track(env_key: &str) -> bool {
         let keys = MetadataEnvs::keys();
-        keys.iter().any(|k| *k == env_key)
+        keys.contains(&env_key)
     }
 
     pub fn env_var<'a>(&'a self, env_key: &str) -> Option<Cow<'a, str>> {
@@ -276,6 +276,17 @@ impl TargetKind {
                 kinds.iter().any(|k| k.requires_upstream_objects())
             }
             _ => true,
+        }
+    }
+
+    /// Returns whether production of this artifact could benefit from splitting metadata
+    /// into a .rmeta file.
+    pub fn benefits_from_no_embed_metadata(&self) -> bool {
+        match self {
+            TargetKind::Lib(kinds) | TargetKind::ExampleLib(kinds) => {
+                kinds.iter().any(|k| k.benefits_from_no_embed_metadata())
+            }
+            _ => false,
         }
     }
 
@@ -1005,21 +1016,21 @@ impl Target {
 
     pub fn is_dylib(&self) -> bool {
         match self.kind() {
-            TargetKind::Lib(libs) => libs.iter().any(|l| *l == CrateType::Dylib),
+            TargetKind::Lib(libs) => libs.contains(&CrateType::Dylib),
             _ => false,
         }
     }
 
     pub fn is_cdylib(&self) -> bool {
         match self.kind() {
-            TargetKind::Lib(libs) => libs.iter().any(|l| *l == CrateType::Cdylib),
+            TargetKind::Lib(libs) => libs.contains(&CrateType::Cdylib),
             _ => false,
         }
     }
 
     pub fn is_staticlib(&self) -> bool {
         match self.kind() {
-            TargetKind::Lib(libs) => libs.iter().any(|l| *l == CrateType::Staticlib),
+            TargetKind::Lib(libs) => libs.contains(&CrateType::Staticlib),
             _ => false,
         }
     }
@@ -1066,6 +1077,11 @@ impl Target {
     }
     pub fn is_custom_build(&self) -> bool {
         *self.kind() == TargetKind::CustomBuild
+    }
+
+    /// Returns `true` if it is a compile time depencencies, e.g., build script or proc macro
+    pub fn is_compile_time_dependency(&self) -> bool {
+        self.is_custom_build() || self.proc_macro()
     }
 
     /// Returns the arguments suitable for `--crate-type` to pass to rustc.

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Error;
-use rinja::Template;
+use askama::Template;
 
 mod cargo_metadata;
 
@@ -15,6 +15,7 @@ mod cargo_metadata;
 ///
 /// Run `x.py run generate-copyright`
 fn main() -> Result<(), Error> {
+    let cargo_home = env_path("CARGO_HOME")?;
     let dest_file = env_path("DEST")?;
     let libstd_dest_file = env_path("DEST_LIBSTD")?;
     let src_dir = env_path("SRC_DIR")?;
@@ -39,11 +40,17 @@ fn main() -> Result<(), Error> {
         .collect::<Vec<_>>();
 
     // Scan Cargo dependencies
-    let mut collected_cargo_metadata =
-        cargo_metadata::get_metadata_and_notices(&cargo, &vendor_dir, &src_dir, &cargo_manifests)?;
+    let mut collected_cargo_metadata = cargo_metadata::get_metadata_and_notices(
+        &cargo,
+        &cargo_home,
+        &vendor_dir,
+        &src_dir,
+        &cargo_manifests,
+    )?;
 
     let library_collected_cargo_metadata = cargo_metadata::get_metadata_and_notices(
         &cargo,
+        &cargo_home,
         &vendor_dir,
         &src_dir,
         &library_manifests,
@@ -117,7 +124,7 @@ struct Metadata {
 }
 
 /// Describes one node in our metadata tree
-#[derive(serde::Deserialize, rinja::Template, Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Deserialize, Template, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case", tag = "type")]
 #[template(path = "Node.html")]
 pub(crate) enum Node {

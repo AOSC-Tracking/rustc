@@ -1243,7 +1243,10 @@ pub unsafe fn _mm_loadl_epi64(mem_addr: *const __m128i) -> __m128i {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_load_si128)
 #[inline]
 #[target_feature(enable = "sse2")]
-#[cfg_attr(test, assert_instr(movaps))]
+#[cfg_attr(
+    all(test, not(all(target_arch = "x86", target_env = "msvc"))),
+    assert_instr(movaps)
+)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm_load_si128(mem_addr: *const __m128i) -> __m128i {
     *mem_addr
@@ -1293,7 +1296,10 @@ pub unsafe fn _mm_maskmoveu_si128(a: __m128i, mask: __m128i, mem_addr: *mut i8) 
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_store_si128)
 #[inline]
 #[target_feature(enable = "sse2")]
-#[cfg_attr(test, assert_instr(movaps))]
+#[cfg_attr(
+    all(test, not(all(target_arch = "x86", target_env = "msvc"))),
+    assert_instr(movaps)
+)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm_store_si128(mem_addr: *mut __m128i, a: __m128i) {
     *mem_addr = a;
@@ -1385,10 +1391,7 @@ pub unsafe fn _mm_stream_si32(mem_addr: *mut i32, a: i32) {
 #[inline]
 #[target_feature(enable = "sse2")]
 // FIXME movd on msvc, movd on i686
-#[cfg_attr(
-    all(test, not(target_env = "msvc"), target_arch = "x86_64"),
-    assert_instr(movq)
-)]
+#[cfg_attr(all(test, target_arch = "x86_64"), assert_instr(movq))]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub fn _mm_move_epi64(a: __m128i) -> __m128i {
     unsafe {
@@ -1668,7 +1671,7 @@ pub fn _mm_unpacklo_epi32(a: __m128i, b: __m128i) -> __m128i {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_unpacklo_epi64)
 #[inline]
 #[target_feature(enable = "sse2")]
-#[cfg_attr(all(test, not(target_env = "msvc")), assert_instr(movlhps))]
+#[cfg_attr(test, assert_instr(movlhps))]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub fn _mm_unpacklo_epi64(a: __m128i, b: __m128i) -> __m128i {
     unsafe { transmute::<i64x2, _>(simd_shuffle!(a.as_i64x2(), b.as_i64x2(), [0, 2])) }
@@ -2538,7 +2541,10 @@ pub fn _mm_movemask_pd(a: __m128d) -> i32 {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_load_pd)
 #[inline]
 #[target_feature(enable = "sse2")]
-#[cfg_attr(test, assert_instr(movaps))]
+#[cfg_attr(
+    all(test, not(all(target_arch = "x86", target_env = "msvc"))),
+    assert_instr(movaps)
+)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 #[allow(clippy::cast_ptr_alignment)]
 pub unsafe fn _mm_load_pd(mem_addr: *const f64) -> __m128d {
@@ -2618,7 +2624,7 @@ pub unsafe fn _mm_stream_pd(mem_addr: *mut f64, a: __m128d) {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_store_sd)
 #[inline]
 #[target_feature(enable = "sse2")]
-#[cfg_attr(all(test, not(target_env = "msvc")), assert_instr(movlps))]
+#[cfg_attr(test, assert_instr(movlps))]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm_store_sd(mem_addr: *mut f64, a: __m128d) {
     *mem_addr = simd_extract!(a, 0)
@@ -2631,7 +2637,10 @@ pub unsafe fn _mm_store_sd(mem_addr: *mut f64, a: __m128d) {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_store_pd)
 #[inline]
 #[target_feature(enable = "sse2")]
-#[cfg_attr(test, assert_instr(movaps))]
+#[cfg_attr(
+    all(test, not(all(target_arch = "x86", target_env = "msvc"))),
+    assert_instr(movaps)
+)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 #[allow(clippy::cast_ptr_alignment)]
 pub unsafe fn _mm_store_pd(mem_addr: *mut f64, a: __m128d) {
@@ -2736,7 +2745,7 @@ pub unsafe fn _mm_storer_pd(mem_addr: *mut f64, a: __m128d) {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_storeh_pd)
 #[inline]
 #[target_feature(enable = "sse2")]
-#[cfg_attr(all(test, not(target_env = "msvc")), assert_instr(movhps))]
+#[cfg_attr(test, assert_instr(movhps))]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm_storeh_pd(mem_addr: *mut f64, a: __m128d) {
     *mem_addr = simd_extract!(a, 1);
@@ -2748,7 +2757,7 @@ pub unsafe fn _mm_storeh_pd(mem_addr: *mut f64, a: __m128d) {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_storel_pd)
 #[inline]
 #[target_feature(enable = "sse2")]
-#[cfg_attr(all(test, not(target_env = "msvc")), assert_instr(movlps))]
+#[cfg_attr(test, assert_instr(movlps))]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm_storel_pd(mem_addr: *mut f64, a: __m128d) {
     *mem_addr = simd_extract!(a, 0);
@@ -2786,7 +2795,10 @@ pub unsafe fn _mm_load_pd1(mem_addr: *const f64) -> __m128d {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_loadr_pd)
 #[inline]
 #[target_feature(enable = "sse2")]
-#[cfg_attr(test, assert_instr(movaps))]
+#[cfg_attr(
+    all(test, not(all(target_arch = "x86", target_env = "msvc"))),
+    assert_instr(movaps)
+)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm_loadr_pd(mem_addr: *const f64) -> __m128d {
     let a = _mm_load_pd(mem_addr);
@@ -2956,9 +2968,10 @@ pub fn _mm_castsi128_ps(a: __m128i) -> __m128 {
     unsafe { transmute(a) }
 }
 
-/// Returns vector of type __m128d with indeterminate elements.
-/// Despite being "undefined", this is some valid value and not equivalent to [`mem::MaybeUninit`].
-/// In practice, this is equivalent to [`mem::zeroed`].
+/// Returns vector of type __m128d with indeterminate elements.with indetermination elements.
+/// Despite using the word "undefined" (following Intel's naming scheme), this non-deterministically
+/// picks some valid value and is not equivalent to [`mem::MaybeUninit`].
+/// In practice, this is typically equivalent to [`mem::zeroed`].
 ///
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_undefined_pd)
 #[inline]
@@ -2968,9 +2981,10 @@ pub fn _mm_undefined_pd() -> __m128d {
     const { unsafe { mem::zeroed() } }
 }
 
-/// Returns vector of type __m128i with indeterminate elements.
-/// Despite being "undefined", this is some valid value and not equivalent to [`mem::MaybeUninit`].
-/// In practice, this is equivalent to [`mem::zeroed`].
+/// Returns vector of type __m128i with indeterminate elements.with indetermination elements.
+/// Despite using the word "undefined" (following Intel's naming scheme), this non-deterministically
+/// picks some valid value and is not equivalent to [`mem::MaybeUninit`].
+/// In practice, this is typically equivalent to [`mem::zeroed`].
 ///
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_undefined_si128)
 #[inline]
@@ -3004,7 +3018,7 @@ pub fn _mm_unpackhi_pd(a: __m128d, b: __m128d) -> __m128d {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_unpacklo_pd)
 #[inline]
 #[target_feature(enable = "sse2")]
-#[cfg_attr(all(test, not(target_env = "msvc")), assert_instr(movlhps))]
+#[cfg_attr(test, assert_instr(movlhps))]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub fn _mm_unpacklo_pd(a: __m128d, b: __m128d) -> __m128d {
     unsafe { simd_shuffle!(a, b, [0, 2]) }

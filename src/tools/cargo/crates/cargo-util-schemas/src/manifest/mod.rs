@@ -907,6 +907,8 @@ pub struct TomlProfile {
     pub build_override: Option<Box<TomlProfile>>,
     /// Unstable feature `-Ztrim-paths`.
     pub trim_paths: Option<TomlTrimPaths>,
+    /// Unstable feature `hint-mostly-unused`
+    pub hint_mostly_unused: Option<bool>,
 }
 
 impl TomlProfile {
@@ -997,6 +999,10 @@ impl TomlProfile {
 
         if let Some(v) = &profile.trim_paths {
             self.trim_paths = Some(v.clone())
+        }
+
+        if let Some(v) = profile.hint_mostly_unused {
+            self.hint_mostly_unused = Some(v);
         }
     }
 }
@@ -1496,7 +1502,7 @@ impl TomlPlatform {
 #[derive(Serialize, Debug, Clone)]
 #[cfg_attr(feature = "unstable-schema", derive(schemars::JsonSchema))]
 pub struct InheritableLints {
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(feature = "unstable-schema", schemars(default))]
     pub workspace: bool,
     #[serde(flatten)]
@@ -1511,10 +1517,6 @@ impl InheritableLints {
             Ok(&self.lints)
         }
     }
-}
-
-fn is_false(b: &bool) -> bool {
-    !b
 }
 
 impl<'de> Deserialize<'de> for InheritableLints {

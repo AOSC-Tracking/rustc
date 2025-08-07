@@ -4,15 +4,15 @@ use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
 use rustc_errors::codes::*;
 use rustc_errors::struct_span_code_err;
 use rustc_hir as hir;
-use rustc_hir::HirId;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId};
+use rustc_hir::{AmbigArg, LangItem, PolyTraitRef};
 use rustc_middle::bug;
 use rustc_middle::ty::{
     self as ty, IsSuggestable, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable, TypeVisitableExt,
     TypeVisitor, Upcast,
 };
-use rustc_span::{ErrorGuaranteed, Ident, Span, Symbol, kw, sym};
+use rustc_span::{ErrorGuaranteed, Ident, Span, Symbol, kw};
 use rustc_trait_selection::traits;
 use smallvec::SmallVec;
 use tracing::{debug, instrument};
@@ -23,104 +23,409 @@ use crate::hir_ty_lowering::{
     AssocItemQSelf, FeedConstTy, HirTyLowerer, PredicateFilter, RegionInferReason,
 };
 
+#[derive(Debug, Default)]
+struct CollectedBound {
+    /// `Trait`
+    positive: bool,
+    /// `?Trait`
+    maybe: bool,
+    /// `!Trait`
+    negative: bool,
+}
+
+impl CollectedBound {
+    /// Returns `true` if any of `Trait`, `?Trait` or `!Trait` were encountered.
+    fn any(&self) -> bool {
+        self.positive || self.maybe || self.negative
+    }
+}
+
+#[derive(Debug)]
+struct CollectedSizednessBounds {
+    // Collected `Sized` bounds
+    sized: CollectedBound,
+    // Collected `MetaSized` bounds
+    meta_sized: CollectedBound,
+    // Collected `PointeeSized` bounds
+    pointee_sized: CollectedBound,
+}
+
+impl CollectedSizednessBounds {
+    /// Returns `true` if any of `Trait`, `?Trait` or `!Trait` were encountered for `Sized`,
+    /// `MetaSized` or `PointeeSized`.
+    fn any(&self) -> bool {
+        self.sized.any() || self.meta_sized.any() || self.pointee_sized.any()
+    }
+}
+
+fn search_bounds_for<'tcx>(
+    hir_bounds: &'tcx [hir::GenericBound<'tcx>],
+    self_ty_where_predicates: Option<(LocalDefId, &'tcx [hir::WherePredicate<'tcx>])>,
+    mut f: impl FnMut(&'tcx PolyTraitRef<'tcx>),
+) {
+    let mut search_bounds = |hir_bounds: &'tcx [hir::GenericBound<'tcx>]| {
+        for hir_bound in hir_bounds {
+            let hir::GenericBound::Trait(ptr) = hir_bound else {
+                continue;
+            };
+
+            f(ptr)
+        }
+    };
+
+    search_bounds(hir_bounds);
+    if let Some((self_ty, where_clause)) = self_ty_where_predicates {
+        for clause in where_clause {
+            if let hir::WherePredicateKind::BoundPredicate(pred) = clause.kind
+                && pred.is_param_bound(self_ty.to_def_id())
+            {
+                search_bounds(pred.bounds);
+            }
+        }
+    }
+}
+
+fn collect_unbounds<'tcx>(
+    hir_bounds: &'tcx [hir::GenericBound<'tcx>],
+    self_ty_where_predicates: Option<(LocalDefId, &'tcx [hir::WherePredicate<'tcx>])>,
+) -> SmallVec<[&'tcx PolyTraitRef<'tcx>; 1]> {
+    let mut unbounds: SmallVec<[_; 1]> = SmallVec::new();
+    search_bounds_for(hir_bounds, self_ty_where_predicates, |ptr| {
+        if matches!(ptr.modifiers.polarity, hir::BoundPolarity::Maybe(_)) {
+            unbounds.push(ptr);
+        }
+    });
+    unbounds
+}
+
+fn collect_bounds<'a, 'tcx>(
+    hir_bounds: &'a [hir::GenericBound<'tcx>],
+    self_ty_where_predicates: Option<(LocalDefId, &'tcx [hir::WherePredicate<'tcx>])>,
+    target_did: DefId,
+) -> CollectedBound {
+    let mut collect_into = CollectedBound::default();
+    search_bounds_for(hir_bounds, self_ty_where_predicates, |ptr| {
+        if !matches!(ptr.trait_ref.path.res, Res::Def(DefKind::Trait, did) if did == target_did) {
+            return;
+        }
+
+        match ptr.modifiers.polarity {
+            hir::BoundPolarity::Maybe(_) => collect_into.maybe = true,
+            hir::BoundPolarity::Negative(_) => collect_into.negative = true,
+            hir::BoundPolarity::Positive => collect_into.positive = true,
+        }
+    });
+    collect_into
+}
+
+fn collect_sizedness_bounds<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    hir_bounds: &'tcx [hir::GenericBound<'tcx>],
+    self_ty_where_predicates: Option<(LocalDefId, &'tcx [hir::WherePredicate<'tcx>])>,
+    span: Span,
+) -> CollectedSizednessBounds {
+    let sized_did = tcx.require_lang_item(LangItem::Sized, span);
+    let sized = collect_bounds(hir_bounds, self_ty_where_predicates, sized_did);
+
+    let meta_sized_did = tcx.require_lang_item(LangItem::MetaSized, span);
+    let meta_sized = collect_bounds(hir_bounds, self_ty_where_predicates, meta_sized_did);
+
+    let pointee_sized_did = tcx.require_lang_item(LangItem::PointeeSized, span);
+    let pointee_sized = collect_bounds(hir_bounds, self_ty_where_predicates, pointee_sized_did);
+
+    CollectedSizednessBounds { sized, meta_sized, pointee_sized }
+}
+
+/// Add a trait bound for `did`.
+fn add_trait_bound<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    bounds: &mut Vec<(ty::Clause<'tcx>, Span)>,
+    self_ty: Ty<'tcx>,
+    did: DefId,
+    span: Span,
+) {
+    let trait_ref = ty::TraitRef::new(tcx, did, [self_ty]);
+    // Preferable to put sizedness obligations first, since we report better errors for `Sized`
+    // ambiguity.
+    bounds.insert(0, (trait_ref.upcast(tcx), span));
+}
+
 impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
-    /// Add a `Sized` bound to the `bounds` if appropriate.
+    /// Skip `PointeeSized` bounds.
     ///
-    /// Doesn't add the bound if the HIR bounds contain any of `Sized`, `?Sized` or `!Sized`.
-    pub(crate) fn add_sized_bound(
+    /// `PointeeSized` is a "fake bound" insofar as anywhere a `PointeeSized` bound exists, there
+    /// is actually the absence of any bounds. This avoids limitations around non-global where
+    /// clauses being preferred over item bounds (where `PointeeSized` bounds would be
+    /// proven) - which can result in errors when a `PointeeSized` supertrait/bound/predicate is
+    /// added to some items.
+    pub(crate) fn should_skip_sizedness_bound<'hir>(
+        &self,
+        bound: &'hir hir::GenericBound<'tcx>,
+    ) -> bool {
+        bound
+            .trait_ref()
+            .and_then(|tr| tr.trait_def_id())
+            .map(|did| self.tcx().is_lang_item(did, LangItem::PointeeSized))
+            .unwrap_or(false)
+    }
+
+    /// Adds sizedness bounds to a trait, trait alias, parameter, opaque type or associated type.
+    ///
+    /// - On parameters, opaque type and associated types, add default `Sized` bound if no explicit
+    ///   sizedness bounds are present.
+    /// - On traits and trait aliases, add default `MetaSized` supertrait if no explicit sizedness
+    ///   bounds are present.
+    /// - On parameters, opaque type, associated types and trait aliases, add a `MetaSized` bound if
+    ///   a `?Sized` bound is present.
+    pub(crate) fn add_sizedness_bounds(
         &self,
         bounds: &mut Vec<(ty::Clause<'tcx>, Span)>,
         self_ty: Ty<'tcx>,
         hir_bounds: &'tcx [hir::GenericBound<'tcx>],
         self_ty_where_predicates: Option<(LocalDefId, &'tcx [hir::WherePredicate<'tcx>])>,
+        trait_did: Option<LocalDefId>,
         span: Span,
     ) {
         let tcx = self.tcx();
-        let sized_def_id = tcx.lang_items().sized_trait();
-        let mut seen_negative_sized_bound = false;
-        let mut seen_positive_sized_bound = false;
 
-        // Try to find an unbound in bounds.
-        let mut unbounds: SmallVec<[_; 1]> = SmallVec::new();
-        let mut search_bounds = |hir_bounds: &'tcx [hir::GenericBound<'tcx>]| {
-            for hir_bound in hir_bounds {
-                let hir::GenericBound::Trait(ptr) = hir_bound else {
-                    continue;
-                };
-                match ptr.modifiers.polarity {
-                    hir::BoundPolarity::Maybe(_) => unbounds.push(ptr),
-                    hir::BoundPolarity::Negative(_) => {
-                        if let Some(sized_def_id) = sized_def_id
-                            && ptr.trait_ref.path.res == Res::Def(DefKind::Trait, sized_def_id)
-                        {
-                            seen_negative_sized_bound = true;
-                        }
-                    }
-                    hir::BoundPolarity::Positive => {
-                        if let Some(sized_def_id) = sized_def_id
-                            && ptr.trait_ref.path.res == Res::Def(DefKind::Trait, sized_def_id)
-                        {
-                            seen_positive_sized_bound = true;
-                        }
-                    }
-                }
+        let meta_sized_did = tcx.require_lang_item(LangItem::MetaSized, span);
+        let pointee_sized_did = tcx.require_lang_item(LangItem::PointeeSized, span);
+
+        // If adding sizedness bounds to a trait, then there are some relevant early exits
+        if let Some(trait_did) = trait_did {
+            let trait_did = trait_did.to_def_id();
+            // Never add a default supertrait to `PointeeSized`.
+            if trait_did == pointee_sized_did {
+                return;
             }
+            // Don't add default sizedness supertraits to auto traits because it isn't possible to
+            // relax an automatically added supertrait on the defn itself.
+            if tcx.trait_is_auto(trait_did) {
+                return;
+            }
+        } else {
+            // Report invalid unbounds on sizedness-bounded generic parameters.
+            let unbounds = collect_unbounds(hir_bounds, self_ty_where_predicates);
+            self.check_and_report_invalid_unbounds_on_param(unbounds);
+        }
+
+        let collected = collect_sizedness_bounds(tcx, hir_bounds, self_ty_where_predicates, span);
+        if (collected.sized.maybe || collected.sized.negative)
+            && !collected.sized.positive
+            && !collected.meta_sized.any()
+            && !collected.pointee_sized.any()
+        {
+            // `?Sized` is equivalent to `MetaSized` (but only add the bound if there aren't any
+            // other explicit ones) - this can happen for trait aliases as well as bounds.
+            add_trait_bound(tcx, bounds, self_ty, meta_sized_did, span);
+        } else if !collected.any() {
+            if trait_did.is_some() {
+                // If there are no explicit sizedness bounds on a trait then add a default
+                // `MetaSized` supertrait.
+                add_trait_bound(tcx, bounds, self_ty, meta_sized_did, span);
+            } else {
+                // If there are no explicit sizedness bounds on a parameter then add a default
+                // `Sized` bound.
+                let sized_did = tcx.require_lang_item(LangItem::Sized, span);
+                add_trait_bound(tcx, bounds, self_ty, sized_did, span);
+            }
+        }
+    }
+
+    /// Checks whether `Self: DefaultAutoTrait` bounds should be added on trait super bounds
+    /// or associated items.
+    ///
+    /// To keep backward compatibility with existing code, `experimental_default_bounds` bounds
+    /// should be added everywhere, including super bounds. However this causes a huge performance
+    /// costs. For optimization purposes instead of adding default supertraits, bounds
+    /// are added to the associated items:
+    ///
+    /// ```ignore(illustrative)
+    /// // Default bounds are generated in the following way:
+    /// trait Trait {
+    ///     fn foo(&self) where Self: Leak {}
+    /// }
+    ///
+    /// // instead of this:
+    /// trait Trait: Leak {
+    ///     fn foo(&self) {}
+    /// }
+    /// ```
+    /// It is not always possible to do this because of backward compatibility:
+    ///
+    /// ```ignore(illustrative)
+    /// pub trait Trait<Rhs = Self> {}
+    /// pub trait Trait1 : Trait {}
+    /// //~^ ERROR: `Rhs` requires `DefaultAutoTrait`, but `Self` is not `DefaultAutoTrait`
+    /// ```
+    ///
+    /// or:
+    ///
+    /// ```ignore(illustrative)
+    /// trait Trait {
+    ///     type Type where Self: Sized;
+    /// }
+    /// trait Trait2<T> : Trait<Type = T> {}
+    /// //~^ ERROR: `DefaultAutoTrait` required for `Trait2`, by implicit  `Self: DefaultAutoTrait` in `Trait::Type`
+    /// ```
+    ///
+    /// Therefore, `experimental_default_bounds` are still being added to supertraits if
+    /// the `SelfTyParam` or `AssocItemConstraint` were found in a trait header.
+    fn requires_default_supertraits(
+        &self,
+        hir_bounds: &'tcx [hir::GenericBound<'tcx>],
+        hir_generics: &'tcx hir::Generics<'tcx>,
+    ) -> bool {
+        struct TraitInfoCollector;
+
+        impl<'tcx> hir::intravisit::Visitor<'tcx> for TraitInfoCollector {
+            type Result = ControlFlow<()>;
+
+            fn visit_assoc_item_constraint(
+                &mut self,
+                _constraint: &'tcx hir::AssocItemConstraint<'tcx>,
+            ) -> Self::Result {
+                ControlFlow::Break(())
+            }
+
+            fn visit_ty(&mut self, t: &'tcx hir::Ty<'tcx, AmbigArg>) -> Self::Result {
+                if matches!(
+                    &t.kind,
+                    hir::TyKind::Path(hir::QPath::Resolved(
+                        _,
+                        hir::Path { res: hir::def::Res::SelfTyParam { .. }, .. },
+                    ))
+                ) {
+                    return ControlFlow::Break(());
+                }
+                hir::intravisit::walk_ty(self, t)
+            }
+        }
+
+        let mut found = false;
+        for bound in hir_bounds {
+            found |= hir::intravisit::walk_param_bound(&mut TraitInfoCollector, bound).is_break();
+        }
+        found |= hir::intravisit::walk_generics(&mut TraitInfoCollector, hir_generics).is_break();
+        found
+    }
+
+    /// Implicitly add `Self: DefaultAutoTrait` clauses on trait associated items if
+    /// they are not added as super trait bounds to the trait itself. See
+    /// `requires_default_supertraits` for more information.
+    pub(crate) fn add_default_trait_item_bounds(
+        &self,
+        trait_item: &hir::TraitItem<'tcx>,
+        bounds: &mut Vec<(ty::Clause<'tcx>, Span)>,
+    ) {
+        let tcx = self.tcx();
+        if !tcx.sess.opts.unstable_opts.experimental_default_bounds {
+            return;
+        }
+
+        let parent = tcx.local_parent(trait_item.hir_id().owner.def_id);
+        let hir::Node::Item(parent_trait) = tcx.hir_node_by_def_id(parent) else {
+            unreachable!();
         };
-        search_bounds(hir_bounds);
-        if let Some((self_ty, where_clause)) = self_ty_where_predicates {
-            for clause in where_clause {
-                if let hir::WherePredicateKind::BoundPredicate(pred) = clause.kind
-                    && pred.is_param_bound(self_ty.to_def_id())
-                {
-                    search_bounds(pred.bounds);
-                }
-            }
-        }
 
-        let mut unique_bounds = FxIndexSet::default();
-        let mut seen_repeat = false;
-        for unbound in &unbounds {
-            if let Res::Def(DefKind::Trait, unbound_def_id) = unbound.trait_ref.path.res {
-                seen_repeat |= !unique_bounds.insert(unbound_def_id);
-            }
-        }
-        if unbounds.len() > 1 {
-            let err = errors::MultipleRelaxedDefaultBounds {
-                spans: unbounds.iter().map(|ptr| ptr.span).collect(),
-            };
-            if seen_repeat {
-                self.dcx().emit_err(err);
-            } else if !tcx.features().more_maybe_bounds() {
-                self.tcx().sess.create_feature_err(err, sym::more_maybe_bounds).emit();
-            };
-        }
+        let (trait_generics, trait_bounds) = match parent_trait.kind {
+            hir::ItemKind::Trait(_, _, _, generics, supertraits, _) => (generics, supertraits),
+            hir::ItemKind::TraitAlias(_, generics, supertraits) => (generics, supertraits),
+            _ => unreachable!(),
+        };
 
-        let mut seen_sized_unbound = false;
-        for unbound in unbounds {
-            if let Some(sized_def_id) = sized_def_id
-                && unbound.trait_ref.path.res == Res::Def(DefKind::Trait, sized_def_id)
-            {
-                seen_sized_unbound = true;
-                continue;
-            }
-            // There was a `?Trait` bound, but it was not `?Sized`
-            self.dcx().span_err(
-                unbound.span,
-                "relaxing a default bound only does something for `?Sized`; \
-                all other traits are not bound by default",
+        if !self.requires_default_supertraits(trait_bounds, trait_generics) {
+            let self_ty_where_predicates = (parent, trait_item.generics.predicates);
+            self.add_default_traits(
+                bounds,
+                tcx.types.self_param,
+                &[],
+                Some(self_ty_where_predicates),
+                trait_item.span,
             );
         }
+    }
 
-        if seen_sized_unbound || seen_negative_sized_bound || seen_positive_sized_bound {
-            // There was in fact a `?Sized`, `!Sized` or explicit `Sized` bound;
-            // we don't need to do anything.
-        } else if let Some(sized_def_id) = sized_def_id {
-            // There was no `?Sized`, `!Sized` or explicit `Sized` bound;
-            // add `Sized` if it's available.
-            let trait_ref = ty::TraitRef::new(tcx, sized_def_id, [self_ty]);
-            // Preferable to put this obligation first, since we report better errors for sized ambiguity.
-            bounds.insert(0, (trait_ref.upcast(tcx), span));
+    /// Lazily sets `experimental_default_bounds` to true on trait super bounds.
+    /// See `requires_default_supertraits` for more information.
+    pub(crate) fn add_default_super_traits(
+        &self,
+        trait_def_id: LocalDefId,
+        bounds: &mut Vec<(ty::Clause<'tcx>, Span)>,
+        hir_bounds: &'tcx [hir::GenericBound<'tcx>],
+        hir_generics: &'tcx hir::Generics<'tcx>,
+        span: Span,
+    ) {
+        if !self.tcx().sess.opts.unstable_opts.experimental_default_bounds {
+            return;
         }
+
+        assert!(matches!(self.tcx().def_kind(trait_def_id), DefKind::Trait | DefKind::TraitAlias));
+        if self.requires_default_supertraits(hir_bounds, hir_generics) {
+            let self_ty_where_predicates = (trait_def_id, hir_generics.predicates);
+            self.add_default_traits(
+                bounds,
+                self.tcx().types.self_param,
+                hir_bounds,
+                Some(self_ty_where_predicates),
+                span,
+            );
+        }
+    }
+
+    pub(crate) fn add_default_traits(
+        &self,
+        bounds: &mut Vec<(ty::Clause<'tcx>, Span)>,
+        self_ty: Ty<'tcx>,
+        hir_bounds: &[hir::GenericBound<'tcx>],
+        self_ty_where_predicates: Option<(LocalDefId, &'tcx [hir::WherePredicate<'tcx>])>,
+        span: Span,
+    ) {
+        self.tcx().default_traits().iter().for_each(|default_trait| {
+            self.add_default_trait(
+                *default_trait,
+                bounds,
+                self_ty,
+                hir_bounds,
+                self_ty_where_predicates,
+                span,
+            );
+        });
+    }
+
+    /// Add a `experimental_default_bounds` bound to the `bounds` if appropriate.
+    ///
+    /// Doesn't add the bound if the HIR bounds contain any of `Trait`, `?Trait` or `!Trait`.
+    pub(crate) fn add_default_trait(
+        &self,
+        trait_: hir::LangItem,
+        bounds: &mut Vec<(ty::Clause<'tcx>, Span)>,
+        self_ty: Ty<'tcx>,
+        hir_bounds: &[hir::GenericBound<'tcx>],
+        self_ty_where_predicates: Option<(LocalDefId, &'tcx [hir::WherePredicate<'tcx>])>,
+        span: Span,
+    ) {
+        let tcx = self.tcx();
+        let trait_id = tcx.lang_items().get(trait_);
+        if let Some(trait_id) = trait_id
+            && self.do_not_provide_default_trait_bound(
+                trait_id,
+                hir_bounds,
+                self_ty_where_predicates,
+            )
+        {
+            add_trait_bound(tcx, bounds, self_ty, trait_id, span);
+        }
+    }
+
+    fn do_not_provide_default_trait_bound<'a>(
+        &self,
+        trait_def_id: DefId,
+        hir_bounds: &'a [hir::GenericBound<'tcx>],
+        self_ty_where_predicates: Option<(LocalDefId, &'tcx [hir::WherePredicate<'tcx>])>,
+    ) -> bool {
+        let collected = collect_bounds(hir_bounds, self_ty_where_predicates, trait_def_id);
+        !collected.any()
     }
 
     /// Lower HIR bounds into `bounds` given the self type `param_ty` and the overarching late-bound vars if any.
@@ -156,12 +461,16 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
         'tcx: 'hir,
     {
         for hir_bound in hir_bounds {
+            if self.should_skip_sizedness_bound(hir_bound) {
+                continue;
+            }
+
             // In order to avoid cycles, when we're lowering `SelfTraitThatDefines`,
             // we skip over any traits that don't define the given associated type.
-            if let PredicateFilter::SelfTraitThatDefines(assoc_name) = predicate_filter {
+            if let PredicateFilter::SelfTraitThatDefines(assoc_ident) = predicate_filter {
                 if let Some(trait_ref) = hir_bound.trait_ref()
                     && let Some(trait_did) = trait_ref.trait_def_id()
-                    && self.tcx().trait_may_define_assoc_item(trait_did, assoc_name)
+                    && self.tcx().trait_may_define_assoc_item(trait_did, assoc_ident)
                 {
                     // Okay
                 } else {
@@ -226,16 +535,16 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
     ) -> Result<(), ErrorGuaranteed> {
         let tcx = self.tcx();
 
-        let assoc_kind = if constraint.gen_args.parenthesized
+        let assoc_tag = if constraint.gen_args.parenthesized
             == hir::GenericArgsParentheses::ReturnTypeNotation
         {
-            ty::AssocKind::Fn
+            ty::AssocTag::Fn
         } else if let hir::AssocItemConstraintKind::Equality { term: hir::Term::Const(_) } =
             constraint.kind
         {
-            ty::AssocKind::Const
+            ty::AssocTag::Const
         } else {
-            ty::AssocKind::Type
+            ty::AssocTag::Type
         };
 
         // Given something like `U: Trait<T = X>`, we want to produce a predicate like
@@ -248,7 +557,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
         //     trait SuperTrait<A> { type T; }
         let candidate = if self.probe_trait_that_defines_assoc_item(
             trait_ref.def_id(),
-            assoc_kind,
+            assoc_tag,
             constraint.ident,
         ) {
             // Simple case: The assoc item is defined in the current trait.
@@ -259,7 +568,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
             self.probe_single_bound_for_assoc_item(
                 || traits::supertraits(tcx, trait_ref),
                 AssocItemQSelf::Trait(trait_ref.def_id()),
-                assoc_kind,
+                assoc_tag,
                 constraint.ident,
                 path_span,
                 Some(constraint),
@@ -269,7 +578,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
         let assoc_item = self
             .probe_assoc_item(
                 constraint.ident,
-                assoc_kind,
+                assoc_tag,
                 hir_ref_id,
                 constraint.span,
                 candidate.def_id(),
@@ -288,7 +597,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
             })
             .or_insert(constraint.span);
 
-        let projection_term = if let ty::AssocKind::Fn = assoc_kind {
+        let projection_term = if let ty::AssocTag::Fn = assoc_tag {
             let bound_vars = tcx.late_bound_vars(constraint.hir_id);
             ty::Binder::bind_with_vars(
                 self.lower_return_type_notation_ty(candidate, assoc_item.def_id, path_span)?.into(),
@@ -337,7 +646,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
         };
 
         match constraint.kind {
-            hir::AssocItemConstraintKind::Equality { .. } if let ty::AssocKind::Fn = assoc_kind => {
+            hir::AssocItemConstraintKind::Equality { .. } if let ty::AssocTag::Fn = assoc_tag => {
                 return Err(self.dcx().emit_err(crate::errors::ReturnTypeNotationEqualityBound {
                     span: constraint.span,
                 }));
@@ -470,11 +779,11 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
 
                 // Good error for `where Trait::method(..): Send`.
                 let Some(self_ty) = opt_self_ty else {
-                    let guar = self.error_missing_qpath_self_ty(
+                    let guar = self.report_missing_self_ty_for_resolved_path(
                         trait_def_id,
                         hir_ty.span,
                         item_segment,
-                        ty::AssocKind::Type,
+                        ty::AssocTag::Type,
                     );
                     return Ty::new_error(tcx, guar);
                 };
@@ -508,120 +817,51 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                     Err(guar) => Ty::new_error(tcx, guar),
                 }
             }
-            hir::QPath::TypeRelative(qself, item_segment)
-                if item_segment.args.is_some_and(|args| {
+            hir::QPath::TypeRelative(hir_self_ty, segment)
+                if segment.args.is_some_and(|args| {
                     matches!(args.parenthesized, hir::GenericArgsParentheses::ReturnTypeNotation)
                 }) =>
             {
-                match self
-                    .resolve_type_relative_return_type_notation(
-                        qself,
-                        item_segment,
-                        hir_ty.hir_id,
-                        hir_ty.span,
-                    )
-                    .and_then(|(candidate, item_def_id)| {
-                        self.lower_return_type_notation_ty(candidate, item_def_id, hir_ty.span)
-                    }) {
+                let self_ty = self.lower_ty(hir_self_ty);
+                let (item_def_id, bound) = match self.resolve_type_relative_path(
+                    self_ty,
+                    hir_self_ty,
+                    ty::AssocTag::Fn,
+                    segment,
+                    hir_ty.hir_id,
+                    hir_ty.span,
+                    None,
+                ) {
+                    Ok(result) => result,
+                    Err(guar) => return Ty::new_error(tcx, guar),
+                };
+
+                // Don't let `T::method` resolve to some `for<'a> <T as Tr<'a>>::method`,
+                // which may happen via a higher-ranked where clause or supertrait.
+                // This is the same restrictions as associated types; even though we could
+                // support it, it just makes things a lot more difficult to support in
+                // `resolve_bound_vars`, since we'd need to introduce those as elided
+                // bound vars on the where clause too.
+                if bound.has_bound_vars() {
+                    return Ty::new_error(
+                        tcx,
+                        self.dcx().emit_err(errors::AssociatedItemTraitUninferredGenericParams {
+                            span: hir_ty.span,
+                            inferred_sugg: Some(hir_ty.span.with_hi(segment.ident.span.lo())),
+                            bound: format!("{}::", tcx.anonymize_bound_vars(bound).skip_binder()),
+                            mpart_sugg: None,
+                            what: tcx.def_descr(item_def_id),
+                        }),
+                    );
+                }
+
+                match self.lower_return_type_notation_ty(bound, item_def_id, hir_ty.span) {
                     Ok(ty) => Ty::new_alias(tcx, ty::Projection, ty),
                     Err(guar) => Ty::new_error(tcx, guar),
                 }
             }
             _ => self.lower_ty(hir_ty),
         }
-    }
-
-    /// Perform type-dependent lookup for a *method* for return type notation.
-    /// This generally mirrors `<dyn HirTyLowerer>::lower_assoc_path`.
-    fn resolve_type_relative_return_type_notation(
-        &self,
-        qself: &'tcx hir::Ty<'tcx>,
-        item_segment: &'tcx hir::PathSegment<'tcx>,
-        qpath_hir_id: HirId,
-        span: Span,
-    ) -> Result<(ty::PolyTraitRef<'tcx>, DefId), ErrorGuaranteed> {
-        let tcx = self.tcx();
-        let qself_ty = self.lower_ty(qself);
-        let assoc_ident = item_segment.ident;
-        let qself_res = if let hir::TyKind::Path(hir::QPath::Resolved(_, path)) = &qself.kind {
-            path.res
-        } else {
-            Res::Err
-        };
-
-        let bound = match (qself_ty.kind(), qself_res) {
-            (_, Res::SelfTyAlias { alias_to: impl_def_id, is_trait_impl: true, .. }) => {
-                // `Self` in an impl of a trait -- we have a concrete self type and a
-                // trait reference.
-                let Some(trait_ref) = tcx.impl_trait_ref(impl_def_id) else {
-                    // A cycle error occurred, most likely.
-                    self.dcx().span_bug(span, "expected cycle error");
-                };
-
-                self.probe_single_bound_for_assoc_item(
-                    || {
-                        traits::supertraits(
-                            tcx,
-                            ty::Binder::dummy(trait_ref.instantiate_identity()),
-                        )
-                    },
-                    AssocItemQSelf::SelfTyAlias,
-                    ty::AssocKind::Fn,
-                    assoc_ident,
-                    span,
-                    None,
-                )?
-            }
-            (
-                &ty::Param(_),
-                Res::SelfTyParam { trait_: param_did } | Res::Def(DefKind::TyParam, param_did),
-            ) => self.probe_single_ty_param_bound_for_assoc_item(
-                param_did.expect_local(),
-                qself.span,
-                ty::AssocKind::Fn,
-                assoc_ident,
-                span,
-            )?,
-            _ => {
-                if let Err(reported) = qself_ty.error_reported() {
-                    return Err(reported);
-                } else {
-                    // FIXME(return_type_notation): Provide some structured suggestion here.
-                    let err = struct_span_code_err!(
-                        self.dcx(),
-                        span,
-                        E0223,
-                        "ambiguous associated function"
-                    );
-                    return Err(err.emit());
-                }
-            }
-        };
-
-        // Don't let `T::method` resolve to some `for<'a> <T as Tr<'a>>::method`,
-        // which may happen via a higher-ranked where clause or supertrait.
-        // This is the same restrictions as associated types; even though we could
-        // support it, it just makes things a lot more difficult to support in
-        // `resolve_bound_vars`, since we'd need to introduce those as elided
-        // bound vars on the where clause too.
-        if bound.has_bound_vars() {
-            return Err(self.tcx().dcx().emit_err(
-                errors::AssociatedItemTraitUninferredGenericParams {
-                    span,
-                    inferred_sugg: Some(span.with_hi(item_segment.ident.span.lo())),
-                    bound: format!("{}::", tcx.anonymize_bound_vars(bound).skip_binder(),),
-                    mpart_sugg: None,
-                    what: "function",
-                },
-            ));
-        }
-
-        let trait_def_id = bound.def_id();
-        let assoc_ty = self
-            .probe_assoc_item(assoc_ident, ty::AssocKind::Fn, qpath_hir_id, span, trait_def_id)
-            .expect("failed to find associated type");
-
-        Ok((bound, assoc_ty.def_id))
     }
 
     /// Do the common parts of lowering an RTN type. This involves extending the
@@ -684,7 +924,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
             return Err(self.dcx().emit_err(crate::errors::ReturnTypeNotationOnNonRpitit {
                 span: path_span,
                 ty: tcx.liberate_late_bound_regions(item_def_id, output),
-                fn_span: tcx.hir().span_if_local(item_def_id),
+                fn_span: tcx.hir_span_if_local(item_def_id),
                 note: (),
             }));
         };

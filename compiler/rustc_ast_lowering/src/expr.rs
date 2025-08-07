@@ -1,4 +1,3 @@
-use std::assert_matches::assert_matches;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
@@ -74,14 +73,15 @@ impl<'hir> LoweringContext<'_, 'hir> {
                     // Merge attributes into the inner expression.
                     if !e.attrs.is_empty() {
                         let old_attrs = self.attrs.get(&ex.hir_id.local_id).copied().unwrap_or(&[]);
-                        self.attrs.insert(
-                            ex.hir_id.local_id,
-                            &*self.arena.alloc_from_iter(
-                                self.lower_attrs_vec(&e.attrs, e.span)
-                                    .into_iter()
-                                    .chain(old_attrs.iter().cloned()),
-                            ),
-                        );
+                        let new_attrs = self
+                            .lower_attrs_vec(&e.attrs, e.span, ex.hir_id)
+                            .into_iter()
+                            .chain(old_attrs.iter().cloned());
+                        let new_attrs = &*self.arena.alloc_from_iter(new_attrs);
+                        if new_attrs.is_empty() {
+                            return ex;
+                        }
+                        self.attrs.insert(ex.hir_id.local_id, new_attrs);
                     }
                     return ex;
                 }
@@ -274,7 +274,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 }
                 ExprKind::Assign(el, er, span) => self.lower_expr_assign(el, er, *span, e.span),
                 ExprKind::AssignOp(op, el, er) => hir::ExprKind::AssignOp(
-                    self.lower_binop(*op),
+                    self.lower_assign_op(*op),
                     self.lower_expr(el),
                     self.lower_expr(er),
                 ),
@@ -397,12 +397,16 @@ impl<'hir> LoweringContext<'_, 'hir> {
         &mut self,
         expr: &'hir hir::Expr<'hir>,
         span: Span,
-        check_ident: Ident,
-        check_hir_id: HirId,
+        cond_ident: Ident,
+        cond_hir_id: HirId,
     ) -> &'hir hir::Expr<'hir> {
-        let checker_fn = self.expr_ident(span, check_ident, check_hir_id);
-        let span = self.mark_span_with_reason(DesugaringKind::Contract, span, None);
-        self.expr_call(span, checker_fn, std::slice::from_ref(expr))
+        let cond_fn = self.expr_ident(span, cond_ident, cond_hir_id);
+        let call_expr = self.expr_call_lang_item_fn_mut(
+            span,
+            hir::LangItem::ContractCheckEnsures,
+            arena_vec![self; *cond_fn, *expr],
+        );
+        self.arena.alloc(call_expr)
     }
 
     pub(crate) fn lower_const_block(&mut self, c: &AnonConst) -> hir::ConstBlock {
@@ -441,6 +445,10 @@ impl<'hir> LoweringContext<'_, 'hir> {
 
     fn lower_binop(&mut self, b: BinOp) -> BinOp {
         Spanned { node: b.node, span: self.lower_span(b.span) }
+    }
+
+    fn lower_assign_op(&mut self, a: AssignOp) -> AssignOp {
+        Spanned { node: a.node, span: self.lower_span(a.span) }
     }
 
     fn lower_legacy_const_generics(
@@ -482,9 +490,8 @@ impl<'hir> LoweringContext<'_, 'hir> {
         let mut generic_args = ThinVec::new();
         for (idx, arg) in args.iter().cloned().enumerate() {
             if legacy_args_idx.contains(&idx) {
-                let parent_def_id = self.current_hir_id_owner.def_id;
                 let node_id = self.next_node_id();
-                self.create_def(parent_def_id, node_id, None, DefKind::AnonConst, f.span);
+                self.create_def(node_id, None, DefKind::AnonConst, f.span);
                 let mut visitor = WillCreateDefIdsVisitor {};
                 let const_value = if let ControlFlow::Break(span) = visitor.visit_expr(&arg) {
                     AstP(Expr {
@@ -1190,11 +1197,13 @@ impl<'hir> LoweringContext<'_, 'hir> {
         let closure_def_id = self.local_def_id(closure_id);
         let (binder_clause, generic_params) = self.lower_closure_binder(binder);
 
-        assert_matches!(
-            coroutine_kind,
-            CoroutineKind::Async { .. },
-            "only async closures are supported currently"
-        );
+        let coroutine_desugaring = match coroutine_kind {
+            CoroutineKind::Async { .. } => hir::CoroutineDesugaring::Async,
+            CoroutineKind::Gen { .. } => hir::CoroutineDesugaring::Gen,
+            CoroutineKind::AsyncGen { span, .. } => {
+                span_bug!(span, "only async closures and `iter!` closures are supported currently")
+            }
+        };
 
         let body = self.with_new_scopes(fn_decl_span, |this| {
             let inner_decl =
@@ -1238,7 +1247,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
             // Lower this as a `CoroutineClosure`. That will ensure that HIR typeck
             // knows that a `FnDecl` output type like `-> &str` actually means
             // "coroutine that returns &str", rather than directly returning a `&str`.
-            kind: hir::ClosureKind::CoroutineClosure(hir::CoroutineDesugaring::Async),
+            kind: hir::ClosureKind::CoroutineClosure(coroutine_desugaring),
             constness: hir::Constness::NotConst,
         });
         hir::ExprKind::Closure(c)
@@ -2025,7 +2034,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 let ret_expr = self.checked_return(Some(from_residual_expr));
                 self.arena.alloc(self.expr(try_span, ret_expr))
             };
-            self.lower_attrs(ret_expr.hir_id, &attrs, ret_expr.span);
+            self.lower_attrs(ret_expr.hir_id, &attrs, span);
 
             let break_pat = self.pat_cf_break(try_span, residual_local);
             self.arm(break_pat, ret_expr)
@@ -2280,12 +2289,12 @@ impl<'hir> LoweringContext<'_, 'hir> {
         span: Span,
         elements: &'hir [hir::Expr<'hir>],
     ) -> hir::Expr<'hir> {
-        let addrof = hir::ExprKind::AddrOf(
-            hir::BorrowKind::Ref,
-            hir::Mutability::Not,
-            self.arena.alloc(self.expr(span, hir::ExprKind::Array(elements))),
-        );
-        self.expr(span, addrof)
+        let array = self.arena.alloc(self.expr(span, hir::ExprKind::Array(elements)));
+        self.expr_ref(span, array)
+    }
+
+    pub(super) fn expr_ref(&mut self, span: Span, expr: &'hir hir::Expr<'hir>) -> hir::Expr<'hir> {
+        self.expr(span, hir::ExprKind::AddrOf(hir::BorrowKind::Ref, hir::Mutability::Not, expr))
     }
 
     pub(super) fn expr(&mut self, span: Span, kind: hir::ExprKind<'hir>) -> hir::Expr<'hir> {

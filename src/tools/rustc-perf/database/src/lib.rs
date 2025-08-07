@@ -14,6 +14,9 @@ pub mod metric;
 pub mod pool;
 pub mod selector;
 
+#[cfg(test)]
+mod tests;
+
 pub use pool::{Connection, Pool};
 
 intern!(pub struct Metric);
@@ -113,7 +116,7 @@ impl<'de> Deserialize<'de> for Date {
     {
         struct DateVisitor;
 
-        impl<'de> serde::de::Visitor<'de> for DateVisitor {
+        impl serde::de::Visitor<'_> for DateVisitor {
             type Value = Date;
 
             fn visit_str<E>(self, value: &str) -> ::std::result::Result<Date, E>
@@ -340,6 +343,43 @@ impl PartialOrd for Scenario {
     }
 }
 
+/// Target representing an Rust target triple, for a full list of targets and
+/// their support see;
+/// https://doc.rust-lang.org/nightly/rustc/platform-support.html
+///
+/// Presently we only support x86_64
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub enum Target {
+    /// `x86_64-unknown-linux-gnu`
+    X86_64UnknownLinuxGnu,
+}
+
+impl Target {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Target::X86_64UnknownLinuxGnu => "x86_64-unknown-linux-gnu",
+        }
+    }
+}
+
+impl FromStr for Target {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_ascii_lowercase().as_str() {
+            "x86_64-unknown-linux-gnu" => Target::X86_64UnknownLinuxGnu,
+            _ => return Err(format!("{} is not a valid target", s)),
+        })
+    }
+}
+
+impl fmt::Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// The codegen backend used for compilation.
 #[derive(
     Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -472,7 +512,7 @@ pub struct Index {
     artifacts: Indexed<Box<str>>,
     /// Id lookup of compile stat description ids
     /// For legacy reasons called `pstat_series` in the database, and so the name is kept here.
-    pstat_series: Indexed<(Benchmark, Profile, Scenario, CodegenBackend, Metric)>,
+    pstat_series: Indexed<(Benchmark, Profile, Scenario, CodegenBackend, Target, Metric)>,
     /// Id lookup of runtime stat description ids
     runtime_pstat_series: Indexed<(Benchmark, Metric)>,
 }
@@ -593,6 +633,7 @@ pub enum DbLabel {
         profile: Profile,
         scenario: Scenario,
         backend: CodegenBackend,
+        target: Target,
         metric: Metric,
     },
 }
@@ -612,9 +653,10 @@ impl Lookup for DbLabel {
                 scenario,
                 backend,
                 metric,
+                target,
             } => index
                 .pstat_series
-                .get(&(*benchmark, *profile, *scenario, *backend, *metric)),
+                .get(&(*benchmark, *profile, *scenario, *backend, *target, *metric)),
         }
     }
 }
@@ -664,7 +706,7 @@ impl Index {
         self.pstat_series
             .map
             .keys()
-            .map(|(_, _, _, _, metric)| metric)
+            .map(|(_, _, _, _, _, metric)| metric)
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .map(|s| s.to_string())
@@ -690,7 +732,7 @@ impl Index {
         &self,
     ) -> impl Iterator<
         Item = (
-            &(Benchmark, Profile, Scenario, CodegenBackend, Metric),
+            &(Benchmark, Profile, Scenario, CodegenBackend, Target, Metric),
             StatisticalDescriptionId,
         ),
     > + '_ {

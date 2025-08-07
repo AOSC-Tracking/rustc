@@ -840,14 +840,22 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             } else {
                 bug!("not an upvar")
             };
-            err.span_label(
-                *span,
-                format!(
-                    "calling `{}` requires mutable binding due to {}",
-                    self.describe_place(the_place_err).unwrap(),
-                    reason
-                ),
-            );
+            // sometimes we deliberately don't store the name of a place when coming from a macro in
+            // another crate. We generally want to limit those diagnostics a little, to hide
+            // implementation details (such as those from pin!() or format!()). In that case show a
+            // slightly different error message, or none at all if something else happened. In other
+            // cases the message is likely not useful.
+            if let Some(place_name) = self.describe_place(the_place_err) {
+                err.span_label(
+                    *span,
+                    format!("calling `{place_name}` requires mutable binding due to {reason}"),
+                );
+            } else if span.from_expansion() {
+                err.span_label(
+                    *span,
+                    format!("a call in this macro requires a mutable binding due to {reason}",),
+                );
+            }
         }
     }
 
@@ -969,7 +977,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             }
         };
 
-        // If we can detect the expression to be an function or method call where the closure was
+        // If we can detect the expression to be a function or method call where the closure was
         // an argument, we point at the function or method definition argument...
         if let Some((callee_def_id, call_span, call_args)) = get_call_details() {
             let arg_pos = call_args

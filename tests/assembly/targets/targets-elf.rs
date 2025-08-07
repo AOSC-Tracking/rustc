@@ -259,6 +259,12 @@
 //@ revisions: i686_wrs_vxworks
 //@ [i686_wrs_vxworks] compile-flags: --target i686-wrs-vxworks
 //@ [i686_wrs_vxworks] needs-llvm-components: x86
+//@ revisions: loongarch32_unknown_none
+//@ [loongarch32_unknown_none] compile-flags: --target loongarch32-unknown-none
+//@ [loongarch32_unknown_none] needs-llvm-components: loongarch
+//@ revisions: loongarch32_unknown_none_softfloat
+//@ [loongarch32_unknown_none_softfloat] compile-flags: --target loongarch32-unknown-none-softfloat
+//@ [loongarch32_unknown_none_softfloat] needs-llvm-components: loongarch
 //@ revisions: loongarch64_unknown_linux_gnu
 //@ [loongarch64_unknown_linux_gnu] compile-flags: --target loongarch64-unknown-linux-gnu
 //@ [loongarch64_unknown_linux_gnu] needs-llvm-components: loongarch
@@ -571,6 +577,9 @@
 //@ revisions: x86_64_linux_android
 //@ [x86_64_linux_android] compile-flags: --target x86_64-linux-android
 //@ [x86_64_linux_android] needs-llvm-components: x86
+//@ revisions: x86_64_lynx_lynxos178
+//@ [x86_64_lynx_lynxos178] compile-flags: --target x86_64-lynx-lynxos178
+//@ [x86_64_lynx_lynxos178] needs-llvm-components: x86
 //@ revisions: x86_64_pc_nto_qnx710
 //@ [x86_64_pc_nto_qnx710] compile-flags: --target x86_64-pc-nto-qnx710
 //@ [x86_64_pc_nto_qnx710] needs-llvm-components: x86

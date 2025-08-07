@@ -1,5 +1,7 @@
 // Check that all symbols in cdylibs, staticlibs and bins are mangled
 //@ only-elf some object file formats create multiple symbols for each function with different names
+//@ ignore-nvptx64 (needs target std)
+//@ ignore-cross-compile (host-only)
 
 use run_make_support::object::read::{Object, ObjectSymbol};
 use run_make_support::{bin_name, dynamic_lib_name, object, rfs, rustc, static_lib_name};
@@ -31,10 +33,6 @@ fn symbols_check_archive(path: &str) {
             std::str::from_utf8(file.member(symbol.offset()).unwrap().name()).unwrap();
         if !member_name.ends_with(".rcgu.o") || member_name.contains("compiler_builtins") {
             continue; // All compiler-builtins symbols must remain unmangled
-        }
-
-        if name == "__rust_no_alloc_shim_is_unstable" {
-            continue; // FIXME remove exception once we mangle this symbol
         }
 
         if name.contains("rust_eh_personality") {
@@ -71,10 +69,6 @@ fn symbols_check(path: &str) {
             // be wrong, but even if so symbol_check_archive will likely
             // catch it.
             continue;
-        }
-
-        if name == "__rust_no_alloc_shim_is_unstable" {
-            continue; // FIXME remove exception once we mangle this symbol
         }
 
         if name.contains("rust_eh_personality") {

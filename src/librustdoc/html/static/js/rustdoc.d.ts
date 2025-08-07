@@ -4,10 +4,10 @@
 
 /* eslint-disable */
 declare global {
-    /** Map from crate name to directory structure, for source view */
-    declare var srcIndex: Map<string, rustdoc.Dir>;
-    /** Defined and documented in `main.js` */
+    /** Defined and documented in `storage.js` */
     declare function nonnull(x: T|null, msg: string|undefined);
+    /** Defined and documented in `storage.js` */
+    declare function nonundef(x: T|undefined, msg: string|undefined);
     interface Window {
         /** Make the current theme easy to find */
         currentTheme: HTMLLinkElement|null;
@@ -28,6 +28,8 @@ declare global {
         currentCrate: string|null;
         /**
          * Hide popovers, tooltips, or the mobile sidebar.
+         *
+         * Pass `true` to reset focus for tooltip popovers.
          */
         hideAllModals: function(boolean),
         /**
@@ -60,7 +62,7 @@ declare global {
          * create's the sidebar in source code view.
          * called in generated `src-files.js`.
          */
-        createSrcSidebar?: function(),
+        createSrcSidebar?: function(string),
         /**
          * Set up event listeners for a scraped source example.
          */
@@ -76,6 +78,8 @@ declare global {
         pending_implementors?: rustdoc.Implementors,
         register_type_impls?: function(rustdoc.TypeImpls): void,
         pending_type_impls?: rustdoc.TypeImpls,
+        rustdoc_add_line_numbers_to_examples?: function(),
+        rustdoc_remove_line_numbers_from_examples?: function(),
     }
     interface HTMLElement {
         /** Used by the popover tooltip code. */
@@ -123,7 +127,7 @@ declare namespace rustdoc {
 
     /**
      * A single parsed "atom" in a search query. For example,
-     * 
+     *
      *     std::fmt::Formatter, Write -> Result<()>
      *     ┏━━━━━━━━━━━━━━━━━━  ┌────    ┏━━━━━┅┅┅┅┄┄┄┄┄┄┄┄┄┄┄┄┄┄┐
      *     ┃                    │        ┗ QueryElement {        ┊
@@ -255,10 +259,18 @@ declare namespace rustdoc {
         ty: number,
         type?: FunctionSearchType,
         paramNames?: string[],
-        displayType: Promise<Array<Array<string>>>|null,
-        displayTypeMappedNames: Promise<Array<[string, Array<string>]>>|null,
+        displayTypeSignature: Promise<rustdoc.DisplayTypeSignature> | null,
         item: Row,
         dontValidate?: boolean,
+    }
+
+    /**
+     * output of `formatDisplayTypeSignature`
+     */
+    interface DisplayTypeSignature {
+        type: Array<string>,
+        mappedNames: Map<string, string>,
+        whereClause: Map<string, Array<string>>,
     }
 
     /**
@@ -467,4 +479,14 @@ declare namespace rustdoc {
      * is a tuple of (filename, subdirs, filenames).
      */
     type Dir = [string, rustdoc.Dir[], string[]]
+
+    /**
+     * Indivitual setting object, used in `settings.js`
+     */
+    interface Setting {
+        js_name: string,
+        name: string,
+        options?: string[],
+        default: string | boolean,
+    }
 }

@@ -29,7 +29,7 @@
 //! race but we do make a best effort such that it *should* do so.
 
 use core::ptr;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{Atomic, AtomicU32, Ordering};
 
 use super::{AsRawHandle, DirBuff, File, FromRawHandle};
 use crate::sys::c;
@@ -87,15 +87,24 @@ fn open_link_no_reparse(
     // The `OBJ_DONT_REPARSE` attribute ensures that we haven't been
     // tricked into following a symlink. However, it may not be available in
     // earlier versions of Windows.
-    static ATTRIBUTES: AtomicU32 = AtomicU32::new(c::OBJ_DONT_REPARSE);
+    static ATTRIBUTES: Atomic<u32> = AtomicU32::new(c::OBJ_DONT_REPARSE);
 
     let result = unsafe {
+        // Workaround for #143078.
+        // While the Windows OS itself handles zero length strings,
+        // some security software that hooks system functions may expect it to
+        // be null terminated. So as a workaround we ensure zero length strings
+        // always point to a zero u16 even though it should never be read.
+        static EMPTY_STR: [u16; 1] = [0];
         let mut path_str = c::UNICODE_STRING::from_ref(path);
+        if path_str.Length == 0 {
+            path_str.Buffer = EMPTY_STR.as_ptr().cast_mut();
+        }
         let mut object = c::OBJECT_ATTRIBUTES {
             ObjectName: &mut path_str,
             RootDirectory: parent.as_raw_handle(),
             Attributes: ATTRIBUTES.load(Ordering::Relaxed),
-            ..c::OBJECT_ATTRIBUTES::default()
+            ..c::OBJECT_ATTRIBUTES::with_length()
         };
         let share = c::FILE_SHARE_DELETE | c::FILE_SHARE_READ | c::FILE_SHARE_WRITE;
         let options = c::FILE_OPEN_REPARSE_POINT | options;

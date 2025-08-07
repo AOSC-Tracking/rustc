@@ -70,14 +70,7 @@ fn functions(input: TokenStream, dirs: &[&str]) -> TokenStream {
     }
     assert!(!tests.is_empty());
 
-    functions.retain(|(f, _)| {
-        if let syn::Visibility::Public(_) = f.vis {
-            if f.sig.unsafety.is_some() {
-                return true;
-            }
-        }
-        false
-    });
+    functions.retain(|(f, _)| matches!(f.vis, syn::Visibility::Public(_)));
     assert!(!functions.is_empty());
 
     let input = proc_macro2::TokenStream::from(input);
@@ -505,6 +498,7 @@ fn find_target_feature(attrs: &[syn::Attribute]) -> Option<syn::Lit> {
     attrs
         .iter()
         .flat_map(|a| {
+            #[allow(clippy::collapsible_if)]
             if let syn::Meta::List(ref l) = a.meta {
                 if l.path.is_ident("target_feature") {
                     if let Ok(l) =
@@ -533,6 +527,7 @@ fn find_doc(attrs: &[syn::Attribute]) -> String {
     attrs
         .iter()
         .filter_map(|a| {
+            #[allow(clippy::collapsible_if)]
             if let syn::Meta::NameValue(ref l) = a.meta {
                 if l.path.is_ident("doc") {
                     if let syn::Expr::Lit(syn::ExprLit {

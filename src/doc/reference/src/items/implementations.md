@@ -2,24 +2,23 @@ r[items.impl]
 # Implementations
 
 r[items.impl.syntax]
-> **<sup>Syntax</sup>**\
-> _Implementation_ :\
-> &nbsp;&nbsp; _InherentImpl_ | _TraitImpl_
->
-> _InherentImpl_ :\
-> &nbsp;&nbsp; `impl` [_GenericParams_]<sup>?</sup>&nbsp;[_Type_]&nbsp;[_WhereClause_]<sup>?</sup> `{`\
-> &nbsp;&nbsp; &nbsp;&nbsp; [_InnerAttribute_]<sup>\*</sup>\
-> &nbsp;&nbsp; &nbsp;&nbsp; [_AssociatedItem_]<sup>\*</sup>\
-> &nbsp;&nbsp; `}`
->
-> _TraitImpl_ :\
-> &nbsp;&nbsp; `unsafe`<sup>?</sup> `impl` [_GenericParams_]<sup>?</sup> `!`<sup>?</sup>
->              [_TypePath_] `for` [_Type_]\
-> &nbsp;&nbsp; [_WhereClause_]<sup>?</sup>\
-> &nbsp;&nbsp; `{`\
-> &nbsp;&nbsp; &nbsp;&nbsp; [_InnerAttribute_]<sup>\*</sup>\
-> &nbsp;&nbsp; &nbsp;&nbsp; [_AssociatedItem_]<sup>\*</sup>\
-> &nbsp;&nbsp; `}`
+```grammar,items
+Implementation -> InherentImpl | TraitImpl
+
+InherentImpl ->
+    `impl` GenericParams? Type WhereClause? `{`
+        InnerAttribute*
+        AssociatedItem*
+    `}`
+
+TraitImpl ->
+    `unsafe`? `impl` GenericParams? `!`? TypePath `for` Type
+    WhereClause?
+    `{`
+        InnerAttribute*
+        AssociatedItem*
+    `}`
+```
 
 r[items.impl.intro]
 An _implementation_ is an item that associates items with an _implementing type_.
@@ -174,6 +173,13 @@ be instantiable with the same set of types for the input type parameters. -->
 r[items.impl.trait.orphan-rule]
 #### Orphan rules
 
+r[items.impl.trait.orphan-rule.intro]
+The *orphan rule* states that a trait implementation is only allowed if either the trait or at least one of the types in the implementation is defined in the current crate. It prevents conflicting trait implementations across different crates and is key to ensuring coherence.
+
+An orphan implementation is one that implements a foreign trait for a foreign type. If these were freely allowed, two crates could implement the same trait for the same type in incompatible ways, creating a situation where adding or updating a dependency could break compilation due to conflicting implementations.
+
+The orphan rule enables library authors to add new implementations to their traits without fear that they'll break downstream code. Without these restrictions, a library couldn't add an implementation like `impl<T: Display> MyTrait for T` without potentially conflicting with downstream implementations.
+
 r[items.impl.trait.orphan-rule.general]
 Given `impl<P1..=Pn> Trait<T1..=Tn> for T0`, an `impl` is valid only if at
 least one of the following is true:
@@ -301,12 +307,6 @@ attributes must come before any associated items. The attributes that have
 meaning here are [`cfg`], [`deprecated`], [`doc`], and [the lint check
 attributes].
 
-[_AssociatedItem_]: associated-items.md
-[_GenericParams_]: generics.md
-[_InnerAttribute_]: ../attributes.md
-[_TypePath_]: ../paths.md#paths-in-types
-[_Type_]: ../types.md#type-expressions
-[_WhereClause_]: generics.md#where-clauses
 [trait]: traits.md
 [associated constants]: associated-items.md#associated-constants
 [associated functions]: associated-items.md#associated-functions-and-methods

@@ -36,6 +36,16 @@ macro_rules! gate_alt {
             feature_err(&$visitor.sess, $name, $span, $explain).emit();
         }
     }};
+    ($visitor:expr, $has_feature:expr, $name:expr, $span:expr, $explain:expr, $notes: expr) => {{
+        if !$has_feature && !$span.allows_unstable($name) {
+            #[allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
+            let mut diag = feature_err(&$visitor.sess, $name, $span, $explain);
+            for note in $notes {
+                diag.note(*note);
+            }
+            diag.emit();
+        }
+    }};
 }
 
 /// The case involving a multispan.
@@ -154,11 +164,11 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
         let attr_info = attr.ident().and_then(|ident| BUILTIN_ATTRIBUTE_MAP.get(&ident.name));
         // Check feature gates for built-in attributes.
         if let Some(BuiltinAttribute {
-            gate: AttributeGate::Gated(_, name, descr, has_feature),
+            gate: AttributeGate::Gated { feature, message, check, notes, .. },
             ..
         }) = attr_info
         {
-            gate_alt!(self, has_feature(self.features), *name, attr.span, *descr);
+            gate_alt!(self, check(self.features), *feature, attr.span, *message, *notes);
         }
         // Check unstable flavors of the `#[doc]` attribute.
         if attr.has_name(sym::doc) {
@@ -236,7 +246,7 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
                 gate!(&self, trait_alias, i.span, "trait aliases are experimental");
             }
 
-            ast::ItemKind::MacroDef(ast::MacroDef { macro_rules: false, .. }) => {
+            ast::ItemKind::MacroDef(_, ast::MacroDef { macro_rules: false, .. }) => {
                 let msg = "`macro` is experimental";
                 gate!(&self, decl_macro, i.span, msg);
             }
@@ -332,17 +342,19 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
             ast::ExprKind::TryBlock(_) => {
                 gate!(&self, try_blocks, e.span, "`try` expression is experimental");
             }
-            ast::ExprKind::Lit(token::Lit { kind: token::LitKind::Float, suffix, .. }) => {
-                match suffix {
-                    Some(sym::f16) => {
-                        gate!(&self, f16, e.span, "the type `f16` is unstable")
-                    }
-                    Some(sym::f128) => {
-                        gate!(&self, f128, e.span, "the type `f128` is unstable")
-                    }
-                    _ => (),
+            ast::ExprKind::Lit(token::Lit {
+                kind: token::LitKind::Float | token::LitKind::Integer,
+                suffix,
+                ..
+            }) => match suffix {
+                Some(sym::f16) => {
+                    gate!(&self, f16, e.span, "the type `f16` is unstable")
                 }
-            }
+                Some(sym::f128) => {
+                    gate!(&self, f128, e.span, "the type `f128` is unstable")
+                }
+                _ => (),
+            },
             _ => {}
         }
         visit::walk_expr(self, e)
@@ -475,11 +487,12 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session, features: &Features) {
         for span in spans {
             if (!visitor.features.coroutines() && !span.allows_unstable(sym::coroutines))
                 && (!visitor.features.gen_blocks() && !span.allows_unstable(sym::gen_blocks))
+                && (!visitor.features.yield_expr() && !span.allows_unstable(sym::yield_expr))
             {
                 #[allow(rustc::untranslatable_diagnostic)]
-                // Don't know which of the two features to include in the
-                // error message, so I am arbitrarily picking one.
-                feature_err(&visitor.sess, sym::coroutines, *span, "yield syntax is experimental")
+                // Emit yield_expr as the error, since that will be sufficient. You can think of it
+                // as coroutines and gen_blocks imply yield_expr.
+                feature_err(&visitor.sess, sym::yield_expr, *span, "yield syntax is experimental")
                     .emit();
             }
         }
@@ -490,7 +503,6 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session, features: &Features) {
         half_open_range_patterns_in_slices,
         "half-open range patterns in slices are unstable"
     );
-    gate_all!(inline_const_pat, "inline-const in pattern position is experimental");
     gate_all!(associated_const_equality, "associated const equality is incomplete");
     gate_all!(yeet_expr, "`do yeet` expression is experimental");
     gate_all!(dyn_star, "`dyn*` trait objects are experimental");
@@ -512,6 +524,8 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session, features: &Features) {
     gate_all!(contracts, "contracts are incomplete");
     gate_all!(contracts_internals, "contract internal machinery is for internal use only");
     gate_all!(where_clause_attrs, "attributes in `where` clause are unstable");
+    gate_all!(super_let, "`super let` is experimental");
+    gate_all!(frontmatter, "frontmatters are experimental");
 
     if !visitor.features.never_patterns() {
         if let Some(spans) = spans.get(&sym::never_patterns) {

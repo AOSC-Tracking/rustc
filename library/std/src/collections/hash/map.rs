@@ -648,14 +648,14 @@ impl<K, V, S> HashMap<K, V, S> {
         Drain { base: self.base.drain() }
     }
 
-    /// Creates an iterator which uses a closure to determine if an element should be removed.
+    /// Creates an iterator which uses a closure to determine if an element (key-value pair) should be removed.
     ///
-    /// If the closure returns true, the element is removed from the map and yielded.
-    /// If the closure returns false, or panics, the element remains in the map and will not be
-    /// yielded.
+    /// If the closure returns `true`, the element is removed from the map and
+    /// yielded. If the closure returns `false`, or panics, the element remains
+    /// in the map and will not be yielded.
     ///
-    /// Note that `extract_if` lets you mutate every value in the filter closure, regardless of
-    /// whether you choose to keep or remove it.
+    /// The iterator also lets you mutate the value of each element in the
+    /// closure, regardless of whether you choose to keep or remove it.
     ///
     /// If the returned `ExtractIf` is not exhausted, e.g. because it is dropped without iterating
     /// or the iteration short-circuits, then the remaining elements will be retained.
@@ -668,7 +668,6 @@ impl<K, V, S> HashMap<K, V, S> {
     /// Splitting a map into even and odd keys, reusing the original map:
     ///
     /// ```
-    /// #![feature(hash_extract_if)]
     /// use std::collections::HashMap;
     ///
     /// let mut map: HashMap<i32, i32> = (0..8).map(|x| (x, x)).collect();
@@ -684,7 +683,7 @@ impl<K, V, S> HashMap<K, V, S> {
     /// ```
     #[inline]
     #[rustc_lint_query_instability]
-    #[unstable(feature = "hash_extract_if", issue = "59618")]
+    #[stable(feature = "hash_extract_if", since = "1.88.0")]
     pub fn extract_if<F>(&mut self, pred: F) -> ExtractIf<'_, K, V, F>
     where
         F: FnMut(&K, &mut V) -> bool,
@@ -973,6 +972,9 @@ where
     ///
     /// Returns an array of length `N` with the results of each query. For soundness, at most one
     /// mutable reference will be returned to any value. `None` will be used if the key is missing.
+    ///
+    /// This method performs a check to ensure there are no duplicate keys, which currently has a time-complexity of O(n^2),
+    /// so be careful when passing many keys.
     ///
     /// # Panics
     ///
@@ -1671,8 +1673,6 @@ impl<'a, K, V> Drain<'a, K, V> {
 /// # Example
 ///
 /// ```
-/// #![feature(hash_extract_if)]
-///
 /// use std::collections::HashMap;
 ///
 /// let mut map = HashMap::from([
@@ -1680,12 +1680,9 @@ impl<'a, K, V> Drain<'a, K, V> {
 /// ]);
 /// let iter = map.extract_if(|_k, v| *v % 2 == 0);
 /// ```
-#[unstable(feature = "hash_extract_if", issue = "59618")]
+#[stable(feature = "hash_extract_if", since = "1.88.0")]
 #[must_use = "iterators are lazy and do nothing unless consumed"]
-pub struct ExtractIf<'a, K, V, F>
-where
-    F: FnMut(&K, &mut V) -> bool,
-{
+pub struct ExtractIf<'a, K, V, F> {
     base: base::ExtractIf<'a, K, V, F>,
 }
 
@@ -2297,7 +2294,7 @@ where
     }
 }
 
-#[unstable(feature = "hash_extract_if", issue = "59618")]
+#[stable(feature = "hash_extract_if", since = "1.88.0")]
 impl<K, V, F> Iterator for ExtractIf<'_, K, V, F>
 where
     F: FnMut(&K, &mut V) -> bool,
@@ -2314,13 +2311,14 @@ where
     }
 }
 
-#[unstable(feature = "hash_extract_if", issue = "59618")]
+#[stable(feature = "hash_extract_if", since = "1.88.0")]
 impl<K, V, F> FusedIterator for ExtractIf<'_, K, V, F> where F: FnMut(&K, &mut V) -> bool {}
 
-#[unstable(feature = "hash_extract_if", issue = "59618")]
-impl<'a, K, V, F> fmt::Debug for ExtractIf<'a, K, V, F>
+#[stable(feature = "hash_extract_if", since = "1.88.0")]
+impl<K, V, F> fmt::Debug for ExtractIf<'_, K, V, F>
 where
-    F: FnMut(&K, &mut V) -> bool,
+    K: fmt::Debug,
+    V: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExtractIf").finish_non_exhaustive()

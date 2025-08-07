@@ -5,10 +5,9 @@
 use either::Either;
 use ide_db::famous_defs::FamousDefs;
 use ide_db::text_edit::TextEdit;
-use span::EditionedFileId;
 use syntax::{
-    ast::{self, AstNode},
     SyntaxKind,
+    ast::{self, AstNode},
 };
 
 use crate::{InlayHint, InlayHintPosition, InlayHintsConfig, InlayKind, LifetimeElisionHints};
@@ -17,7 +16,6 @@ pub(super) fn hints(
     acc: &mut Vec<InlayHint>,
     FamousDefs(_sema, _): &FamousDefs<'_, '_>,
     config: &InlayHintsConfig,
-    _file_id: EditionedFileId,
     statik_or_const: Either<ast::Static, ast::Const>,
 ) -> Option<()> {
     if config.lifetime_elision_hints != LifetimeElisionHints::Always {
@@ -56,8 +54,8 @@ pub(super) fn hints(
 #[cfg(test)]
 mod tests {
     use crate::{
-        inlay_hints::tests::{check_with_config, TEST_CONFIG},
         InlayHintsConfig, LifetimeElisionHints,
+        inlay_hints::tests::{TEST_CONFIG, check_with_config},
     };
 
     #[test]

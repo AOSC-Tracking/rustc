@@ -3,15 +3,18 @@
 //@ ignore-arm no "ret" mnemonic
 
 #![crate_type = "lib"]
-#![feature(naked_functions, fn_align)]
+// FIXME(#82232, #143834): temporarily renamed to mitigate `#[align]` nameres ambiguity
+#![feature(rustc_attrs)]
+#![feature(fn_align)]
+
 use std::arch::naked_asm;
 
 // CHECK: .balign 16
 // CHECK-LABEL: naked_empty:
-#[repr(align(16))]
+#[rustc_align(16)]
 #[no_mangle]
-#[naked]
-pub unsafe extern "C" fn naked_empty() {
+#[unsafe(naked)]
+pub extern "C" fn naked_empty() {
     // CHECK: ret
-    naked_asm!("ret");
+    naked_asm!("ret")
 }

@@ -88,10 +88,47 @@ pub fn publish(ws: &Workspace<'_>, opts: &PublishOpts<'_>) -> CargoResult<()> {
     let mut pkgs = ws.members_with_features(&specs, &opts.cli_features)?;
     // In `members_with_features_old`, it will add "current" package (determined by the cwd)
     // So we need filter
-    pkgs = pkgs
+    pkgs.retain(|(m, _)| specs.iter().any(|spec| spec.matches(m.package_id())));
+
+    let (unpublishable, pkgs): (Vec<_>, Vec<_>) = pkgs
         .into_iter()
-        .filter(|(m, _)| specs.iter().any(|spec| spec.matches(m.package_id())))
-        .collect();
+        .partition(|(pkg, _)| pkg.publish() == &Some(vec![]));
+    // If `--workspace` is passed,
+    // the intent is more like "publish all publisable packages in this workspace",
+    // so skip `publish=false` packages.
+    let allow_unpublishable = multi_package_mode
+        && match &opts.to_publish {
+            Packages::Default => ws.is_virtual(),
+            Packages::All(_) => true,
+            Packages::OptOut(_) => true,
+            Packages::Packages(_) => false,
+        };
+    if !unpublishable.is_empty() && !allow_unpublishable {
+        bail!(
+            "{} cannot be published.\n\
+            `package.publish` must be set to `true` or a non-empty list in Cargo.toml to publish.",
+            unpublishable
+                .iter()
+                .map(|(pkg, _)| format!("`{}`", pkg.name()))
+                .join(", "),
+        );
+    }
+
+    if pkgs.is_empty() {
+        if allow_unpublishable {
+            let n = unpublishable.len();
+            let plural = if n == 1 { "" } else { "s" };
+            ws.gctx().shell().warn(format_args!(
+                "nothing to publish, but found {n} unpublishable package{plural}"
+            ))?;
+            ws.gctx().shell().note(format_args!(
+                "to publish packages, set `package.publish` to `true` or a non-empty list"
+            ))?;
+            return Ok(());
+        } else {
+            unreachable!("must have at least one publishable package");
+        }
+    }
 
     let just_pkgs: Vec<_> = pkgs.iter().map(|p| p.0).collect();
     let reg_or_index = match opts.reg_or_index.clone() {
@@ -233,13 +270,52 @@ pub fn publish(ws: &Workspace<'_>, opts: &PublishOpts<'_>) -> CargoResult<()> {
                 DEFAULT_TIMEOUT
             };
             if 0 < timeout {
+                let source_description = source.source_id().to_string();
+                let short_pkg_descriptions = package_list(to_confirm.iter().copied(), "or");
+                if plan.is_empty() {
+                    opts.gctx.shell().note(format!(
+                    "waiting for {short_pkg_descriptions} to be available at {source_description}.\n\
+                    You may press ctrl-c to skip waiting; the {crate} should be available shortly.",
+                    crate = if to_confirm.len() == 1 { "crate" } else {"crates"}
+                ))?;
+                } else {
+                    opts.gctx.shell().note(format!(
+                    "waiting for {short_pkg_descriptions} to be available at {source_description}.\n\
+                    {count} remaining {crate} to be published",
+                    count = plan.len(),
+                    crate = if plan.len() == 1 { "crate" } else {"crates"}
+                ))?;
+                }
+
                 let timeout = Duration::from_secs(timeout);
-                wait_for_any_publish_confirmation(
+                let confirmed = wait_for_any_publish_confirmation(
                     opts.gctx,
                     source_ids.original,
                     &to_confirm,
                     timeout,
-                )?
+                )?;
+                if !confirmed.is_empty() {
+                    let short_pkg_description = package_list(confirmed.iter().copied(), "and");
+                    opts.gctx.shell().status(
+                        "Published",
+                        format!("{short_pkg_description} at {source_description}"),
+                    )?;
+                } else {
+                    let short_pkg_descriptions = package_list(to_confirm.iter().copied(), "or");
+                    opts.gctx.shell().warn(format!(
+                        "timed out waiting for {short_pkg_descriptions} to be available in {source_description}",
+                    ))?;
+                    opts.gctx.shell().note(format!(
+                        "the registry may have a backlog that is delaying making the \
+                        {crate} available. The {crate} should be available soon.",
+                        crate = if to_confirm.len() == 1 {
+                            "crate"
+                        } else {
+                            "crates"
+                        }
+                    ))?;
+                }
+                confirmed
             } else {
                 BTreeSet::new()
             }
@@ -253,7 +329,7 @@ pub fn publish(ws: &Workspace<'_>, opts: &PublishOpts<'_>) -> CargoResult<()> {
                 break;
             } else {
                 let failed_list = package_list(plan.iter(), "and");
-                bail!("unable to publish {failed_list} due to time out while waiting for published dependencies to be available.");
+                bail!("unable to publish {failed_list} due to a timeout while waiting for published dependencies to be available.");
             }
         }
         for id in &confirmed {
@@ -280,17 +356,10 @@ fn wait_for_any_publish_confirmation(
     // of independent progress bars can be a little confusing. There is an
     // overall progress bar managed here.
     source.set_quiet(true);
-    let source_description = source.source_id().to_string();
 
     let now = std::time::Instant::now();
     let sleep_time = Duration::from_secs(1);
     let max = timeout.as_secs() as usize;
-    // Short does not include the registry name.
-    let short_pkg_descriptions = package_list(pkgs.iter().copied(), "or");
-    gctx.shell().note(format!(
-        "waiting for {short_pkg_descriptions} to be available at {source_description}.\n\
-        You may press ctrl-c to skip waiting; the crate should be available shortly."
-    ))?;
     let mut progress = Progress::with_style("Waiting", ProgressStyle::Ratio, gctx);
     progress.tick_now(0, max, "")?;
     let available = loop {
@@ -319,30 +388,12 @@ fn wait_for_any_publish_confirmation(
 
         let elapsed = now.elapsed();
         if timeout < elapsed {
-            gctx.shell().warn(format!(
-                "timed out waiting for {short_pkg_descriptions} to be available in {source_description}",
-            ))?;
-            gctx.shell().note(
-                "the registry may have a backlog that is delaying making the \
-                crate available. The crate should be available soon.",
-            )?;
             break BTreeSet::new();
         }
 
         progress.tick_now(elapsed.as_secs() as usize, max, "")?;
         std::thread::sleep(sleep_time);
     };
-    if !available.is_empty() {
-        let short_pkg_description = available
-            .iter()
-            .map(|pkg| format!("{} v{}", pkg.name(), pkg.version()))
-            .sorted()
-            .join(", ");
-        gctx.shell().status(
-            "Published",
-            format!("{short_pkg_description} at {source_description}"),
-        )?;
-    }
 
     Ok(available)
 }
@@ -654,6 +705,10 @@ impl PublishPlan {
         self.dependencies_count.is_empty()
     }
 
+    fn len(&self) -> usize {
+        self.dependencies_count.len()
+    }
+
     /// Returns the set of packages that are ready for publishing (i.e. have no outstanding dependencies).
     ///
     /// These will not be returned in future calls.
@@ -690,7 +745,7 @@ impl PublishPlan {
 fn package_list(pkgs: impl IntoIterator<Item = PackageId>, final_sep: &str) -> String {
     let mut names: Vec<_> = pkgs
         .into_iter()
-        .map(|pkg| format!("`{} v{}`", pkg.name(), pkg.version()))
+        .map(|pkg| format!("{} v{}", pkg.name(), pkg.version()))
         .collect();
     names.sort();
 
@@ -705,19 +760,6 @@ fn package_list(pkgs: impl IntoIterator<Item = PackageId>, final_sep: &str) -> S
 }
 
 fn validate_registry(pkgs: &[&Package], reg_or_index: Option<&RegistryOrIndex>) -> CargoResult<()> {
-    let unpublishable = pkgs
-        .iter()
-        .filter(|pkg| pkg.publish() == &Some(Vec::new()))
-        .map(|pkg| format!("`{}`", pkg.name()))
-        .collect::<Vec<_>>();
-    if !unpublishable.is_empty() {
-        bail!(
-            "{} cannot be published.\n\
-            `package.publish` must be set to `true` or a non-empty list in Cargo.toml to publish.",
-            unpublishable.join(", ")
-        );
-    }
-
     let reg_name = match reg_or_index {
         Some(RegistryOrIndex::Registry(r)) => Some(r.as_str()),
         None => Some(CRATES_IO_REGISTRY),

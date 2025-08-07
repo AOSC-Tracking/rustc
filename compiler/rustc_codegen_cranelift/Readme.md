@@ -7,7 +7,7 @@ If not please open an issue.
 
 ## Download using Rustup
 
-The Cranelift codegen backend is distributed in nightly builds on Linux and x86_64 macOS. If you want to
+The Cranelift codegen backend is distributed in nightly builds on Linux, macOS and x86_64 Windows. If you want to
 install it using Rustup, you can do that by running:
 
 ```bash
@@ -49,13 +49,13 @@ If you want to build the backend manually, you can download it from GitHub and b
 ```bash
 $ git clone https://github.com/rust-lang/rustc_codegen_cranelift
 $ cd rustc_codegen_cranelift
-$ ./y.sh prepare
 $ ./y.sh build
 ```
 
 To run the test suite replace the last command with:
 
 ```bash
+$ ./y.sh prepare # only needs to be run the first time
 $ ./test.sh
 ```
 
@@ -79,7 +79,7 @@ For more docs on how to build and test see [build_system/usage.txt](build_system
 Not all targets are available as rustup component for nightly. See notes in the platform support matrix.
 
 [^xcoff]: XCOFF object file format is not supported.
-[^no-rustup]: Not available as rustup component for nightly. You can build it yourself.
+[^no-rustup]: Not available as [rustup component for nightly](https://rust-lang.github.io/rustup-components-history/). You can build it yourself.
 
 ## Usage
 

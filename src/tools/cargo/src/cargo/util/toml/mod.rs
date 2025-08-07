@@ -13,6 +13,7 @@ use cargo_platform::Platform;
 use cargo_util::paths;
 use cargo_util_schemas::manifest::{
     self, PackageName, PathBaseName, TomlDependency, TomlDetailedDependency, TomlManifest,
+    TomlWorkspace,
 };
 use cargo_util_schemas::manifest::{RustVersion, StringOrBool};
 use itertools::Itertools;
@@ -80,7 +81,8 @@ pub fn read_manifest(
         let empty = Vec::new();
         let cargo_features = original_toml.cargo_features.as_ref().unwrap_or(&empty);
         let features = Features::new(cargo_features, gctx, &mut warnings, source_id.is_path())?;
-        let workspace_config = to_workspace_config(&original_toml, path, gctx, &mut warnings)?;
+        let workspace_config =
+            to_workspace_config(&original_toml, path, is_embedded, gctx, &mut warnings)?;
         if let WorkspaceConfig::Root(ws_root_config) = &workspace_config {
             let package_root = path.parent().unwrap();
             gctx.ws_roots
@@ -158,7 +160,7 @@ fn read_toml_string(path: &Path, is_embedded: bool, gctx: &GlobalContext) -> Car
         if !gctx.cli_unstable().script {
             anyhow::bail!("parsing `{}` requires `-Zscript`", path.display());
         }
-        contents = embedded::expand_manifest(&contents, path, gctx)?;
+        contents = embedded::expand_manifest(&contents)?;
     }
     Ok(contents)
 }
@@ -211,9 +213,14 @@ fn stringify(dst: &mut String, path: &serde_ignored::Path<'_>) {
 fn to_workspace_config(
     original_toml: &manifest::TomlManifest,
     manifest_file: &Path,
+    is_embedded: bool,
     gctx: &GlobalContext,
     warnings: &mut Vec<String>,
 ) -> CargoResult<WorkspaceConfig> {
+    if is_embedded {
+        let ws_root_config = to_workspace_root_config(&TomlWorkspace::default(), manifest_file);
+        return Ok(WorkspaceConfig::Root(ws_root_config));
+    }
     let workspace_config = match (
         original_toml.workspace.as_ref(),
         original_toml.package().and_then(|p| p.workspace.as_ref()),
@@ -361,8 +368,37 @@ fn normalize_toml(
             original_package.autolib.or(auto_embedded),
             warnings,
         )?;
+        let original_toml_bin = if is_embedded {
+            let manifest_file_stem = manifest_file
+                .file_stem()
+                .expect("file name enforced previously");
+            let name = embedded::sanitize_name(manifest_file_stem.to_string_lossy().as_ref());
+            let manifest_file_name = manifest_file
+                .file_name()
+                .expect("file name enforced previously");
+            let path = PathBuf::from(manifest_file_name);
+            Cow::Owned(Some(vec![manifest::TomlBinTarget {
+                name: Some(name),
+                crate_type: None,
+                crate_type2: None,
+                path: Some(manifest::PathValue(path)),
+                filename: None,
+                test: None,
+                doctest: None,
+                bench: None,
+                doc: None,
+                doc_scrape_examples: None,
+                proc_macro: None,
+                proc_macro2: None,
+                harness: None,
+                required_features: None,
+                edition: None,
+            }]))
+        } else {
+            Cow::Borrowed(&original_toml.bin)
+        };
         normalized_toml.bin = Some(targets::normalize_bins(
-            original_toml.bin.as_ref(),
+            original_toml_bin.as_ref().as_ref(),
             package_root,
             package_name,
             edition,
@@ -1306,18 +1342,8 @@ pub fn to_real_manifest(
         }
         default_edition
     };
-    // Add these lines if start a new unstable edition.
-    // ```
-    // if edition == Edition::Edition20xx {
-    //     features.require(Feature::edition20xx())?;
-    // }
-    // ```
     if !edition.is_stable() {
-        // Guard in case someone forgets to add .require()
-        return Err(util::errors::internal(format!(
-            "edition {} should be gated",
-            edition
-        )));
+        features.require(Feature::unstable_editions())?;
     }
 
     if original_toml.project.is_some() {
@@ -1338,10 +1364,7 @@ pub fn to_real_manifest(
         let invalid_fields = [
             ("`workspace`", original_toml.workspace.is_some()),
             ("`lib`", original_toml.lib.is_some()),
-            (
-                "`bin`",
-                original_toml.bin.as_ref().map(|b| b.len()).unwrap_or(0) != 1,
-            ),
+            ("`bin`", original_toml.bin.is_some()),
             ("`example`", original_toml.example.is_some()),
             ("`test`", original_toml.test.is_some()),
             ("`bench`", original_toml.bench.is_some()),
@@ -1459,7 +1482,7 @@ pub fn to_real_manifest(
                 warnings.push(format!(
                     "file `{}` found to be present in multiple \
                  build targets:\n{}",
-                    target_path.display().to_string(),
+                    target_path.display(),
                     conflicts
                         .iter()
                         .map(|t| format!("  * `{}` target `{}`", t.kind().description(), t.name(),))
@@ -1674,7 +1697,7 @@ pub fn to_real_manifest(
                 .iter()
                 .map(|(k, v)| {
                     (
-                        InternedString::new(k),
+                        k.to_string().into(),
                         v.iter().map(InternedString::from).collect(),
                     )
                 })
@@ -1963,7 +1986,7 @@ fn validate_dependencies(
             None => "dependencies",
         };
         let table_in_toml = if let Some(platform) = platform {
-            format!("target.{}.{kind_name}", platform.to_string())
+            format!("target.{platform}.{kind_name}")
         } else {
             kind_name.to_string()
         };
@@ -2458,25 +2481,15 @@ pub fn validate_profile(
     features: &Features,
     warnings: &mut Vec<String>,
 ) -> CargoResult<()> {
-    validate_profile_layer(root, name, cli_unstable, features)?;
+    validate_profile_layer(root, cli_unstable, features)?;
     if let Some(ref profile) = root.build_override {
         validate_profile_override(profile, "build-override")?;
-        validate_profile_layer(
-            profile,
-            &format!("{name}.build-override"),
-            cli_unstable,
-            features,
-        )?;
+        validate_profile_layer(profile, cli_unstable, features)?;
     }
     if let Some(ref packages) = root.package {
-        for (override_name, profile) in packages {
+        for profile in packages.values() {
             validate_profile_override(profile, "package")?;
-            validate_profile_layer(
-                profile,
-                &format!("{name}.package.{override_name}"),
-                cli_unstable,
-                features,
-            )?;
+            validate_profile_layer(profile, cli_unstable, features)?;
         }
     }
 
@@ -2541,25 +2554,16 @@ pub fn validate_profile(
 /// This is a shallow check, which is reused for the profile itself and any overrides.
 fn validate_profile_layer(
     profile: &manifest::TomlProfile,
-    name: &str,
     cli_unstable: &CliUnstable,
     features: &Features,
 ) -> CargoResult<()> {
-    if let Some(codegen_backend) = &profile.codegen_backend {
+    if profile.codegen_backend.is_some() {
         match (
             features.require(Feature::codegen_backend()),
             cli_unstable.codegen_backend,
         ) {
             (Err(e), false) => return Err(e),
             _ => {}
-        }
-
-        if codegen_backend.contains(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
-            bail!(
-                "`profile.{}.codegen-backend` setting of `{}` is not a valid backend name.",
-                name,
-                codegen_backend,
-            );
         }
     }
     if profile.rustflags.is_some() {
@@ -3086,7 +3090,7 @@ fn prepare_toml_for_publish(
 
         features.values_mut().for_each(|feature_deps| {
             feature_deps.retain(|feature_dep| {
-                let feature_value = FeatureValue::new(InternedString::new(feature_dep));
+                let feature_value = FeatureValue::new(feature_dep.into());
                 match feature_value {
                     FeatureValue::Dep { dep_name } | FeatureValue::DepFeature { dep_name, .. } => {
                         let k = &manifest::PackageName::new(dep_name.to_string()).unwrap();

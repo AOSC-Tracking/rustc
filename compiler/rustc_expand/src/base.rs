@@ -11,8 +11,8 @@ use rustc_ast::token::MetaVarKind;
 use rustc_ast::tokenstream::TokenStream;
 use rustc_ast::visit::{AssocCtxt, Visitor};
 use rustc_ast::{self as ast, AttrVec, Attribute, HasAttrs, Item, NodeId, PatKind};
-use rustc_attr_parsing::{AttributeKind, Deprecation, Stability, find_attr};
-use rustc_data_structures::fx::FxIndexMap;
+use rustc_attr_data_structures::{AttributeKind, Deprecation, Stability, find_attr};
+use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
 use rustc_data_structures::sync;
 use rustc_errors::{DiagCtxtHandle, ErrorGuaranteed, PResult};
 use rustc_feature::Features;
@@ -35,6 +35,7 @@ use crate::base::ast::MetaItemInner;
 use crate::errors;
 use crate::expand::{self, AstFragment, Invocation};
 use crate::module::DirOwnership;
+use crate::stats::MacroStat;
 
 // When adding new variants, make sure to
 // adjust the `visit_*` / `flat_map_*` calls in `InvocationCollector`
@@ -167,7 +168,7 @@ impl Annotatable {
 
     pub fn expect_stmt(self) -> ast::Stmt {
         match self {
-            Annotatable::Stmt(stmt) => stmt.into_inner(),
+            Annotatable::Stmt(stmt) => *stmt,
             _ => panic!("expected statement"),
         }
     }
@@ -727,6 +728,7 @@ pub enum SyntaxExtensionKind {
     /// A trivial attribute "macro" that does nothing,
     /// only keeps the attribute and marks it as inert,
     /// thus making it ineligible for further expansion.
+    /// E.g. `#[default]`, `#[rustfmt::skip]`.
     NonMacroAttr,
 
     /// A token-based derive macro.
@@ -824,10 +826,10 @@ impl SyntaxExtension {
             return Err(item.span);
         }
 
-        match item.name_or_empty() {
-            sym::no => Ok(CollapseMacroDebuginfo::No),
-            sym::external => Ok(CollapseMacroDebuginfo::External),
-            sym::yes => Ok(CollapseMacroDebuginfo::Yes),
+        match item.name() {
+            Some(sym::no) => Ok(CollapseMacroDebuginfo::No),
+            Some(sym::external) => Ok(CollapseMacroDebuginfo::External),
+            Some(sym::yes) => Ok(CollapseMacroDebuginfo::Yes),
             _ => Err(item.path.span),
         }
     }
@@ -1102,7 +1104,7 @@ pub trait ResolverExpand {
     /// HIR proc macros items back to their harness items.
     fn declare_proc_macro(&mut self, id: NodeId);
 
-    fn append_stripped_cfg_item(&mut self, parent_node: NodeId, name: Ident, cfg: ast::MetaItem);
+    fn append_stripped_cfg_item(&mut self, parent_node: NodeId, ident: Ident, cfg: ast::MetaItem);
 
     /// Tools registered with `#![register_tool]` and used by tool attributes and lints.
     fn registered_tools(&self) -> &RegisteredTools;
@@ -1189,6 +1191,8 @@ pub struct ExtCtxt<'a> {
     /// in the AST, but insert it here so that we know
     /// not to expand it again.
     pub(super) expanded_inert_attrs: MarkedAttrs,
+    /// `-Zmacro-stats` data.
+    pub macro_stats: FxHashMap<(Symbol, MacroKind), MacroStat>,
 }
 
 impl<'a> ExtCtxt<'a> {
@@ -1218,6 +1222,7 @@ impl<'a> ExtCtxt<'a> {
             expansions: FxIndexMap::default(),
             expanded_inert_attrs: MarkedAttrs::new(),
             buffered_early_lint: vec![],
+            macro_stats: Default::default(),
         }
     }
 
@@ -1424,12 +1429,11 @@ pub fn parse_macro_name_and_helper_attrs(
 /// See #73345 and #83125 for more details.
 /// FIXME(#73933): Remove this eventually.
 fn pretty_printing_compatibility_hack(item: &Item, psess: &ParseSess) {
-    let name = item.ident.name;
-    if name == sym::ProceduralMasqueradeDummyType
-        && let ast::ItemKind::Enum(enum_def, _) = &item.kind
+    if let ast::ItemKind::Enum(ident, _, enum_def) = &item.kind
+        && ident.name == sym::ProceduralMasqueradeDummyType
         && let [variant] = &*enum_def.variants
         && variant.ident.name == sym::Input
-        && let FileName::Real(real) = psess.source_map().span_to_filename(item.ident.span)
+        && let FileName::Real(real) = psess.source_map().span_to_filename(ident.span)
         && let Some(c) = real
             .local_path()
             .unwrap_or(Path::new(""))

@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 
-use rinja::Template;
+use askama::Template;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_hir::def_id::{DefIdMap, LOCAL_CRATE};
 use rustc_middle::ty::TyCtxt;
@@ -14,7 +14,7 @@ use rustc_span::edition::Edition;
 use rustc_span::{FileName, Symbol, sym};
 use tracing::info;
 
-use super::print_item::{full_path, item_path, print_item};
+use super::print_item::{full_path, print_item, print_item_path};
 use super::sidebar::{ModuleLike, Sidebar, print_sidebar, sidebar_module_like};
 use super::{AllTypes, LinkFromSrc, StylePath, collect_spans_and_sources, scrape_examples_help};
 use crate::clean::types::ExternalLocation;
@@ -28,11 +28,10 @@ use crate::formats::cache::Cache;
 use crate::formats::item_type::ItemType;
 use crate::html::escape::Escape;
 use crate::html::format::join_with_double_colon;
-use crate::html::layout::{self, BufDisplay};
 use crate::html::markdown::{self, ErrorCodes, IdMap, plain_text_summary};
 use crate::html::render::write_shared::write_shared;
 use crate::html::url_parts_builder::UrlPartsBuilder;
-use crate::html::{sources, static_files};
+use crate::html::{layout, sources, static_files};
 use crate::scrape_examples::AllCallLocations;
 use crate::{DOC_RUST_LANG_ORG_VERSION, try_err};
 
@@ -250,9 +249,7 @@ impl<'tcx> Context<'tcx> {
             layout::render(
                 &self.shared.layout,
                 &page,
-                BufDisplay(|buf: &mut String| {
-                    print_sidebar(self, it, buf);
-                }),
+                fmt::from_fn(|f| print_sidebar(self, it, f)),
                 content,
                 &self.shared.style_files,
             )
@@ -269,7 +266,7 @@ impl<'tcx> Context<'tcx> {
                         for name in &names[..names.len() - 1] {
                             write!(f, "{name}/")?;
                         }
-                        write!(f, "{}", item_path(ty, names.last().unwrap().as_str()))
+                        write!(f, "{}", print_item_path(ty, names.last().unwrap().as_str()))
                     });
                     match self.shared.redirections {
                         Some(ref redirections) => {
@@ -281,7 +278,7 @@ impl<'tcx> Context<'tcx> {
                             let _ = write!(
                                 current_path,
                                 "{}",
-                                item_path(ty, names.last().unwrap().as_str())
+                                print_item_path(ty, names.last().unwrap().as_str())
                             );
                             redirections.borrow_mut().insert(current_path, path.to_string());
                         }
@@ -521,23 +518,23 @@ impl<'tcx> FormatRenderer<'tcx> for Context<'tcx> {
         // Crawl the crate attributes looking for attributes which control how we're
         // going to emit HTML
         for attr in krate.module.attrs.lists(sym::doc) {
-            match (attr.name_or_empty(), attr.value_str()) {
-                (sym::html_favicon_url, Some(s)) => {
+            match (attr.name(), attr.value_str()) {
+                (Some(sym::html_favicon_url), Some(s)) => {
                     layout.favicon = s.to_string();
                 }
-                (sym::html_logo_url, Some(s)) => {
+                (Some(sym::html_logo_url), Some(s)) => {
                     layout.logo = s.to_string();
                 }
-                (sym::html_playground_url, Some(s)) => {
+                (Some(sym::html_playground_url), Some(s)) => {
                     playground = Some(markdown::Playground {
                         crate_name: Some(krate.name(tcx)),
                         url: s.to_string(),
                     });
                 }
-                (sym::issue_tracker_base_url, Some(s)) => {
+                (Some(sym::issue_tracker_base_url), Some(s)) => {
                     issue_tracker_base_url = Some(s.to_string());
                 }
-                (sym::html_no_source, None) if attr.is_word() => {
+                (Some(sym::html_no_source), None) if attr.is_word() => {
                     include_sources = false;
                 }
                 _ => {}
@@ -612,7 +609,7 @@ impl<'tcx> FormatRenderer<'tcx> for Context<'tcx> {
         self.info = info;
     }
 
-    fn after_krate(&mut self) -> Result<(), Error> {
+    fn after_krate(mut self) -> Result<(), Error> {
         let crate_name = self.tcx().crate_name(LOCAL_CRATE);
         let final_file = self.dst.join(crate_name.as_str()).join("all.html");
         let settings_file = self.dst.join("settings.html");
@@ -650,15 +647,7 @@ impl<'tcx> FormatRenderer<'tcx> for Context<'tcx> {
 
         bar.render_into(&mut sidebar).unwrap();
 
-        let v = layout::render(
-            &shared.layout,
-            &page,
-            sidebar,
-            BufDisplay(|buf: &mut String| {
-                all.print(buf);
-            }),
-            &shared.style_files,
-        );
+        let v = layout::render(&shared.layout, &page, sidebar, all.print(), &shared.style_files);
         shared.fs.write(final_file, v)?;
 
         // if to avoid writing help, settings files to doc root unless we're on the final invocation
@@ -841,7 +830,7 @@ impl<'tcx> FormatRenderer<'tcx> for Context<'tcx> {
         Ok(())
     }
 
-    fn item(&mut self, item: clean::Item) -> Result<(), Error> {
+    fn item(&mut self, item: &clean::Item) -> Result<(), Error> {
         // Stripped modules survive the rustdoc passes (i.e., `strip-private`)
         // if they contain impls for public types. These modules can also
         // contain items such as publicly re-exported structures.
@@ -858,7 +847,7 @@ impl<'tcx> FormatRenderer<'tcx> for Context<'tcx> {
         if !buf.is_empty() {
             let name = item.name.as_ref().unwrap();
             let item_type = item.type_();
-            let file_name = item_path(item_type, name.as_str()).to_string();
+            let file_name = print_item_path(item_type, name.as_str()).to_string();
             self.shared.ensure_dir(&self.dst)?;
             let joint_dst = self.dst.join(&file_name);
             self.shared.fs.write(joint_dst, buf)?;
@@ -885,9 +874,5 @@ impl<'tcx> FormatRenderer<'tcx> for Context<'tcx> {
         }
 
         Ok(())
-    }
-
-    fn cache(&self) -> &Cache {
-        &self.shared.cache
     }
 }

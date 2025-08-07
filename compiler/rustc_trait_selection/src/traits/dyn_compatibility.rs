@@ -7,15 +7,15 @@
 use std::ops::ControlFlow;
 
 use rustc_errors::FatalError;
-use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
+use rustc_hir::{self as hir, LangItem};
 use rustc_middle::query::Providers;
 use rustc_middle::ty::{
     self, EarlyBinder, GenericArgs, Ty, TyCtxt, TypeFoldable, TypeFolder, TypeSuperFoldable,
     TypeSuperVisitable, TypeVisitable, TypeVisitableExt, TypeVisitor, TypingMode, Upcast,
+    elaborate,
 };
-use rustc_span::Span;
-use rustc_type_ir::elaborate;
+use rustc_span::{DUMMY_SP, Span};
 use smallvec::SmallVec;
 use tracing::{debug, instrument};
 
@@ -31,7 +31,7 @@ use crate::traits::{
 ///
 /// Currently that is `Self` in supertraits. This is needed
 /// because `dyn_compatibility_violations` can't be used during
-/// type collection.
+/// type collection, as type collection is needed for `dyn_compatiblity_violations` itself.
 #[instrument(level = "debug", skip(tcx), ret)]
 pub fn hir_ty_lowering_dyn_compatibility_violations(
     tcx: TyCtxt<'_>,
@@ -188,7 +188,7 @@ fn bounds_reference_self(tcx: TyCtxt<'_>, trait_def_id: DefId) -> SmallVec<[Span
     tcx.associated_items(trait_def_id)
         .in_definition_order()
         // We're only looking at associated type bounds
-        .filter(|item| item.kind == ty::AssocKind::Type)
+        .filter(|item| item.is_type())
         // Ignore GATs with `Self: Sized`
         .filter(|item| !tcx.generics_require_sized_self(item.def_id))
         .flat_map(|item| tcx.explicit_item_bounds(item.def_id).iter_identity_copied())
@@ -298,31 +298,33 @@ pub fn dyn_compatibility_violations_for_assoc_item(
     match item.kind {
         // Associated consts are never dyn-compatible, as they can't have `where` bounds yet at all,
         // and associated const bounds in trait objects aren't a thing yet either.
-        ty::AssocKind::Const => {
-            vec![DynCompatibilityViolation::AssocConst(item.name, item.ident(tcx).span)]
+        ty::AssocKind::Const { name } => {
+            vec![DynCompatibilityViolation::AssocConst(name, item.ident(tcx).span)]
         }
-        ty::AssocKind::Fn => virtual_call_violations_for_method(tcx, trait_def_id, item)
-            .into_iter()
-            .map(|v| {
-                let node = tcx.hir_get_if_local(item.def_id);
-                // Get an accurate span depending on the violation.
-                let span = match (&v, node) {
-                    (MethodViolationCode::ReferencesSelfInput(Some(span)), _) => *span,
-                    (MethodViolationCode::UndispatchableReceiver(Some(span)), _) => *span,
-                    (MethodViolationCode::ReferencesImplTraitInTrait(span), _) => *span,
-                    (MethodViolationCode::ReferencesSelfOutput, Some(node)) => {
-                        node.fn_decl().map_or(item.ident(tcx).span, |decl| decl.output.span())
-                    }
-                    _ => item.ident(tcx).span,
-                };
+        ty::AssocKind::Fn { name, .. } => {
+            virtual_call_violations_for_method(tcx, trait_def_id, item)
+                .into_iter()
+                .map(|v| {
+                    let node = tcx.hir_get_if_local(item.def_id);
+                    // Get an accurate span depending on the violation.
+                    let span = match (&v, node) {
+                        (MethodViolationCode::ReferencesSelfInput(Some(span)), _) => *span,
+                        (MethodViolationCode::UndispatchableReceiver(Some(span)), _) => *span,
+                        (MethodViolationCode::ReferencesImplTraitInTrait(span), _) => *span,
+                        (MethodViolationCode::ReferencesSelfOutput, Some(node)) => {
+                            node.fn_decl().map_or(item.ident(tcx).span, |decl| decl.output.span())
+                        }
+                        _ => item.ident(tcx).span,
+                    };
 
-                DynCompatibilityViolation::Method(item.name, v, span)
-            })
-            .collect(),
+                    DynCompatibilityViolation::Method(name, v, span)
+                })
+                .collect()
+        }
         // Associated types can only be dyn-compatible if they have `Self: Sized` bounds.
-        ty::AssocKind::Type => {
+        ty::AssocKind::Type { .. } => {
             if !tcx.generics_of(item.def_id).is_own_empty() && !item.is_impl_trait_in_trait() {
-                vec![DynCompatibilityViolation::GAT(item.name, item.ident(tcx).span)]
+                vec![DynCompatibilityViolation::GAT(item.name(), item.ident(tcx).span)]
             } else {
                 // We will permit associated types if they are explicitly mentioned in the trait object.
                 // We can't check this here, as here we only check if it is guaranteed to not be possible.
@@ -344,7 +346,7 @@ fn virtual_call_violations_for_method<'tcx>(
     let sig = tcx.fn_sig(method.def_id).instantiate_identity();
 
     // The method's first parameter must be named `self`
-    if !method.fn_has_self_parameter {
+    if !method.is_method() {
         let sugg = if let Some(hir::Node::TraitItem(hir::TraitItem {
             generics,
             kind: hir::TraitItemKind::Fn(sig, _),
@@ -412,8 +414,8 @@ fn virtual_call_violations_for_method<'tcx>(
 
     let receiver_ty = tcx.liberate_late_bound_regions(method.def_id, sig.input(0));
 
-    // Until `unsized_locals` is fully implemented, `self: Self` can't be dispatched on.
-    // However, this is already considered dyn compatible. We allow it as a special case here.
+    // `self: Self` can't be dispatched on.
+    // However, this is considered dyn compatible. We allow it as a special case here.
     // FIXME(mikeyhew) get rid of this `if` statement once `receiver_is_dispatchable` allows
     // `Receiver: Unsize<Receiver[Self => dyn Trait]>`.
     if receiver_ty != tcx.types.self_param {
@@ -541,11 +543,11 @@ fn receiver_for_self_ty<'tcx>(
 /// In practice, we cannot use `dyn Trait` explicitly in the obligation because it would result in
 /// a new check that `Trait` is dyn-compatible, creating a cycle.
 /// Instead, we emulate a placeholder by introducing a new type parameter `U` such that
-/// `Self: Unsize<U>` and `U: Trait + ?Sized`, and use `U` in place of `dyn Trait`.
+/// `Self: Unsize<U>` and `U: Trait + MetaSized`, and use `U` in place of `dyn Trait`.
 ///
 /// Written as a chalk-style query:
 /// ```ignore (not-rust)
-/// forall (U: Trait + ?Sized) {
+/// forall (U: Trait + MetaSized) {
 ///     if (Self: Unsize<U>) {
 ///         Receiver: DispatchFromDyn<Receiver[Self => U]>
 ///     }
@@ -565,9 +567,10 @@ fn receiver_is_dispatchable<'tcx>(
 ) -> bool {
     debug!("receiver_is_dispatchable: method = {:?}, receiver_ty = {:?}", method, receiver_ty);
 
-    let traits = (tcx.lang_items().unsize_trait(), tcx.lang_items().dispatch_from_dyn_trait());
-    let (Some(unsize_did), Some(dispatch_from_dyn_did)) = traits else {
-        debug!("receiver_is_dispatchable: Missing Unsize or DispatchFromDyn traits");
+    let (Some(unsize_did), Some(dispatch_from_dyn_did)) =
+        (tcx.lang_items().unsize_trait(), tcx.lang_items().dispatch_from_dyn_trait())
+    else {
+        debug!("receiver_is_dispatchable: Missing `Unsize` or `DispatchFromDyn` traits");
         return false;
     };
 
@@ -581,7 +584,7 @@ fn receiver_is_dispatchable<'tcx>(
         receiver_for_self_ty(tcx, receiver_ty, unsized_self_ty, method.def_id);
 
     // create a modified param env, with `Self: Unsize<U>` and `U: Trait` (and all of
-    // its supertraits) added to caller bounds. `U: ?Sized` is already implied here.
+    // its supertraits) added to caller bounds. `U: MetaSized` is already implied here.
     let param_env = {
         // N.B. We generally want to emulate the construction of the `unnormalized_param_env`
         // in the param-env query here. The fact that we don't just start with the clauses
@@ -609,6 +612,12 @@ fn receiver_is_dispatchable<'tcx>(
         });
         let trait_predicate = ty::TraitRef::new_from_args(tcx, trait_def_id, args);
         predicates.push(trait_predicate.upcast(tcx));
+
+        let meta_sized_predicate = {
+            let meta_sized_did = tcx.require_lang_item(LangItem::MetaSized, DUMMY_SP);
+            ty::TraitRef::new(tcx, meta_sized_did, [unsized_self_ty]).upcast(tcx)
+        };
+        predicates.push(meta_sized_predicate);
 
         normalize_param_env_or_error(
             tcx,
@@ -797,7 +806,7 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for EraseEscapingBoundRegions<'tcx> {
     }
 
     fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
-        if let ty::ReBound(debruijn, _) = *r
+        if let ty::ReBound(debruijn, _) = r.kind()
             && debruijn < self.binder
         {
             r

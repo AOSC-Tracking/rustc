@@ -2,14 +2,14 @@ r[items.use]
 # Use declarations
 
 r[items.use.syntax]
-> **<sup>Syntax:</sup>**\
-> _UseDeclaration_ :\
-> &nbsp;&nbsp; `use` _UseTree_ `;`
->
-> _UseTree_ :\
-> &nbsp;&nbsp; &nbsp;&nbsp; ([_SimplePath_]<sup>?</sup> `::`)<sup>?</sup> `*`\
-> &nbsp;&nbsp; | ([_SimplePath_]<sup>?</sup> `::`)<sup>?</sup> `{` (_UseTree_ ( `,`  _UseTree_ )<sup>\*</sup> `,`<sup>?</sup>)<sup>?</sup> `}`\
-> &nbsp;&nbsp; | [_SimplePath_]&nbsp;( `as` ( [IDENTIFIER] | `_` ) )<sup>?</sup>
+```grammar,items
+UseDeclaration -> `use` UseTree `;`
+
+UseTree ->
+      (SimplePath? `::`)? `*`
+    | (SimplePath? `::`)? `{` (UseTree ( `,`  UseTree )* `,`?)? `}`
+    | SimplePath ( `as` ( IDENTIFIER | `_` ) )?
+```
 
 r[items.use.intro]
 A _use declaration_ creates one or more local name bindings synonymous with
@@ -108,7 +108,7 @@ r[items.use.path]
 ## `use` Paths
 
 r[items.use.path.intro]
-The [paths] that are allowed in a `use` item follow the [_SimplePath_] grammar and are similar to the paths that may be used in an expression.
+The [paths] that are allowed in a `use` item follow the [SimplePath] grammar and are similar to the paths that may be used in an expression.
 They may create bindings for:
 
 * Nameable [items]
@@ -138,9 +138,9 @@ fn example() {
 }
 ```
 
-r[items.use.path.edition2015]
-> **Edition differences**: In the 2015 edition, `use` paths are relative to the crate root.
-> For example:
+r[items.use.path.edition2018]
+> [!EDITION-2018]
+> In the 2015 edition, `use` paths are relative to the crate root. For example:
 >
 > ```rust,edition2015
 > mod foo {
@@ -196,8 +196,9 @@ r[items.use.multiple-syntax.empty]
 An empty brace does not import anything, though the leading path is validated that it is accessible.
 <!-- This is slightly wrong, see: https://github.com/rust-lang/rust/issues/61826 -->
 
-r[items.use.multiple-syntax.edition2015]
-> **Edition differences**: In the 2015 edition, paths are relative to the crate root, so an import such as `use {foo, bar};` will import the names `foo` and `bar` from the crate root, whereas starting in 2018, those names are relative to the current scope.
+r[items.use.multiple-syntax.edition2018]
+> [!EDITION-2018]
+> In the 2015 edition, paths are relative to the crate root, so an import such as `use {foo, bar};` will import the names `foo` and `bar` from the crate root, whereas starting in 2018, those names are relative to the current scope.
 
 r[items.use.self]
 ## `self` imports
@@ -307,9 +308,9 @@ r[items.use.glob.last-segment-only]
 r[items.use.glob.self-import]
 `*` cannot be used to import a module's contents into itself (such as `use self::*;`).
 
-r[items.use.glob.edition2015]
-> **Edition differences**: In the 2015 edition, paths are relative to the crate root, so an import such as `use *;` is valid, and it means to import everything from the crate root.
-> This cannot be used in the crate root itself.
+r[items.use.glob.edition2018]
+> [!EDITION-2018]
+> In the 2015 edition, paths are relative to the crate root, so an import such as `use *;` is valid, and it means to import everything from the crate root. This cannot be used in the crate root itself.
 
 r[items.use.as-underscore]
 ## Underscore Imports
@@ -441,7 +442,6 @@ fn main() {
 }
 ```
 
-[_SimplePath_]: ../paths.md#simple-paths
 [`extern crate`]: extern-crates.md
 [`macro_rules`]: ../macros-by-example.md
 [`self`]: ../paths.md#self
@@ -452,7 +452,6 @@ fn main() {
 [Enum variants]: enumerations.md
 [extern prelude]: ../names/preludes.md#extern-prelude
 [generic parameters]: generics.md
-[IDENTIFIER]: ../identifiers.md
 [items]: ../items.md
 [local variables]: ../variables.md
 [namespace]: ../names/namespaces.md

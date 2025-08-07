@@ -2,20 +2,22 @@ r[items.extern]
 # External blocks
 
 r[items.extern.syntax]
-> **<sup>Syntax</sup>**\
-> _ExternBlock_ :\
-> &nbsp;&nbsp; `unsafe`<sup>?</sup>[^unsafe-2024] `extern` [_Abi_]<sup>?</sup> `{`\
-> &nbsp;&nbsp; &nbsp;&nbsp; [_InnerAttribute_]<sup>\*</sup>\
-> &nbsp;&nbsp; &nbsp;&nbsp; _ExternalItem_<sup>\*</sup>\
-> &nbsp;&nbsp; `}`
->
-> _ExternalItem_ :\
-> &nbsp;&nbsp; [_OuterAttribute_]<sup>\*</sup> (\
-> &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; [_MacroInvocationSemi_]\
-> &nbsp;&nbsp; &nbsp;&nbsp; | ( [_Visibility_]<sup>?</sup> ( [_StaticItem_] | [_Function_] ) )\
-> &nbsp;&nbsp; )
->
-> [^unsafe-2024]: Starting with the 2024 Edition, the `unsafe` keyword is required semantically.
+```grammar,items
+ExternBlock ->
+    `unsafe`?[^unsafe-2024] `extern` Abi? `{`
+        InnerAttribute*
+        ExternalItem*
+    `}`
+
+ExternalItem ->
+    OuterAttribute* (
+        MacroInvocationSemi
+      | Visibility? StaticItem
+      | Visibility? Function
+    )
+```
+
+[^unsafe-2024]: Starting with the 2024 Edition, the `unsafe` keyword is required semantically.
 
 r[items.extern.intro]
 External blocks provide _declarations_ of items that are not _defined_ in the
@@ -36,7 +38,8 @@ r[items.extern.unsafe-required]
 The `unsafe` keyword is semantically required to appear before the `extern` keyword on external blocks.
 
 r[items.extern.edition2024]
-> **Edition differences**: Prior to the 2024 edition, the `unsafe` keyword is optional. The `safe` and `unsafe` item qualifiers are only allowed if the external block itself is marked as `unsafe`.
+> [!EDITION-2024]
+> Prior to the 2024 edition, the `unsafe` keyword is optional. The `safe` and `unsafe` item qualifiers are only allowed if the external block itself is marked as `unsafe`.
 
 r[items.extern.fn]
 ## Functions
@@ -100,9 +103,8 @@ standard C ABI on the specific platform. Other ABIs may be specified using an
 `abi` string, as shown here:
 
 ```rust
-# #[cfg(any(windows, target_arch = "x86"))]
 // Interface to the Windows API
-unsafe extern "stdcall" { }
+unsafe extern "system" { }
 ```
 
 r[items.extern.abi.standard]
@@ -147,7 +149,7 @@ r[items.extern.abi.fastcall]
   `__fastcall` and GCC and clang's `__attribute__((fastcall))`
 
 r[items.extern.abi.thiscall]
-* `unsafe extern "thiscall"` -- The default for C++ member functions on MSVC -- corresponds to MSVC's
+* `unsafe extern "thiscall"` -- The default for C++ member functions on x86\_32 MSVC -- corresponds to MSVC's
   `__thiscall` and GCC and clang's `__attribute__((thiscall))`
 
 r[items.extern.abi.efiapi]
@@ -173,11 +175,17 @@ identifier.
 
 ```rust
 unsafe extern "C" {
-    safe fn foo(...);
+    unsafe fn foo(...);
     unsafe fn bar(x: i32, ...);
     unsafe fn with_name(format: *const u8, args: ...);
+    // SAFETY: This function guarantees it will not access
+    // variadic arguments.
+    safe fn ignores_variadic_arguments(x: i32, ...);
 }
 ```
+
+> [!WARNING]
+> The `safe` qualifier should not be used on a function in an `extern` block unless that function guarantees that it will not access the variadic arguments at all. Passing an unexpected number of arguments or arguments of unexpected type to a variadic function may lead to [undefined behavior][undefined].
 
 r[items.extern.attributes]
 ## Attributes on extern blocks
@@ -193,7 +201,7 @@ The *`link` attribute* specifies the name of a native library that the
 compiler should link with for the items within an `extern` block.
 
 r[items.extern.attributes.link.syntax]
-It uses the [_MetaListNameValueStr_] syntax to specify its inputs. The `name` key is the
+It uses the [MetaListNameValueStr] syntax to specify its inputs. The `name` key is the
 name of the native library to link. The `kind` key is an optional value which
 specifies the kind of library with the following possible values:
 
@@ -391,7 +399,7 @@ The *`link_name` attribute* may be specified on declarations inside an `extern`
 block to indicate the symbol to import for the given function or static.
 
 r[items.extern.attributes.link_name.syntax]
-It uses the [_MetaNameValueStr_] syntax to specify the name of the symbol.
+It uses the [MetaNameValueStr] syntax to specify the name of the symbol.
 
 ```rust
 unsafe extern {
@@ -440,19 +448,9 @@ r[items.extern.attributes.fn-parameters]
 Attributes on extern function parameters follow the same rules and
 restrictions as [regular function parameters].
 
-[IDENTIFIER]: ../identifiers.md
 [PE Format]: https://learn.microsoft.com/windows/win32/debug/pe-format#import-name-type
 [UEFI]: https://uefi.org/specifications
 [WebAssembly module]: https://webassembly.github.io/spec/core/syntax/modules.html
-[_Abi_]: functions.md
-[_Function_]: functions.md
-[_InnerAttribute_]: ../attributes.md
-[_MacroInvocationSemi_]: ../macros.md#macro-invocation
-[_MetaListNameValueStr_]: ../attributes.md#meta-item-attribute-syntax
-[_MetaNameValueStr_]: ../attributes.md#meta-item-attribute-syntax
-[_OuterAttribute_]: ../attributes.md
-[_StaticItem_]: static-items.md
-[_Visibility_]: ../visibility-and-privacy.md
 [`bundle` documentation for rustc]: ../../rustc/command-line-arguments.html#linking-modifiers-bundle
 [`dylib` versus `raw-dylib`]: #dylib-versus-raw-dylib
 [`verbatim` documentation for rustc]: ../../rustc/command-line-arguments.html#linking-modifiers-verbatim

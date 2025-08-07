@@ -96,7 +96,7 @@ use rustc_middle::query::Providers;
 use rustc_middle::span_bug;
 use rustc_middle::ty::{self, RootVariableMinCaptureList, Ty, TyCtxt};
 use rustc_session::lint;
-use rustc_span::{BytePos, Span, Symbol, kw, sym};
+use rustc_span::{BytePos, Span, Symbol, sym};
 use tracing::{debug, instrument};
 
 use self::LiveNodeKind::*;
@@ -122,7 +122,6 @@ enum LiveNodeKind {
     VarDefNode(Span, HirId),
     ClosureNode,
     ExitNode,
-    ErrNode,
 }
 
 fn live_node_kind_to_string(lnk: LiveNodeKind, tcx: TyCtxt<'_>) -> String {
@@ -133,7 +132,6 @@ fn live_node_kind_to_string(lnk: LiveNodeKind, tcx: TyCtxt<'_>) -> String {
         VarDefNode(s, _) => format!("Var def node [{}]", sm.span_to_diagnostic_string(s)),
         ClosureNode => "Closure node".to_owned(),
         ExitNode => "Exit node".to_owned(),
-        ErrNode => "Error node".to_owned(),
     }
 }
 
@@ -492,6 +490,9 @@ struct Liveness<'a, 'tcx> {
 impl<'a, 'tcx> Liveness<'a, 'tcx> {
     fn new(ir: &'a mut IrMaps<'tcx>, body_owner: LocalDefId) -> Liveness<'a, 'tcx> {
         let typeck_results = ir.tcx.typeck(body_owner);
+        // Liveness linting runs after building the THIR. We make several assumptions based on
+        // typeck succeeding, e.g. that breaks and continues are well-formed.
+        assert!(typeck_results.tainted_by_errors.is_none());
         // FIXME(#132279): we're in a body here.
         let typing_env = ty::TypingEnv::non_body_analysis(ir.tcx, body_owner);
         let closure_min_captures = typeck_results.closure_min_captures.get(&body_owner);
@@ -578,8 +579,7 @@ impl<'a, 'tcx> Liveness<'a, 'tcx> {
     where
         F: FnMut(Variable) -> bool,
     {
-        for var_idx in 0..self.ir.var_kinds.len() {
-            let var = Variable::from(var_idx);
+        for var in self.ir.var_kinds.indices() {
             if test(var) {
                 write!(wr, " {var:?}")?;
             }
@@ -609,8 +609,8 @@ impl<'a, 'tcx> Liveness<'a, 'tcx> {
         debug!(
             "^^ liveness computation results for body {} (entry={:?})",
             {
-                for ln_idx in 0..self.ir.lnks.len() {
-                    debug!("{:?}", self.ln_str(LiveNode::from(ln_idx)));
+                for ln_idx in self.ir.lnks.indices() {
+                    debug!("{:?}", self.ln_str(ln_idx));
                 }
                 hir_id
             },
@@ -977,8 +977,9 @@ impl<'a, 'tcx> Liveness<'a, 'tcx> {
                 // Now that we know the label we're going to,
                 // look it up in the continue loop nodes table
                 self.cont_ln.get(&sc).cloned().unwrap_or_else(|| {
-                    self.ir.tcx.dcx().span_delayed_bug(expr.span, "continue to unknown label");
-                    self.ir.add_live_node(ErrNode)
+                    // Liveness linting happens after building the THIR. Bad labels should already
+                    // have been caught.
+                    span_bug!(expr.span, "continue to unknown label");
                 })
             }
 
@@ -1021,7 +1022,10 @@ impl<'a, 'tcx> Liveness<'a, 'tcx> {
             }
 
             hir::ExprKind::Call(ref f, args) => {
-                let succ = self.check_is_ty_uninhabited(expr, succ);
+                let is_ctor = |f: &Expr<'_>| matches!(f.kind, hir::ExprKind::Path(hir::QPath::Resolved(_, path)) if matches!(path.res, rustc_hir::def::Res::Def(rustc_hir::def::DefKind::Ctor(_, _), _)));
+                let succ =
+                    if !is_ctor(f) { self.check_is_ty_uninhabited(expr, succ) } else { succ };
+
                 let succ = self.propagate_through_exprs(args, succ);
                 self.propagate_through_expr(f, succ)
             }
@@ -1481,9 +1485,6 @@ impl<'tcx> Liveness<'_, 'tcx> {
 
     fn should_warn(&self, var: Variable) -> Option<String> {
         let name = self.ir.variable_name(var);
-        if name == kw::Empty {
-            return None;
-        }
         let name = name.as_str();
         if name.as_bytes()[0] == b'_' {
             return None;
@@ -1655,7 +1656,7 @@ impl<'tcx> Liveness<'_, 'tcx> {
                 // `&'name Ty` -> `&'name mut Ty` or `&Ty` -> `&mut Ty`
                 Some(mut_ty.ty.span.shrink_to_lo())
             };
-            let pre = if lt.ident.span.lo() == lt.ident.span.hi() { "" } else { " " };
+            let pre = if lt.ident.span.is_empty() { "" } else { " " };
             Some(errors::UnusedAssignSuggestion {
                 ty_span,
                 pre,

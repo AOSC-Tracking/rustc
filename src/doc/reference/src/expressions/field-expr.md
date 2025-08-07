@@ -2,9 +2,9 @@ r[expr.field]
 # Field access expressions
 
 r[expr.field.syntax]
-> **<sup>Syntax</sup>**\
-> _FieldExpression_ :\
-> &nbsp;&nbsp; [_Expression_] `.` [IDENTIFIER]
+```grammar,expressions
+FieldExpression -> Expression `.` IDENTIFIER
+```
 
 r[expr.field.intro]
 A *field expression* is a [place expression] that evaluates to the location of a field of a [struct] or [union].
@@ -54,7 +54,7 @@ r[expr.field.borrow]
 
 The fields of a struct or a reference to a struct are treated as separate entities when borrowing.
 If the struct does not implement [`Drop`] and is stored in a local variable, this also applies to moving out of each of its fields.
-This also does not apply if automatic dereferencing is done though user-defined types other than [`Box`].
+This also does not apply if automatic dereferencing is done through user-defined types other than [`Box`].
 
 ```rust
 struct A { f1: String, f2: String, f3: String }
@@ -70,11 +70,10 @@ let c: &String = &x.f2;         // Can borrow again
 let d: String = x.f3;           // Move out of x.f3
 ```
 
-[_Expression_]: ../expressions.md
 [`Box`]: ../special-types-and-traits.md#boxt
 [`Deref`]: ../special-types-and-traits.md#deref-and-derefmut
 [`drop`]: ../special-types-and-traits.md#drop
-[IDENTIFIER]: ../identifiers.md
+[identifier]: ../identifiers.md
 [call expression]: call-expr.md
 [method call expression]: method-call-expr.md
 [mutable]: ../expressions.md#mutability

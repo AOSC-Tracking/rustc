@@ -36,11 +36,11 @@ use rustc_serialize::opaque::FileEncoder;
 use rustc_session::config::{SymbolManglingVersion, TargetModifier};
 use rustc_session::cstore::{CrateDepKind, ForeignModule, LinkagePreference, NativeLib};
 use rustc_span::edition::Edition;
-use rustc_span::hygiene::{ExpnIndex, MacroKind, SyntaxContextData};
+use rustc_span::hygiene::{ExpnIndex, MacroKind, SyntaxContextKey};
 use rustc_span::{self, ExpnData, ExpnHash, ExpnId, Ident, Span, Symbol};
 use rustc_target::spec::{PanicStrategy, TargetTuple};
 use table::TableBuilder;
-use {rustc_ast as ast, rustc_attr_parsing as attr, rustc_hir as hir};
+use {rustc_ast as ast, rustc_attr_data_structures as attrs, rustc_hir as hir};
 
 use crate::creader::CrateMetadataRef;
 
@@ -56,7 +56,7 @@ pub(crate) fn rustc_version(cfg_version: &'static str) -> String {
 /// Metadata encoding version.
 /// N.B., increment this if you change the format of metadata such that
 /// the rustc version can't be found to compare with `rustc_version()`.
-const METADATA_VERSION: u8 = 9;
+const METADATA_VERSION: u8 = 10;
 
 /// Metadata header which includes `METADATA_VERSION`.
 ///
@@ -193,14 +193,14 @@ enum LazyState {
     Previous(NonZero<usize>),
 }
 
-type SyntaxContextTable = LazyTable<u32, Option<LazyValue<SyntaxContextData>>>;
+type SyntaxContextTable = LazyTable<u32, Option<LazyValue<SyntaxContextKey>>>;
 type ExpnDataTable = LazyTable<ExpnIndex, Option<LazyValue<ExpnData>>>;
 type ExpnHashTable = LazyTable<ExpnIndex, Option<LazyValue<ExpnHash>>>;
 
 #[derive(MetadataEncodable, MetadataDecodable)]
 pub(crate) struct ProcMacroData {
     proc_macro_decls_static: DefIndex,
-    stability: Option<attr::Stability>,
+    stability: Option<attrs::Stability>,
     macros: LazyArray<DefIndex>,
 }
 
@@ -221,6 +221,12 @@ pub(crate) struct CrateHeader {
     /// This is separate from [`ProcMacroData`] to avoid having to update [`METADATA_VERSION`] every
     /// time ProcMacroData changes.
     pub(crate) is_proc_macro_crate: bool,
+    /// Whether this crate metadata section is just a stub.
+    /// Stubs do not contain the full metadata (it will be typically stored
+    /// in a separate rmeta file).
+    ///
+    /// This is used inside rlibs and dylibs when using `-Zembed-metadata=no`.
+    pub(crate) is_stub: bool,
 }
 
 /// Serialized `.rmeta` data for a crate.
@@ -274,6 +280,8 @@ pub(crate) struct CrateRoot {
     tables: LazyTables,
     debugger_visualizers: LazyArray<DebuggerVisualizerFile>,
 
+    exportable_items: LazyArray<DefIndex>,
+    stable_order_of_exportable_impls: LazyArray<(DefIndex, usize)>,
     exported_symbols: LazyArray<(ExportedSymbol<'static>, SymbolExportInfo)>,
 
     syntax_contexts: SyntaxContextTable,
@@ -414,10 +422,10 @@ define_tables! {
     safety: Table<DefIndex, hir::Safety>,
     def_span: Table<DefIndex, LazyValue<Span>>,
     def_ident_span: Table<DefIndex, LazyValue<Span>>,
-    lookup_stability: Table<DefIndex, LazyValue<attr::Stability>>,
-    lookup_const_stability: Table<DefIndex, LazyValue<attr::ConstStability>>,
-    lookup_default_body_stability: Table<DefIndex, LazyValue<attr::DefaultBodyStability>>,
-    lookup_deprecation_entry: Table<DefIndex, LazyValue<attr::Deprecation>>,
+    lookup_stability: Table<DefIndex, LazyValue<attrs::Stability>>,
+    lookup_const_stability: Table<DefIndex, LazyValue<attrs::ConstStability>>,
+    lookup_default_body_stability: Table<DefIndex, LazyValue<attrs::DefaultBodyStability>>,
+    lookup_deprecation_entry: Table<DefIndex, LazyValue<attrs::Deprecation>>,
     explicit_predicates_of: Table<DefIndex, LazyValue<ty::GenericPredicates<'static>>>,
     generics_of: Table<DefIndex, LazyValue<ty::Generics>>,
     type_of: Table<DefIndex, LazyValue<ty::EarlyBinder<'static, Ty<'static>>>>,
@@ -443,9 +451,11 @@ define_tables! {
     rendered_const: Table<DefIndex, LazyValue<String>>,
     rendered_precise_capturing_args: Table<DefIndex, LazyArray<PreciseCapturingArgKind<Symbol, Symbol>>>,
     asyncness: Table<DefIndex, ty::Asyncness>,
-    fn_arg_names: Table<DefIndex, LazyArray<Option<Ident>>>,
+    fn_arg_idents: Table<DefIndex, LazyArray<Option<Ident>>>,
     coroutine_kind: Table<DefIndex, hir::CoroutineKind>,
     coroutine_for_closure: Table<DefIndex, RawDefId>,
+    adt_destructor: Table<DefIndex, LazyValue<ty::Destructor>>,
+    adt_async_destructor: Table<DefIndex, LazyValue<ty::AsyncDestructor>>,
     coroutine_by_move_body_def_id: Table<DefIndex, RawDefId>,
     eval_static_initializer: Table<DefIndex, LazyValue<mir::interpret::ConstAllocation<'static>>>,
     trait_def: Table<DefIndex, LazyValue<ty::TraitDef>>,
@@ -470,6 +480,7 @@ define_tables! {
     doc_link_traits_in_scope: Table<DefIndex, LazyArray<DefId>>,
     assumed_wf_types_for_rpitit: Table<DefIndex, LazyArray<(Ty<'static>, Span)>>,
     opaque_ty_origin: Table<DefIndex, LazyValue<hir::OpaqueTyOrigin<DefId>>>,
+    anon_const_kind: Table<DefIndex, LazyValue<ty::AnonConstKind>>,
 }
 
 #[derive(TyEncodable, TyDecodable)]
@@ -576,7 +587,7 @@ impl SpanTag {
 // Tags for encoding Symbol's
 const SYMBOL_STR: u8 = 0;
 const SYMBOL_OFFSET: u8 = 1;
-const SYMBOL_PREINTERNED: u8 = 2;
+const SYMBOL_PREDEFINED: u8 = 2;
 
 pub fn provide(providers: &mut Providers) {
     encoder::provide(providers);

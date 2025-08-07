@@ -9,13 +9,11 @@
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![doc(rust_logo)]
 #![feature(assert_matches)]
-#![feature(exact_size_is_empty)]
 #![feature(extern_types)]
 #![feature(file_buffered)]
 #![feature(if_let_guard)]
 #![feature(impl_trait_in_assoc_type)]
 #![feature(iter_intersperse)]
-#![feature(let_chains)]
 #![feature(rustdoc_internals)]
 #![feature(slice_as_array)]
 #![feature(try_blocks)]
@@ -29,7 +27,7 @@ use back::owned_target_machine::OwnedTargetMachine;
 use back::write::{create_informational_target_machine, create_target_machine};
 use context::SimpleCx;
 use errors::{AutoDiffWithoutLTO, ParseTargetMachineConfig};
-use llvm_util::target_features_cfg;
+use llvm_util::target_config;
 use rustc_ast::expand::allocator::AllocatorKind;
 use rustc_ast::expand::autodiff_attrs::AutoDiffItem;
 use rustc_codegen_ssa::back::lto::{LtoModuleCodegen, SerializedModule, ThinModule};
@@ -37,7 +35,7 @@ use rustc_codegen_ssa::back::write::{
     CodegenContext, FatLtoInput, ModuleConfig, TargetMachineFactoryConfig, TargetMachineFactoryFn,
 };
 use rustc_codegen_ssa::traits::*;
-use rustc_codegen_ssa::{CodegenResults, CompiledModule, ModuleCodegen};
+use rustc_codegen_ssa::{CodegenResults, CompiledModule, ModuleCodegen, TargetConfig};
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_errors::{DiagCtxtHandle, FatalError};
 use rustc_metadata::EncodedMetadata;
@@ -190,13 +188,13 @@ impl WriteBackendMethods for LlvmCodegenBackend {
     ) -> Result<(Vec<LtoModuleCodegen<Self>>, Vec<WorkProduct>), FatalError> {
         back::lto::run_thin(cgcx, modules, cached_modules)
     }
-    unsafe fn optimize(
+    fn optimize(
         cgcx: &CodegenContext<Self>,
         dcx: DiagCtxtHandle<'_>,
         module: &mut ModuleCodegen<Self::Module>,
         config: &ModuleConfig,
     ) -> Result<(), FatalError> {
-        unsafe { back::write::optimize(cgcx, dcx, module, config) }
+        back::write::optimize(cgcx, dcx, module, config)
     }
     fn optimize_fat(
         cgcx: &CodegenContext<Self>,
@@ -206,19 +204,19 @@ impl WriteBackendMethods for LlvmCodegenBackend {
         let dcx = dcx.handle();
         back::lto::run_pass_manager(cgcx, dcx, module, false)
     }
-    unsafe fn optimize_thin(
+    fn optimize_thin(
         cgcx: &CodegenContext<Self>,
         thin: ThinModule<Self>,
     ) -> Result<ModuleCodegen<Self::Module>, FatalError> {
-        unsafe { back::lto::optimize_thin_module(thin, cgcx) }
+        back::lto::optimize_thin_module(thin, cgcx)
     }
-    unsafe fn codegen(
+    fn codegen(
         cgcx: &CodegenContext<Self>,
         dcx: DiagCtxtHandle<'_>,
         module: ModuleCodegen<Self::Module>,
         config: &ModuleConfig,
     ) -> Result<CompiledModule, FatalError> {
-        unsafe { back::write::codegen(cgcx, dcx, module, config) }
+        back::write::codegen(cgcx, dcx, module, config)
     }
     fn prepare_thin(
         module: ModuleCodegen<Self::Module>,
@@ -338,22 +336,15 @@ impl CodegenBackend for LlvmCodegenBackend {
         llvm_util::print_version();
     }
 
-    fn target_features_cfg(&self, sess: &Session) -> (Vec<Symbol>, Vec<Symbol>) {
-        target_features_cfg(sess)
+    fn target_config(&self, sess: &Session) -> TargetConfig {
+        target_config(sess)
     }
 
-    fn codegen_crate<'tcx>(
-        &self,
-        tcx: TyCtxt<'tcx>,
-        metadata: EncodedMetadata,
-        need_metadata_module: bool,
-    ) -> Box<dyn Any> {
+    fn codegen_crate<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Box<dyn Any> {
         Box::new(rustc_codegen_ssa::base::codegen_crate(
             LlvmCodegenBackend(()),
             tcx,
             crate::llvm_util::target_cpu(tcx.sess).to_string(),
-            metadata,
-            need_metadata_module,
         ))
     }
 
@@ -378,14 +369,20 @@ impl CodegenBackend for LlvmCodegenBackend {
         (codegen_results, work_products)
     }
 
-    fn link(&self, sess: &Session, codegen_results: CodegenResults, outputs: &OutputFilenames) {
+    fn link(
+        &self,
+        sess: &Session,
+        codegen_results: CodegenResults,
+        metadata: EncodedMetadata,
+        outputs: &OutputFilenames,
+    ) {
         use rustc_codegen_ssa::back::link::link_binary;
 
         use crate::back::archive::LlvmArchiveBuilderBuilder;
 
         // Run the linker on any artifacts that resulted from the LLVM run.
         // This should produce either a finished executable or library.
-        link_binary(sess, &LlvmArchiveBuilderBuilder, codegen_results, outputs);
+        link_binary(sess, &LlvmArchiveBuilderBuilder, codegen_results, metadata, outputs);
     }
 }
 

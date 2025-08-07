@@ -151,11 +151,8 @@ pub type AllowFeatures = BTreeSet<String>;
 /// - Update the [`FromStr`] impl.
 /// - Update [`CLI_VALUES`] to include the new edition.
 /// - Set [`LATEST_UNSTABLE`] to Some with the new edition.
-/// - Add an unstable feature to the [`features!`] macro invocation below for the new edition.
-/// - Gate on that new feature in [`toml`].
 /// - Update the shell completion files.
 /// - Update any failing tests (hopefully there are very few).
-/// - Update unstable.md to add a new section for this new edition (see [this example]).
 ///
 /// ## Stabilization instructions
 ///
@@ -163,10 +160,8 @@ pub type AllowFeatures = BTreeSet<String>;
 /// - Set [`LATEST_STABLE`] to the new version.
 /// - Update [`is_stable`] to `true`.
 /// - Set [`first_version`] to the version it will be released.
-/// - Set the editionNNNN feature to stable in the [`features!`] macro invocation below.
 /// - Update any tests that are affected.
 /// - Update the man page for the `--edition` flag.
-/// - Update unstable.md to move the edition section to the bottom.
 /// - Update the documentation:
 ///   - Update any features impacted by the edition.
 ///   - Update manifest.md#the-edition-field.
@@ -178,7 +173,6 @@ pub type AllowFeatures = BTreeSet<String>;
 /// [`CLI_VALUES`]: Edition::CLI_VALUES
 /// [`LATEST_UNSTABLE`]: Edition::LATEST_UNSTABLE
 /// [`LATEST_STABLE`]: Edition::LATEST_STABLE
-/// [this example]: https://github.com/rust-lang/cargo/blob/3ebb5f15a940810f250b68821149387af583a79e/src/doc/src/reference/unstable.md?plain=1#L1238-L1264
 /// [`first_version`]: Edition::first_version
 /// [`is_stable`]: Edition::is_stable
 /// [`toml`]: crate::util::toml
@@ -196,12 +190,17 @@ pub enum Edition {
     Edition2021,
     /// The 2024 edition
     Edition2024,
+    /// The future edition (permanently unstable)
+    EditionFuture,
 }
 
 impl Edition {
     /// The latest edition that is unstable.
     ///
     /// This is `None` if there is no next unstable edition.
+    ///
+    /// Note that this does *not* include "future" since this is primarily
+    /// used for tests that need to step between stable and unstable.
     pub const LATEST_UNSTABLE: Option<Edition> = None;
     /// The latest stable edition.
     pub const LATEST_STABLE: Edition = Edition::Edition2024;
@@ -210,11 +209,15 @@ impl Edition {
         Self::Edition2018,
         Self::Edition2021,
         Self::Edition2024,
+        Self::EditionFuture,
     ];
     /// Possible values allowed for the `--edition` CLI flag.
     ///
     /// This requires a static value due to the way clap works, otherwise I
     /// would have built this dynamically.
+    ///
+    /// This does not include `future` since we don't need to create new
+    /// packages with it.
     pub const CLI_VALUES: [&'static str; 4] = ["2015", "2018", "2021", "2024"];
 
     /// Returns the first version that a particular edition was released on
@@ -226,6 +229,7 @@ impl Edition {
             Edition2018 => Some(semver::Version::new(1, 31, 0)),
             Edition2021 => Some(semver::Version::new(1, 56, 0)),
             Edition2024 => Some(semver::Version::new(1, 85, 0)),
+            EditionFuture => None,
         }
     }
 
@@ -237,6 +241,7 @@ impl Edition {
             Edition2018 => true,
             Edition2021 => true,
             Edition2024 => true,
+            EditionFuture => false,
         }
     }
 
@@ -250,6 +255,7 @@ impl Edition {
             Edition2018 => Some(Edition2015),
             Edition2021 => Some(Edition2018),
             Edition2024 => Some(Edition2021),
+            EditionFuture => panic!("future does not have a previous edition"),
         }
     }
 
@@ -257,11 +263,13 @@ impl Edition {
     /// if this is already the last one.
     pub fn saturating_next(&self) -> Edition {
         use Edition::*;
+        // Nothing should treat "future" as being next.
         match self {
             Edition2015 => Edition2018,
             Edition2018 => Edition2021,
             Edition2021 => Edition2024,
             Edition2024 => Edition2024,
+            EditionFuture => EditionFuture,
         }
     }
 
@@ -274,18 +282,23 @@ impl Edition {
         }
     }
 
-    /// Whether or not this edition supports the `rust_*_compatibility` lint.
-    ///
-    /// Ideally this would not be necessary, but editions may not have any
-    /// lints, and thus `rustc` doesn't recognize it. Perhaps `rustc` could
-    /// create an empty group instead?
-    pub(crate) fn supports_compat_lint(&self) -> bool {
+    /// Adds the appropriate argument to generate warnings for this edition.
+    pub(crate) fn force_warn_arg(&self, cmd: &mut ProcessBuilder) {
         use Edition::*;
         match self {
-            Edition2015 => false,
-            Edition2018 => true,
-            Edition2021 => true,
-            Edition2024 => true,
+            Edition2015 => {}
+            EditionFuture => {
+                cmd.arg("--force-warn=edition_future_compatibility");
+            }
+            e => {
+                // Note that cargo always passes this even if the
+                // compatibility lint group does not exist. When a new edition
+                // is introduced, but there are no migration lints, rustc does
+                // not create the lint group. That's OK because rustc will
+                // just generate a warning about an unknown lint which will be
+                // suppressed due to cap-lints.
+                cmd.arg(format!("--force-warn=rust-{e}-compatibility"));
+            }
         }
     }
 
@@ -299,6 +312,7 @@ impl Edition {
             Edition2018 => true,
             Edition2021 => false,
             Edition2024 => false,
+            EditionFuture => false,
         }
     }
 
@@ -320,6 +334,7 @@ impl fmt::Display for Edition {
             Edition::Edition2018 => f.write_str("2018"),
             Edition::Edition2021 => f.write_str("2021"),
             Edition::Edition2024 => f.write_str("2024"),
+            Edition::EditionFuture => f.write_str("future"),
         }
     }
 }
@@ -332,6 +347,7 @@ impl FromStr for Edition {
             "2018" => Ok(Edition::Edition2018),
             "2021" => Ok(Edition::Edition2021),
             "2024" => Ok(Edition::Edition2024),
+            "future" => Ok(Edition::EditionFuture),
             s if s.parse().map_or(false, |y: u16| y > 2024 && y < 2050) => bail!(
                 "this version of Cargo is older than the `{}` edition, \
                  and only supports `2015`, `2018`, `2021`, and `2024` editions.",
@@ -342,6 +358,45 @@ impl FromStr for Edition {
                  but `{}` is unknown",
                 s
             ),
+        }
+    }
+}
+
+/// The value for `-Zfix-edition`.
+#[derive(Debug, Deserialize)]
+pub enum FixEdition {
+    /// `-Zfix-edition=start=$INITIAL`
+    ///
+    /// This mode for `cargo fix` will just run `cargo check` if the current
+    /// edition is equal to this edition. If it is a different edition, then
+    /// it just exits with success. This is used for crater integration which
+    /// needs to set a baseline for the "before" toolchain.
+    Start(Edition),
+    /// `-Zfix-edition=end=$INITIAL,$NEXT`
+    ///
+    /// This mode for `cargo fix` will migrate to the `next` edition if the
+    /// current edition is `initial`. After migration, it will update
+    /// `Cargo.toml` and verify that that it works on the new edition. If the
+    /// current edition is not `initial`, then it immediately exits with
+    /// success since we just want to ignore those packages.
+    End { initial: Edition, next: Edition },
+}
+
+impl FromStr for FixEdition {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, <Self as FromStr>::Err> {
+        if let Some(start) = s.strip_prefix("start=") {
+            Ok(FixEdition::Start(start.parse()?))
+        } else if let Some(end) = s.strip_prefix("end=") {
+            let (initial, next) = end
+                .split_once(',')
+                .ok_or_else(|| anyhow::format_err!("expected `initial,next`"))?;
+            Ok(FixEdition::End {
+                initial: initial.parse()?,
+                next: next.parse()?,
+            })
+        } else {
+            bail!("invalid `-Zfix-edition, expected start= or end=, got `{s}`");
         }
     }
 }
@@ -519,6 +574,9 @@ features! {
 
     /// Allow paths that resolve relatively to a base specified in the config.
     (unstable, path_bases, "", "reference/unstable.html#path-bases"),
+
+    /// Allows use of editions that are not yet stable.
+    (unstable, unstable_editions, "", "reference/unstable.html#unstable-editions"),
 }
 
 /// Status and metadata for a single unstable feature.
@@ -769,10 +827,10 @@ unstable_cli_options!(
     codegen_backend: bool = ("Enable the `codegen-backend` option in profiles in .cargo/config.toml file"),
     config_include: bool = ("Enable the `include` key in config files"),
     direct_minimal_versions: bool = ("Resolve minimal dependency versions instead of maximum (direct dependencies only)"),
-    doctest_xcompile: bool = ("Compile and run doctests for non-host target using runner config"),
     dual_proc_macros: bool = ("Build proc-macros for both the host and the target"),
     feature_unification: bool = ("Enable new feature unification modes in workspaces"),
     features: Option<Vec<String>>,
+    fix_edition: Option<FixEdition> = ("Permanently unstable edition migration helper"),
     gc: bool = ("Track cache usage and \"garbage collect\" unused files"),
     #[serde(deserialize_with = "deserialize_git_features")]
     git: Option<GitFeatures> = ("Enable support for shallow git fetch operations"),
@@ -783,13 +841,16 @@ unstable_cli_options!(
     msrv_policy: bool = ("Enable rust-version aware policy within cargo"),
     mtime_on_use: bool = ("Configure Cargo to update the mtime of used files"),
     next_lockfile_bump: bool,
+    no_embed_metadata: bool = ("Avoid embedding metadata in library artifacts"),
     no_index_update: bool = ("Do not update the registry index even if the cache is outdated"),
     package_workspace: bool = ("Handle intra-workspace dependencies when packaging"),
     panic_abort_tests: bool = ("Enable support to run tests with -Cpanic=abort"),
+    profile_hint_mostly_unused: bool = ("Enable the `hint-mostly-unused` setting in profiles to mark a crate as mostly unused."),
     profile_rustflags: bool = ("Enable the `rustflags` option in profiles in .cargo/config.toml file"),
     public_dependency: bool = ("Respect a dependency's `public` field in Cargo.toml to control public/private dependencies"),
     publish_timeout: bool = ("Enable the `publish.timeout` key in .cargo/config.toml file"),
     root_dir: Option<PathBuf> = ("Set the root directory relative to which paths are printed (defaults to workspace root)"),
+    rustdoc_depinfo: bool = ("Use dep-info files in rustdoc rebuild detection"),
     rustdoc_map: bool = ("Allow passing external documentation mappings to rustdoc"),
     rustdoc_scrape_examples: bool = ("Allows Rustdoc to scrape code examples from reverse-dependencies"),
     sbom: bool = ("Enable the `sbom` option in build config in .cargo/config.toml file"),
@@ -877,6 +938,8 @@ const STABILIZED_LINTS: &str = "The `[lints]` table is now always available.";
 const STABILIZED_CHECK_CFG: &str =
     "Compile-time checking of conditional (a.k.a. `-Zcheck-cfg`) is now always enabled.";
 
+const STABILIZED_DOCTEST_XCOMPILE: &str = "Doctest cross-compiling is now always enabled.";
+
 fn deserialize_comma_separated_list<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<String>>, D::Error>
@@ -913,7 +976,7 @@ impl GitFeatures {
     }
 
     fn expecting() -> String {
-        let fields = vec!["`shallow-index`", "`shallow-deps`"];
+        let fields = ["`shallow-index`", "`shallow-deps`"];
         format!(
             "unstable 'git' only takes {} as valid inputs",
             fields.join(" and ")
@@ -1025,7 +1088,7 @@ impl GitoxideFeatures {
     }
 
     fn expecting() -> String {
-        let fields = vec!["`fetch`", "`checkout`", "`internal-use-git2`"];
+        let fields = ["`fetch`", "`checkout`", "`internal-use-git2`"];
         format!(
             "unstable 'gitoxide' only takes {} as valid inputs, for shallow fetches see `-Zgit=shallow-index,shallow-deps`",
             fields.join(" and ")
@@ -1273,15 +1336,19 @@ impl CliUnstable {
             "codegen-backend" => self.codegen_backend = parse_empty(k, v)?,
             "config-include" => self.config_include = parse_empty(k, v)?,
             "direct-minimal-versions" => self.direct_minimal_versions = parse_empty(k, v)?,
-            "doctest-xcompile" => self.doctest_xcompile = parse_empty(k, v)?,
+            "doctest-xcompile" => stabilized_warn(k, "1.89", STABILIZED_DOCTEST_XCOMPILE),
             "dual-proc-macros" => self.dual_proc_macros = parse_empty(k, v)?,
             "feature-unification" => self.feature_unification = parse_empty(k, v)?,
+            "fix-edition" => {
+                let fe = v
+                    .ok_or_else(|| anyhow::anyhow!("-Zfix-edition expected a value"))?
+                    .parse()?;
+                self.fix_edition = Some(fe);
+            }
             "gc" => self.gc = parse_empty(k, v)?,
             "git" => {
-                self.git = v.map_or_else(
-                    || Ok(Some(GitFeatures::all())),
-                    |v| parse_git(v.split(',')),
-                )?
+                self.git =
+                    v.map_or_else(|| Ok(Some(GitFeatures::all())), |v| parse_git(v.split(',')))?
             }
             "gitoxide" => {
                 self.gitoxide = v.map_or_else(
@@ -1295,14 +1362,17 @@ impl CliUnstable {
             "msrv-policy" => self.msrv_policy = parse_empty(k, v)?,
             // can also be set in .cargo/config or with and ENV
             "mtime-on-use" => self.mtime_on_use = parse_empty(k, v)?,
+            "no-embed-metadata" => self.no_embed_metadata = parse_empty(k, v)?,
             "no-index-update" => self.no_index_update = parse_empty(k, v)?,
-            "package-workspace" => self.package_workspace= parse_empty(k, v)?,
+            "package-workspace" => self.package_workspace = parse_empty(k, v)?,
             "panic-abort-tests" => self.panic_abort_tests = parse_empty(k, v)?,
             "public-dependency" => self.public_dependency = parse_empty(k, v)?,
+            "profile-hint-mostly-unused" => self.profile_hint_mostly_unused = parse_empty(k, v)?,
             "profile-rustflags" => self.profile_rustflags = parse_empty(k, v)?,
             "trim-paths" => self.trim_paths = parse_empty(k, v)?,
             "publish-timeout" => self.publish_timeout = parse_empty(k, v)?,
             "root-dir" => self.root_dir = v.map(|v| v.into()),
+            "rustdoc-depinfo" => self.rustdoc_depinfo = parse_empty(k, v)?,
             "rustdoc-map" => self.rustdoc_map = parse_empty(k, v)?,
             "rustdoc-scrape-examples" => self.rustdoc_scrape_examples = parse_empty(k, v)?,
             "sbom" => self.sbom = parse_empty(k, v)?,
@@ -1313,10 +1383,13 @@ impl CliUnstable {
             "target-applies-to-host" => self.target_applies_to_host = parse_empty(k, v)?,
             "unstable-options" => self.unstable_options = parse_empty(k, v)?,
             "warnings" => self.warnings = parse_empty(k, v)?,
-            _ => bail!("\
+            _ => bail!(
+                "\
             unknown `-Z` flag specified: {k}\n\n\
-            For available unstable features, see https://doc.rust-lang.org/nightly/cargo/reference/unstable.html\n\
-            If you intended to use an unstable rustc feature, try setting `RUSTFLAGS=\"-Z{k}\"`"),
+            For available unstable features, see \
+            https://doc.rust-lang.org/nightly/cargo/reference/unstable.html\n\
+            If you intended to use an unstable rustc feature, try setting `RUSTFLAGS=\"-Z{k}\"`"
+            ),
         }
 
         Ok(())

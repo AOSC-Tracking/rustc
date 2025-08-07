@@ -10,11 +10,9 @@ set -ex
 #export RUST_TEST_NOCAPTURE=1
 #export RUST_TEST_THREADS=1
 
-export RUSTFLAGS="${RUSTFLAGS} -D warnings -Z merge-functions=disabled "
+export RUSTFLAGS="${RUSTFLAGS} -D warnings -Z merge-functions=disabled -Z verify-llvm-ir"
 export HOST_RUSTFLAGS="${RUSTFLAGS}"
 export PROFILE="${PROFILE:="--profile=release"}"
-
-export STDARCH_DISABLE_DEDUP_GUARD=1
 
 case ${TARGET} in
     # On Windows the linker performs identical COMDAT folding (ICF) by default
@@ -29,11 +27,8 @@ case ${TARGET} in
     # instruction assertion checks to pass below the 20 instruction limit. If
     # this is the default, dynamic, then too many instructions are generated
     # when we assert the instruction for a function and it causes tests to fail.
-    #
-    # It's not clear why `-Z plt=yes` is required here. Probably a bug in LLVM.
-    # If you can remove it and CI passes, please feel free to do so!
     i686-* | i586-*)
-        export RUSTFLAGS="${RUSTFLAGS} -C relocation-model=static -Z plt=yes"
+        export RUSTFLAGS="${RUSTFLAGS} -C relocation-model=static"
         ;;
     # Some x86_64 targets enable by default more features beyond SSE2,
     # which cause some instruction assertion checks to fail.
@@ -44,26 +39,22 @@ case ${TARGET} in
     mips-* | mipsel-*)
 	export RUSTFLAGS="${RUSTFLAGS} -C llvm-args=-fast-isel=false"
 	;;
-    # Some of our test dependencies use the deprecated `gcc` crates which is
-    # missing a fix from https://github.com/alexcrichton/cc-rs/pull/627. Apply
-    # the workaround manually here.
     armv7-*eabihf | thumbv7-*eabihf)
         export RUSTFLAGS="${RUSTFLAGS} -Ctarget-feature=+neon"
-        export TARGET_CFLAGS="-mfpu=vfpv3-d16"
         ;;
     # Some of our test dependencies use the deprecated `gcc` crates which
     # doesn't detect RISC-V compilers automatically, so do it manually here.
-    riscv64*)
+    riscv*)
         export RUSTFLAGS="${RUSTFLAGS} -Ctarget-feature=+zk,+zks,+zbb,+zbc"
-        export TARGET_CC="riscv64-linux-gnu-gcc"
         ;;
 esac
 
 echo "RUSTFLAGS=${RUSTFLAGS}"
-echo "FEATURES=${FEATURES}"
 echo "OBJDUMP=${OBJDUMP}"
 echo "STDARCH_DISABLE_ASSERT_INSTR=${STDARCH_DISABLE_ASSERT_INSTR}"
 echo "STDARCH_TEST_EVERYTHING=${STDARCH_TEST_EVERYTHING}"
+echo "STDARCH_TEST_SKIP_FEATURE=${STDARCH_TEST_SKIP_FEATURE}"
+echo "STDARCH_TEST_SKIP_FUNCTION=${STDARCH_TEST_SKIP_FUNCTION}"
 echo "PROFILE=${PROFILE}"
 
 cargo_test() {
@@ -83,10 +74,6 @@ cargo_test() {
             cmd="$cmd --nocapture"
             ;;
     esac
-
-    if [ "$SKIP_TESTS" != "" ]; then
-        cmd="$cmd --skip "$SKIP_TESTS
-    fi
     $cmd
 }
 
@@ -111,8 +98,18 @@ fi
 
 # Test targets compiled with extra features.
 case ${TARGET} in
-    x86*)
+    x86_64-unknown-linux-gnu)
         export STDARCH_DISABLE_ASSERT_INSTR=1
+
+        export RUSTFLAGS="${RUSTFLAGS} -C target-feature=+avx"
+        cargo_test "${PROFILE}"
+
+        export RUSTFLAGS="${RUSTFLAGS} -C target-feature=+avx512f"
+        cargo_test "${PROFILE}"
+        ;;
+    x86_64* | i686*)
+        export STDARCH_DISABLE_ASSERT_INSTR=1
+
         export RUSTFLAGS="${RUSTFLAGS} -C target-feature=+avx"
         cargo_test "${PROFILE}"
         ;;
@@ -130,13 +127,15 @@ case ${TARGET} in
         cargo_test "${PROFILE}"
 	      ;;
     powerpc64*)
-        # We don't build the ppc 32-bit targets with these - these targets
-        # are mostly unsupported for now.
-        OLD_RUSTFLAGS="${RUSTFLAGS}"
-        export RUSTFLAGS="${OLD_RUSTFLAGS} -C target-feature=+altivec"
+        export RUSTFLAGS="${RUSTFLAGS} -C target-feature=+altivec"
         cargo_test "${PROFILE}"
 
-        export RUSTFLAGS="${OLD_RUSTFLAGS} -C target-feature=+vsx"
+        export RUSTFLAGS="${RUSTFLAGS} -C target-feature=+vsx"
+        cargo_test "${PROFILE}"
+        ;;
+    powerpc*)
+        # qemu has a bug in PPC32 which leads to a crash when compiled with `vsx`
+        export RUSTFLAGS="${RUSTFLAGS} -C target-feature=+altivec"
         cargo_test "${PROFILE}"
         ;;
 
@@ -187,7 +186,7 @@ case "${TARGET}" in
             --cppcompiler "${TEST_CXX_COMPILER}" \
             --skip "${TEST_SKIP_INTRINSICS}" \
             --target "${TARGET}" \
-            --linker "${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER}" \
+            --linker "${CARGO_TARGET_AARCH64_BE_UNKNOWN_LINUX_GNU_LINKER}" \
             --cxx-toolchain-dir "${AARCH64_BE_TOOLCHAIN}"
         ;;
      *)

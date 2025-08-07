@@ -229,3 +229,41 @@ fn issue_10447() -> usize {
 
     2
 }
+
+fn issue14634() {
+    macro_rules! id {
+        ($i:ident) => {
+            $i
+        };
+    }
+    match dbg!(3) {
+        _ => println!("here"),
+    }
+    //~^^^ match_single_binding
+    match dbg!(3) {
+        id!(a) => println!("found {a}"),
+    }
+    //~^^^ match_single_binding
+    let id!(_a) = match dbg!(3) {
+        id!(b) => dbg!(b + 1),
+    };
+    //~^^^ match_single_binding
+}
+
+mod issue14991 {
+    struct AnnoConstWOBlock {
+        inner: [(); match 1 {
+            //~^ match_single_binding
+            _n => 42,
+        }],
+    }
+
+    struct AnnoConstWBlock {
+        inner: [(); {
+            match 1 {
+                //~^ match_single_binding
+                _n => 42,
+            }
+        }],
+    }
+}

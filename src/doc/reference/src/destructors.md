@@ -1,3 +1,4 @@
+r[destructors]
 # Destructors
 
 r[destructors.intro]
@@ -67,8 +68,9 @@ leaves a drop scope all variables associated to that scope are dropped in
 reverse order of declaration (for variables) or creation (for temporaries).
 
 r[destructors.scope.desugaring]
-Drop scopes are determined after replacing [`for`], [`if let`], and
-[`while let`] expressions with the equivalent expressions using [`match`].
+Drop scopes can be determined by replacing [`for`], [`if`], and [`while`]
+expressions with equivalent expressions using [`match`], [`loop`] and
+`break`.
 
 r[destructors.scope.operators]
 Overloaded operators are not distinguished from built-in operators and [binding
@@ -135,7 +137,6 @@ r[destructors.scope.nesting.other]
 
 r[destructors.scope.params]
 ### Scopes of function parameters
-
 
 All function parameters are in the scope of the entire function body, so are
 dropped last when evaluating the function. Each actual function parameter is
@@ -204,22 +205,25 @@ smallest scope that contains the expression and is one of the following:
 * A statement.
 * The body of an [`if`], [`while`] or [`loop`] expression.
 * The `else` block of an `if` expression.
-* The condition expression of an `if` or `while` expression, or a `match`
-  guard.
+* The non-pattern matching condition expression of an `if` or `while` expression,
+  or a `match` guard.
 * The body expression for a match arm.
 * Each operand of a [lazy boolean expression].
-* The pattern-matching condition and consequent body of [`if let`] ([destructors.scope.temporary.edition2024]).
+* The pattern-matching condition(s) and consequent body of [`if`] ([destructors.scope.temporary.edition2024]).
+* The pattern-matching condition and loop body of [`while`].
 * The entirety of the tail expression of a block ([destructors.scope.temporary.edition2024]).
 
 > [!NOTE]
 > The [scrutinee] of a `match` expression is not a temporary scope, so temporaries in the scrutinee can be dropped after the `match` expression. For example, the temporary for `1` in `match 1 { ref mut z => z };` lives until the end of the statement.
 
 r[destructors.scope.temporary.edition2024]
-> **Edition differences**: The 2024 edition added two new temporary scope narrowing rules: `if let` temporaries are dropped before the `else` block, and temporaries of tail expressions of blocks are dropped immediately after the tail expression is evaluated.
+> [!EDITION-2024]
+> The 2024 edition added two new temporary scope narrowing rules: `if let` temporaries are dropped before the `else` block, and temporaries of tail expressions of blocks are dropped immediately after the tail expression is evaluated.
 
 Some examples:
 
 ```rust
+# #![allow(irrefutable_let_patterns)]
 # struct PrintOnDrop(&'static str);
 # impl Drop for PrintOnDrop {
 #     fn drop(&mut self) {
@@ -246,6 +250,13 @@ else {
     // `if let else` dropped here
 };
 
+while let x = PrintOnDrop("while let scrutinee").0 {
+    PrintOnDrop("while let loop body").0;
+    break;
+    // `while let loop body` dropped here.
+    // `while let scrutinee` dropped here.
+}
+
 // Dropped before the first ||
 (PrintOnDrop("first operand").0 == ""
 // Dropped before the )
@@ -264,7 +275,6 @@ match PrintOnDrop("Matched value in final expression") {
 
 r[destructors.scope.operands]
 ### Operands
-
 
 Temporaries are also created to hold the result of operands to an expression
 while the other operands are evaluated. The temporaries are associated to the
@@ -297,7 +307,6 @@ loop {
 r[destructors.scope.const-promotion]
 ### Constant promotion
 
-
 Promotion of a value expression to a `'static` slot occurs when the expression
 could be written in a constant and borrowed, and that borrow could be dereferenced
 where
@@ -309,7 +318,6 @@ always has the type `&'static Option<_>`, as it contains nothing disallowed).
 
 r[destructors.scope.lifetime-extension]
 ### Temporary lifetime extension
-
 
 > [!NOTE]
 > The exact rules for temporary lifetime extension are subject to change. This is describing the current behavior only.
@@ -367,7 +375,6 @@ scope of the initializer expression is extended.
 r[destructors.scope.lifetime-extension.exprs]
 #### Extending based on expressions
 
-
 For a let statement with an initializer, an *extending expression* is an
 expression which is one of the following:
 
@@ -376,11 +383,11 @@ expression which is one of the following:
 * The operand(s) of an extending [array][array expression], [cast][cast
   expression], [braced struct][struct expression], or [tuple][tuple expression]
   expression.
+* The arguments to an extending [tuple struct] or [tuple variant] constructor expression.
 * The final expression of any extending [block expression].
 
-So the borrow expressions in `&mut 0`, `(&1, &mut 2)`, and `Some { 0: &mut 3 }`
-are all extending expressions. The borrows in `&0 + &1` and `Some(&mut 0)` are
-not: the latter is syntactically a function call expression.
+So the borrow expressions in `&mut 0`, `(&1, &mut 2)`, and `Some(&mut 3)`
+are all extending expressions. The borrows in `&0 + &1` and `f(&mut 0)` are not.
 
 The operand of any extending borrow expression has its temporary scope
 extended.
@@ -398,7 +405,7 @@ Here are some examples where expressions have extended temporary scopes:
 let x = &temp();
 let x = &temp() as &dyn Send;
 let x = (&*&temp(),);
-let x = { [Some { 0: &temp(), }] };
+let x = { [Some(&temp()) ] };
 let ref x = temp();
 let ref x = *&temp();
 # x;
@@ -413,7 +420,7 @@ Here are some examples where expressions don't have extended temporary scopes:
 // The temporary that stores the result of `temp()` only lives until the
 // end of the let statement in these cases.
 
-let x = Some(&temp());         // ERROR
+let x = std::convert::identity(&temp()); // ERROR
 let x = (&temp()).use_temp();  // ERROR
 # x;
 ```
@@ -470,6 +477,8 @@ There is one additional case to be aware of: when a panic reaches a [non-unwindi
 [struct pattern]: patterns.md#struct-patterns
 [tuple pattern]: patterns.md#tuple-patterns
 [tuple struct pattern]: patterns.md#tuple-struct-patterns
+[tuple struct]: type.struct.tuple
+[tuple variant]: type.enum.declaration
 
 [array expression]: expressions/array-expr.md#array-expressions
 [block expression]: expressions/block-expr.md
@@ -483,10 +492,10 @@ There is one additional case to be aware of: when a panic reaches a [non-unwindi
 [tuple indexing expression]: expressions/tuple-expr.md#tuple-indexing-expressions
 
 [`for`]: expressions/loop-expr.md#iterator-loops
-[`if let`]: expressions/if-expr.md#if-let-expressions
+[`if let`]: expressions/if-expr.md#if-let-patterns
 [`if`]: expressions/if-expr.md#if-expressions
 [`let` statement]: statements.md#let-statements
 [`loop`]: expressions/loop-expr.md#infinite-loops
 [`match`]: expressions/match-expr.md
-[`while let`]: expressions/loop-expr.md#predicate-pattern-loops
+[`while let`]: expressions/loop-expr.md#while-let-patterns
 [`while`]: expressions/loop-expr.md#predicate-loops

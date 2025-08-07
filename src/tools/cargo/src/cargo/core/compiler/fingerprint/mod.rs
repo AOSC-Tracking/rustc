@@ -89,7 +89,7 @@
 //! `[lints]` table[^6]                        | ✓           |                     |                        |
 //! `[lints.rust.unexpected_cfgs.check-cfg]`   | ✓           |                     |                        |
 //!
-//! [^1]: Build script and bin dependencies are not included.
+//! [^1]: Bin dependencies are not included.
 //!
 //! [^3]: See below for details on mtime tracking.
 //!
@@ -254,7 +254,7 @@
 //! simple system for detecting rebuilds. [`LocalFingerprint::Precalculated`] is
 //! used for rustdoc units. For registry packages, this is the package
 //! version. For git packages, it is the git hash. For path packages, it is
-//! the a string of the mtime of the newest file in the package.
+//! a string of the mtime of the newest file in the package.
 //!
 //! There are some known bugs with how this works, so it should be improved at
 //! some point.
@@ -694,7 +694,7 @@ impl<'de> Deserialize<'de> for DepFingerprint {
         let (pkg_id, name, public, hash) = <(u64, String, bool, u64)>::deserialize(d)?;
         Ok(DepFingerprint {
             pkg_id,
-            name: InternedString::new(&name),
+            name: name.into(),
             public,
             fingerprint: Arc::new(Fingerprint {
                 memoized_hash: Mutex::new(Some(hash)),
@@ -1167,15 +1167,12 @@ impl Fingerprint {
         // minimum mtime as it's the one we'll be comparing to inputs and
         // dependencies.
         for output in self.outputs.iter() {
-            let mtime = match paths::mtime(output) {
-                Ok(mtime) => mtime,
-
+            let Ok(mtime) = paths::mtime(output) else {
                 // This path failed to report its `mtime`. It probably doesn't
                 // exists, so leave ourselves as stale and bail out.
-                Err(e) => {
-                    debug!("failed to get mtime of {:?}: {}", output, e);
-                    return Ok(());
-                }
+                let item = StaleItem::FailedToReadMetadata(output.clone());
+                self.fs_status = FsStatus::StaleItem(item);
+                return Ok(());
             };
             assert!(mtimes.insert(output.clone(), mtime).is_none());
         }
@@ -1494,7 +1491,9 @@ fn calculate_normal(
 
     // Afterwards calculate our own fingerprint information.
     let build_root = build_root(build_runner);
-    let local = if unit.mode.is_doc() || unit.mode.is_doc_scrape() {
+    let is_any_doc_gen = unit.mode.is_doc() || unit.mode.is_doc_scrape();
+    let rustdoc_depinfo_enabled = build_runner.bcx.gctx.cli_unstable().rustdoc_depinfo;
+    let local = if is_any_doc_gen && !rustdoc_depinfo_enabled {
         // rustdoc does not have dep-info files.
         let fingerprint = pkg_fingerprint(build_runner.bcx, &unit.pkg).with_context(|| {
             format!(

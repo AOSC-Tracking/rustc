@@ -119,7 +119,7 @@ resolve_const_param_in_enum_discriminant =
     const parameters may not be used in enum discriminant values
 
 resolve_const_param_in_non_trivial_anon_const =
-    const parameters may only be used as standalone arguments, i.e. `{$name}`
+    const parameters may only be used as standalone arguments here, i.e. `{$name}`
 
 resolve_constructor_private_if_any_field_private =
     a constructor is private if any of the fields is private
@@ -218,10 +218,6 @@ resolve_invalid_asm_sym =
     .label = is a local variable
     .help = `sym` operands must refer to either a function or a static
 
-resolve_is_not_directly_importable =
-    `{$target}` is not directly importable
-    .label = cannot be imported directly
-
 resolve_is_private =
     {$ident_descr} `{$ident}` is private
     .label = private {$ident_descr}
@@ -230,9 +226,6 @@ resolve_item_was_behind_feature =
     the item is gated behind the `{$feature}` feature
 
 resolve_item_was_cfg_out = the item is gated here
-
-resolve_items_in_traits_are_not_importable =
-    items in traits are not importable
 
 resolve_label_with_similar_name_reachable =
     a label with a similar name is reachable

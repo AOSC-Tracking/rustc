@@ -18,17 +18,22 @@ SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-l
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
-path = "bitmaps-3.1.0/**"
+path = "bitmaps-3.2.1/**"
 SPDX-License-Identifier = "MPL-2.0"
 SPDX-FileCopyrightText = "Bodil Stokke"
 
 [[annotations]]
-path = "cargo-0.60.0/**"
+path = "bitmaps-3.2.1-new-solver/**"
+SPDX-License-Identifier = "MPL-2.0"
+SPDX-FileCopyrightText = "Bodil Stokke"
+
+[[annotations]]
+path = "cargo-0.87.1/**"
 SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-lang.org)"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
 [[annotations]]
-path = "clap-3.1.6/**"
+path = "clap_derive-4.5.32/**"
 SPDX-FileCopyrightText = "clap contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
@@ -38,7 +43,7 @@ SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-l
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
-path = "cranelift-codegen-0.82.1/**"
+path = "cranelift-codegen-0.119.0/**"
 SPDX-FileCopyrightText = "The Cranelift Project Developers"
 SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
 
@@ -63,7 +68,7 @@ SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-l
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
-path = "diesel-1.4.8/**"
+path = "diesel-2.2.10/**"
 SPDX-FileCopyrightText = "diesel contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
@@ -73,9 +78,9 @@ SPDX-FileCopyrightText = "encoding contributors"
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
-path = "exa-0.10.1/**"
-SPDX-FileCopyrightText = "exa contributors"
-SPDX-License-Identifier = "MIT"
+path = "eza-0.21.2/**"
+SPDX-FileCopyrightText = "Christina Sørensen, eza contributors"
+SPDX-License-Identifier = "EUPL-1.2"
 
 [[annotations]]
 path = "externs/**"
@@ -106,17 +111,22 @@ SPDX-FileCopyrightText = [
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
 [[annotations]]
-path = "html5ever-0.26.0/**"
+path = "html5ever-0.31.0/**"
 SPDX-FileCopyrightText = "The html5ever Project Developers"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
 [[annotations]]
-path = "hyper-0.14.18/**"
+path = "html5ever-0.31.0-new-solver/**"
+SPDX-FileCopyrightText = "The html5ever Project Developers"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
+path = "hyper-1.6.0/**"
 SPDX-FileCopyrightText = "hyper contributors"
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
-path = "image-0.24.1/**"
+path = "image-0.25.6/**"
 SPDX-FileCopyrightText = "The image-rs Developers"
 SPDX-License-Identifier = "MIT"
 
@@ -141,7 +151,12 @@ SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-l
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
-path = "libc-0.2.124/**"
+path = "large-workspace/**"
+SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-lang.org)"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = "libc-0.2.172/**"
 SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-lang.org)"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
@@ -161,6 +176,11 @@ SPDX-FileCopyrightText = "Sébastien Crozet"
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
+path = "nalgebra-0.33.0-new-solver/**"
+SPDX-FileCopyrightText = "Sébastien Crozet"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
 path = "piston-image/**"
 SPDX-FileCopyrightText = "piston contributors"
 SPDX-License-Identifier = "MIT"
@@ -176,7 +196,7 @@ SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-l
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
 [[annotations]]
-path = "regex-1.5.5/**"
+path = "regex-automata-0.4.8/**"
 SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-lang.org)"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
@@ -186,27 +206,37 @@ SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-l
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
-path = "ripgrep-13.0.0/**"
+path = "ripgrep-14.1.1/**"
 SPDX-FileCopyrightText = "ripgrep contributors"
 SPDX-License-Identifier = "MIT OR Unlicense"
 
 [[annotations]]
-path = "ripgrep-13.0.0-tiny/**"
+path = "ripgrep-14.1.1-tiny/**"
 SPDX-FileCopyrightText = "ripgrep contributors"
 SPDX-License-Identifier = "MIT OR Unlicense"
 
 [[annotations]]
-path = "serde-1.0.136/**"
+path = "serde-1.0.219/**"
 SPDX-FileCopyrightText = "serde contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
 [[annotations]]
-path = "serde_derive-1.0.136/**"
+path = "serde-1.0.219-new-solver/**"
 SPDX-FileCopyrightText = "serde contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
 [[annotations]]
-path = "stm32f4-0.14.0/**"
+path = "serde-1.0.219-threads4/**"
+SPDX-FileCopyrightText = "serde contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
+path = "serde_derive-1.0.219/**"
+SPDX-FileCopyrightText = "serde contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
+path = "stm32f4-0.15.1/**"
 SPDX-FileCopyrightText = "stm32-rs contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
@@ -221,7 +251,12 @@ SPDX-FileCopyrightText = "syn contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
 [[annotations]]
-path = "syn-1.0.89/**"
+path = "syn-2.0.101/**"
+SPDX-FileCopyrightText = "syn contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
+path = "syn-2.0.101-new-solver/**"
 SPDX-FileCopyrightText = "syn contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
@@ -255,7 +290,7 @@ SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-l
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
-path = "typenum-1.17.0/**"
+path = "typenum-1.18.0/**"
 SPDX-FileCopyrightText = "typenum contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
@@ -265,7 +300,7 @@ SPDX-FileCopyrightText = "ucd contributors"
 SPDX-License-Identifier = "MIT OR Unicode-DFS-2016"
 
 [[annotations]]
-path = "unicode-normalization-0.1.19/**"
+path = "unicode-normalization-0.1.24/**"
 SPDX-FileCopyrightText = "unicode-normalization contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
@@ -278,11 +313,6 @@ SPDX-License-Identifier = "MIT"
 path = "unused-warnings/**"
 SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-lang.org)"
 SPDX-License-Identifier = "MIT"
-
-[[annotations]]
-path = "webrender-2022/**"
-SPDX-FileCopyrightText = "The Mozilla Project Developers"
-SPDX-License-Identifier = "MPL-2.0"
 
 [[annotations]]
 path = "wf-projection-stress-65510/**"

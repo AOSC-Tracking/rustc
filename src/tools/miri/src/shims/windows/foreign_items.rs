@@ -2,20 +2,15 @@ use std::ffi::OsStr;
 use std::path::{self, Path, PathBuf};
 use std::{io, iter, str};
 
-use rustc_abi::{Align, Size};
+use rustc_abi::{Align, CanonAbi, Size, X86Call};
 use rustc_middle::ty::Ty;
 use rustc_span::Symbol;
-use rustc_target::callconv::{Conv, FnAbi};
+use rustc_target::callconv::FnAbi;
 
 use self::shims::windows::handle::{Handle, PseudoHandle};
 use crate::shims::os_str::bytes_to_os_str;
-use crate::shims::windows::handle::HandleError;
 use crate::shims::windows::*;
 use crate::*;
-
-// The NTSTATUS STATUS_INVALID_HANDLE (0xC0000008) encoded as a HRESULT by setting the N bit.
-// (https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/0642cb2f-2075-4469-918c-4441e69c548a)
-const STATUS_INVALID_HANDLE: u32 = 0xD0000008;
 
 pub fn is_dyn_sym(name: &str) -> bool {
     // std does dynamic detection for these symbols
@@ -26,57 +21,107 @@ pub fn is_dyn_sym(name: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn win_absolute<'tcx>(path: &Path) -> InterpResult<'tcx, io::Result<PathBuf>> {
+fn win_get_full_path_name<'tcx>(path: &Path) -> InterpResult<'tcx, io::Result<PathBuf>> {
     // We are on Windows so we can simply let the host do this.
     interp_ok(path::absolute(path))
 }
 
 #[cfg(unix)]
 #[expect(clippy::get_first, clippy::arithmetic_side_effects)]
-fn win_absolute<'tcx>(path: &Path) -> InterpResult<'tcx, io::Result<PathBuf>> {
-    // We are on Unix, so we need to implement parts of the logic ourselves.
+fn win_get_full_path_name<'tcx>(path: &Path) -> InterpResult<'tcx, io::Result<PathBuf>> {
+    use std::sync::LazyLock;
+
+    use rustc_data_structures::fx::FxHashSet;
+
+    // We are on Unix, so we need to implement parts of the logic ourselves. `path` will use `/`
+    // separators, and the result should also use `/`.
+    // See <https://chrisdenton.github.io/omnipath/Overview.html#absolute-win32-paths> for more
+    // information about Windows paths.
+    // This does not handle all corner cases correctly, see
+    // <https://github.com/rust-lang/miri/pull/4262#issuecomment-2792168853> for more cursed
+    // examples.
     let bytes = path.as_os_str().as_encoded_bytes();
-    // If it starts with `//` (these were backslashes but are already converted)
-    // then this is a magic special path, we just leave it unchanged.
-    if bytes.get(0).copied() == Some(b'/') && bytes.get(1).copied() == Some(b'/') {
+    // If it starts with `//./` or `//?/` then this is a magic special path, we just leave it
+    // unchanged.
+    if bytes.get(0).copied() == Some(b'/')
+        && bytes.get(1).copied() == Some(b'/')
+        && matches!(bytes.get(2), Some(b'.' | b'?'))
+        && bytes.get(3).copied() == Some(b'/')
+    {
         return interp_ok(Ok(path.into()));
     };
-    // Special treatment for Windows' magic filenames: they are treated as being relative to `\\.\`.
-    let magic_filenames = &[
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-    ];
-    if magic_filenames.iter().any(|m| m.as_bytes() == bytes) {
-        let mut result: Vec<u8> = br"//./".into();
+    let is_unc = bytes.starts_with(b"//");
+    // Special treatment for Windows' magic filenames: they are treated as being relative to `//./`.
+    static MAGIC_FILENAMES: LazyLock<FxHashSet<&'static str>> = LazyLock::new(|| {
+        FxHashSet::from_iter([
+            "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+            "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        ])
+    });
+    if str::from_utf8(bytes).is_ok_and(|s| MAGIC_FILENAMES.contains(&*s.to_ascii_uppercase())) {
+        let mut result: Vec<u8> = b"//./".into();
         result.extend(bytes);
         return interp_ok(Ok(bytes_to_os_str(&result)?.into()));
     }
     // Otherwise we try to do something kind of close to what Windows does, but this is probably not
-    // right in all cases. We iterate over the components between `/`, and remove trailing `.`,
-    // except that trailing `..` remain unchanged.
-    let mut result = vec![];
+    // right in all cases.
+    let mut result: Vec<&[u8]> = vec![]; // will be a vector of components, joined by `/`.
     let mut bytes = bytes; // the remaining bytes to process
-    loop {
-        let len = bytes.iter().position(|&b| b == b'/').unwrap_or(bytes.len());
-        let mut component = &bytes[..len];
-        if len >= 2 && component[len - 1] == b'.' && component[len - 2] != b'.' {
-            // Strip trailing `.`
+    let mut stop = false;
+    while !stop {
+        // Find next component, and advance `bytes`.
+        let mut component = match bytes.iter().position(|&b| b == b'/') {
+            Some(pos) => {
+                let (component, tail) = bytes.split_at(pos);
+                bytes = &tail[1..]; // remove the `/`.
+                component
+            }
+            None => {
+                // There's no more `/`.
+                stop = true;
+                let component = bytes;
+                bytes = &[];
+                component
+            }
+        };
+        // `NUL` and only `NUL` also gets changed to be relative to `//./` later in the path.
+        // (This changed with Windows 11; previously, all magic filenames behaved like this.)
+        // Also, this does not apply to UNC paths.
+        if !is_unc && component.eq_ignore_ascii_case(b"NUL") {
+            let mut result: Vec<u8> = b"//./".into();
+            result.extend(component);
+            return interp_ok(Ok(bytes_to_os_str(&result)?.into()));
+        }
+        // Deal with `..` -- Windows handles this entirely syntactically.
+        if component == b".." {
+            // Remove previous component, unless we are at the "root" already, then just ignore the `..`.
+            let is_root = {
+                // Paths like `/C:`.
+                result.len() == 2 && matches!(result[0], []) && matches!(result[1], [_, b':'])
+            } || {
+                // Paths like `//server/share`
+                result.len() == 4 && matches!(result[0], []) && matches!(result[1], [])
+            };
+            if !is_root {
+                result.pop();
+            }
+            continue;
+        }
+        // Preserve this component.
+        // Strip trailing `.`, but preserve trailing `..`. But not for UNC paths!
+        let len = component.len();
+        if !is_unc && len >= 2 && component[len - 1] == b'.' && component[len - 2] != b'.' {
             component = &component[..len - 1];
         }
         // Add this component to output.
-        result.extend(component);
-        // Prepare next iteration.
-        if len < bytes.len() {
-            // There's a component after this; add `/` and process remaining bytes.
-            result.push(b'/');
-            bytes = &bytes[len + 1..];
-            continue;
-        } else {
-            // This was the last component and it did not have a trailing `/`.
-            break;
-        }
+        result.push(component);
     }
-    // Let the host `absolute` function do working-dir handling
+    // Drive letters must be followed by a `/`.
+    if result.len() == 2 && matches!(result[0], []) && matches!(result[1], [_, b':']) {
+        result.push(&[]);
+    }
+    // Let the host `absolute` function do working-dir handling.
+    let result = result.join(&b'/');
     interp_ok(path::absolute(bytes_to_os_str(&result)?))
 }
 
@@ -95,7 +140,11 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         // https://github.com/rust-lang/rust/blob/fb00adbdb69266f10df95a4527b767b0ad35ea48/compiler/rustc_target/src/spec/mod.rs#L2766-L2768,
         // x86-32 Windows uses a different calling convention than other Windows targets
         // for the "system" ABI.
-        let sys_conv = if this.tcx.sess.target.arch == "x86" { Conv::X86Stdcall } else { Conv::C };
+        let sys_conv = if this.tcx.sess.target.arch == "x86" {
+            CanonAbi::X86(X86Call::Stdcall)
+        } else {
+            CanonAbi::C
+        };
 
         // See `fn emulate_foreign_item_inner` in `shims/foreign_items.rs` for the general pattern.
 
@@ -150,69 +199,52 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
 
             // File related shims
             "NtWriteFile" => {
-                if !this.frame_in_std() {
-                    throw_unsup_format!(
-                        "`NtWriteFile` support is crude and just enough for stdout to work"
-                    );
-                }
-
                 let [
                     handle,
-                    _event,
-                    _apc_routine,
-                    _apc_context,
+                    event,
+                    apc_routine,
+                    apc_context,
                     io_status_block,
                     buf,
                     n,
                     byte_offset,
-                    _key,
+                    key,
                 ] = this.check_shim(abi, sys_conv, link_name, args)?;
-                let handle = this.read_target_isize(handle)?;
-                let buf = this.read_pointer(buf)?;
-                let n = this.read_scalar(n)?.to_u32()?;
-                let byte_offset = this.read_target_usize(byte_offset)?; // is actually a pointer
-                let io_status_block = this
-                    .deref_pointer_as(io_status_block, this.windows_ty_layout("IO_STATUS_BLOCK"))?;
-
-                if byte_offset != 0 {
-                    throw_unsup_format!(
-                        "`NtWriteFile` `ByteOffset` parameter is non-null, which is unsupported"
-                    );
-                }
-
-                let written = if handle == -11 || handle == -12 {
-                    // stdout/stderr
-                    use io::Write;
-
-                    let buf_cont =
-                        this.read_bytes_ptr_strip_provenance(buf, Size::from_bytes(u64::from(n)))?;
-                    let res = if this.machine.mute_stdout_stderr {
-                        Ok(buf_cont.len())
-                    } else if handle == -11 {
-                        io::stdout().write(buf_cont)
-                    } else {
-                        io::stderr().write(buf_cont)
-                    };
-                    // We write at most `n` bytes, which is a `u32`, so we cannot have written more than that.
-                    res.ok().map(|n| u32::try_from(n).unwrap())
-                } else {
-                    throw_unsup_format!(
-                        "on Windows, writing to anything except stdout/stderr is not supported"
-                    )
-                };
-                // We have to put the result into io_status_block.
-                if let Some(n) = written {
-                    let io_status_information =
-                        this.project_field_named(&io_status_block, "Information")?;
-                    this.write_scalar(
-                        Scalar::from_target_usize(n.into(), this),
-                        &io_status_information,
-                    )?;
-                }
-                // Return whether this was a success. >= 0 is success.
-                // For the error code we arbitrarily pick 0xC0000185, STATUS_IO_DEVICE_ERROR.
-                this.write_scalar(
-                    Scalar::from_u32(if written.is_some() { 0 } else { 0xC0000185u32 }),
+                this.NtWriteFile(
+                    handle,
+                    event,
+                    apc_routine,
+                    apc_context,
+                    io_status_block,
+                    buf,
+                    n,
+                    byte_offset,
+                    key,
+                    dest,
+                )?;
+            }
+            "NtReadFile" => {
+                let [
+                    handle,
+                    event,
+                    apc_routine,
+                    apc_context,
+                    io_status_block,
+                    buf,
+                    n,
+                    byte_offset,
+                    key,
+                ] = this.check_shim(abi, sys_conv, link_name, args)?;
+                this.NtReadFile(
+                    handle,
+                    event,
+                    apc_routine,
+                    apc_context,
+                    io_status_block,
+                    buf,
+                    n,
+                    byte_offset,
+                    key,
                     dest,
                 )?;
             }
@@ -231,7 +263,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 }
 
                 let filename = this.read_path_from_wide_str(filename)?;
-                let result = match win_absolute(&filename)? {
+                let result = match win_get_full_path_name(&filename)? {
                     Err(err) => {
                         this.set_last_error(err)?;
                         Scalar::from_u32(0) // return zero upon failure
@@ -245,6 +277,44 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                     }
                 };
                 this.write_scalar(result, dest)?;
+            }
+            "CreateFileW" => {
+                let [
+                    file_name,
+                    desired_access,
+                    share_mode,
+                    security_attributes,
+                    creation_disposition,
+                    flags_and_attributes,
+                    template_file,
+                ] = this.check_shim(abi, sys_conv, link_name, args)?;
+                let handle = this.CreateFileW(
+                    file_name,
+                    desired_access,
+                    share_mode,
+                    security_attributes,
+                    creation_disposition,
+                    flags_and_attributes,
+                    template_file,
+                )?;
+                this.write_scalar(handle.to_scalar(this), dest)?;
+            }
+            "GetFileInformationByHandle" => {
+                let [handle, info] = this.check_shim(abi, sys_conv, link_name, args)?;
+                let res = this.GetFileInformationByHandle(handle, info)?;
+                this.write_scalar(res, dest)?;
+            }
+            "DeleteFileW" => {
+                let [file_name] = this.check_shim(abi, sys_conv, link_name, args)?;
+                let res = this.DeleteFileW(file_name)?;
+                this.write_scalar(res, dest)?;
+            }
+            "SetFilePointerEx" => {
+                let [file, distance_to_move, new_file_pointer, move_method] =
+                    this.check_shim(abi, sys_conv, link_name, args)?;
+                let res =
+                    this.SetFilePointerEx(file, distance_to_move, new_file_pointer, move_method)?;
+                this.write_scalar(res, dest)?;
             }
 
             // Allocation
@@ -324,6 +394,25 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 let [] = this.check_shim(abi, sys_conv, link_name, args)?;
                 let last_error = this.get_last_error()?;
                 this.write_scalar(last_error, dest)?;
+            }
+            "RtlNtStatusToDosError" => {
+                let [status] = this.check_shim(abi, sys_conv, link_name, args)?;
+                let status = this.read_scalar(status)?.to_u32()?;
+                let err = match status {
+                    // STATUS_MEDIA_WRITE_PROTECTED => ERROR_WRITE_PROTECT
+                    0xC00000A2 => 19,
+                    // STATUS_FILE_INVALID => ERROR_FILE_INVALID
+                    0xC0000098 => 1006,
+                    // STATUS_DISK_FULL => ERROR_DISK_FULL
+                    0xC000007F => 112,
+                    // STATUS_IO_DEVICE_ERROR => ERROR_IO_DEVICE
+                    0xC0000185 => 1117,
+                    // STATUS_ACCESS_DENIED => ERROR_ACCESS_DENIED
+                    0xC0000022 => 5,
+                    // Anything without an error code => ERROR_MR_MID_NOT_FOUND
+                    _ => 317,
+                };
+                this.write_scalar(Scalar::from_i32(err), dest)?;
             }
 
             // Querying system information
@@ -487,6 +576,14 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 let ret = this.WaitForSingleObject(handle, timeout)?;
                 this.write_scalar(ret, dest)?;
             }
+            "GetCurrentProcess" => {
+                let [] = this.check_shim(abi, sys_conv, link_name, args)?;
+
+                this.write_scalar(
+                    Handle::Pseudo(PseudoHandle::CurrentProcess).to_scalar(this),
+                    dest,
+                )?;
+            }
             "GetCurrentThread" => {
                 let [] = this.check_shim(abi, sys_conv, link_name, args)?;
 
@@ -498,52 +595,37 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             "SetThreadDescription" => {
                 let [handle, name] = this.check_shim(abi, sys_conv, link_name, args)?;
 
-                let handle = this.read_scalar(handle)?;
+                let handle = this.read_handle(handle, "SetThreadDescription")?;
                 let name = this.read_wide_str(this.read_pointer(name)?)?;
 
-                let thread = match Handle::try_from_scalar(handle, this)? {
-                    Ok(Handle::Thread(thread)) => Ok(thread),
-                    Ok(Handle::Pseudo(PseudoHandle::CurrentThread)) => Ok(this.active_thread()),
-                    Ok(_) | Err(HandleError::InvalidHandle) =>
-                        this.invalid_handle("SetThreadDescription")?,
-                    Err(HandleError::ThreadNotFound(e)) => Err(e),
+                let thread = match handle {
+                    Handle::Thread(thread) => thread,
+                    Handle::Pseudo(PseudoHandle::CurrentThread) => this.active_thread(),
+                    _ => this.invalid_handle("SetThreadDescription")?,
                 };
-                let res = match thread {
-                    Ok(thread) => {
-                        // FIXME: use non-lossy conversion
-                        this.set_thread_name(thread, String::from_utf16_lossy(&name).into_bytes());
-                        Scalar::from_u32(0)
-                    }
-                    Err(_) => Scalar::from_u32(STATUS_INVALID_HANDLE),
-                };
-
-                this.write_scalar(res, dest)?;
+                // FIXME: use non-lossy conversion
+                this.set_thread_name(thread, String::from_utf16_lossy(&name).into_bytes());
+                this.write_scalar(Scalar::from_u32(0), dest)?;
             }
             "GetThreadDescription" => {
                 let [handle, name_ptr] = this.check_shim(abi, sys_conv, link_name, args)?;
 
-                let handle = this.read_scalar(handle)?;
+                let handle = this.read_handle(handle, "GetThreadDescription")?;
                 let name_ptr = this.deref_pointer_as(name_ptr, this.machine.layouts.mut_raw_ptr)?; // the pointer where we should store the ptr to the name
 
-                let thread = match Handle::try_from_scalar(handle, this)? {
-                    Ok(Handle::Thread(thread)) => Ok(thread),
-                    Ok(Handle::Pseudo(PseudoHandle::CurrentThread)) => Ok(this.active_thread()),
-                    Ok(_) | Err(HandleError::InvalidHandle) =>
-                        this.invalid_handle("GetThreadDescription")?,
-                    Err(HandleError::ThreadNotFound(e)) => Err(e),
+                let thread = match handle {
+                    Handle::Thread(thread) => thread,
+                    Handle::Pseudo(PseudoHandle::CurrentThread) => this.active_thread(),
+                    _ => this.invalid_handle("GetThreadDescription")?,
                 };
-                let (name, res) = match thread {
-                    Ok(thread) => {
-                        // Looks like the default thread name is empty.
-                        let name = this.get_thread_name(thread).unwrap_or(b"").to_owned();
-                        let name = this.alloc_os_str_as_wide_str(
-                            bytes_to_os_str(&name)?,
-                            MiriMemoryKind::WinLocal.into(),
-                        )?;
-                        (Scalar::from_maybe_pointer(name, this), Scalar::from_u32(0))
-                    }
-                    Err(_) => (Scalar::null_ptr(this), Scalar::from_u32(STATUS_INVALID_HANDLE)),
-                };
+                // Looks like the default thread name is empty.
+                let name = this.get_thread_name(thread).unwrap_or(b"").to_owned();
+                let name = this.alloc_os_str_as_wide_str(
+                    bytes_to_os_str(&name)?,
+                    MiriMemoryKind::WinLocal.into(),
+                )?;
+                let name = Scalar::from_maybe_pointer(name, this);
+                let res = Scalar::from_u32(0);
 
                 this.write_scalar(name, &name_ptr)?;
                 this.write_scalar(res, dest)?;
@@ -620,12 +702,22 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             }
             "GetStdHandle" => {
                 let [which] = this.check_shim(abi, sys_conv, link_name, args)?;
-                let which = this.read_scalar(which)?.to_i32()?;
-                // We just make this the identity function, so we know later in `NtWriteFile` which
-                // one it is. This is very fake, but libtest needs it so we cannot make it a
-                // std-only shim.
-                // FIXME: this should return real HANDLEs when io support is added
-                this.write_scalar(Scalar::from_target_isize(which.into(), this), dest)?;
+                let res = this.GetStdHandle(which)?;
+                this.write_scalar(res, dest)?;
+            }
+            "DuplicateHandle" => {
+                let [src_proc, src_handle, target_proc, target_handle, access, inherit, options] =
+                    this.check_shim(abi, sys_conv, link_name, args)?;
+                let res = this.DuplicateHandle(
+                    src_proc,
+                    src_handle,
+                    target_proc,
+                    target_handle,
+                    access,
+                    inherit,
+                    options,
+                )?;
+                this.write_scalar(res, dest)?;
             }
             "CloseHandle" => {
                 let [handle] = this.check_shim(abi, sys_conv, link_name, args)?;
@@ -638,11 +730,11 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 let [handle, filename, size] = this.check_shim(abi, sys_conv, link_name, args)?;
                 this.check_no_isolation("`GetModuleFileNameW`")?;
 
-                let handle = this.read_target_usize(handle)?;
+                let handle = this.read_handle(handle, "GetModuleFileNameW")?;
                 let filename = this.read_pointer(filename)?;
                 let size = this.read_scalar(size)?.to_u32()?;
 
-                if handle != 0 {
+                if handle != Handle::Null {
                     throw_unsup_format!("`GetModuleFileNameW` only supports the NULL handle");
                 }
 
@@ -768,7 +860,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                     );
                 }
                 // This function looks and behaves excatly like miri_start_unwind.
-                let [payload] = this.check_shim(abi, Conv::C, link_name, args)?;
+                let [payload] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
                 this.handle_miri_start_unwind(payload)?;
                 return interp_ok(EmulateItemResult::NeedsUnwind);
             }

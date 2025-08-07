@@ -26,7 +26,16 @@ label = "O-windows"
 
 [shortcut]
 
+# Enable issue transfers within the org
+# Documentation at: https://forge.rust-lang.org/triagebot/transfer.html
 [transfer]
+
+# Prevents mentions in commits to avoid users being spammed
+[no-mentions]
+
+# Enable `@rustbot note` functionality
+# Documentation at: https://forge.rust-lang.org/triagebot/note.html
+[note]
 
 [merge-conflicts]
 remove = []
@@ -270,7 +279,7 @@ trigger_files = ["src/bin/cargo/commands/fetch.rs", "src/cargo/ops/cargo_fetch.r
 trigger_files = [
     "crates/rustfix/",
     "src/bin/cargo/commands/fix.rs",
-    "src/cargo/ops/fix.rs",
+    "src/cargo/ops/fix/",
     "src/cargo/util/diagnostic_server.rs",
     "src/cargo/util/lockserver.rs",
 ]

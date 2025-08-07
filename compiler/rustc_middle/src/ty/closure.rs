@@ -117,6 +117,10 @@ impl<'tcx> CapturedPlace<'tcx> {
                     }
                 },
 
+                HirProjectionKind::UnwrapUnsafeBinder => {
+                    write!(&mut symbol, "__unwrap").unwrap();
+                }
+
                 // Ignore derefs for now, as they are likely caused by
                 // autoderefs that don't appear in the original code.
                 HirProjectionKind::Deref => {}
@@ -150,9 +154,9 @@ impl<'tcx> CapturedPlace<'tcx> {
     /// Return span pointing to use that resulted in selecting the captured path
     pub fn get_path_span(&self, tcx: TyCtxt<'tcx>) -> Span {
         if let Some(path_expr_id) = self.info.path_expr_id {
-            tcx.hir().span(path_expr_id)
+            tcx.hir_span(path_expr_id)
         } else if let Some(capture_kind_expr_id) = self.info.capture_kind_expr_id {
-            tcx.hir().span(capture_kind_expr_id)
+            tcx.hir_span(capture_kind_expr_id)
         } else {
             // Fallback on upvars mentioned if neither path or capture expr id is captured
 
@@ -166,9 +170,9 @@ impl<'tcx> CapturedPlace<'tcx> {
     /// Return span pointing to use that resulted in selecting the current capture kind
     pub fn get_capture_kind_span(&self, tcx: TyCtxt<'tcx>) -> Span {
         if let Some(capture_kind_expr_id) = self.info.capture_kind_expr_id {
-            tcx.hir().span(capture_kind_expr_id)
+            tcx.hir_span(capture_kind_expr_id)
         } else if let Some(path_expr_id) = self.info.path_expr_id {
-            tcx.hir().span(path_expr_id)
+            tcx.hir_span(path_expr_id)
         } else {
             // Fallback on upvars mentioned if neither path or capture expr id is captured
 
@@ -418,53 +422,49 @@ pub fn analyze_coroutine_closure_captures<'a, 'tcx: 'a, T>(
     child_captures: impl IntoIterator<Item = &'a CapturedPlace<'tcx>>,
     mut for_each: impl FnMut((usize, &'a CapturedPlace<'tcx>), (usize, &'a CapturedPlace<'tcx>)) -> T,
 ) -> impl Iterator<Item = T> {
-    std::iter::from_coroutine(
-        #[coroutine]
-        move || {
-            let mut child_captures = child_captures.into_iter().enumerate().peekable();
+    gen move {
+        let mut child_captures = child_captures.into_iter().enumerate().peekable();
 
-            // One parent capture may correspond to several child captures if we end up
-            // refining the set of captures via edition-2021 precise captures. We want to
-            // match up any number of child captures with one parent capture, so we keep
-            // peeking off this `Peekable` until the child doesn't match anymore.
-            for (parent_field_idx, parent_capture) in parent_captures.into_iter().enumerate() {
-                // Make sure we use every field at least once, b/c why are we capturing something
-                // if it's not used in the inner coroutine.
-                let mut field_used_at_least_once = false;
+        // One parent capture may correspond to several child captures if we end up
+        // refining the set of captures via edition-2021 precise captures. We want to
+        // match up any number of child captures with one parent capture, so we keep
+        // peeking off this `Peekable` until the child doesn't match anymore.
+        for (parent_field_idx, parent_capture) in parent_captures.into_iter().enumerate() {
+            // Make sure we use every field at least once, b/c why are we capturing something
+            // if it's not used in the inner coroutine.
+            let mut field_used_at_least_once = false;
 
-                // A parent matches a child if they share the same prefix of projections.
-                // The child may have more, if it is capturing sub-fields out of
-                // something that is captured by-move in the parent closure.
-                while child_captures.peek().is_some_and(|(_, child_capture)| {
-                    child_prefix_matches_parent_projections(parent_capture, child_capture)
-                }) {
-                    let (child_field_idx, child_capture) = child_captures.next().unwrap();
-                    // This analysis only makes sense if the parent capture is a
-                    // prefix of the child capture.
-                    assert!(
-                        child_capture.place.projections.len()
-                            >= parent_capture.place.projections.len(),
-                        "parent capture ({parent_capture:#?}) expected to be prefix of \
-                    child capture ({child_capture:#?})"
-                    );
-
-                    yield for_each(
-                        (parent_field_idx, parent_capture),
-                        (child_field_idx, child_capture),
-                    );
-
-                    field_used_at_least_once = true;
-                }
-
-                // Make sure the field was used at least once.
+            // A parent matches a child if they share the same prefix of projections.
+            // The child may have more, if it is capturing sub-fields out of
+            // something that is captured by-move in the parent closure.
+            while child_captures.peek().is_some_and(|(_, child_capture)| {
+                child_prefix_matches_parent_projections(parent_capture, child_capture)
+            }) {
+                let (child_field_idx, child_capture) = child_captures.next().unwrap();
+                // This analysis only makes sense if the parent capture is a
+                // prefix of the child capture.
                 assert!(
-                    field_used_at_least_once,
-                    "we captured {parent_capture:#?} but it was not used in the child coroutine?"
+                    child_capture.place.projections.len() >= parent_capture.place.projections.len(),
+                    "parent capture ({parent_capture:#?}) expected to be prefix of \
+                    child capture ({child_capture:#?})"
                 );
+
+                yield for_each(
+                    (parent_field_idx, parent_capture),
+                    (child_field_idx, child_capture),
+                );
+
+                field_used_at_least_once = true;
             }
-            assert_eq!(child_captures.next(), None, "leftover child captures?");
-        },
-    )
+
+            // Make sure the field was used at least once.
+            assert!(
+                field_used_at_least_once,
+                "we captured {parent_capture:#?} but it was not used in the child coroutine?"
+            );
+        }
+        assert_eq!(child_captures.next(), None, "leftover child captures?");
+    }
 }
 
 fn child_prefix_matches_parent_projections(

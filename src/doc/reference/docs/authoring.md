@@ -28,7 +28,7 @@ This document serves as a guide for editors and reviewers. Some conventions and 
     ```
 * See the [Conventions] section for formatting callouts such as notes, edition differences, and warnings.
 
-There are automated checks for some of these rules. Run `cargo run --manifest-path style-check/Cargo.toml -- src` to run them locally.
+There are automated checks for some of these rules. Run `cargo xtask style-check` to run them locally.
 
 [atx]: https://spec.commonmark.org/0.31.2/#atx-headings
 [conventions]: ../src/introduction.md#conventions
@@ -57,6 +57,16 @@ Rust examples are tested via rustdoc, and should include the appropriate annotat
 See the [rustdoc documentation] for more detail.
 
 [rustdoc documentation]: https://doc.rust-lang.org/rustdoc/documentation-tests.html
+
+You can verify the samples pass by running `mdbook test`.
+
+### Linkcheck
+
+To verify that links are not broken, run `cargo xtask linkcheck`.
+
+### Running all tests
+
+As a last step before opening a PR, it is recommended to run `cargo xtask test-all`. This will go through and run most of the tests that are required for CI to pass. See `xtask/src/main.rs` for what all this does.
 
 ## Special markdown constructs
 
@@ -95,7 +105,7 @@ When assigning rules to new paragraphs, or when modifying rule names, use the fo
     * If the rule is naming a specific Rust language construct (e.g. an attribute, standard library type/function, or keyword-introduced concept), use the construct as named in the language, appropriately case-adjusted (but do not replace `_`s with `-`s).
     * Other than Rust language concepts with `_`s in the name, use `-` characters to separate words within a "subrule".
     * Whenever possible, do not repeat previous components of the rule.
-    * Edition differences admonitions should typically be named by the edition referenced directly by the rule. If multiple editions are named, use the one for which the behavior is defined by the admonition, and not by a previous paragraph.
+    * Edition differences admonitions should typically be named by the edition where the behavior changed. You should be able to correspond the dates to the chapters in <https://doc.rust-lang.org/edition-guide/>.
     * Target specific admonitions should typically be named by the least specific target property to which they apply (e.g. if a rule affects all x86 CPUs, the rule name should include `x86` rather than separately listing `i586`, `i686` and `x86_64`, and if a rule applies to all ELF platforms, it should be named `elf` rather than listing every ELF OS).
     * Use an appropriately descriptive, but short, name if the language does not provide one.
 
@@ -170,9 +180,15 @@ Admonitions use a style similar to GitHub-flavored markdown, where the style nam
 
 > [!NOTE]
 > This is a note.
+
+> [!EDITION-2024]
+> This is an edition-specific difference.
+
+> [!EXAMPLE]
+> This is an example.
 ```
 
-The color and styling is defined in [`theme/reference.css`](https://github.com/rust-lang/reference/blob/master/theme/reference.css) and the transformation and icons are in [`mdbook-spec/src/lib.rs`](https://github.com/rust-lang/reference/blob/HEAD/mdbook-spec/src/lib.rs).
+The color and styling is defined in [`theme/reference.css`](https://github.com/rust-lang/reference/blob/master/theme/reference.css) and the transformation and icons are in [`mdbook-spec/src/admonitions.rs`](https://github.com/rust-lang/reference/blob/HEAD/mdbook-spec/src/admonitions.rs).
 
 ## Style
 
@@ -197,4 +213,14 @@ The reference does not document which targets exist, or the properties of specif
 
 ### Editions
 
-The main text and flow should document only the current edition. Whenever there is a difference between editions, the differences should be called out with an "Edition differences" block.
+The main text and flow should document only the current edition. Whenever there is a difference between editions, the differences should be called out with an edition block, such as:
+
+```markdown
+r[foo.bar.edition2021]
+> [!EDITION-2021]
+> Describe what changed in 2021.
+```
+
+## Grammar
+
+See [Grammar](grammar.md) for details on how to write grammar rules.

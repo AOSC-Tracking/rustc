@@ -195,15 +195,20 @@ impl<'tcx> UnsafetyVisitor<'_, 'tcx> {
 
     /// Whether the `unsafe_op_in_unsafe_fn` lint is `allow`ed at the current HIR node.
     fn unsafe_op_in_unsafe_fn_allowed(&self) -> bool {
-        self.tcx.lint_level_at_node(UNSAFE_OP_IN_UNSAFE_FN, self.hir_context).0 == Level::Allow
+        self.tcx.lint_level_at_node(UNSAFE_OP_IN_UNSAFE_FN, self.hir_context).level == Level::Allow
     }
 
     /// Handle closures/coroutines/inline-consts, which is unsafecked with their parent body.
     fn visit_inner_body(&mut self, def: LocalDefId) {
         if let Ok((inner_thir, expr)) = self.tcx.thir_body(def) {
-            // Runs all other queries that depend on THIR.
+            // Run all other queries that depend on THIR.
             self.tcx.ensure_done().mir_built(def);
-            let inner_thir = &inner_thir.steal();
+            let inner_thir = if self.tcx.sess.opts.unstable_opts.no_steal_thir {
+                &inner_thir.borrow()
+            } else {
+                // We don't have other use for the THIR. Steal it to reduce memory usage.
+                &inner_thir.steal()
+            };
             let hir_context = self.tcx.local_def_id_to_hir_id(def);
             let safety_context = mem::replace(&mut self.safety_context, SafetyContext::Safe);
             let mut inner_visitor = UnsafetyVisitor {
@@ -292,8 +297,10 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
                 });
             }
             BlockSafety::ExplicitUnsafe(hir_id) => {
-                let used =
-                    matches!(self.tcx.lint_level_at_node(UNUSED_UNSAFE, hir_id), (Level::Allow, _));
+                let used = matches!(
+                    self.tcx.lint_level_at_node(UNUSED_UNSAFE, hir_id).level,
+                    Level::Allow
+                );
                 self.in_safety_context(
                     SafetyContext::UnsafeBlock {
                         span: block.span,
@@ -313,6 +320,7 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
     fn visit_pat(&mut self, pat: &'a Pat<'tcx>) {
         if self.in_union_destructure {
             match pat.kind {
+                PatKind::Missing => unreachable!(),
                 // binding to a variable allows getting stuff out of variable
                 PatKind::Binding { .. }
                 // match is conditional on having this value
@@ -401,9 +409,9 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
                 visit::walk_pat(self, pat);
                 self.inside_adt = old_inside_adt;
             }
-            PatKind::ExpandedConstant { def_id, is_inline, .. } => {
+            PatKind::ExpandedConstant { def_id, .. } => {
                 if let Some(def) = def_id.as_local()
-                    && *is_inline
+                    && matches!(self.tcx.def_kind(def_id), DefKind::InlineConst)
                 {
                     self.visit_inner_body(def);
                 }
@@ -561,13 +569,17 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
                 }
             }
             ExprKind::InlineAsm(box InlineAsmExpr {
-                asm_macro: AsmMacro::Asm | AsmMacro::NakedAsm,
+                asm_macro: asm_macro @ (AsmMacro::Asm | AsmMacro::NakedAsm),
                 ref operands,
                 template: _,
                 options: _,
                 line_spans: _,
             }) => {
-                self.requires_unsafe(expr.span, UseOfInlineAssembly);
+                // The `naked` attribute and the `naked_asm!` block form one atomic unit of
+                // unsafety, and `naked_asm!` does not itself need to be wrapped in an unsafe block.
+                if let AsmMacro::Asm = asm_macro {
+                    self.requires_unsafe(expr.span, UseOfInlineAssembly);
+                }
 
                 // For inline asm, do not use `walk_expr`, since we want to handle the label block
                 // specially.
@@ -943,7 +955,7 @@ impl UnsafeOpKind {
             }
         });
         let unsafe_not_inherited_note = if let Some((id, _)) = note_non_inherited {
-            let span = tcx.hir().span(id);
+            let span = tcx.hir_span(id);
             let span = tcx.sess.source_map().guess_head_span(span);
             Some(UnsafeNotInheritedNote { span })
         } else {
@@ -1141,15 +1153,21 @@ impl UnsafeOpKind {
 
 pub(crate) fn check_unsafety(tcx: TyCtxt<'_>, def: LocalDefId) {
     // Closures and inline consts are handled by their owner, if it has a body
+    assert!(!tcx.is_typeck_child(def.to_def_id()));
     // Also, don't safety check custom MIR
-    if tcx.is_typeck_child(def.to_def_id()) || tcx.has_attr(def, sym::custom_mir) {
+    if tcx.has_attr(def, sym::custom_mir) {
         return;
     }
 
     let Ok((thir, expr)) = tcx.thir_body(def) else { return };
     // Runs all other queries that depend on THIR.
     tcx.ensure_done().mir_built(def);
-    let thir = &thir.steal();
+    let thir = if tcx.sess.opts.unstable_opts.no_steal_thir {
+        &thir.borrow()
+    } else {
+        // We don't have other use for the THIR. Steal it to reduce memory usage.
+        &thir.steal()
+    };
 
     let hir_id = tcx.local_def_id_to_hir_id(def);
     let safety_context = tcx.hir_fn_sig_by_hir_id(hir_id).map_or(SafetyContext::Safe, |fn_sig| {

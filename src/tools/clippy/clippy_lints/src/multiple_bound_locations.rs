@@ -39,7 +39,7 @@ declare_lint_pass!(MultipleBoundLocations => [MULTIPLE_BOUND_LOCATIONS]);
 
 impl EarlyLintPass for MultipleBoundLocations {
     fn check_fn(&mut self, cx: &EarlyContext<'_>, kind: FnKind<'_>, _: Span, _: NodeId) {
-        if let FnKind::Fn(_, _, _, Fn { generics, .. }) = kind
+        if let FnKind::Fn(_, _, Fn { generics, .. }) = kind
             && !generics.params.is_empty()
             && !generics.where_clause.predicates.is_empty()
         {
@@ -47,7 +47,7 @@ impl EarlyLintPass for MultipleBoundLocations {
 
             for param in &generics.params {
                 if !param.bounds.is_empty() {
-                    generic_params_with_bounds.insert(param.ident.name.as_str(), param.ident.span);
+                    generic_params_with_bounds.insert(param.ident.as_str(), param.ident.span);
                 }
             }
             for clause in &generics.where_clause.predicates {
@@ -64,7 +64,7 @@ impl EarlyLintPass for MultipleBoundLocations {
                     },
                     WherePredicateKind::RegionPredicate(pred) => {
                         if !pred.bounds.is_empty()
-                            && let Some(bound_span) = generic_params_with_bounds.get(&pred.lifetime.ident.name.as_str())
+                            && let Some(bound_span) = generic_params_with_bounds.get(&pred.lifetime.ident.as_str())
                         {
                             emit_lint(cx, *bound_span, pred.lifetime.ident.span);
                         }

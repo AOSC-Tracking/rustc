@@ -5,7 +5,6 @@
 
 use std::path::PathBuf;
 
-use crate::Mode;
 use crate::core::build_steps::dist::distdir;
 use crate::core::build_steps::test;
 use crate::core::build_steps::tool::{self, SourceType, Tool};
@@ -14,6 +13,7 @@ use crate::core::builder::{Builder, Kind, RunConfig, ShouldRun, Step};
 use crate::core::config::TargetSelection;
 use crate::core::config::flags::get_completion;
 use crate::utils::exec::command;
+use crate::{Mode, t};
 
 #[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
 pub struct BuildManifest;
@@ -116,17 +116,27 @@ impl Step for Miri {
     }
 
     fn run(self, builder: &Builder<'_>) {
-        let host = builder.build.build;
+        let host = builder.build.host_target;
         let target = self.target;
-        let stage = builder.top_stage;
+
+        // `x run` uses stage 0 by default but miri does not work well with stage 0.
+        // Change the stage to 1 if it's not set explicitly.
+        let stage = if builder.config.is_explicit_stage() || builder.top_stage >= 1 {
+            builder.top_stage
+        } else {
+            1
+        };
+
         if stage == 0 {
             eprintln!("miri cannot be run at stage 0");
             std::process::exit(1);
         }
 
         // This compiler runs on the host, we'll just use it for the target.
-        let target_compiler = builder.compiler(stage, host);
-        let host_compiler = tool::get_tool_rustc_compiler(builder, target_compiler);
+        let target_compiler = builder.compiler(stage, target);
+        let miri_build = builder.ensure(tool::Miri { compiler: target_compiler, target });
+        // Rustc tools are off by one stage, so use the build compiler to run miri.
+        let host_compiler = miri_build.build_compiler;
 
         // Get a target sysroot for Miri.
         let miri_sysroot = test::Miri::build_miri_sysroot(builder, target_compiler, target);
@@ -243,6 +253,7 @@ impl Step for GenerateCopyright {
         cmd.env("SRC_DIR", &builder.src);
         cmd.env("VENDOR_DIR", &vendored_sources);
         cmd.env("CARGO", &builder.initial_cargo);
+        cmd.env("CARGO_HOME", t!(home::cargo_home()));
         // it is important that generate-copyright runs from the root of the
         // source tree, because it uses relative paths
         cmd.current_dir(&builder.src);
@@ -390,5 +401,86 @@ impl Step for CyclicStep {
     fn run(self, builder: &Builder<'_>) -> Self::Output {
         // When n=0, the step will try to ensure itself, causing a step cycle.
         builder.ensure(CyclicStep { n: self.n.saturating_sub(1) })
+    }
+}
+
+/// Step to manually run the coverage-dump tool (`./x run coverage-dump`).
+///
+/// The coverage-dump tool is an internal detail of coverage tests, so this run
+/// step is only needed when testing coverage-dump manually.
+#[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
+pub struct CoverageDump;
+
+impl Step for CoverageDump {
+    type Output = ();
+
+    const DEFAULT: bool = false;
+    const ONLY_HOSTS: bool = true;
+
+    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
+        run.path("src/tools/coverage-dump")
+    }
+
+    fn make_run(run: RunConfig<'_>) {
+        run.builder.ensure(Self {});
+    }
+
+    fn run(self, builder: &Builder<'_>) {
+        let mut cmd = builder.tool_cmd(Tool::CoverageDump);
+        cmd.args(&builder.config.free_args);
+        cmd.run(builder);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Rustfmt;
+
+impl Step for Rustfmt {
+    type Output = ();
+    const ONLY_HOSTS: bool = true;
+
+    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
+        run.path("src/tools/rustfmt")
+    }
+
+    fn make_run(run: RunConfig<'_>) {
+        run.builder.ensure(Rustfmt);
+    }
+
+    fn run(self, builder: &Builder<'_>) {
+        let host = builder.build.host_target;
+
+        // `x run` uses stage 0 by default but rustfmt does not work well with stage 0.
+        // Change the stage to 1 if it's not set explicitly.
+        let stage = if builder.config.is_explicit_stage() || builder.top_stage >= 1 {
+            builder.top_stage
+        } else {
+            1
+        };
+
+        if stage == 0 {
+            eprintln!("rustfmt cannot be run at stage 0");
+            eprintln!("HELP: Use `x fmt` to use stage 0 rustfmt.");
+            std::process::exit(1);
+        }
+
+        let compiler = builder.compiler(stage, host);
+        let rustfmt_build = builder.ensure(tool::Rustfmt { compiler, target: host });
+
+        let mut rustfmt = tool::prepare_tool_cargo(
+            builder,
+            rustfmt_build.build_compiler,
+            Mode::ToolRustc,
+            host,
+            Kind::Run,
+            "src/tools/rustfmt",
+            SourceType::InTree,
+            &[],
+        );
+
+        rustfmt.args(["--bin", "rustfmt", "--"]);
+        rustfmt.args(builder.config.args());
+
+        rustfmt.into_cmd().run(builder);
     }
 }

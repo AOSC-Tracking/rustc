@@ -7,6 +7,7 @@ use stable_mir::ty::{
 };
 
 use crate::rustc_smir::{Stable, Tables, alloc};
+use crate::stable_mir;
 
 impl<'tcx> Stable<'tcx> for ty::AliasTyKind {
     type T = stable_mir::ty::AliasKind;
@@ -15,7 +16,7 @@ impl<'tcx> Stable<'tcx> for ty::AliasTyKind {
             ty::Projection => stable_mir::ty::AliasKind::Projection,
             ty::Inherent => stable_mir::ty::AliasKind::Inherent,
             ty::Opaque => stable_mir::ty::AliasKind::Opaque,
-            ty::Weak => stable_mir::ty::AliasKind::Weak,
+            ty::Free => stable_mir::ty::AliasKind::Free,
         }
     }
 }
@@ -99,7 +100,7 @@ impl<'tcx> Stable<'tcx> for ty::ExistentialProjection<'tcx> {
         stable_mir::ty::ExistentialProjection {
             def_id: tables.trait_def(*def_id),
             generic_args: args.stable(tables),
-            term: term.unpack().stable(tables),
+            term: term.kind().stable(tables),
         }
     }
 }
@@ -157,7 +158,7 @@ impl<'tcx> Stable<'tcx> for ty::FieldDef {
 impl<'tcx> Stable<'tcx> for ty::GenericArgs<'tcx> {
     type T = stable_mir::ty::GenericArgs;
     fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
-        GenericArgs(self.iter().map(|arg| arg.unpack().stable(tables)).collect())
+        GenericArgs(self.iter().map(|arg| arg.kind().stable(tables)).collect())
     }
 }
 
@@ -411,6 +412,7 @@ impl<'tcx> Stable<'tcx> for ty::Pattern<'tcx> {
                 end: Some(end.stable(tables)),
                 include_end: true,
             },
+            ty::PatternKind::Or(_) => todo!(),
         }
     }
 }
@@ -602,8 +604,8 @@ impl<'tcx> Stable<'tcx> for ty::PredicateKind<'tcx> {
             PredicateKind::NormalizesTo(_pred) => unimplemented!(),
             PredicateKind::AliasRelate(a, b, alias_relation_direction) => {
                 stable_mir::ty::PredicateKind::AliasRelate(
-                    a.unpack().stable(tables),
-                    b.unpack().stable(tables),
+                    a.kind().stable(tables),
+                    b.kind().stable(tables),
                     alias_relation_direction.stable(tables),
                 )
             }
@@ -637,8 +639,8 @@ impl<'tcx> Stable<'tcx> for ty::ClauseKind<'tcx> {
                 const_.stable(tables),
                 ty.stable(tables),
             ),
-            ClauseKind::WellFormed(generic_arg) => {
-                stable_mir::ty::ClauseKind::WellFormed(generic_arg.unpack().stable(tables))
+            ClauseKind::WellFormed(term) => {
+                stable_mir::ty::ClauseKind::WellFormed(term.kind().stable(tables))
             }
             ClauseKind::ConstEvaluatable(const_) => {
                 stable_mir::ty::ClauseKind::ConstEvaluatable(const_.stable(tables))
@@ -724,7 +726,7 @@ impl<'tcx> Stable<'tcx> for ty::ProjectionPredicate<'tcx> {
         let ty::ProjectionPredicate { projection_term, term } = self;
         stable_mir::ty::ProjectionPredicate {
             projection_term: projection_term.stable(tables),
-            term: term.unpack().stable(tables),
+            term: term.kind().stable(tables),
         }
     }
 }
@@ -812,6 +814,8 @@ impl<'tcx> Stable<'tcx> for ty::Instance<'tcx> {
             | ty::InstanceKind::DropGlue(..)
             | ty::InstanceKind::CloneShim(..)
             | ty::InstanceKind::FnPtrShim(..)
+            | ty::InstanceKind::FutureDropPollShim(..)
+            | ty::InstanceKind::AsyncDropGlue(..)
             | ty::InstanceKind::AsyncDropGlueCtorShim(..) => {
                 stable_mir::mir::mono::InstanceKind::Shim
             }
@@ -870,12 +874,13 @@ impl<'tcx> Stable<'tcx> for rustc_abi::ExternAbi {
             ExternAbi::CCmseNonSecureCall => Abi::CCmseNonSecureCall,
             ExternAbi::CCmseNonSecureEntry => Abi::CCmseNonSecureEntry,
             ExternAbi::System { unwind } => Abi::System { unwind },
-            ExternAbi::RustIntrinsic => Abi::RustIntrinsic,
             ExternAbi::RustCall => Abi::RustCall,
             ExternAbi::Unadjusted => Abi::Unadjusted,
             ExternAbi::RustCold => Abi::RustCold,
+            ExternAbi::RustInvalid => Abi::RustInvalid,
             ExternAbi::RiscvInterruptM => Abi::RiscvInterruptM,
             ExternAbi::RiscvInterruptS => Abi::RiscvInterruptS,
+            ExternAbi::Custom => Abi::Custom,
         }
     }
 }
@@ -888,5 +893,79 @@ impl<'tcx> Stable<'tcx> for rustc_session::cstore::ForeignModule {
             def_id: tables.foreign_module_def(self.def_id),
             abi: self.abi.stable(tables),
         }
+    }
+}
+
+impl<'tcx> Stable<'tcx> for ty::AssocKind {
+    type T = stable_mir::ty::AssocKind;
+
+    fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
+        use stable_mir::ty::{AssocKind, AssocTypeData};
+        match *self {
+            ty::AssocKind::Const { name } => AssocKind::Const { name: name.to_string() },
+            ty::AssocKind::Fn { name, has_self } => {
+                AssocKind::Fn { name: name.to_string(), has_self }
+            }
+            ty::AssocKind::Type { data } => AssocKind::Type {
+                data: match data {
+                    ty::AssocTypeData::Normal(name) => AssocTypeData::Normal(name.to_string()),
+                    ty::AssocTypeData::Rpitit(rpitit) => {
+                        AssocTypeData::Rpitit(rpitit.stable(tables))
+                    }
+                },
+            },
+        }
+    }
+}
+
+impl<'tcx> Stable<'tcx> for ty::AssocItemContainer {
+    type T = stable_mir::ty::AssocItemContainer;
+
+    fn stable(&self, _tables: &mut Tables<'_>) -> Self::T {
+        use stable_mir::ty::AssocItemContainer;
+        match self {
+            ty::AssocItemContainer::Trait => AssocItemContainer::Trait,
+            ty::AssocItemContainer::Impl => AssocItemContainer::Impl,
+        }
+    }
+}
+
+impl<'tcx> Stable<'tcx> for ty::AssocItem {
+    type T = stable_mir::ty::AssocItem;
+
+    fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
+        stable_mir::ty::AssocItem {
+            def_id: tables.assoc_def(self.def_id),
+            kind: self.kind.stable(tables),
+            container: self.container.stable(tables),
+            trait_item_def_id: self.trait_item_def_id.map(|did| tables.assoc_def(did)),
+        }
+    }
+}
+
+impl<'tcx> Stable<'tcx> for ty::ImplTraitInTraitData {
+    type T = stable_mir::ty::ImplTraitInTraitData;
+
+    fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
+        use stable_mir::ty::ImplTraitInTraitData;
+        match self {
+            ty::ImplTraitInTraitData::Trait { fn_def_id, opaque_def_id } => {
+                ImplTraitInTraitData::Trait {
+                    fn_def_id: tables.fn_def(*fn_def_id),
+                    opaque_def_id: tables.opaque_def(*opaque_def_id),
+                }
+            }
+            ty::ImplTraitInTraitData::Impl { fn_def_id } => {
+                ImplTraitInTraitData::Impl { fn_def_id: tables.fn_def(*fn_def_id) }
+            }
+        }
+    }
+}
+
+impl<'tcx> Stable<'tcx> for rustc_middle::ty::util::Discr<'tcx> {
+    type T = stable_mir::ty::Discr;
+
+    fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
+        stable_mir::ty::Discr { val: self.val, ty: self.ty.stable(tables) }
     }
 }

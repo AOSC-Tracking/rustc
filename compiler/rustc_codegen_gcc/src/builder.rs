@@ -12,7 +12,7 @@ use rustc_abi::{Align, HasDataLayout, Size, TargetDataLayout, WrappingRange};
 use rustc_apfloat::{Float, Round, Status, ieee};
 use rustc_codegen_ssa::MemFlags;
 use rustc_codegen_ssa::common::{
-    AtomicOrdering, AtomicRmwBinOp, IntPredicate, RealPredicate, SynchronizationScope, TypeKind,
+    AtomicRmwBinOp, IntPredicate, RealPredicate, SynchronizationScope, TypeKind,
 };
 use rustc_codegen_ssa::mir::operand::{OperandRef, OperandValue};
 use rustc_codegen_ssa::mir::place::PlaceRef;
@@ -26,11 +26,11 @@ use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
 use rustc_middle::ty::layout::{
     FnAbiError, FnAbiOfHelpers, FnAbiRequest, HasTyCtxt, HasTypingEnv, LayoutError, LayoutOfHelpers,
 };
-use rustc_middle::ty::{self, Instance, Ty, TyCtxt};
+use rustc_middle::ty::{self, AtomicOrdering, Instance, Ty, TyCtxt};
 use rustc_span::Span;
 use rustc_span::def_id::DefId;
 use rustc_target::callconv::FnAbi;
-use rustc_target::spec::{HasTargetSpec, HasWasmCAbiOpt, HasX86AbiOpt, Target, WasmCAbi, X86Abi};
+use rustc_target::spec::{HasTargetSpec, HasX86AbiOpt, Target, X86Abi};
 
 use crate::common::{SignType, TypeReflection, type_is_pointer};
 use crate::context::CodegenCx;
@@ -45,7 +45,7 @@ enum ExtremumOperation {
     Min,
 }
 
-pub struct Builder<'a: 'gcc, 'gcc, 'tcx> {
+pub struct Builder<'a, 'gcc, 'tcx> {
     pub cx: &'a CodegenCx<'gcc, 'tcx>,
     pub block: Block<'gcc>,
     pub location: Option<Location<'gcc>>,
@@ -75,7 +75,7 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
 
         let load_ordering = match order {
             // TODO(antoyo): does this make sense?
-            AtomicOrdering::AcquireRelease | AtomicOrdering::Release => AtomicOrdering::Acquire,
+            AtomicOrdering::AcqRel | AtomicOrdering::Release => AtomicOrdering::Acquire,
             _ => order,
         };
         let previous_value =
@@ -368,16 +368,8 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
         let previous_arg_count = args.len();
         let orig_args = args;
         let args = {
-            let function_address_names = self.function_address_names.borrow();
-            let original_function_name = function_address_names.get(&func_ptr);
             func_ptr = llvm::adjust_function(self.context, &func_name, func_ptr, args);
-            llvm::adjust_intrinsic_arguments(
-                self,
-                gcc_func,
-                args.into(),
-                &func_name,
-                original_function_name,
-            )
+            llvm::adjust_intrinsic_arguments(self, gcc_func, args.into(), &func_name)
         };
         let args_adjusted = args.len() != previous_arg_count;
         let args = self.check_ptr_call("call", func_ptr, &args);
@@ -576,11 +568,28 @@ impl<'a, 'gcc, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'gcc, 'tcx> {
     ) {
         let mut gcc_cases = vec![];
         let typ = self.val_ty(value);
-        for (on_val, dest) in cases {
-            let on_val = self.const_uint_big(typ, on_val);
-            gcc_cases.push(self.context.new_case(on_val, on_val, dest));
+        // FIXME(FractalFir): This is a workaround for a libgccjit limitation.
+        // Currently, libgccjit can't directly create 128 bit integers.
+        // Since switch cases must be values, and casts are not constant, we can't use 128 bit switch cases.
+        // In such a case, we will simply fall back to an if-ladder.
+        // This *may* be slower than a native switch, but a slow working solution is better than none at all.
+        if typ.is_i128(self) || typ.is_u128(self) {
+            for (on_val, dest) in cases {
+                let on_val = self.const_uint_big(typ, on_val);
+                let is_case =
+                    self.context.new_comparison(self.location, ComparisonOp::Equals, value, on_val);
+                let next_block = self.current_func().new_block("case");
+                self.block.end_with_conditional(self.location, is_case, dest, next_block);
+                self.block = next_block;
+            }
+            self.block.end_with_jump(self.location, default_block);
+        } else {
+            for (on_val, dest) in cases {
+                let on_val = self.const_uint_big(typ, on_val);
+                gcc_cases.push(self.context.new_case(on_val, on_val, dest));
+            }
+            self.block.end_with_switch(self.location, value, default_block, &gcc_cases);
         }
-        self.block.end_with_switch(self.location, value, default_block, &gcc_cases);
     }
 
     #[cfg(feature = "master")]
@@ -756,7 +765,15 @@ impl<'a, 'gcc, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'gcc, 'tcx> {
 
         #[cfg(feature = "master")]
         match self.cx.type_kind(a_type) {
-            TypeKind::Half | TypeKind::Float => {
+            TypeKind::Half => {
+                let fmodf = self.context.get_builtin_function("fmodf");
+                let f32_type = self.type_f32();
+                let a = self.context.new_cast(self.location, a, f32_type);
+                let b = self.context.new_cast(self.location, b, f32_type);
+                let result = self.context.new_call(self.location, fmodf, &[a, b]);
+                return self.context.new_cast(self.location, result, a_type);
+            }
+            TypeKind::Float => {
                 let fmodf = self.context.get_builtin_function("fmodf");
                 return self.context.new_call(self.location, fmodf, &[a, b]);
             }
@@ -765,8 +782,19 @@ impl<'a, 'gcc, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'gcc, 'tcx> {
                 return self.context.new_call(self.location, fmod, &[a, b]);
             }
             TypeKind::FP128 => {
-                let fmodl = self.context.get_builtin_function("fmodl");
-                return self.context.new_call(self.location, fmodl, &[a, b]);
+                let f128_type = self.type_f128();
+                let fmodf128 = self.context.new_function(
+                    None,
+                    gccjit::FunctionType::Extern,
+                    f128_type,
+                    &[
+                        self.context.new_parameter(None, f128_type, "a"),
+                        self.context.new_parameter(None, f128_type, "b"),
+                    ],
+                    "fmodf128",
+                    false,
+                );
+                return self.context.new_call(self.location, fmodf128, &[a, b]);
             }
             _ => (),
         }
@@ -888,7 +916,7 @@ impl<'a, 'gcc, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'gcc, 'tcx> {
     fn checked_binop(
         &mut self,
         oop: OverflowOp,
-        typ: Ty<'_>,
+        typ: Ty<'tcx>,
         lhs: Self::Value,
         rhs: Self::Value,
     ) -> (Self::Value, Self::Value) {
@@ -915,7 +943,12 @@ impl<'a, 'gcc, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'gcc, 'tcx> {
         // dereference after a drop, for instance.
         // FIXME(antoyo): this check that we don't call get_aligned() a second time on a type.
         // Ideally, we shouldn't need to do this check.
-        let aligned_type = if pointee_ty == self.cx.u128_type || pointee_ty == self.cx.i128_type {
+        // FractalFir: the `align == self.int128_align` check ensures we *do* call `get_aligned` if
+        // the alignment of a `u128`/`i128` is not the one mandated by the ABI. This ensures we handle
+        // under-aligned loads correctly.
+        let aligned_type = if (pointee_ty == self.cx.u128_type || pointee_ty == self.cx.i128_type)
+            && align == self.int128_align
+        {
             pointee_ty
         } else {
             pointee_ty.get_aligned(align.bytes())
@@ -1001,13 +1034,13 @@ impl<'a, 'gcc, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'gcc, 'tcx> {
             let b_offset = a.size(self).align_to(b.align(self).abi);
 
             let mut load = |i, scalar: &abi::Scalar, align| {
-                let llptr = if i == 0 {
+                let ptr = if i == 0 {
                     place.val.llval
                 } else {
                     self.inbounds_ptradd(place.val.llval, self.const_usize(b_offset.bytes()))
                 };
                 let llty = place.layout.scalar_pair_element_gcc_type(self, i);
-                let load = self.load(llty, llptr, align);
+                let load = self.load(llty, ptr, align);
                 scalar_load_metadata(self, load, scalar);
                 if scalar.is_bool() { self.trunc(load, self.type_i1()) } else { load }
             };
@@ -1271,7 +1304,50 @@ impl<'a, 'gcc, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'gcc, 'tcx> {
     }
 
     fn fcmp(&mut self, op: RealPredicate, lhs: RValue<'gcc>, rhs: RValue<'gcc>) -> RValue<'gcc> {
-        self.context.new_comparison(self.location, op.to_gcc_comparison(), lhs, rhs)
+        // LLVM has a concept of "unordered compares", where eg ULT returns true if either the two
+        // arguments are unordered (i.e. either is NaN), or the lhs is less than the rhs. GCC does
+        // not natively have this concept, so in some cases we must manually handle NaNs
+        let must_handle_nan = match op {
+            RealPredicate::RealPredicateFalse => unreachable!(),
+            RealPredicate::RealOEQ => false,
+            RealPredicate::RealOGT => false,
+            RealPredicate::RealOGE => false,
+            RealPredicate::RealOLT => false,
+            RealPredicate::RealOLE => false,
+            RealPredicate::RealONE => false,
+            RealPredicate::RealORD => unreachable!(),
+            RealPredicate::RealUNO => unreachable!(),
+            RealPredicate::RealUEQ => false,
+            RealPredicate::RealUGT => true,
+            RealPredicate::RealUGE => true,
+            RealPredicate::RealULT => true,
+            RealPredicate::RealULE => true,
+            RealPredicate::RealUNE => false,
+            RealPredicate::RealPredicateTrue => unreachable!(),
+        };
+
+        let cmp = self.context.new_comparison(self.location, op.to_gcc_comparison(), lhs, rhs);
+
+        if must_handle_nan {
+            let is_nan = self.context.new_binary_op(
+                self.location,
+                BinaryOp::LogicalOr,
+                self.cx.bool_type,
+                // compare a value to itself to check whether it is NaN
+                self.context.new_comparison(self.location, ComparisonOp::NotEquals, lhs, lhs),
+                self.context.new_comparison(self.location, ComparisonOp::NotEquals, rhs, rhs),
+            );
+
+            self.context.new_binary_op(
+                self.location,
+                BinaryOp::LogicalOr,
+                self.cx.bool_type,
+                is_nan,
+                cmp,
+            )
+        } else {
+            cmp
+        }
     }
 
     /* Miscellaneous instructions */
@@ -2342,12 +2418,6 @@ impl<'tcx> HasTargetSpec for Builder<'_, '_, 'tcx> {
     }
 }
 
-impl<'tcx> HasWasmCAbiOpt for Builder<'_, '_, 'tcx> {
-    fn wasm_c_abi_opt(&self) -> WasmCAbi {
-        self.cx.wasm_c_abi_opt()
-    }
-}
-
 impl<'tcx> HasX86AbiOpt for Builder<'_, '_, 'tcx> {
     fn x86_abi_opt(&self) -> X86Abi {
         self.cx.x86_abi_opt()
@@ -2419,12 +2489,11 @@ impl ToGccOrdering for AtomicOrdering {
         use MemOrdering::*;
 
         let ordering = match self {
-            AtomicOrdering::Unordered => __ATOMIC_RELAXED,
             AtomicOrdering::Relaxed => __ATOMIC_RELAXED, // TODO(antoyo): check if that's the same.
             AtomicOrdering::Acquire => __ATOMIC_ACQUIRE,
             AtomicOrdering::Release => __ATOMIC_RELEASE,
-            AtomicOrdering::AcquireRelease => __ATOMIC_ACQ_REL,
-            AtomicOrdering::SequentiallyConsistent => __ATOMIC_SEQ_CST,
+            AtomicOrdering::AcqRel => __ATOMIC_ACQ_REL,
+            AtomicOrdering::SeqCst => __ATOMIC_SEQ_CST,
         };
         ordering as i32
     }

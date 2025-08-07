@@ -573,7 +573,7 @@ pub fn _mm256_blendv_ps(a: __m256, b: __m256, c: __m256) -> __m256 {
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub fn _mm256_dp_ps<const IMM8: i32>(a: __m256, b: __m256) -> __m256 {
     static_assert_uimm_bits!(IMM8, 8);
-    unsafe { vdpps(a, b, IMM8) }
+    unsafe { vdpps(a, b, IMM8 as i8) }
 }
 
 /// Horizontal addition of adjacent pairs in the two packed vectors
@@ -970,10 +970,7 @@ pub fn _mm256_cvttps_epi32(a: __m256) -> __m256i {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_extractf128_ps)
 #[inline]
 #[target_feature(enable = "avx")]
-#[cfg_attr(
-    all(test, not(target_env = "msvc")),
-    assert_instr(vextractf128, IMM1 = 1)
-)]
+#[cfg_attr(test, assert_instr(vextractf128, IMM1 = 1))]
 #[rustc_legacy_const_generics(1)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub fn _mm256_extractf128_ps<const IMM1: i32>(a: __m256) -> __m128 {
@@ -993,10 +990,7 @@ pub fn _mm256_extractf128_ps<const IMM1: i32>(a: __m256) -> __m128 {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_extractf128_pd)
 #[inline]
 #[target_feature(enable = "avx")]
-#[cfg_attr(
-    all(test, not(target_env = "msvc")),
-    assert_instr(vextractf128, IMM1 = 1)
-)]
+#[cfg_attr(test, assert_instr(vextractf128, IMM1 = 1))]
 #[rustc_legacy_const_generics(1)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub fn _mm256_extractf128_pd<const IMM1: i32>(a: __m256d) -> __m128d {
@@ -1009,10 +1003,7 @@ pub fn _mm256_extractf128_pd<const IMM1: i32>(a: __m256d) -> __m128d {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_extractf128_si256)
 #[inline]
 #[target_feature(enable = "avx")]
-#[cfg_attr(
-    all(test, not(target_env = "msvc")),
-    assert_instr(vextractf128, IMM1 = 1)
-)]
+#[cfg_attr(test, assert_instr(vextractf128, IMM1 = 1))]
 #[rustc_legacy_const_generics(1)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub fn _mm256_extractf128_si256<const IMM1: i32>(a: __m256i) -> __m128i {
@@ -1328,10 +1319,7 @@ pub unsafe fn _mm256_broadcast_pd(a: &__m128d) -> __m256d {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_insertf128_ps)
 #[inline]
 #[target_feature(enable = "avx")]
-#[cfg_attr(
-    all(test, not(target_env = "msvc")),
-    assert_instr(vinsertf128, IMM1 = 1)
-)]
+#[cfg_attr(test, assert_instr(vinsertf128, IMM1 = 1))]
 #[rustc_legacy_const_generics(2)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub fn _mm256_insertf128_ps<const IMM1: i32>(a: __m256, b: __m128) -> __m256 {
@@ -1352,10 +1340,7 @@ pub fn _mm256_insertf128_ps<const IMM1: i32>(a: __m256, b: __m128) -> __m256 {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_insertf128_pd)
 #[inline]
 #[target_feature(enable = "avx")]
-#[cfg_attr(
-    all(test, not(target_env = "msvc")),
-    assert_instr(vinsertf128, IMM1 = 1)
-)]
+#[cfg_attr(test, assert_instr(vinsertf128, IMM1 = 1))]
 #[rustc_legacy_const_generics(2)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub fn _mm256_insertf128_pd<const IMM1: i32>(a: __m256d, b: __m128d) -> __m256d {
@@ -1375,10 +1360,7 @@ pub fn _mm256_insertf128_pd<const IMM1: i32>(a: __m256d, b: __m128d) -> __m256d 
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_insertf128_si256)
 #[inline]
 #[target_feature(enable = "avx")]
-#[cfg_attr(
-    all(test, not(target_env = "msvc")),
-    assert_instr(vinsertf128, IMM1 = 1)
-)]
+#[cfg_attr(test, assert_instr(vinsertf128, IMM1 = 1))]
 #[rustc_legacy_const_generics(2)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub fn _mm256_insertf128_si256<const IMM1: i32>(a: __m256i, b: __m128i) -> __m256i {
@@ -1443,7 +1425,10 @@ pub fn _mm256_insert_epi32<const INDEX: i32>(a: __m256i, i: i32) -> __m256i {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_load_pd)
 #[inline]
 #[target_feature(enable = "avx")]
-#[cfg_attr(test, assert_instr(vmovap))]
+#[cfg_attr(
+    all(test, not(all(target_arch = "x86", target_env = "msvc"))),
+    assert_instr(vmovap)
+)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 #[allow(clippy::cast_ptr_alignment)]
 pub unsafe fn _mm256_load_pd(mem_addr: *const f64) -> __m256d {
@@ -1458,7 +1443,10 @@ pub unsafe fn _mm256_load_pd(mem_addr: *const f64) -> __m256d {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_store_pd)
 #[inline]
 #[target_feature(enable = "avx")]
-#[cfg_attr(test, assert_instr(vmovap))]
+#[cfg_attr(
+    all(test, not(all(target_arch = "x86", target_env = "msvc"))),
+    assert_instr(vmovap)
+)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 #[allow(clippy::cast_ptr_alignment)]
 pub unsafe fn _mm256_store_pd(mem_addr: *mut f64, a: __m256d) {
@@ -1473,7 +1461,10 @@ pub unsafe fn _mm256_store_pd(mem_addr: *mut f64, a: __m256d) {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_load_ps)
 #[inline]
 #[target_feature(enable = "avx")]
-#[cfg_attr(test, assert_instr(vmovaps))]
+#[cfg_attr(
+    all(test, not(all(target_arch = "x86", target_env = "msvc"))),
+    assert_instr(vmovaps)
+)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 #[allow(clippy::cast_ptr_alignment)]
 pub unsafe fn _mm256_load_ps(mem_addr: *const f32) -> __m256 {
@@ -1488,7 +1479,10 @@ pub unsafe fn _mm256_load_ps(mem_addr: *const f32) -> __m256 {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_store_ps)
 #[inline]
 #[target_feature(enable = "avx")]
-#[cfg_attr(test, assert_instr(vmovaps))]
+#[cfg_attr(
+    all(test, not(all(target_arch = "x86", target_env = "msvc"))),
+    assert_instr(vmovaps)
+)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 #[allow(clippy::cast_ptr_alignment)]
 pub unsafe fn _mm256_store_ps(mem_addr: *mut f32, a: __m256) {
@@ -1566,7 +1560,10 @@ pub unsafe fn _mm256_storeu_ps(mem_addr: *mut f32, a: __m256) {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_load_si256)
 #[inline]
 #[target_feature(enable = "avx")]
-#[cfg_attr(test, assert_instr(vmovaps))] // FIXME vmovdqa expected
+#[cfg_attr(
+    all(test, not(all(target_arch = "x86", target_env = "msvc"))),
+    assert_instr(vmovaps)
+)] // FIXME vmovdqa expected
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm256_load_si256(mem_addr: *const __m256i) -> __m256i {
     *mem_addr
@@ -1579,7 +1576,10 @@ pub unsafe fn _mm256_load_si256(mem_addr: *const __m256i) -> __m256i {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_store_si256)
 #[inline]
 #[target_feature(enable = "avx")]
-#[cfg_attr(test, assert_instr(vmovaps))] // FIXME vmovdqa expected
+#[cfg_attr(
+    all(test, not(all(target_arch = "x86", target_env = "msvc"))),
+    assert_instr(vmovaps)
+)] // FIXME vmovdqa expected
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm256_store_si256(mem_addr: *mut __m256i, a: __m256i) {
     *mem_addr = a;
@@ -2815,8 +2815,9 @@ pub fn _mm256_zextpd128_pd256(a: __m128d) -> __m256d {
 }
 
 /// Returns vector of type `__m256` with indeterminate elements.
-/// Despite being "undefined", this is some valid value and not equivalent to [`mem::MaybeUninit`].
-/// In practice, this is equivalent to [`mem::zeroed`].
+/// Despite using the word "undefined" (following Intel's naming scheme), this non-deterministically
+/// picks some valid value and is not equivalent to [`mem::MaybeUninit`].
+/// In practice, this is typically equivalent to [`mem::zeroed`].
 ///
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_undefined_ps)
 #[inline]
@@ -2828,8 +2829,9 @@ pub fn _mm256_undefined_ps() -> __m256 {
 }
 
 /// Returns vector of type `__m256d` with indeterminate elements.
-/// Despite being "undefined", this is some valid value and not equivalent to [`mem::MaybeUninit`].
-/// In practice, this is equivalent to [`mem::zeroed`].
+/// Despite using the word "undefined" (following Intel's naming scheme), this non-deterministically
+/// picks some valid value and is not equivalent to [`mem::MaybeUninit`].
+/// In practice, this is typically equivalent to [`mem::zeroed`].
 ///
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_undefined_pd)
 #[inline]
@@ -2841,8 +2843,9 @@ pub fn _mm256_undefined_pd() -> __m256d {
 }
 
 /// Returns vector of type __m256i with with indeterminate elements.
-/// Despite being "undefined", this is some valid value and not equivalent to [`mem::MaybeUninit`].
-/// In practice, this is equivalent to [`mem::zeroed`].
+/// Despite using the word "undefined" (following Intel's naming scheme), this non-deterministically
+/// picks some valid value and is not equivalent to [`mem::MaybeUninit`].
+/// In practice, this is typically equivalent to [`mem::zeroed`].
 ///
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_undefined_si256)
 #[inline]
@@ -3040,7 +3043,7 @@ unsafe extern "C" {
     #[link_name = "llvm.x86.avx.round.ps.256"]
     fn roundps256(a: __m256, b: i32) -> __m256;
     #[link_name = "llvm.x86.avx.dp.ps.256"]
-    fn vdpps(a: __m256, b: __m256, imm8: i32) -> __m256;
+    fn vdpps(a: __m256, b: __m256, imm8: i8) -> __m256;
     #[link_name = "llvm.x86.avx.hadd.pd.256"]
     fn vhaddpd(a: __m256d, b: __m256d) -> __m256d;
     #[link_name = "llvm.x86.avx.hadd.ps.256"]

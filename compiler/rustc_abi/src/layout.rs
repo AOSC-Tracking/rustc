@@ -8,7 +8,7 @@ use rustc_index::bit_set::BitMatrix;
 use tracing::debug;
 
 use crate::{
-    AbiAndPrefAlign, Align, BackendRepr, FieldsShape, HasDataLayout, IndexSlice, IndexVec, Integer,
+    AbiAlign, Align, BackendRepr, FieldsShape, HasDataLayout, IndexSlice, IndexVec, Integer,
     LayoutData, Niche, NonZeroUsize, Primitive, ReprOptions, Scalar, Size, StructKind, TagEncoding,
     Variants, WrappingRange,
 };
@@ -173,13 +173,7 @@ impl<Cx: HasDataLayout> LayoutCalculator<Cx> {
             // Non-power-of-two vectors have padding up to the next power-of-two.
             // If we're a packed repr, remove the padding while keeping the alignment as close
             // to a vector as possible.
-            (
-                BackendRepr::Memory { sized: true },
-                AbiAndPrefAlign {
-                    abi: Align::max_aligned_factor(size),
-                    pref: dl.llvmlike_vector_align(size).pref,
-                },
-            )
+            (BackendRepr::Memory { sized: true }, AbiAlign { abi: Align::max_aligned_factor(size) })
         } else {
             (BackendRepr::SimdVector { element: e_repr, count }, dl.llvmlike_vector_align(size))
         };
@@ -315,7 +309,7 @@ impl<Cx: HasDataLayout> LayoutCalculator<Cx> {
         repr: &ReprOptions,
         variants: &IndexSlice<VariantIdx, IndexVec<FieldIdx, F>>,
         is_enum: bool,
-        is_unsafe_cell: bool,
+        is_special_no_niche: bool,
         scalar_valid_range: (Bound<u128>, Bound<u128>),
         discr_range_of_repr: impl Fn(i128, i128) -> (Integer, bool),
         discriminants: impl Iterator<Item = (VariantIdx, i128)>,
@@ -348,7 +342,7 @@ impl<Cx: HasDataLayout> LayoutCalculator<Cx> {
                 repr,
                 variants,
                 is_enum,
-                is_unsafe_cell,
+                is_special_no_niche,
                 scalar_valid_range,
                 always_sized,
                 present_first,
@@ -435,13 +429,13 @@ impl<Cx: HasDataLayout> LayoutCalculator<Cx> {
         }
 
         if let Some(pack) = repr.pack {
-            align = align.min(AbiAndPrefAlign::new(pack));
+            align = align.min(AbiAlign::new(pack));
         }
         // The unadjusted ABI alignment does not include repr(align), but does include repr(pack).
-        // See documentation on `LayoutS::unadjusted_abi_align`.
+        // See documentation on `LayoutData::unadjusted_abi_align`.
         let unadjusted_abi_align = align.abi;
         if let Some(repr_align) = repr.align {
-            align = align.max(AbiAndPrefAlign::new(repr_align));
+            align = align.max(AbiAlign::new(repr_align));
         }
         // `align` must not be modified after this, or `unadjusted_abi_align` could be inaccurate.
         let align = align;
@@ -505,7 +499,7 @@ impl<Cx: HasDataLayout> LayoutCalculator<Cx> {
         repr: &ReprOptions,
         variants: &IndexSlice<VariantIdx, IndexVec<FieldIdx, F>>,
         is_enum: bool,
-        is_unsafe_cell: bool,
+        is_special_no_niche: bool,
         scalar_valid_range: (Bound<u128>, Bound<u128>),
         always_sized: bool,
         present_first: VariantIdx,
@@ -524,7 +518,7 @@ impl<Cx: HasDataLayout> LayoutCalculator<Cx> {
         let mut st = self.univariant(&variants[v], repr, kind)?;
         st.variants = Variants::Single { index: v };
 
-        if is_unsafe_cell {
+        if is_special_no_niche {
             let hide_niches = |scalar: &mut _| match scalar {
                 Scalar::Initialized { value, valid_range } => {
                     *valid_range = WrappingRange::full(value.size(dl))
@@ -608,10 +602,10 @@ impl<Cx: HasDataLayout> LayoutCalculator<Cx> {
         dont_niche_optimize_enum: bool,
     ) -> LayoutCalculatorResult<FieldIdx, VariantIdx, F> {
         // Until we've decided whether to use the tagged or
-        // niche filling LayoutS, we don't want to intern the
+        // niche filling LayoutData, we don't want to intern the
         // variant layouts, so we can't store them in the
-        // overall LayoutS. Store the overall LayoutS
-        // and the variant LayoutSs here until then.
+        // overall LayoutData. Store the overall LayoutData
+        // and the variant LayoutDatas here until then.
         struct TmpLayout<FieldIdx: Idx, VariantIdx: Idx> {
             layout: LayoutData<FieldIdx, VariantIdx>,
             variants: IndexVec<VariantIdx, LayoutData<FieldIdx, VariantIdx>>,
@@ -758,7 +752,7 @@ impl<Cx: HasDataLayout> LayoutCalculator<Cx> {
                         niche_variants,
                         niche_start,
                     },
-                    tag_field: 0,
+                    tag_field: FieldIdx::new(0),
                     variants: IndexVec::new(),
                 },
                 fields: FieldsShape::Arbitrary {
@@ -1072,7 +1066,7 @@ impl<Cx: HasDataLayout> LayoutCalculator<Cx> {
             variants: Variants::Multiple {
                 tag,
                 tag_encoding: TagEncoding::Direct,
-                tag_field: 0,
+                tag_field: FieldIdx::new(0),
                 variants: IndexVec::new(),
             },
             fields: FieldsShape::Arbitrary {
@@ -1220,7 +1214,7 @@ impl<Cx: HasDataLayout> LayoutCalculator<Cx> {
 
                 match kind {
                     StructKind::AlwaysSized | StructKind::MaybeUnsized => {
-                        // Currently `LayoutS` only exposes a single niche so sorting is usually
+                        // Currently `LayoutData` only exposes a single niche so sorting is usually
                         // sufficient to get one niche into the preferred position. If it ever
                         // supported multiple niches then a more advanced pick-and-pack approach could
                         // provide better results. But even for the single-niche cache it's not
@@ -1289,7 +1283,7 @@ impl<Cx: HasDataLayout> LayoutCalculator<Cx> {
         if let StructKind::Prefixed(prefix_size, prefix_align) = kind {
             let prefix_align =
                 if let Some(pack) = pack { prefix_align.min(pack) } else { prefix_align };
-            align = align.max(AbiAndPrefAlign::new(prefix_align));
+            align = align.max(AbiAlign::new(prefix_align));
             offset = prefix_size.align_to(prefix_align);
         }
         for &i in &inverse_memory_index {
@@ -1308,7 +1302,7 @@ impl<Cx: HasDataLayout> LayoutCalculator<Cx> {
 
             // Invariant: offset < dl.obj_size_bound() <= 1<<61
             let field_align = if let Some(pack) = pack {
-                field.align.min(AbiAndPrefAlign::new(pack))
+                field.align.min(AbiAlign::new(pack))
             } else {
                 field.align
             };
@@ -1339,10 +1333,10 @@ impl<Cx: HasDataLayout> LayoutCalculator<Cx> {
         }
 
         // The unadjusted ABI alignment does not include repr(align), but does include repr(pack).
-        // See documentation on `LayoutS::unadjusted_abi_align`.
+        // See documentation on `LayoutData::unadjusted_abi_align`.
         let unadjusted_abi_align = align.abi;
         if let Some(repr_align) = repr.align {
-            align = align.max(AbiAndPrefAlign::new(repr_align));
+            align = align.max(AbiAlign::new(repr_align));
         }
         // `align` must not be modified after this point, or `unadjusted_abi_align` could be inaccurate.
         let align = align;

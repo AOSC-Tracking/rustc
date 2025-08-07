@@ -1,11 +1,11 @@
 //! Set and unset common attributes on LLVM values.
-
-use rustc_attr_parsing::{InlineAttr, InstructionSetAttr, OptimizeAttr};
+use rustc_attr_data_structures::{InlineAttr, InstructionSetAttr, OptimizeAttr};
 use rustc_codegen_ssa::traits::*;
 use rustc_hir::def_id::DefId;
 use rustc_middle::middle::codegen_fn_attrs::{CodegenFnAttrFlags, PatchableFunctionEntry};
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_session::config::{BranchProtection, FunctionReturn, OptLevel, PAuthKey, PacRet};
+use rustc_symbol_mangling::mangle_internal_symbol;
 use rustc_target::spec::{FramePointer, SanitizerSet, StackProbeType, StackProtector};
 use smallvec::SmallVec;
 
@@ -26,6 +26,22 @@ pub(crate) fn apply_to_callsite(callsite: &Value, idx: AttributePlace, attrs: &[
     if !attrs.is_empty() {
         llvm::AddCallSiteAttributes(callsite, idx, attrs);
     }
+}
+
+pub(crate) fn has_attr(llfn: &Value, idx: AttributePlace, attr: AttributeKind) -> bool {
+    llvm::HasAttributeAtIndex(llfn, idx, attr)
+}
+
+pub(crate) fn has_string_attr(llfn: &Value, name: &str) -> bool {
+    llvm::HasStringAttribute(llfn, name)
+}
+
+pub(crate) fn remove_from_llfn(llfn: &Value, place: AttributePlace, kind: AttributeKind) {
+    llvm::RemoveRustEnumAttributeAtIndex(llfn, place, kind);
+}
+
+pub(crate) fn remove_string_attr_from_llfn(llfn: &Value, name: &str) {
+    llvm::RemoveStringAttrFromFn(llfn, name);
 }
 
 /// Get LLVM attribute for the provided inline heuristic.
@@ -241,11 +257,11 @@ fn probestack_attr<'ll>(cx: &CodegenCx<'ll, '_>) -> Option<&'ll Attribute> {
         StackProbeType::Inline => "inline-asm",
         // Flag our internal `__rust_probestack` function as the stack probe symbol.
         // This is defined in the `compiler-builtins` crate for each architecture.
-        StackProbeType::Call => "__rust_probestack",
+        StackProbeType::Call => &mangle_internal_symbol(cx.tcx, "__rust_probestack"),
         // Pick from the two above based on the LLVM version.
         StackProbeType::InlineOrCall { min_llvm_version_for_inline } => {
             if llvm_util::get_version() < min_llvm_version_for_inline {
-                "__rust_probestack"
+                &mangle_internal_symbol(cx.tcx, "__rust_probestack")
             } else {
                 "inline-asm"
             }
@@ -407,30 +423,28 @@ pub(crate) fn llfn_attrs_from_instance<'ll, 'tcx>(
         // Do not set sanitizer attributes for naked functions.
         to_add.extend(sanitize_attrs(cx, codegen_fn_attrs.no_sanitize));
 
-        if llvm_util::get_version() >= (19, 0, 0) {
-            // For non-naked functions, set branch protection attributes on aarch64.
-            if let Some(BranchProtection { bti, pac_ret }) =
-                cx.sess().opts.unstable_opts.branch_protection
-            {
-                assert!(cx.sess().target.arch == "aarch64");
-                if bti {
-                    to_add.push(llvm::CreateAttrString(cx.llcx, "branch-target-enforcement"));
+        // For non-naked functions, set branch protection attributes on aarch64.
+        if let Some(BranchProtection { bti, pac_ret }) =
+            cx.sess().opts.unstable_opts.branch_protection
+        {
+            assert!(cx.sess().target.arch == "aarch64");
+            if bti {
+                to_add.push(llvm::CreateAttrString(cx.llcx, "branch-target-enforcement"));
+            }
+            if let Some(PacRet { leaf, pc, key }) = pac_ret {
+                if pc {
+                    to_add.push(llvm::CreateAttrString(cx.llcx, "branch-protection-pauth-lr"));
                 }
-                if let Some(PacRet { leaf, pc, key }) = pac_ret {
-                    if pc {
-                        to_add.push(llvm::CreateAttrString(cx.llcx, "branch-protection-pauth-lr"));
-                    }
-                    to_add.push(llvm::CreateAttrStringValue(
-                        cx.llcx,
-                        "sign-return-address",
-                        if leaf { "all" } else { "non-leaf" },
-                    ));
-                    to_add.push(llvm::CreateAttrStringValue(
-                        cx.llcx,
-                        "sign-return-address-key",
-                        if key == PAuthKey::A { "a_key" } else { "b_key" },
-                    ));
-                }
+                to_add.push(llvm::CreateAttrStringValue(
+                    cx.llcx,
+                    "sign-return-address",
+                    if leaf { "all" } else { "non-leaf" },
+                ));
+                to_add.push(llvm::CreateAttrStringValue(
+                    cx.llcx,
+                    "sign-return-address-key",
+                    if key == PAuthKey::A { "a_key" } else { "b_key" },
+                ));
             }
         }
     }
@@ -477,11 +491,7 @@ pub(crate) fn llfn_attrs_from_instance<'ll, 'tcx>(
         let allocated_pointer = AttributeKind::AllocatedPointer.create_attr(cx.llcx);
         attributes::apply_to_llfn(llfn, AttributePlace::Argument(0), &[allocated_pointer]);
     }
-    // function alignment can be set globally with the `-Zmin-function-alignment=<n>` flag;
-    // the alignment from a `#[repr(align(<n>))]` is used if it specifies a higher alignment.
-    if let Some(align) =
-        Ord::max(cx.tcx.sess.opts.unstable_opts.min_function_alignment, codegen_fn_attrs.alignment)
-    {
+    if let Some(align) = codegen_fn_attrs.alignment {
         llvm::set_alignment(llfn, align);
     }
     if let Some(backchain) = backchain_attr(cx) {
@@ -510,12 +520,6 @@ pub(crate) fn llfn_attrs_from_instance<'ll, 'tcx>(
             InstructionSetAttr::ArmA32 => "-thumb-mode".to_string(),
             InstructionSetAttr::ArmT32 => "+thumb-mode".to_string(),
         }))
-        // HACK: LLVM versions 19+ do not have the FPMR feature and treat it as always enabled
-        // It only exists as a feature in LLVM 18, cannot be passed down for any other version
-        .chain(match &*cx.tcx.sess.target.arch {
-            "aarch64" if llvm_util::get_version().0 == 18 => vec!["+fpmr".to_string()],
-            _ => vec![],
-        })
         .collect::<Vec<String>>();
 
     if cx.tcx.sess.target.is_like_wasm {

@@ -338,26 +338,26 @@ unsafe extern "C" {
     #[link_name = "llvm.ppc.altivec.vlogefp"]
     fn vlogefp(a: vector_float) -> vector_float;
 
-    #[link_name = "llvm.ppc.altivec.sll"]
+    #[link_name = "llvm.ppc.altivec.vsl"]
     fn vsl(a: vector_signed_int, b: vector_signed_int) -> vector_signed_int;
-    #[link_name = "llvm.ppc.altivec.slo"]
+    #[link_name = "llvm.ppc.altivec.vslo"]
     fn vslo(a: vector_signed_int, b: vector_signed_int) -> vector_signed_int;
 
-    #[link_name = "llvm.ppc.altivec.srab"]
+    #[link_name = "llvm.ppc.altivec.vsrab"]
     fn vsrab(a: vector_signed_char, b: vector_unsigned_char) -> vector_signed_char;
-    #[link_name = "llvm.ppc.altivec.srah"]
+    #[link_name = "llvm.ppc.altivec.vsrah"]
     fn vsrah(a: vector_signed_short, b: vector_unsigned_short) -> vector_signed_short;
-    #[link_name = "llvm.ppc.altivec.sraw"]
+    #[link_name = "llvm.ppc.altivec.vsraw"]
     fn vsraw(a: vector_signed_int, b: vector_unsigned_int) -> vector_signed_int;
 
-    #[link_name = "llvm.ppc.altivec.srl"]
+    #[link_name = "llvm.ppc.altivec.vsr"]
     fn vsr(a: vector_signed_int, b: vector_signed_int) -> vector_signed_int;
-    #[link_name = "llvm.ppc.altivec.sro"]
+    #[link_name = "llvm.ppc.altivec.vsro"]
     fn vsro(a: vector_signed_int, b: vector_signed_int) -> vector_signed_int;
 
-    #[link_name = "llvm.ppc.altivec.slv"]
+    #[link_name = "llvm.ppc.altivec.vslv"]
     fn vslv(a: vector_unsigned_char, b: vector_unsigned_char) -> vector_unsigned_char;
-    #[link_name = "llvm.ppc.altivec.srv"]
+    #[link_name = "llvm.ppc.altivec.vsrv"]
     fn vsrv(a: vector_unsigned_char, b: vector_unsigned_char) -> vector_unsigned_char;
 
     #[link_name = "llvm.fshl.v16i8"]
@@ -547,7 +547,7 @@ mod sealed {
             #[target_feature(enable = "altivec")]
             #[cfg_attr(test, assert_instr($instr))]
             pub unsafe fn $fun(a: isize, b: *const $ty) -> t_t_l!($ty) {
-                let addr = (b as *const i8).offset(a);
+                let addr = b.byte_offset(a).cast::<i8>();
                 transmute($instr(addr))
             }
 
@@ -1878,7 +1878,7 @@ mod sealed {
 
     #[inline]
     #[target_feature(enable = "altivec")]
-    #[cfg_attr(test, assert_instr(vmaddfp))]
+    #[cfg_attr(test, assert_instr(xvmaddasp))]
     pub unsafe fn vec_vmaddfp(a: vector_float, b: vector_float, c: vector_float) -> vector_float {
         simd_fma(a, b, c)
     }
@@ -3239,7 +3239,7 @@ mod sealed {
         unsafe fn vec_round(self) -> Self;
     }
 
-    test_impl! { vec_vrfin(a: vector_float) -> vector_float [vrfin, vrfin] }
+    test_impl! { vec_vrfin(a: vector_float) -> vector_float [vrfin, xvrspic] }
 
     #[unstable(feature = "stdarch_powerpc", issue = "111145")]
     impl VectorRound for vector_float {
@@ -4785,7 +4785,7 @@ mod tests {
     unsafe fn test_vec_lde_u16() {
         let pat = [u16x8::new(0, 1, 2, 3, 4, 5, 6, 7)];
         for off in 0..8 {
-            let v: u16x8 = transmute(vec_lde(off * 2, pat.as_ptr() as *const u8));
+            let v: u16x8 = transmute(vec_lde(off * 2, pat.as_ptr() as *const u16));
             assert_eq!(off as u16, v.extract(off as _));
         }
     }
@@ -4794,7 +4794,7 @@ mod tests {
     unsafe fn test_vec_lde_u32() {
         let pat = [u32x4::new(0, 1, 2, 3)];
         for off in 0..4 {
-            let v: u32x4 = transmute(vec_lde(off * 4, pat.as_ptr() as *const u8));
+            let v: u32x4 = transmute(vec_lde(off * 4, pat.as_ptr() as *const u32));
             assert_eq!(off as u32, v.extract(off as _));
         }
     }

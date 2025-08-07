@@ -95,7 +95,9 @@ impl<'tcx> BorrowExplanation<'tcx> {
                         && let hir::def::Res::Local(hir_id) = p.res
                         && let hir::Node::Pat(pat) = tcx.hir_node(hir_id)
                     {
-                        err.span_label(pat.span, format!("binding `{ident}` declared here"));
+                        if !ident.span.in_external_macro(tcx.sess.source_map()) {
+                            err.span_label(pat.span, format!("binding `{ident}` declared here"));
+                        }
                     }
                 }
             }
@@ -340,6 +342,7 @@ impl<'tcx> BorrowExplanation<'tcx> {
                                 }
                             }
                         } else if let LocalInfo::BlockTailTemp(info) = local_decl.local_info() {
+                            let sp = info.span.find_oldest_ancestor_in_same_ctxt();
                             if info.tail_result_is_ignored {
                                 // #85581: If the first mutable borrow's scope contains
                                 // the second borrow, this suggestion isn't helpful.
@@ -347,7 +350,7 @@ impl<'tcx> BorrowExplanation<'tcx> {
                                     old.to(info.span.shrink_to_hi()).contains(new)
                                 }) {
                                     err.span_suggestion_verbose(
-                                        info.span.shrink_to_hi(),
+                                        sp.shrink_to_hi(),
                                         "consider adding semicolon after the expression so its \
                                         temporaries are dropped sooner, before the local variables \
                                         declared by the block are dropped",
@@ -366,8 +369,8 @@ impl<'tcx> BorrowExplanation<'tcx> {
                                      local variable `x` and then make `x` be the expression at the \
                                      end of the block",
                                     vec![
-                                        (info.span.shrink_to_lo(), "let x = ".to_string()),
-                                        (info.span.shrink_to_hi(), "; x".to_string()),
+                                        (sp.shrink_to_lo(), "let x = ".to_string()),
+                                        (sp.shrink_to_hi(), "; x".to_string()),
                                     ],
                                     Applicability::MaybeIncorrect,
                                 );

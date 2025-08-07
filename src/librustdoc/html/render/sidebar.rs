@@ -1,7 +1,8 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::fmt;
 
-use rinja::Template;
+use askama::Template;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_hir::def::CtorKind;
 use rustc_hir::def_id::{DefIdMap, DefIdSet};
@@ -123,10 +124,10 @@ impl<'a> Link<'a> {
 pub(crate) mod filters {
     use std::fmt::{self, Display};
 
-    use rinja::filters::Safe;
+    use askama::filters::Safe;
 
     use crate::html::escape::EscapeBodyTextWithWbr;
-    pub(crate) fn wrapped<T>(v: T) -> rinja::Result<Safe<impl Display>>
+    pub(crate) fn wrapped<T, V: askama::Values>(v: T, _: V) -> askama::Result<Safe<impl Display>>
     where
         T: Display,
     {
@@ -135,7 +136,11 @@ pub(crate) mod filters {
     }
 }
 
-pub(super) fn print_sidebar(cx: &Context<'_>, it: &clean::Item, buffer: &mut String) {
+pub(super) fn print_sidebar(
+    cx: &Context<'_>,
+    it: &clean::Item,
+    mut buffer: impl fmt::Write,
+) -> fmt::Result {
     let mut ids = IdMap::new();
     let mut blocks: Vec<LinkBlock<'_>> = docblock_toc(cx, it, &mut ids).into_iter().collect();
     let deref_id_map = cx.deref_id_map.borrow();
@@ -195,7 +200,8 @@ pub(super) fn print_sidebar(cx: &Context<'_>, it: &clean::Item, buffer: &mut Str
         blocks,
         path,
     };
-    sidebar.render_into(buffer).unwrap();
+    sidebar.render_into(&mut buffer)?;
+    Ok(())
 }
 
 fn get_struct_fields_name<'a>(fields: &'a [clean::Item]) -> Vec<Link<'a>> {
@@ -593,7 +599,7 @@ fn sidebar_enum<'a>(
     deref_id_map: &'a DefIdMap<String>,
 ) {
     let mut variants = e
-        .variants()
+        .non_stripped_variants()
         .filter_map(|v| v.name)
         .map(|name| Link::new(format!("variant.{name}"), name.to_string()))
         .collect::<Vec<_>>();

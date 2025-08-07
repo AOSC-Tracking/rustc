@@ -20,12 +20,13 @@ use rustc_middle::ty::{
     self, FloatTy, GenericArg, GenericArgKind, Instance, IntTy, ReifyReason, Ty, TyCtxt,
     TypeVisitable, TypeVisitableExt, UintTy,
 };
-use rustc_span::kw;
+use rustc_span::sym;
 
 pub(super) fn mangle<'tcx>(
     tcx: TyCtxt<'tcx>,
     instance: Instance<'tcx>,
     instantiating_crate: Option<CrateNum>,
+    is_exportable: bool,
 ) -> String {
     let def_id = instance.def_id();
     // FIXME(eddyb) this should ideally not be needed.
@@ -35,6 +36,7 @@ pub(super) fn mangle<'tcx>(
     let mut cx: SymbolMangler<'_> = SymbolMangler {
         tcx,
         start_offset: prefix.len(),
+        is_exportable,
         paths: FxHashMap::default(),
         types: FxHashMap::default(),
         consts: FxHashMap::default(),
@@ -58,11 +60,17 @@ pub(super) fn mangle<'tcx>(
         ty::InstanceKind::ConstructCoroutineInClosureShim { receiver_by_ref: false, .. } => {
             Some("by_ref")
         }
-
+        ty::InstanceKind::FutureDropPollShim(_, _, _) => Some("drop"),
         _ => None,
     };
 
-    if let Some(shim_kind) = shim_kind {
+    if let ty::InstanceKind::AsyncDropGlue(_, ty) = instance.def {
+        let ty::Coroutine(_, cor_args) = ty.kind() else {
+            bug!();
+        };
+        let drop_ty = cor_args.first().unwrap().expect_ty();
+        cx.print_def_path(def_id, tcx.mk_args(&[GenericArg::from(drop_ty)])).unwrap()
+    } else if let Some(shim_kind) = shim_kind {
         cx.path_append_ns(|cx| cx.print_def_path(def_id, args), 'S', 0, shim_kind).unwrap()
     } else {
         cx.print_def_path(def_id, args).unwrap()
@@ -77,16 +85,13 @@ pub fn mangle_internal_symbol<'tcx>(tcx: TyCtxt<'tcx>, item_name: &str) -> Strin
     if item_name == "rust_eh_personality" {
         // rust_eh_personality must not be renamed as LLVM hard-codes the name
         return "rust_eh_personality".to_owned();
-    } else if item_name == "__rust_no_alloc_shim_is_unstable" {
-        // Temporary back compat hack to give people the chance to migrate to
-        // include #[rustc_std_internal_symbol].
-        return "__rust_no_alloc_shim_is_unstable".to_owned();
     }
 
     let prefix = "_R";
     let mut cx: SymbolMangler<'_> = SymbolMangler {
         tcx,
         start_offset: prefix.len(),
+        is_exportable: false,
         paths: FxHashMap::default(),
         types: FxHashMap::default(),
         consts: FxHashMap::default(),
@@ -129,6 +134,7 @@ pub(super) fn mangle_typeid_for_trait_ref<'tcx>(
     let mut cx = SymbolMangler {
         tcx,
         start_offset: 0,
+        is_exportable: false,
         paths: FxHashMap::default(),
         types: FxHashMap::default(),
         consts: FxHashMap::default(),
@@ -157,6 +163,7 @@ struct SymbolMangler<'tcx> {
     tcx: TyCtxt<'tcx>,
     binders: Vec<BinderLevel>,
     out: String,
+    is_exportable: bool,
 
     /// The length of the prefix in `out` (e.g. 2 for `_R`).
     start_offset: usize,
@@ -246,6 +253,22 @@ impl<'tcx> SymbolMangler<'tcx> {
         self.binders.pop();
 
         Ok(())
+    }
+
+    fn print_pat(&mut self, pat: ty::Pattern<'tcx>) -> Result<(), std::fmt::Error> {
+        Ok(match *pat {
+            ty::PatternKind::Range { start, end } => {
+                let consts = [start, end];
+                for ct in consts {
+                    Ty::new_array_with_const_len(self.tcx, self.tcx.types.unit, ct).print(self)?;
+                }
+            }
+            ty::PatternKind::Or(patterns) => {
+                for pat in patterns {
+                    self.print_pat(pat)?;
+                }
+            }
+        })
     }
 }
 
@@ -354,7 +377,14 @@ impl<'tcx> Printer<'tcx> for SymbolMangler<'tcx> {
                 args,
             )?;
         } else {
-            self.push_disambiguator(key.disambiguated_data.disambiguator as u64);
+            let exported_impl_order = self.tcx.stable_order_of_exportable_impls(impl_def_id.krate);
+            let disambiguator = match self.is_exportable {
+                true => exported_impl_order[&impl_def_id] as u64,
+                false => {
+                    exported_impl_order.len() as u64 + key.disambiguated_data.disambiguator as u64
+                }
+            };
+            self.push_disambiguator(disambiguator);
             self.print_def_path(parent_def_id, &[])?;
         }
 
@@ -368,7 +398,7 @@ impl<'tcx> Printer<'tcx> for SymbolMangler<'tcx> {
     }
 
     fn print_region(&mut self, region: ty::Region<'_>) -> Result<(), PrintError> {
-        let i = match *region {
+        let i = match region.kind() {
             // Erased lifetimes use the index 0, for a
             // shorter mangling of `L_`.
             ty::ReErased => 0,
@@ -463,20 +493,14 @@ impl<'tcx> Printer<'tcx> for SymbolMangler<'tcx> {
                 ty.print(self)?;
             }
 
-            ty::Pat(ty, pat) => match *pat {
-                ty::PatternKind::Range { start, end } => {
-                    let consts = [start, end];
-                    // HACK: Represent as tuple until we have something better.
-                    // HACK: constants are used in arrays, even if the types don't match.
-                    self.push("T");
-                    ty.print(self)?;
-                    for ct in consts {
-                        Ty::new_array_with_const_len(self.tcx, self.tcx.types.unit, ct)
-                            .print(self)?;
-                    }
-                    self.push("E");
-                }
-            },
+            ty::Pat(ty, pat) => {
+                // HACK: Represent as tuple until we have something better.
+                // HACK: constants are used in arrays, even if the types don't match.
+                self.push("T");
+                ty.print(self)?;
+                self.print_pat(pat)?;
+                self.push("E");
+            }
 
             ty::Array(ty, len) => {
                 self.push("A");
@@ -615,10 +639,10 @@ impl<'tcx> Printer<'tcx> for SymbolMangler<'tcx> {
                         cx.print_def_path(trait_ref.def_id, trait_ref.args)?;
                     }
                     ty::ExistentialPredicate::Projection(projection) => {
-                        let name = cx.tcx.associated_item(projection.def_id).name;
+                        let name = cx.tcx.associated_item(projection.def_id).name();
                         cx.push("p");
                         cx.push_ident(name.as_str());
-                        match projection.term.unpack() {
+                        match projection.term.kind() {
                             ty::TermKind::Ty(ty) => ty.print(cx),
                             ty::TermKind::Const(c) => c.print(cx),
                         }?;
@@ -776,7 +800,7 @@ impl<'tcx> Printer<'tcx> for SymbolMangler<'tcx> {
                                     self.push_disambiguator(
                                         disambiguated_field.disambiguator as u64,
                                     );
-                                    self.push_ident(field_name.unwrap_or(kw::Empty).as_str());
+                                    self.push_ident(field_name.unwrap().as_str());
 
                                     field.print(self)?;
                                 }
@@ -802,8 +826,10 @@ impl<'tcx> Printer<'tcx> for SymbolMangler<'tcx> {
 
     fn path_crate(&mut self, cnum: CrateNum) -> Result<(), PrintError> {
         self.push("C");
-        let stable_crate_id = self.tcx.def_path_hash(cnum.as_def_id()).stable_crate_id();
-        self.push_disambiguator(stable_crate_id.as_u64());
+        if !self.is_exportable {
+            let stable_crate_id = self.tcx.def_path_hash(cnum.as_def_id()).stable_crate_id();
+            self.push_disambiguator(stable_crate_id.as_u64());
+        }
         let name = self.tcx.crate_name(cnum);
         self.push_ident(name.as_str());
         Ok(())
@@ -850,6 +876,8 @@ impl<'tcx> Printer<'tcx> for SymbolMangler<'tcx> {
             DefPathData::Ctor => 'c',
             DefPathData::AnonConst => 'k',
             DefPathData::OpaqueTy => 'i',
+            DefPathData::SyntheticCoroutineBody => 's',
+            DefPathData::NestedStatic => 'n',
 
             // These should never show up as `path_append` arguments.
             DefPathData::CrateRoot
@@ -857,7 +885,9 @@ impl<'tcx> Printer<'tcx> for SymbolMangler<'tcx> {
             | DefPathData::GlobalAsm
             | DefPathData::Impl
             | DefPathData::MacroNs(_)
-            | DefPathData::LifetimeNs(_) => {
+            | DefPathData::LifetimeNs(_)
+            | DefPathData::OpaqueLifetime(_)
+            | DefPathData::AnonAssocTy(..) => {
                 bug!("symbol_names: unexpected DefPathData: {:?}", disambiguated_data.data)
             }
         };
@@ -868,7 +898,7 @@ impl<'tcx> Printer<'tcx> for SymbolMangler<'tcx> {
             print_prefix,
             ns,
             disambiguated_data.disambiguator as u64,
-            name.unwrap_or(kw::Empty).as_str(),
+            name.unwrap_or(sym::empty).as_str(),
         )
     }
 
@@ -878,11 +908,11 @@ impl<'tcx> Printer<'tcx> for SymbolMangler<'tcx> {
         args: &[GenericArg<'tcx>],
     ) -> Result<(), PrintError> {
         // Don't print any regions if they're all erased.
-        let print_regions = args.iter().any(|arg| match arg.unpack() {
+        let print_regions = args.iter().any(|arg| match arg.kind() {
             GenericArgKind::Lifetime(r) => !r.is_erased(),
             _ => false,
         });
-        let args = args.iter().cloned().filter(|arg| match arg.unpack() {
+        let args = args.iter().cloned().filter(|arg| match arg.kind() {
             GenericArgKind::Lifetime(_) => print_regions,
             _ => true,
         });
@@ -894,7 +924,7 @@ impl<'tcx> Printer<'tcx> for SymbolMangler<'tcx> {
         self.push("I");
         print_prefix(self)?;
         for arg in args {
-            match arg.unpack() {
+            match arg.kind() {
                 GenericArgKind::Lifetime(lt) => {
                     lt.print(self)?;
                 }

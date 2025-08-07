@@ -1,5 +1,5 @@
 r[undefined]
-## Behavior considered undefined
+# Behavior considered undefined
 
 r[undefined.general]
 Rust code is incorrect if it exhibits any of the behaviors in the following
@@ -34,22 +34,18 @@ r[undefined.place-projection]
   [array/slice index expression][project-slice].
 
 r[undefined.alias]
-* Breaking the [pointer aliasing rules]. `Box<T>`, `&mut T` and `&T` follow
-  LLVM’s scoped [noalias] model, except if the `&T` contains an
-  [`UnsafeCell<U>`]. References and boxes must not be [dangling] while they are
-  live. The exact liveness duration is not specified, but some bounds exist:
+* Breaking the pointer aliasing rules. The exact aliasing rules are not determined yet, but here is an outline of the general principles:
+  `&T` must point to memory that is not mutated while they are live (except for data inside an [`UnsafeCell<U>`]),
+  and `&mut T` must point to memory that is not read or written by any pointer not derived from the reference and that no other reference points to while they are live.
+  `Box<T>` is treated similar to `&'static mut T` for the purpose of these rules.
+  The exact liveness duration is not specified, but some bounds exist:
   * For references, the liveness duration is upper-bounded by the syntactic
-    lifetime assigned by the borrow checker; it cannot be live any *longer* than
-    that lifetime.
-  * Each time a reference or box is passed to or returned from a function, it is
-    considered live.
-  * When a reference (but not a `Box`!) is passed to a function, it is live at
-    least as long as that function call, again except if the `&T` contains an
-    [`UnsafeCell<U>`].
+    lifetime assigned by the borrow checker; it cannot be live any *longer* than that lifetime.
+  * Each time a reference or box is dereferenced or reborrowed, it is considered live.
+  * Each time a reference or box is passed to or returned from a function, it is considered live.
+  * When a reference (but not a `Box`!) is passed to a function, it is live at least as long as that function call, again except if the `&T` contains an [`UnsafeCell<U>`].
 
-  All this also applies when values of these
-  types are passed in a (nested) field of a compound type, but not behind
-  pointer indirections.
+  All this also applies when values of these types are passed in a (nested) field of a compound type, but not behind pointer indirections.
 
 r[undefined.immutable]
 * Mutating immutable bytes.
@@ -96,14 +92,13 @@ r[undefined.runtime]
 > Undefined behavior affects the entire program. For example, calling a function in C that exhibits undefined behavior of C means your entire program contains undefined behaviour that can also affect the Rust code. And vice versa, undefined behavior in Rust can cause adverse affects on code executed by any FFI calls to other languages.
 
 r[undefined.pointed-to]
-### Pointed-to bytes
+## Pointed-to bytes
 
 The span of bytes a pointer or reference "points to" is determined by the pointer value and the size of the pointee type (using `size_of_val`).
 
-### Places based on misaligned pointers
-[based on a misaligned pointer]: #places-based-on-misaligned-pointers
-
 r[undefined.misaligned]
+## Places based on misaligned pointers
+[based on a misaligned pointer]: #places-based-on-misaligned-pointers
 
 r[undefined.misaligned.general]
 A place is said to be "based on a misaligned pointer" if the last `*` projection
@@ -141,10 +136,9 @@ more aligned than the type that contains it, i.e., `repr(packed)`. This means
 that being based on an aligned pointer is always sufficient to ensure that the
 new reference is aligned, but it is not always necessary.
 
-### Dangling pointers
-[dangling]: #dangling-pointers
-
 r[undefined.dangling]
+## Dangling pointers
+[dangling]: #dangling-pointers
 
 r[undefined.dangling.general]
 A reference/pointer is "dangling" if not all of the bytes it
@@ -164,10 +158,9 @@ In particular, the dynamic size of a Rust value (as determined by `size_of_val`)
 must never exceed `isize::MAX`, since it is impossible for a single allocation
 to be larger than `isize::MAX`.
 
-### Invalid values
-[invalid-values]: #invalid-values
-
 r[undefined.validity]
+## Invalid values
+[invalid-values]: #invalid-values
 
 r[undefined.validity.general]
 The Rust compiler assumes that all values produced during program execution are
@@ -189,7 +182,7 @@ r[undefined.validity.never]
 
 r[undefined.validity.scalar]
 * An integer (`i*`/`u*`), floating point value (`f*`), or raw pointer must be
-  initialized, i.e., must not be obtained from [uninitialized memory][undef].
+  initialized, i.e., must not be obtained from uninitialized memory.
 
 r[undefined.validity.str]
 * A `str` value is treated like `[u8]`, i.e. it must be initialized.
@@ -236,10 +229,7 @@ reading uninitialized memory is permitted are inside `union`s and in "padding"
 
 [`bool`]: types/boolean.md
 [`const`]: items/constant-items.md
-[noalias]: http://llvm.org/docs/LangRef.html#noalias
-[pointer aliasing rules]: http://llvm.org/docs/LangRef.html#pointer-aliasing-rules
 [abi]: items/external-blocks.md#abi
-[undef]: http://llvm.org/docs/LangRef.html#undefined-values
 [`target_feature`]: attributes/codegen.md#the-target_feature-attribute
 [`UnsafeCell<U>`]: std::cell::UnsafeCell
 [Rustonomicon]: ../nomicon/index.html

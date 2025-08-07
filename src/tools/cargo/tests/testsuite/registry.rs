@@ -3695,11 +3695,12 @@ fn sparse_retry_multiple() {
             let remain = 3 - retry;
             write!(
                 &mut expected,
-                "[WARNING] spurious network error ({remain} tries remaining): \
+                "[WARNING] spurious network error ({remain} {} remaining): \
                 failed to get successful HTTP response from \
                 `http://127.0.0.1:[..]/{ab}/{cd}/{name}` (127.0.0.1), got 500\n\
                 body:\n\
-                internal server error\n"
+                internal server error\n",
+                if remain != 1 { "tries" } else { "try" }
             )
             .unwrap();
         }
@@ -3847,11 +3848,12 @@ fn dl_retry_multiple() {
             let remain = 3 - retry;
             write!(
                 &mut expected,
-                "[WARNING] spurious network error ({remain} tries remaining): \
+                "[WARNING] spurious network error ({remain} {} remaining): \
                 failed to get successful HTTP response from \
                 `http://127.0.0.1:[..]/dl/{name}/1.0.0/download` (127.0.0.1), got 500\n\
                 body:\n\
-                internal server error\n"
+                internal server error\n",
+                if remain != 1 { "tries" } else { "try" }
             )
             .unwrap();
         }
@@ -3877,6 +3879,57 @@ fn dl_retry_multiple() {
     p.cargo("fetch")
         .with_stderr_data(IntoData::unordered(expected))
         .run();
+}
+
+#[cargo_test]
+fn retry_too_many_requests() {
+    let fail_count = Mutex::new(0);
+    let _registry = RegistryBuilder::new()
+        .http_index()
+        .add_responder("/index/3/b/bar", move |req, server| {
+            let mut fail_count = fail_count.lock().unwrap();
+            if *fail_count < 1 {
+                *fail_count += 1;
+                server.too_many_requests(req, std::time::Duration::from_secs(1))
+            } else {
+                server.index(req)
+            }
+        })
+        .build();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.1"
+                edition = "2015"
+                authors = []
+
+                [dependencies]
+                bar = ">= 0.0.0"
+            "#,
+        )
+        .file("src/main.rs", "fn main() {}")
+        .build();
+
+    Package::new("bar", "0.0.1").publish();
+
+    p.cargo("check")
+    .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[WARNING] spurious network error (3 tries remaining): failed to get successful HTTP response from `[..]/index/3/b/bar` ([..]), got 429
+body:
+too many requests, try again in 1 seconds
+[LOCKING] 1 package to latest compatible version
+[DOWNLOADING] crates ...
+[DOWNLOADED] bar v0.0.1 (registry `dummy-registry`)
+[CHECKING] bar v0.0.1
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]).run();
 }
 
 #[cargo_test]
@@ -4220,7 +4273,7 @@ Please slow down
 [WARNING] spurious network error (2 tries remaining): failed to get successful HTTP response from `http://127.0.0.1:[..]/index/3/b/bar` (127.0.0.1), got 503
 body:
 Please slow down
-[WARNING] spurious network error (1 tries remaining): failed to get successful HTTP response from `http://127.0.0.1:[..]/index/3/b/bar` (127.0.0.1), got 503
+[WARNING] spurious network error (1 try remaining): failed to get successful HTTP response from `http://127.0.0.1:[..]/index/3/b/bar` (127.0.0.1), got 503
 body:
 Please slow down
 [ERROR] failed to get `bar` as a dependency of package `foo v0.1.0 ([ROOT]/foo)`
@@ -4285,7 +4338,7 @@ Please slow down
 [WARNING] spurious network error (2 tries remaining): failed to get successful HTTP response from `http://127.0.0.1:[..]/dl/bar/1.0.0/download` (127.0.0.1), got 503
 body:
 Please slow down
-[WARNING] spurious network error (1 tries remaining): failed to get successful HTTP response from `http://127.0.0.1:[..]/dl/bar/1.0.0/download` (127.0.0.1), got 503
+[WARNING] spurious network error (1 try remaining): failed to get successful HTTP response from `http://127.0.0.1:[..]/dl/bar/1.0.0/download` (127.0.0.1), got 503
 body:
 Please slow down
 [ERROR] failed to download from `http://127.0.0.1:[..]/dl/bar/1.0.0/download`

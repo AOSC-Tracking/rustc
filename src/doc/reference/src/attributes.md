@@ -1,21 +1,21 @@
 {{#include attributes-redirect.html}}
+r[attributes]
 # Attributes
 
 r[attributes.syntax]
-> **<sup>Syntax</sup>**\
-> _InnerAttribute_ :\
-> &nbsp;&nbsp; `#` `!` `[` _Attr_ `]`
->
-> _OuterAttribute_ :\
-> &nbsp;&nbsp; `#` `[` _Attr_ `]`
->
-> _Attr_ :\
-> &nbsp;&nbsp; &nbsp;&nbsp; [_SimplePath_] _AttrInput_<sup>?</sup>\
-> &nbsp;&nbsp; | `unsafe` `(` [_SimplePath_] _AttrInput_<sup>?</sup> `)`
->
-> _AttrInput_ :\
-> &nbsp;&nbsp; &nbsp;&nbsp; [_DelimTokenTree_]\
-> &nbsp;&nbsp; | `=` [_Expression_]
+```grammar,attributes
+InnerAttribute -> `#` `!` `[` Attr `]`
+
+OuterAttribute -> `#` `[` Attr `]`
+
+Attr ->
+      SimplePath AttrInput?
+    | `unsafe` `(` SimplePath AttrInput? `)`
+
+AttrInput ->
+      DelimTokenTree
+    | `=` Expression
+```
 
 r[attributes.intro]
 An _attribute_ is a general, free-form metadatum that is interpreted according
@@ -44,6 +44,7 @@ The following attributes are unsafe:
 
 * [`export_name`]
 * [`link_section`]
+* [`naked`]
 * [`no_mangle`]
 
 r[attributes.kind]
@@ -109,22 +110,23 @@ r[attributes.meta]
 ## Meta Item Attribute Syntax
 
 r[attributes.meta.intro]
-A "meta item" is the syntax used for the _Attr_ rule by most [built-in
+A "meta item" is the syntax used for the [Attr] rule by most [built-in
 attributes]. It has the following grammar:
 
 r[attributes.meta.syntax]
-> **<sup>Syntax</sup>**\
-> _MetaItem_ :\
-> &nbsp;&nbsp; &nbsp;&nbsp; [_SimplePath_]\
-> &nbsp;&nbsp; | [_SimplePath_] `=` [_Expression_]\
-> &nbsp;&nbsp; | [_SimplePath_] `(` _MetaSeq_<sup>?</sup> `)`
->
-> _MetaSeq_ :\
-> &nbsp;&nbsp; _MetaItemInner_ ( `,` MetaItemInner )<sup>\*</sup> `,`<sup>?</sup>
->
-> _MetaItemInner_ :\
-> &nbsp;&nbsp; &nbsp;&nbsp; _MetaItem_\
-> &nbsp;&nbsp; | [_Expression_]
+```grammar,attributes
+@root MetaItem ->
+      SimplePath
+    | SimplePath `=` Expression
+    | SimplePath `(` MetaSeq? `)`
+
+MetaSeq ->
+    MetaItemInner ( `,` MetaItemInner )* `,`?
+
+MetaItemInner ->
+      MetaItem
+    | Expression
+```
 
 r[attributes.meta.literal-expr]
 Expressions in meta items must macro-expand to literal expressions, which must not
@@ -161,31 +163,33 @@ Various built-in attributes use different subsets of the meta item syntax to
 specify their inputs. The following grammar rules show some commonly used
 forms:
 
-> **<sup>Syntax</sup>**\
-> _MetaWord_:\
-> &nbsp;&nbsp; [IDENTIFIER]
->
-> _MetaNameValueStr_:\
-> &nbsp;&nbsp; [IDENTIFIER] `=` ([STRING_LITERAL] | [RAW_STRING_LITERAL])
->
-> _MetaListPaths_:\
-> &nbsp;&nbsp; [IDENTIFIER] `(` ( [_SimplePath_] (`,` [_SimplePath_])* `,`<sup>?</sup> )<sup>?</sup> `)`
->
-> _MetaListIdents_:\
-> &nbsp;&nbsp; [IDENTIFIER] `(` ( [IDENTIFIER] (`,` [IDENTIFIER])* `,`<sup>?</sup> )<sup>?</sup> `)`
->
-> _MetaListNameValueStr_:\
-> &nbsp;&nbsp; [IDENTIFIER] `(` ( _MetaNameValueStr_ (`,` _MetaNameValueStr_)* `,`<sup>?</sup> )<sup>?</sup> `)`
+r[attributes.meta.builtin.syntax]
+```grammar,attributes
+@root MetaWord ->
+    IDENTIFIER
+
+MetaNameValueStr ->
+    IDENTIFIER `=` (STRING_LITERAL | RAW_STRING_LITERAL)
+
+@root MetaListPaths ->
+    IDENTIFIER `(` ( SimplePath (`,` SimplePath)* `,`? )? `)`
+
+@root MetaListIdents ->
+    IDENTIFIER `(` ( IDENTIFIER (`,` IDENTIFIER)* `,`? )? `)`
+
+@root MetaListNameValueStr ->
+    IDENTIFIER `(` ( MetaNameValueStr (`,` MetaNameValueStr)* `,`? )? `)`
+```
 
 Some examples of meta items are:
 
 Style | Example
 ------|--------
-_MetaWord_ | `no_std`
-_MetaNameValueStr_ | `doc = "example"`
-_MetaListPaths_ | `allow(unused, clippy::inline_always)`
-_MetaListIdents_ | `macro_use(foo, bar)`
-_MetaListNameValueStr_ | `link(name = "CoreFoundation", kind = "framework")`
+[MetaWord] | `no_std`
+[MetaNameValueStr] | `doc = "example"`
+[MetaListPaths] | `allow(unused, clippy::inline_always)`
+[MetaListIdents] | `macro_use(foo, bar)`
+[MetaListNameValueStr] | `link(name = "CoreFoundation", kind = "framework")`
 
 r[attributes.activity]
 ## Active and inert attributes
@@ -287,6 +291,7 @@ The following is an index of all built-in attributes.
 - Code generation
   - [`inline`] --- Hint to inline code.
   - [`cold`] --- Hint that a function is unlikely to be called.
+  - [`naked`] --- Prevent the compiler from emitting a function prologue.
   - [`no_builtins`] --- Disables use of certain built-in functions.
   - [`target_feature`] --- Configure platform-specific code generation.
   - [`track_caller`] --- Pass the parent call location to `std::panic::Location::caller()`.
@@ -329,14 +334,8 @@ The following is an index of all built-in attributes.
 [ECMA-334]: https://www.ecma-international.org/publications-and-standards/standards/ecma-334/
 [ECMA-335]: https://www.ecma-international.org/publications-and-standards/standards/ecma-335/
 [Expression Attributes]: expressions.md#expression-attributes
-[IDENTIFIER]: identifiers.md
-[RAW_STRING_LITERAL]: tokens.md#raw-string-literals
-[STRING_LITERAL]: tokens.md#string-literals
 [The Rustdoc Book]: ../rustdoc/the-doc-attribute.html
 [The Unstable Book]: ../unstable-book/index.html
-[_DelimTokenTree_]: macros.md
-[_Expression_]: expressions.md
-[_SimplePath_]: paths.md#simple-paths
 [`allow`]: attributes/diagnostics.md#lint-check-attributes
 [`automatically_derived`]: attributes/derive.md#the-automatically_derived-attribute
 [`cfg_attr`]: conditional-compilation.md#the-cfg_attr-attribute
@@ -363,6 +362,7 @@ The following is an index of all built-in attributes.
 [`macro_export`]: macros-by-example.md#path-based-scope
 [`macro_use`]: macros-by-example.md#the-macro_use-attribute
 [`must_use`]: attributes/diagnostics.md#the-must_use-attribute
+[`naked`]: attributes/codegen.md#the-naked-attribute
 [`no_builtins`]: attributes/codegen.md#the-no_builtins-attribute
 [`no_implicit_prelude`]: names/preludes.md#the-no_implicit_prelude-attribute
 [`no_link`]: items/extern-crates.md#the-no_link-attribute

@@ -4,20 +4,20 @@ use rustc_type_ir::data_structures::IndexSet;
 use rustc_type_ir::fast_reject::DeepRejectCtxt;
 use rustc_type_ir::inherent::*;
 use rustc_type_ir::lang_items::TraitSolverLangItem;
-use rustc_type_ir::solve::CanonicalResponse;
+use rustc_type_ir::solve::{CanonicalResponse, SizedTraitKind};
 use rustc_type_ir::{
-    self as ty, Interner, Movability, TraitPredicate, TypeVisitableExt as _, TypingMode,
+    self as ty, Interner, Movability, TraitPredicate, TraitRef, TypeVisitableExt as _, TypingMode,
     Upcast as _, elaborate,
 };
-use tracing::{instrument, trace};
+use tracing::{debug, instrument, trace};
 
 use crate::delegate::SolverDelegate;
 use crate::solve::assembly::structural_traits::{self, AsyncCallableRelevantTypes};
-use crate::solve::assembly::{self, Candidate};
+use crate::solve::assembly::{self, AllowInferenceConstraints, AssembleCandidatesFrom, Candidate};
 use crate::solve::inspect::ProbeKind;
 use crate::solve::{
     BuiltinImplSource, CandidateSource, Certainty, EvalCtxt, Goal, GoalSource, MaybeCause,
-    NoSolution, QueryResult,
+    NoSolution, ParamEnvSource, QueryResult, has_only_region_constraints,
 };
 
 impl<D, I> assembly::GoalKind<D> for TraitPredicate<I>
@@ -72,6 +72,7 @@ where
             (ty::ImplPolarity::Reservation, _) => match ecx.typing_mode() {
                 TypingMode::Coherence => Certainty::AMBIGUOUS,
                 TypingMode::Analysis { .. }
+                | TypingMode::Borrowck { .. }
                 | TypingMode::PostBorrowckAnalysis { .. }
                 | TypingMode::PostAnalysis => return Err(NoSolution),
             },
@@ -124,45 +125,70 @@ where
             .enter(|ecx| ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes))
     }
 
-    fn probe_and_match_goal_against_assumption(
+    fn fast_reject_assumption(
         ecx: &mut EvalCtxt<'_, D>,
-        source: CandidateSource<I>,
         goal: Goal<I, Self>,
         assumption: I::Clause,
-        then: impl FnOnce(&mut EvalCtxt<'_, D>) -> QueryResult<I>,
-    ) -> Result<Candidate<I>, NoSolution> {
+    ) -> Result<(), NoSolution> {
         if let Some(trait_clause) = assumption.as_trait_clause() {
-            if trait_clause.def_id() == goal.predicate.def_id()
-                && trait_clause.polarity() == goal.predicate.polarity
-            {
-                if !DeepRejectCtxt::relate_rigid_rigid(ecx.cx()).args_may_unify(
+            if trait_clause.polarity() != goal.predicate.polarity {
+                return Err(NoSolution);
+            }
+
+            if trait_clause.def_id() == goal.predicate.def_id() {
+                if DeepRejectCtxt::relate_rigid_rigid(ecx.cx()).args_may_unify(
                     goal.predicate.trait_ref.args,
                     trait_clause.skip_binder().trait_ref.args,
                 ) {
-                    return Err(NoSolution);
+                    return Ok(());
                 }
-
-                ecx.probe_trait_candidate(source).enter(|ecx| {
-                    let assumption_trait_pred = ecx.instantiate_binder_with_infer(trait_clause);
-                    ecx.eq(
-                        goal.param_env,
-                        goal.predicate.trait_ref,
-                        assumption_trait_pred.trait_ref,
-                    )?;
-                    then(ecx)
-                })
-            } else {
-                Err(NoSolution)
             }
-        } else {
-            Err(NoSolution)
+
+            // PERF(sized-hierarchy): Sizedness supertraits aren't elaborated to improve perf, so
+            // check for a `Sized` subtrait when looking for `MetaSized`. `PointeeSized` bounds
+            // are syntactic sugar for a lack of bounds so don't need this.
+            if ecx.cx().is_lang_item(goal.predicate.def_id(), TraitSolverLangItem::MetaSized)
+                && ecx.cx().is_lang_item(trait_clause.def_id(), TraitSolverLangItem::Sized)
+            {
+                let meta_sized_clause =
+                    trait_predicate_with_def_id(ecx.cx(), trait_clause, goal.predicate.def_id());
+                return Self::fast_reject_assumption(ecx, goal, meta_sized_clause);
+            }
         }
+
+        Err(NoSolution)
+    }
+
+    fn match_assumption(
+        ecx: &mut EvalCtxt<'_, D>,
+        goal: Goal<I, Self>,
+        assumption: I::Clause,
+        then: impl FnOnce(&mut EvalCtxt<'_, D>) -> QueryResult<I>,
+    ) -> QueryResult<I> {
+        let trait_clause = assumption.as_trait_clause().unwrap();
+
+        // PERF(sized-hierarchy): Sizedness supertraits aren't elaborated to improve perf, so
+        // check for a `Sized` subtrait when looking for `MetaSized`. `PointeeSized` bounds
+        // are syntactic sugar for a lack of bounds so don't need this.
+        if ecx.cx().is_lang_item(goal.predicate.def_id(), TraitSolverLangItem::MetaSized)
+            && ecx.cx().is_lang_item(trait_clause.def_id(), TraitSolverLangItem::Sized)
+        {
+            let meta_sized_clause =
+                trait_predicate_with_def_id(ecx.cx(), trait_clause, goal.predicate.def_id());
+            return Self::match_assumption(ecx, goal, meta_sized_clause, then);
+        }
+
+        let assumption_trait_pred = ecx.instantiate_binder_with_infer(trait_clause);
+        ecx.eq(goal.param_env, goal.predicate.trait_ref, assumption_trait_pred.trait_ref)?;
+
+        then(ecx)
     }
 
     fn consider_auto_trait_candidate(
         ecx: &mut EvalCtxt<'_, D>,
         goal: Goal<I, Self>,
     ) -> Result<Candidate<I>, NoSolution> {
+        let cx = ecx.cx();
         if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
         }
@@ -173,20 +199,42 @@ where
 
         // Only consider auto impls of unsafe traits when there are no unsafe
         // fields.
-        if ecx.cx().trait_is_unsafe(goal.predicate.def_id())
+        if cx.trait_is_unsafe(goal.predicate.def_id())
             && goal.predicate.self_ty().has_unsafe_fields()
         {
             return Err(NoSolution);
         }
 
-        // We only look into opaque types during analysis for opaque types
-        // outside of their defining scope. Doing so for opaques in the
-        // defining scope may require calling `typeck` on the same item we're
-        // currently type checking, which will result in a fatal cycle that
-        // ideally we want to avoid, since we can make progress on this goal
-        // via an alias bound or a locally-inferred hidden type instead.
+        // We leak the implemented auto traits of opaques outside of their defining scope.
+        // This depends on `typeck` of the defining scope of that opaque, which may result in
+        // fatal query cycles.
+        //
+        // We only get to this point if we're outside of the defining scope as we'd otherwise
+        // be able to normalize the opaque type. We may also cycle in case `typeck` of a defining
+        // scope relies on the current context, e.g. either because it also leaks auto trait
+        // bounds of opaques defined in the current context or by evaluating the current item.
+        //
+        // To avoid this we don't try to leak auto trait bounds if they can also be proven via
+        // item bounds of the opaque. These bounds are always applicable as auto traits must not
+        // have any generic parameters. They would also get preferred over the impl candidate
+        // when merging candidates anyways.
+        //
+        // See tests/ui/impl-trait/auto-trait-leakage/avoid-query-cycle-via-item-bound.rs.
         if let ty::Alias(ty::Opaque, opaque_ty) = goal.predicate.self_ty().kind() {
             debug_assert!(ecx.opaque_type_is_rigid(opaque_ty.def_id));
+            for item_bound in cx.item_self_bounds(opaque_ty.def_id).skip_binder() {
+                if item_bound
+                    .as_trait_clause()
+                    .is_some_and(|b| b.def_id() == goal.predicate.def_id())
+                {
+                    return Err(NoSolution);
+                }
+            }
+        }
+
+        // We need to make sure to stall any coroutines we are inferring to avoid query cycles.
+        if let Some(cand) = ecx.try_stall_coroutine_witness(goal.predicate.self_ty()) {
+            return cand;
         }
 
         ecx.probe_and_evaluate_goal_for_constituent_tys(
@@ -211,15 +259,20 @@ where
                 .predicates_of(goal.predicate.def_id())
                 .iter_instantiated(cx, goal.predicate.trait_ref.args)
                 .map(|p| goal.with(cx, p));
-            // FIXME(-Znext-solver=coinductive): Should this be `GoalSource::ImplWhereBound`?
+            // While you could think of trait aliases to have a single builtin impl
+            // which uses its implied trait bounds as where-clauses, using
+            // `GoalSource::ImplWhereClause` here would be incorrect, as we also
+            // impl them, which means we're "stepping out of the impl constructor"
+            // again. To handle this, we treat these cycles as ambiguous for now.
             ecx.add_goals(GoalSource::Misc, nested_obligations);
             ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
         })
     }
 
-    fn consider_builtin_sized_candidate(
+    fn consider_builtin_sizedness_candidates(
         ecx: &mut EvalCtxt<'_, D>,
         goal: Goal<I, Self>,
+        sizedness: SizedTraitKind,
     ) -> Result<Candidate<I>, NoSolution> {
         if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
@@ -228,7 +281,11 @@ where
         ecx.probe_and_evaluate_goal_for_constituent_tys(
             CandidateSource::BuiltinImpl(BuiltinImplSource::Trivial),
             goal,
-            structural_traits::instantiate_constituent_tys_for_sized_trait,
+            |ecx, ty| {
+                structural_traits::instantiate_constituent_tys_for_sizedness_trait(
+                    ecx, sizedness, ty,
+                )
+            },
         )
     }
 
@@ -238,6 +295,11 @@ where
     ) -> Result<Candidate<I>, NoSolution> {
         if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
+        }
+
+        // We need to make sure to stall any coroutines we are inferring to avoid query cycles.
+        if let Some(cand) = ecx.try_stall_coroutine_witness(goal.predicate.self_ty()) {
+            return cand;
         }
 
         ecx.probe_and_evaluate_goal_for_constituent_tys(
@@ -570,19 +632,6 @@ where
             .enter(|ecx| ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes))
     }
 
-    fn consider_builtin_async_destruct_candidate(
-        ecx: &mut EvalCtxt<'_, D>,
-        goal: Goal<I, Self>,
-    ) -> Result<Candidate<I>, NoSolution> {
-        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
-            return Err(NoSolution);
-        }
-
-        // `AsyncDestruct` is automatically implemented for every type.
-        ecx.probe_builtin_trait_candidate(BuiltinImplSource::Misc)
-            .enter(|ecx| ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes))
-    }
-
     fn consider_builtin_destruct_candidate(
         ecx: &mut EvalCtxt<'_, D>,
         goal: Goal<I, Self>,
@@ -792,6 +841,25 @@ where
     }
 }
 
+/// Small helper function to change the `def_id` of a trait predicate - this is not normally
+/// something that you want to do, as different traits will require different args and so making
+/// it easy to change the trait is something of a footgun, but it is useful in the narrow
+/// circumstance of changing from `MetaSized` to `Sized`, which happens as part of the lazy
+/// elaboration of sizedness candidates.
+#[inline(always)]
+fn trait_predicate_with_def_id<I: Interner>(
+    cx: I,
+    clause: ty::Binder<I, ty::TraitPredicate<I>>,
+    did: I::DefId,
+) -> I::Clause {
+    clause
+        .map_bound(|c| TraitPredicate {
+            trait_ref: TraitRef::new_from_args(cx, did, c.trait_ref.args),
+            polarity: c.polarity,
+        })
+        .upcast(cx)
+}
+
 impl<D, I> EvalCtxt<'_, D>
 where
     D: SolverDelegate<Interner = I>,
@@ -925,7 +993,7 @@ where
              target_projection: ty::Binder<I, ty::ExistentialProjection<I>>| {
                 source_projection.item_def_id() == target_projection.item_def_id()
                     && ecx
-                        .probe(|_| ProbeKind::UpcastProjectionCompatibility)
+                        .probe(|_| ProbeKind::ProjectionCompatibility)
                         .enter(|ecx| -> Result<_, NoSolution> {
                             ecx.enter_forall(target_projection, |ecx, target_projection| {
                                 let source_projection =
@@ -1086,6 +1154,25 @@ where
         goal: Goal<I, TraitPredicate<I>>,
     ) -> Option<Result<Candidate<I>, NoSolution>> {
         let self_ty = goal.predicate.self_ty();
+        let check_impls = || {
+            let mut disqualifying_impl = None;
+            self.cx().for_each_relevant_impl(
+                goal.predicate.def_id(),
+                goal.predicate.self_ty(),
+                |impl_def_id| {
+                    disqualifying_impl = Some(impl_def_id);
+                },
+            );
+            if let Some(def_id) = disqualifying_impl {
+                trace!(?def_id, ?goal, "disqualified auto-trait implementation");
+                // No need to actually consider the candidate here,
+                // since we do that in `consider_impl_candidate`.
+                return Some(Err(NoSolution));
+            } else {
+                None
+            }
+        };
+
         match self_ty.kind() {
             // Stall int and float vars until they are resolved to a concrete
             // numerical type. That's because the check for impls below treats
@@ -1096,12 +1183,16 @@ where
                 Some(self.forced_ambiguity(MaybeCause::Ambiguity))
             }
 
+            // Backward compatibility for default auto traits.
+            // Test: ui/traits/default_auto_traits/extern-types.rs
+            ty::Foreign(..) if self.cx().is_default_trait(goal.predicate.def_id()) => check_impls(),
+
             // These types cannot be structurally decomposed into constituent
             // types, and therefore have no built-in auto impl.
             ty::Dynamic(..)
             | ty::Param(..)
             | ty::Foreign(..)
-            | ty::Alias(ty::Projection | ty::Weak | ty::Inherent, ..)
+            | ty::Alias(ty::Projection | ty::Free | ty::Inherent, ..)
             | ty::Placeholder(..) => Some(Err(NoSolution)),
 
             ty::Infer(_) | ty::Bound(_, _) => panic!("unexpected type `{self_ty:?}`"),
@@ -1156,24 +1247,7 @@ where
             | ty::Never
             | ty::Tuple(_)
             | ty::Adt(_, _)
-            | ty::UnsafeBinder(_) => {
-                let mut disqualifying_impl = None;
-                self.cx().for_each_relevant_impl(
-                    goal.predicate.def_id(),
-                    goal.predicate.self_ty(),
-                    |impl_def_id| {
-                        disqualifying_impl = Some(impl_def_id);
-                    },
-                );
-                if let Some(def_id) = disqualifying_impl {
-                    trace!(?def_id, ?goal, "disqualified auto-trait implementation");
-                    // No need to actually consider the candidate here,
-                    // since we do that in `consider_impl_candidate`.
-                    return Some(Err(NoSolution));
-                } else {
-                    None
-                }
-            }
+            | ty::UnsafeBinder(_) => check_impls(),
             ty::Error(_) => None,
         }
     }
@@ -1231,10 +1305,49 @@ where
     D: SolverDelegate<Interner = I>,
     I: Interner,
 {
+    /// FIXME(#57893): For backwards compatability with the old trait solver implementation,
+    /// we need to handle overlap between builtin and user-written impls for trait objects.
+    ///
+    /// This overlap is unsound in general and something which we intend to fix separately.
+    /// To avoid blocking the stabilization of the trait solver, we add this hack to avoid
+    /// breakage in cases which are *mostly fine*™. Importantly, this preference is strictly
+    /// weaker than the old behavior.
+    ///
+    /// We only prefer builtin over user-written impls if there are no inference constraints.
+    /// Importantly, we also only prefer the builtin impls for trait goals, and not during
+    /// normalization. This means the only case where this special-case results in exploitable
+    /// unsoundness should be lifetime dependent user-written impls.
+    pub(super) fn unsound_prefer_builtin_dyn_impl(&mut self, candidates: &mut Vec<Candidate<I>>) {
+        match self.typing_mode() {
+            TypingMode::Coherence => return,
+            TypingMode::Analysis { .. }
+            | TypingMode::Borrowck { .. }
+            | TypingMode::PostBorrowckAnalysis { .. }
+            | TypingMode::PostAnalysis => {}
+        }
+
+        if candidates
+            .iter()
+            .find(|c| {
+                matches!(c.source, CandidateSource::BuiltinImpl(BuiltinImplSource::Object(_)))
+            })
+            .is_some_and(|c| has_only_region_constraints(c.result))
+        {
+            candidates.retain(|c| {
+                if matches!(c.source, CandidateSource::Impl(_)) {
+                    debug!(?c, "unsoundly dropping impl in favor of builtin dyn-candidate");
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+    }
+
+    #[instrument(level = "debug", skip(self), ret)]
     pub(super) fn merge_trait_candidates(
         &mut self,
-        goal: Goal<I, TraitPredicate<I>>,
-        candidates: Vec<Candidate<I>>,
+        mut candidates: Vec<Candidate<I>>,
     ) -> Result<(CanonicalResponse<I>, Option<TraitGoalProvenVia>), NoSolution> {
         if let TypingMode::Coherence = self.typing_mode() {
             let all_candidates: Vec<_> = candidates.into_iter().map(|c| c.result).collect();
@@ -1261,40 +1374,15 @@ where
 
         // If there are non-global where-bounds, prefer where-bounds
         // (including global ones) over everything else.
-        let has_non_global_where_bounds = candidates.iter().any(|c| match c.source {
-            CandidateSource::ParamEnv(idx) => {
-                let where_bound = goal.param_env.caller_bounds().get(idx).unwrap();
-                let ty::ClauseKind::Trait(trait_pred) = where_bound.kind().skip_binder() else {
-                    unreachable!("expected trait-bound: {where_bound:?}");
-                };
-
-                if trait_pred.has_bound_vars() || !trait_pred.is_global() {
-                    return true;
-                }
-
-                // We don't consider a trait-bound global if it has a projection bound.
-                //
-                // See ui/traits/next-solver/normalization-shadowing/global-trait-with-project.rs
-                // for an example where this is necessary.
-                for p in goal.param_env.caller_bounds().iter() {
-                    if let ty::ClauseKind::Projection(proj) = p.kind().skip_binder() {
-                        if proj.projection_term.trait_ref(self.cx()) == trait_pred.trait_ref {
-                            return true;
-                        }
-                    }
-                }
-
-                false
-            }
-            _ => false,
-        });
+        let has_non_global_where_bounds = candidates
+            .iter()
+            .any(|c| matches!(c.source, CandidateSource::ParamEnv(ParamEnvSource::NonGlobal)));
         if has_non_global_where_bounds {
             let where_bounds: Vec<_> = candidates
                 .iter()
                 .filter(|c| matches!(c.source, CandidateSource::ParamEnv(_)))
                 .map(|c| c.result)
                 .collect();
-
             return if let Some(response) = self.try_merge_responses(&where_bounds) {
                 Ok((response, Some(TraitGoalProvenVia::ParamEnv)))
             } else {
@@ -1315,9 +1403,27 @@ where
             };
         }
 
+        self.filter_specialized_impls(AllowInferenceConstraints::No, &mut candidates);
+        self.unsound_prefer_builtin_dyn_impl(&mut candidates);
+
+        // If there are *only* global where bounds, then make sure to return that this
+        // is still reported as being proven-via the param-env so that rigid projections
+        // operate correctly. Otherwise, drop all global where-bounds before merging the
+        // remaining candidates.
+        let proven_via = if candidates
+            .iter()
+            .all(|c| matches!(c.source, CandidateSource::ParamEnv(ParamEnvSource::Global)))
+        {
+            TraitGoalProvenVia::ParamEnv
+        } else {
+            candidates
+                .retain(|c| !matches!(c.source, CandidateSource::ParamEnv(ParamEnvSource::Global)));
+            TraitGoalProvenVia::Misc
+        };
+
         let all_candidates: Vec<_> = candidates.into_iter().map(|c| c.result).collect();
         if let Some(response) = self.try_merge_responses(&all_candidates) {
-            Ok((response, Some(TraitGoalProvenVia::Misc)))
+            Ok((response, Some(proven_via)))
         } else {
             self.flounder(&all_candidates).map(|r| (r, None))
         }
@@ -1328,7 +1434,31 @@ where
         &mut self,
         goal: Goal<I, TraitPredicate<I>>,
     ) -> Result<(CanonicalResponse<I>, Option<TraitGoalProvenVia>), NoSolution> {
-        let candidates = self.assemble_and_evaluate_candidates(goal);
-        self.merge_trait_candidates(goal, candidates)
+        let candidates = self.assemble_and_evaluate_candidates(goal, AssembleCandidatesFrom::All);
+        self.merge_trait_candidates(candidates)
+    }
+
+    fn try_stall_coroutine_witness(
+        &mut self,
+        self_ty: I::Ty,
+    ) -> Option<Result<Candidate<I>, NoSolution>> {
+        if let ty::CoroutineWitness(def_id, _) = self_ty.kind() {
+            match self.typing_mode() {
+                TypingMode::Analysis {
+                    defining_opaque_types_and_generators: stalled_generators,
+                } => {
+                    if def_id.as_local().is_some_and(|def_id| stalled_generators.contains(&def_id))
+                    {
+                        return Some(self.forced_ambiguity(MaybeCause::Ambiguity));
+                    }
+                }
+                TypingMode::Coherence
+                | TypingMode::PostAnalysis
+                | TypingMode::Borrowck { defining_opaque_types: _ }
+                | TypingMode::PostBorrowckAnalysis { defined_opaque_types: _ } => {}
+            }
+        }
+
+        None
     }
 }

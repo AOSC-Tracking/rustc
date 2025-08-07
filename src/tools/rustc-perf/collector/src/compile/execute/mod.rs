@@ -4,6 +4,7 @@ use crate::compile::benchmark::codegen_backend::CodegenBackend;
 use crate::compile::benchmark::patch::Patch;
 use crate::compile::benchmark::profile::Profile;
 use crate::compile::benchmark::scenario::Scenario;
+use crate::compile::benchmark::target::Target;
 use crate::compile::benchmark::BenchmarkName;
 use crate::toolchain::Toolchain;
 use crate::utils::fs::EnsureImmutableFile;
@@ -20,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{self, Command};
 use std::str;
+use std::sync::LazyLock;
 
 pub mod bencher;
 mod etw_parser;
@@ -128,6 +130,69 @@ pub struct CargoProcess<'a> {
     pub rustc_args: Vec<String>,
     pub touch_file: Option<String>,
     pub jobserver: Option<jobserver::Client>,
+    pub target: Target,
+    pub workspace_package: Option<String>,
+}
+/// Returns an optional list of Performance CPU cores, if the system has P and E cores.
+/// This list *should* be in a format suitable for the `taskset` command.
+#[cfg(target_os = "linux")]
+fn performance_cores() -> Option<&'static String> {
+    use std::sync::LazyLock;
+    static PERFORMANCE_CORES: LazyLock<Option<String>> = LazyLock::new(|| {
+        if std::fs::exists("/sys/devices/cpu").expect("Could not check the CPU architecture details: could not check if `/sys/devices/cpu` exists!") {
+        	// If /sys/devices/cpu exists, then this is not a "Performance-hybrid" CPU.
+		    None
+	    }
+	    else if std::fs::exists("/sys/devices/cpu_core").expect("Could not check the CPU architecture detali: could not check if `/sys/devices/cpu_core` exists!") {
+		    // If /sys/devices/cpu_core exists, then this is a "Performance-hybrid" CPU.
+		    eprintln!("WARNING: Performance-Hybrid CPU detected. `rustc-perf` can't run properly on Efficency cores: test suite will only use Performance cores!");
+		    Some(std::fs::read_to_string("/sys/devices/cpu_core/cpus").unwrap().trim().to_string())
+	    } else {
+		    // If neither dir exists, then something is wrong - `/sys/devices/cpu` has been in Linux for over a decade.
+		    eprintln!("WARNING: neither `/sys/devices/cpu` nor `/sys/devices/cpu_core` present, unable to determine if this CPU has a Performance-Hybrid architecture.");
+		    None
+	    }
+    });
+    (*PERFORMANCE_CORES).as_ref()
+}
+
+#[cfg(not(target_os = "linux"))]
+// Modify this stub if you want to add support for P/E cores on more OSs
+fn performance_cores() -> Option<&'static String> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+/// Makes the benchmark run only on Performance cores.
+fn run_on_p_cores(path: &Path, cpu_list: &str) -> Command {
+    // Parse CPU list to extract the number of P cores!
+    // This assumes the P core id's are countinus, in format `fisrt_id-last_id`
+    let (core_start, core_end) = cpu_list
+        .split_once("-")
+        .unwrap_or_else(|| panic!("Unsuported P core list format: {cpu_list:?}."));
+    let core_start: u32 = core_start
+        .parse()
+        .expect("Expected a number when parsing the start of the P core list!");
+    let core_end: u32 = core_end
+        .parse()
+        .expect("Expected a number when parsing the end of the P core list!");
+    let core_count = core_end - core_start;
+    let mut cmd = Command::new("taskset");
+    // Set job count to P core count - this is done for 2 reasons:
+    // 1. The instruction count info for E core is often very incompleate - a substantial chunk of events is lost.
+    // 2. The performance charcteristics of E cores are less reliable, so excluding them from the benchmark makes things easier.
+    cmd.env("CARGO_BUILD_JOBS", format!("{core_count}"));
+    // pass the P core list to taskset to pin task to the P core.
+    cmd.arg("--cpu-list");
+    cmd.arg(cpu_list);
+    cmd.arg(path);
+    cmd
+}
+
+#[cfg(not(target_os = "linux"))]
+// Modify this stub if you want to add support for P/E cores on more OSs
+fn run_on_p_cores(_path: &Path, _cpu_list: &str) -> Command {
+    todo!("Can't run commands on the P cores on this platform");
 }
 
 impl<'a> CargoProcess<'a> {
@@ -148,7 +213,12 @@ impl<'a> CargoProcess<'a> {
     }
 
     fn base_command(&self, cwd: &Path, subcommand: &str) -> Command {
-        let mut cmd = Command::new(Path::new(&self.toolchain.components.cargo));
+        // Processors with P and E cores require special handling
+        let mut cmd = if let Some(p_cores) = performance_cores() {
+            run_on_p_cores(Path::new(&self.toolchain.components.cargo), p_cores)
+        } else {
+            Command::new(Path::new(&self.toolchain.components.cargo))
+        };
         cmd
             // Not all cargo invocations (e.g. `cargo clean`) need all of these
             // env vars set, but it doesn't hurt to have them.
@@ -189,6 +259,10 @@ impl<'a> CargoProcess<'a> {
 
     fn get_pkgid(&self, cwd: &Path) -> anyhow::Result<String> {
         let mut pkgid_cmd = self.base_command(cwd, "pkgid");
+        if let Some(package) = &self.workspace_package {
+            pkgid_cmd.arg("-p").arg(package);
+        }
+
         let out = command_output(&mut pkgid_cmd)
             .with_context(|| format!("failed to obtain pkgid in '{:?}'", cwd))?
             .stdout;
@@ -206,12 +280,13 @@ impl<'a> CargoProcess<'a> {
     // really.
     pub async fn run_rustc(&mut self, needs_final: bool) -> anyhow::Result<()> {
         log::info!(
-            "run_rustc with incremental={}, profile={:?}, scenario={:?}, patch={:?}, backend={:?}, phase={}",
+            "run_rustc with incremental={}, profile={:?}, scenario={:?}, patch={:?}, backend={:?}, target={:?}, phase={}",
             self.incremental,
             self.profile,
             self.processor_etc.as_ref().map(|v| v.1),
             self.processor_etc.as_ref().and_then(|v| v.3),
             self.backend,
+            self.target,
             if needs_final { "benchmark" } else { "dependencies" }
         );
 
@@ -220,9 +295,10 @@ impl<'a> CargoProcess<'a> {
             let _guard = EnsureImmutableFile::new(
                 &self.cwd.join("Cargo.lock"),
                 self.processor_name.0.clone(),
-            )?;
+            )
+            .context("cannot resolve Cargo.lock")?;
 
-            // Get the subcommand. If it's not `rustc` it must should be a
+            // Get the subcommand. If it's not `rustc` it should be a
             // subcommand that itself invokes `rustc` (so that the `FAKE_RUSTC`
             // machinery works).
             let cargo_subcommand =
@@ -353,6 +429,7 @@ impl<'a> CargoProcess<'a> {
                     scenario_str,
                     patch,
                     backend: self.backend,
+                    target: self.target,
                 };
                 match processor.process_output(&data, output).await {
                     Ok(Retry::No) => return Ok(()),
@@ -366,44 +443,42 @@ impl<'a> CargoProcess<'a> {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref FAKE_RUSTC: PathBuf = {
-        let mut fake_rustc = env::current_exe().unwrap();
-        fake_rustc.pop();
-        fake_rustc.push("rustc-fake");
-        fake_rustc
-    };
-    static ref FAKE_RUSTDOC: PathBuf = {
-        let mut fake_rustdoc = env::current_exe().unwrap();
-        fake_rustdoc.pop();
-        fake_rustdoc.push("rustdoc-fake");
-        // link from rustc-fake to rustdoc-fake
-        if !fake_rustdoc.exists() {
-            #[cfg(unix)]
-            use std::os::unix::fs::symlink;
-            #[cfg(windows)]
-            use std::os::windows::fs::symlink_file as symlink;
+static FAKE_RUSTC: LazyLock<PathBuf> = LazyLock::new(|| {
+    let mut fake_rustc = env::current_exe().unwrap();
+    fake_rustc.pop();
+    fake_rustc.push("rustc-fake");
+    fake_rustc
+});
+static FAKE_RUSTDOC: LazyLock<PathBuf> = LazyLock::new(|| {
+    let mut fake_rustdoc = env::current_exe().unwrap();
+    fake_rustdoc.pop();
+    fake_rustdoc.push("rustdoc-fake");
+    // link from rustc-fake to rustdoc-fake
+    if !fake_rustdoc.exists() {
+        #[cfg(unix)]
+        use std::os::unix::fs::symlink;
+        #[cfg(windows)]
+        use std::os::windows::fs::symlink_file as symlink;
 
-            symlink(&*FAKE_RUSTC, &fake_rustdoc).expect("failed to make symbolic link");
-        }
-        fake_rustdoc
-    };
-    static ref FAKE_CLIPPY: PathBuf = {
-        let mut fake_clippy = env::current_exe().unwrap();
-        fake_clippy.pop();
-        fake_clippy.push("clippy-fake");
-        // link from rustc-fake to rustdoc-fake
-        if !fake_clippy.exists() {
-            #[cfg(unix)]
-            use std::os::unix::fs::symlink;
-            #[cfg(windows)]
-            use std::os::windows::fs::symlink_file as symlink;
+        symlink(&*FAKE_RUSTC, &fake_rustdoc).expect("failed to make symbolic link");
+    }
+    fake_rustdoc
+});
+static FAKE_CLIPPY: LazyLock<PathBuf> = LazyLock::new(|| {
+    let mut fake_clippy = env::current_exe().unwrap();
+    fake_clippy.pop();
+    fake_clippy.push("clippy-fake");
+    // link from rustc-fake to rustdoc-fake
+    if !fake_clippy.exists() {
+        #[cfg(unix)]
+        use std::os::unix::fs::symlink;
+        #[cfg(windows)]
+        use std::os::windows::fs::symlink_file as symlink;
 
-            symlink(&*FAKE_RUSTC, &fake_clippy).expect("failed to make symbolic link");
-        }
-        fake_clippy
-    };
-}
+        symlink(&*FAKE_RUSTC, &fake_clippy).expect("failed to make symbolic link");
+    }
+    fake_clippy
+});
 
 /// Used to indicate if we need to retry a run.
 pub enum Retry {
@@ -419,6 +494,7 @@ pub struct ProcessOutputData<'a> {
     scenario_str: &'a str,
     patch: Option<&'a Patch>,
     backend: CodegenBackend,
+    target: Target,
 }
 
 /// Trait used by `Benchmark::measure()` to provide different kinds of
@@ -551,7 +627,11 @@ fn process_stat_output(
         let mut parts = line.split(';').map(|s| s.trim());
         let cnt = get!(parts.next());
         let _unit = get!(parts.next());
-        let name = get!(parts.next());
+        let mut name = get!(parts.next());
+        // Map P-core events to normal events
+        if name == "cpu_core/instructions:u/" {
+            name = "instructions:u";
+        }
         let _time = get!(parts.next());
         let pct = get!(parts.next());
         if cnt == "<not supported>" || cnt == "<not counted>" || cnt.is_empty() {
@@ -583,11 +663,7 @@ fn process_stat_output(
             // In any case it's better than crashing the collector and looping indefinitely trying
             // to to complete a run -- which happens if we propagate `parse_self_profile`'s errors
             // up to the caller.
-            if let Ok(self_profile_data) = parse_self_profile(dir, krate) {
-                self_profile_data
-            } else {
-                (None, None)
-            }
+            parse_self_profile(dir, krate).unwrap_or_default()
         }
         _ => (None, None),
     };
@@ -640,9 +716,11 @@ fn parse_self_profile(
     // `perf` pid. So just blindly look in the directory to hopefully find it.
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        if entry.file_name().to_str().map_or(false, |s| {
-            s.starts_with(&crate_name) && s.ends_with("mm_profdata")
-        }) {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|s| s.starts_with(&crate_name) && s.ends_with("mm_profdata"))
+        {
             full_path = Some(entry.path());
             break;
         }

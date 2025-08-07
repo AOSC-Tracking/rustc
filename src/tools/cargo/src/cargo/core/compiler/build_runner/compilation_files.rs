@@ -199,8 +199,8 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
     }
 
     /// Gets the short hash based only on the `PackageId`.
-    /// Used for the metadata when `metadata` returns `None`.
-    pub fn target_short_hash(&self, unit: &Unit) -> String {
+    /// Used for the metadata when `c_extra_filename` returns `None`.
+    fn target_short_hash(&self, unit: &Unit) -> String {
         let hashable = unit.pkg.package_id().stable_hash(self.ws.root());
         util::short_hash(&(METADATA_VERSION, hashable))
     }
@@ -363,6 +363,7 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
                 CompileMode::Build,
                 &TargetKind::Bin,
                 bcx.target_data.short_name(&kind),
+                bcx.gctx,
             )
             .expect("target must support `bin`");
 
@@ -447,8 +448,12 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
         bcx: &BuildContext<'a, 'gctx>,
     ) -> CargoResult<Arc<Vec<OutputFile>>> {
         let ret = match unit.mode {
-            CompileMode::Doc { json, .. } => {
-                let path = if json {
+            _ if unit.skip_non_compile_time_dep => {
+                // This skips compilations so no outputs
+                vec![]
+            }
+            CompileMode::Doc => {
+                let path = if bcx.build_config.intent.wants_doc_json_output() {
                     self.out_dir(unit)
                         .join(format!("{}.json", unit.target.crate_name()))
                 } else {
@@ -492,10 +497,7 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
                     flavor: FileFlavor::Normal,
                 }]
             }
-            CompileMode::Test
-            | CompileMode::Build
-            | CompileMode::Bench
-            | CompileMode::Check { .. } => {
+            CompileMode::Test | CompileMode::Build | CompileMode::Check { .. } => {
                 let mut outputs = self.calc_outputs_rustc(unit, bcx)?;
                 if bcx.build_config.sbom && bcx.gctx.cli_unstable().sbom {
                     let sbom_files: Vec<_> = outputs
@@ -540,7 +542,7 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
         let info = bcx.target_data.info(unit.kind);
         let triple = bcx.target_data.short_name(&unit.kind);
         let (file_types, unsupported) =
-            info.rustc_outputs(unit.mode, unit.target.kind(), triple)?;
+            info.rustc_outputs(unit.mode, unit.target.kind(), triple, bcx.gctx)?;
         if file_types.is_empty() {
             if !unsupported.is_empty() {
                 let unsupported_strs: Vec<_> = unsupported.iter().map(|ct| ct.as_str()).collect();

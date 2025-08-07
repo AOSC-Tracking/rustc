@@ -82,6 +82,8 @@ declare_features! (
     (accepted, attr_literals, "1.30.0", Some(34981)),
     /// Allows overloading augmented assignment operations like `a += b`.
     (accepted, augmented_assignments, "1.8.0", Some(28235)),
+    /// Allows using `avx512*` target features.
+    (accepted, avx512_target_feature, "1.89.0", Some(44839)),
     /// Allows mixing bind-by-move in patterns and references to those identifiers in guards.
     (accepted, bind_by_move_pattern_guards, "1.39.0", Some(15287)),
     /// Allows bindings in the subpattern of a binding pattern.
@@ -95,6 +97,8 @@ declare_features! (
     (accepted, c_unwind, "1.81.0", Some(74990)),
     /// Allows `#[cfg_attr(predicate, multiple, attributes, here)]`.
     (accepted, cfg_attr_multi, "1.33.0", Some(54881)),
+    /// Allows the use of `#[cfg(<true/false>)]`.
+    (accepted, cfg_boolean_literals, "1.88.0", Some(131204)),
     /// Allows the use of `#[cfg(doctest)]`, set when rustdoc is collecting doctests.
     (accepted, cfg_doctest, "1.40.0", Some(62210)),
     /// Enables `#[cfg(panic = "...")]` config key.
@@ -216,6 +220,8 @@ declare_features! (
     (accepted, fn_must_use, "1.27.0", Some(43302)),
     /// Allows capturing variables in scope using format_args!
     (accepted, format_args_capture, "1.58.0", Some(67984)),
+    /// Infer generic args for both consts and types.
+    (accepted, generic_arg_infer, "1.89.0", Some(85077)),
     /// Allows associated types to be generic, e.g., `type Foo<T>;` (RFC 1598).
     (accepted, generic_associated_types, "1.65.0", Some(44265)),
     /// Allows attributes on lifetime/type formal parameters in generics (RFC 1327).
@@ -255,6 +261,8 @@ declare_features! (
     /// Allows some increased flexibility in the name resolution rules,
     /// especially around globs and shadowing (RFC 1560).
     (accepted, item_like_imports, "1.15.0", Some(35120)),
+    // Allows using the `kl` and `widekl` target features and the associated intrinsics
+    (accepted, keylocker_x86, "1.89.0", Some(134813)),
     /// Allows `'a: { break 'a; }`.
     (accepted, label_break_value, "1.65.0", Some(48594)),
     /// Allows `let...else` statements.
@@ -298,6 +306,8 @@ declare_features! (
     /// Allows patterns with concurrent by-move and by-ref bindings.
     /// For example, you can write `Foo(a, ref b)` where `a` is by-move and `b` is by-ref.
     (accepted, move_ref_pattern, "1.49.0", Some(68354)),
+    /// Allows using `#[naked]` on functions.
+    (accepted, naked_functions, "1.88.0", Some(90957)),
     /// Allows specifying modifiers in the link attribute: `#[link(modifiers = "...")]`
     (accepted, native_link_modifiers, "1.61.0", Some(81490)),
     /// Allows specifying the bundle link modifier
@@ -354,6 +364,8 @@ declare_features! (
     (accepted, relaxed_adts, "1.19.0", Some(35626)),
     /// Lessens the requirements for structs to implement `Unsize`.
     (accepted, relaxed_struct_unsize, "1.58.0", Some(81793)),
+    /// Allows the `#[repr(i128)]` attribute for enums.
+    (accepted, repr128, "1.89.0", Some(56071)),
     /// Allows `repr(align(16))` struct attribute (RFC 1358).
     (accepted, repr_align, "1.25.0", Some(33626)),
     /// Allows using `#[repr(align(X))]` on enums with equivalent semantics
@@ -374,6 +386,8 @@ declare_features! (
     (accepted, self_in_typedefs, "1.32.0", Some(49303)),
     /// Allows `Self` struct constructor (RFC 2302).
     (accepted, self_struct_ctor, "1.32.0", Some(51994)),
+    /// Allows use of x86 SHA512, SM3 and SM4 target-features and intrinsics
+    (accepted, sha512_sm_x86, "1.89.0", Some(126624)),
     /// Shortern the tail expression lifetime
     (accepted, shorter_tail_lifetimes, "1.84.0", Some(123739)),
     /// Allows using subslice patterns, `[a, .., b]` and `[a, xs @ .., b]`.

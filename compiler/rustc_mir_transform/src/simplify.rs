@@ -26,6 +26,13 @@
 //! Here the block (`{ return; }`) has the return type `char`, rather than `()`, but the MIR we
 //! naively generate still contains the `_a = ()` write in the unreachable block "after" the
 //! return.
+//!
+//! **WARNING**: This is one of the few optimizations that runs on built and analysis MIR, and
+//! so its effects may affect the type-checking, borrow-checking, and other analysis of MIR.
+//! We must be extremely careful to only apply optimizations that preserve UB and all
+//! non-determinism, since changes here can affect which programs compile in an insta-stable way.
+//! The normal logic that a program with UB can be changed to do anything does not apply to
+//! pre-"runtime" MIR!
 
 use rustc_index::{Idx, IndexSlice, IndexVec};
 use rustc_middle::mir::visit::{MutVisitor, MutatingUseContext, PlaceContext, Visitor};
@@ -66,12 +73,16 @@ impl SimplifyCfg {
     }
 }
 
-pub(super) fn simplify_cfg(body: &mut Body<'_>) {
-    CfgSimplifier::new(body).simplify();
+pub(super) fn simplify_cfg<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
+    if CfgSimplifier::new(tcx, body).simplify() {
+        // `simplify` returns that it changed something. We must invalidate the CFG caches as they
+        // are not consistent with the modified CFG any more.
+        body.basic_blocks.invalidate_cfg_cache();
+    }
     remove_dead_blocks(body);
 
     // FIXME: Should probably be moved into some kind of pass manager
-    body.basic_blocks_mut().raw.shrink_to_fit();
+    body.basic_blocks.as_mut_preserves_cfg().shrink_to_fit();
 }
 
 impl<'tcx> crate::MirPass<'tcx> for SimplifyCfg {
@@ -79,9 +90,9 @@ impl<'tcx> crate::MirPass<'tcx> for SimplifyCfg {
         self.name()
     }
 
-    fn run_pass(&self, _: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
+    fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         debug!("SimplifyCfg({:?}) - simplifying {:?}", self.name(), body.source);
-        simplify_cfg(body);
+        simplify_cfg(tcx, body);
     }
 
     fn is_required(&self) -> bool {
@@ -90,12 +101,13 @@ impl<'tcx> crate::MirPass<'tcx> for SimplifyCfg {
 }
 
 struct CfgSimplifier<'a, 'tcx> {
+    preserve_switch_reads: bool,
     basic_blocks: &'a mut IndexSlice<BasicBlock, BasicBlockData<'tcx>>,
     pred_count: IndexVec<BasicBlock, u32>,
 }
 
 impl<'a, 'tcx> CfgSimplifier<'a, 'tcx> {
-    fn new(body: &'a mut Body<'tcx>) -> Self {
+    fn new(tcx: TyCtxt<'tcx>, body: &'a mut Body<'tcx>) -> Self {
         let mut pred_count = IndexVec::from_elem(0u32, &body.basic_blocks);
 
         // we can't use mir.predecessors() here because that counts
@@ -110,12 +122,19 @@ impl<'a, 'tcx> CfgSimplifier<'a, 'tcx> {
             }
         }
 
-        let basic_blocks = body.basic_blocks_mut();
+        // Preserve `SwitchInt` reads on built and analysis MIR, or if `-Zmir-preserve-ub`.
+        let preserve_switch_reads = matches!(body.phase, MirPhase::Built | MirPhase::Analysis(_))
+            || tcx.sess.opts.unstable_opts.mir_preserve_ub;
+        // Do not clear caches yet. The caller to `simplify` will do it if anything changed.
+        let basic_blocks = body.basic_blocks.as_mut_preserves_cfg();
 
-        CfgSimplifier { basic_blocks, pred_count }
+        CfgSimplifier { preserve_switch_reads, basic_blocks, pred_count }
     }
 
-    fn simplify(mut self) {
+    /// Returns whether we actually simplified anything. In that case, the caller *must* invalidate
+    /// the CFG caches of the MIR body.
+    #[must_use]
+    fn simplify(mut self) -> bool {
         self.strip_nops();
 
         // Vec of the blocks that should be merged. We store the indices here, instead of the
@@ -123,6 +142,7 @@ impl<'a, 'tcx> CfgSimplifier<'a, 'tcx> {
         // We do not push the statements directly into the target block (`bb`) as that is slower
         // due to additional reallocations
         let mut merged_blocks = Vec::new();
+        let mut outer_changed = false;
         loop {
             let mut changed = false;
 
@@ -136,9 +156,8 @@ impl<'a, 'tcx> CfgSimplifier<'a, 'tcx> {
                 let mut terminator =
                     self.basic_blocks[bb].terminator.take().expect("invalid terminator state");
 
-                for successor in terminator.successors_mut() {
-                    self.collapse_goto_chain(successor, &mut changed);
-                }
+                terminator
+                    .successors_mut(|successor| self.collapse_goto_chain(successor, &mut changed));
 
                 let mut inner_changed = true;
                 merged_blocks.clear();
@@ -167,7 +186,11 @@ impl<'a, 'tcx> CfgSimplifier<'a, 'tcx> {
             if !changed {
                 break;
             }
+
+            outer_changed = true;
         }
+
+        outer_changed
     }
 
     /// This function will return `None` if
@@ -253,9 +276,15 @@ impl<'a, 'tcx> CfgSimplifier<'a, 'tcx> {
 
     // turn a branch with all successors identical to a goto
     fn simplify_branch(&mut self, terminator: &mut Terminator<'tcx>) -> bool {
-        match terminator.kind {
-            TerminatorKind::SwitchInt { .. } => {}
-            _ => return false,
+        // Removing a `SwitchInt` terminator may remove reads that result in UB,
+        // so we must not apply this optimization before borrowck or when
+        // `-Zmir-preserve-ub` is set.
+        if self.preserve_switch_reads {
+            return false;
+        }
+
+        let TerminatorKind::SwitchInt { .. } = terminator.kind else {
+            return false;
         };
 
         let first_succ = {
@@ -358,9 +387,7 @@ pub(super) fn remove_dead_blocks(body: &mut Body<'_>) {
     }
 
     for block in basic_blocks {
-        for target in block.terminator_mut().successors_mut() {
-            *target = replacements[target.index()];
-        }
+        block.terminator_mut().successors_mut(|target| *target = replacements[target.index()]);
     }
 }
 
@@ -595,20 +622,6 @@ struct LocalUpdater<'tcx> {
 impl<'tcx> MutVisitor<'tcx> for LocalUpdater<'tcx> {
     fn tcx(&self) -> TyCtxt<'tcx> {
         self.tcx
-    }
-
-    fn visit_statement(&mut self, statement: &mut Statement<'tcx>, location: Location) {
-        if let StatementKind::BackwardIncompatibleDropHint { place, reason: _ } =
-            &mut statement.kind
-        {
-            self.visit_local(
-                &mut place.local,
-                PlaceContext::MutatingUse(MutatingUseContext::Store),
-                location,
-            );
-        } else {
-            self.super_statement(statement, location);
-        }
     }
 
     fn visit_local(&mut self, l: &mut Local, _: PlaceContext, _: Location) {

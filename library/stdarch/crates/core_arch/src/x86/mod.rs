@@ -340,7 +340,7 @@ types! {
     ///
     /// Note that unlike `__m512i`, the integer version of the 512-bit
     /// registers, this `__m512d` type has *one* interpretation. Each instance
-    /// of `__m512d` always corresponds to `f64x4`, or eight `f64` types packed
+    /// of `__m512d` always corresponds to `f64x8`, or eight `f64` types packed
     /// together.
     ///
     /// The in-memory representation of this type is the same as the one of an
@@ -356,7 +356,7 @@ types! {
 }
 
 types! {
-    #![unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+    #![stable(feature = "stdarch_x86_avx512", since = "1.89")]
 
     /// 128-bit wide set of eight `u16` types, x86-specific
     ///
@@ -473,42 +473,42 @@ impl bf16 {
 
 /// The `__mmask64` type used in AVX-512 intrinsics, a 64-bit integer
 #[allow(non_camel_case_types)]
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub type __mmask64 = u64;
 
 /// The `__mmask32` type used in AVX-512 intrinsics, a 32-bit integer
 #[allow(non_camel_case_types)]
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub type __mmask32 = u32;
 
 /// The `__mmask16` type used in AVX-512 intrinsics, a 16-bit integer
 #[allow(non_camel_case_types)]
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub type __mmask16 = u16;
 
 /// The `__mmask8` type used in AVX-512 intrinsics, a 8-bit integer
 #[allow(non_camel_case_types)]
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub type __mmask8 = u8;
 
 /// The `_MM_CMPINT_ENUM` type used to specify comparison operations in AVX-512 intrinsics.
 #[allow(non_camel_case_types)]
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub type _MM_CMPINT_ENUM = i32;
 
 /// The `MM_MANTISSA_NORM_ENUM` type used to specify mantissa normalized operations in AVX-512 intrinsics.
 #[allow(non_camel_case_types)]
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub type _MM_MANTISSA_NORM_ENUM = i32;
 
 /// The `MM_MANTISSA_SIGN_ENUM` type used to specify mantissa signed operations in AVX-512 intrinsics.
 #[allow(non_camel_case_types)]
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub type _MM_MANTISSA_SIGN_ENUM = i32;
 
 /// The `MM_PERM_ENUM` type used to specify shuffle operations in AVX-512 intrinsics.
 #[allow(non_camel_case_types)]
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub type _MM_PERM_ENUM = i32;
 
 #[cfg(test)]
@@ -517,17 +517,26 @@ mod test;
 pub use self::test::*;
 
 macro_rules! as_transmute {
-    ($from:ty => $($name:ident -> $to:ident),* $(,)?) => {
+    ($from:ty => $as_from:ident, $($as_to:ident -> $to:ident),* $(,)?) => {
         impl $from {$(
             #[inline]
-            pub(crate) fn $name(self) -> crate::core_arch::simd::$to {
+            pub(crate) fn $as_to(self) -> crate::core_arch::simd::$to {
                 unsafe { transmute(self) }
             }
         )*}
+        $(
+            impl crate::core_arch::simd::$to {
+                #[inline]
+                pub(crate) fn $as_from(self) -> $from {
+                    unsafe { transmute(self) }
+                }
+            }
+        )*
     };
 }
 
 as_transmute!(__m128i =>
+    as_m128i,
     as_u8x16 -> u8x16,
     as_u16x8 -> u16x8,
     as_u32x4 -> u32x4,
@@ -538,6 +547,7 @@ as_transmute!(__m128i =>
     as_i64x2 -> i64x2,
 );
 as_transmute!(__m256i =>
+    as_m256i,
     as_u8x32 -> u8x32,
     as_u16x16 -> u16x16,
     as_u32x8 -> u32x8,
@@ -548,6 +558,7 @@ as_transmute!(__m256i =>
     as_i64x4 -> i64x4,
 );
 as_transmute!(__m512i =>
+    as_m512i,
     as_u8x64 -> u8x64,
     as_u16x32 -> u16x32,
     as_u32x16 -> u32x16,
@@ -558,35 +569,38 @@ as_transmute!(__m512i =>
     as_i64x8 -> i64x8,
 );
 
-as_transmute!(__m128 => as_f32x4 -> f32x4);
-as_transmute!(__m128d => as_f64x2 -> f64x2);
-as_transmute!(__m256 => as_f32x8 -> f32x8);
-as_transmute!(__m256d => as_f64x4 -> f64x4);
-as_transmute!(__m512 => as_f32x16 -> f32x16);
-as_transmute!(__m512d => as_f64x8 -> f64x8);
+as_transmute!(__m128 => as_m128, as_f32x4 -> f32x4);
+as_transmute!(__m128d => as_m128d, as_f64x2 -> f64x2);
+as_transmute!(__m256 => as_m256, as_f32x8 -> f32x8);
+as_transmute!(__m256d => as_m256d, as_f64x4 -> f64x4);
+as_transmute!(__m512 => as_m512, as_f32x16 -> f32x16);
+as_transmute!(__m512d => as_m512d, as_f64x8 -> f64x8);
 
 as_transmute!(__m128bh =>
+    as_m128bh,
     as_u16x8 -> u16x8,
     as_u32x4 -> u32x4,
     as_i16x8 -> i16x8,
     as_i32x4 -> i32x4,
 );
 as_transmute!(__m256bh =>
+    as_m256bh,
     as_u16x16 -> u16x16,
     as_u32x8 -> u32x8,
     as_i16x16 -> i16x16,
     as_i32x8 -> i32x8,
 );
 as_transmute!(__m512bh =>
+    as_m512bh,
     as_u16x32 -> u16x32,
     as_u32x16 -> u32x16,
     as_i16x32 -> i16x32,
     as_i32x16 -> i32x16,
 );
 
-as_transmute!(__m128h => as_f16x8 -> f16x8);
-as_transmute!(__m256h => as_f16x16 -> f16x16);
-as_transmute!(__m512h => as_f16x32 -> f16x32);
+as_transmute!(__m128h => as_m128h, as_f16x8 -> f16x8);
+as_transmute!(__m256h => as_m256h, as_f16x16 -> f16x16);
+as_transmute!(__m512h => as_m512h, as_f16x32 -> f16x32);
 
 mod eflags;
 #[stable(feature = "simd_x86", since = "1.27.0")]
@@ -682,55 +696,55 @@ pub use self::adx::*;
 use stdarch_test::assert_instr;
 
 mod avx512f;
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub use self::avx512f::*;
 
 mod avx512bw;
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub use self::avx512bw::*;
 
 mod avx512cd;
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub use self::avx512cd::*;
 
 mod avx512dq;
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub use self::avx512dq::*;
 
 mod avx512ifma;
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub use self::avx512ifma::*;
 
 mod avx512vbmi;
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub use self::avx512vbmi::*;
 
 mod avx512vbmi2;
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub use self::avx512vbmi2::*;
 
 mod avx512vnni;
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub use self::avx512vnni::*;
 
 mod avx512bitalg;
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub use self::avx512bitalg::*;
 
 mod gfni;
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub use self::gfni::*;
 
 mod avx512vpopcntdq;
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub use self::avx512vpopcntdq::*;
 
 mod vaes;
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub use self::vaes::*;
 
 mod vpclmulqdq;
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub use self::vpclmulqdq::*;
 
 mod bt;
@@ -746,11 +760,11 @@ mod f16c;
 pub use self::f16c::*;
 
 mod avx512bf16;
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub use self::avx512bf16::*;
 
 mod avxneconvert;
-#[unstable(feature = "stdarch_x86_avx512", issue = "111137")]
+#[stable(feature = "stdarch_x86_avx512", since = "1.89")]
 pub use self::avxneconvert::*;
 
 mod avx512fp16;
@@ -758,5 +772,5 @@ mod avx512fp16;
 pub use self::avx512fp16::*;
 
 mod kl;
-#[unstable(feature = "keylocker_x86", issue = "134813")]
+#[stable(feature = "keylocker_x86", since = "1.89.0")]
 pub use self::kl::*;

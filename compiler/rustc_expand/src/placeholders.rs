@@ -26,7 +26,7 @@ pub(crate) fn placeholder(
         })
     }
 
-    let ident = Ident::empty();
+    let ident = Ident::dummy();
     let attrs = ast::AttrVec::new();
     let vis = vis.unwrap_or(ast::Visibility {
         span: DUMMY_SP,
@@ -62,7 +62,6 @@ pub(crate) fn placeholder(
         AstFragmentKind::Items => AstFragment::Items(smallvec![P(ast::Item {
             id,
             span,
-            ident,
             vis,
             attrs,
             kind: ast::ItemKind::MacCall(mac_placeholder()),
@@ -71,7 +70,6 @@ pub(crate) fn placeholder(
         AstFragmentKind::TraitItems => AstFragment::TraitItems(smallvec![P(ast::AssocItem {
             id,
             span,
-            ident,
             vis,
             attrs,
             kind: ast::AssocItemKind::MacCall(mac_placeholder()),
@@ -80,7 +78,6 @@ pub(crate) fn placeholder(
         AstFragmentKind::ImplItems => AstFragment::ImplItems(smallvec![P(ast::AssocItem {
             id,
             span,
-            ident,
             vis,
             attrs,
             kind: ast::AssocItemKind::MacCall(mac_placeholder()),
@@ -90,7 +87,6 @@ pub(crate) fn placeholder(
             AstFragment::TraitImplItems(smallvec![P(ast::AssocItem {
                 id,
                 span,
-                ident,
                 vis,
                 attrs,
                 kind: ast::AssocItemKind::MacCall(mac_placeholder()),
@@ -101,7 +97,6 @@ pub(crate) fn placeholder(
             AstFragment::ForeignItems(smallvec![P(ast::ForeignItem {
                 id,
                 span,
-                ident,
                 vis,
                 attrs,
                 kind: ast::ForeignItemKind::MacCall(mac_placeholder()),
@@ -337,16 +332,16 @@ impl MutVisitor for PlaceholderExpander {
         }
     }
 
-    fn visit_expr(&mut self, expr: &mut P<ast::Expr>) {
+    fn visit_expr(&mut self, expr: &mut ast::Expr) {
         match expr.kind {
-            ast::ExprKind::MacCall(_) => *expr = self.remove(expr.id).make_expr(),
+            ast::ExprKind::MacCall(_) => *expr = *self.remove(expr.id).make_expr(),
             _ => walk_expr(self, expr),
         }
     }
 
-    fn visit_method_receiver_expr(&mut self, expr: &mut P<ast::Expr>) {
+    fn visit_method_receiver_expr(&mut self, expr: &mut ast::Expr) {
         match expr.kind {
-            ast::ExprKind::MacCall(_) => *expr = self.remove(expr.id).make_method_receiver_expr(),
+            ast::ExprKind::MacCall(_) => *expr = *self.remove(expr.id).make_method_receiver_expr(),
             _ => walk_expr(self, expr),
         }
     }
@@ -354,7 +349,7 @@ impl MutVisitor for PlaceholderExpander {
     fn filter_map_expr(&mut self, expr: P<ast::Expr>) -> Option<P<ast::Expr>> {
         match expr.kind {
             ast::ExprKind::MacCall(_) => self.remove(expr.id).make_opt_expr(),
-            _ => noop_filter_map_expr(self, expr),
+            _ => walk_filter_map_expr(self, expr),
         }
     }
 
@@ -404,16 +399,16 @@ impl MutVisitor for PlaceholderExpander {
         stmts
     }
 
-    fn visit_pat(&mut self, pat: &mut P<ast::Pat>) {
+    fn visit_pat(&mut self, pat: &mut ast::Pat) {
         match pat.kind {
-            ast::PatKind::MacCall(_) => *pat = self.remove(pat.id).make_pat(),
+            ast::PatKind::MacCall(_) => *pat = *self.remove(pat.id).make_pat(),
             _ => walk_pat(self, pat),
         }
     }
 
-    fn visit_ty(&mut self, ty: &mut P<ast::Ty>) {
+    fn visit_ty(&mut self, ty: &mut ast::Ty) {
         match ty.kind {
-            ast::TyKind::MacCall(_) => *ty = self.remove(ty.id).make_ty(),
+            ast::TyKind::MacCall(_) => *ty = *self.remove(ty.id).make_ty(),
             _ => walk_ty(self, ty),
         }
     }

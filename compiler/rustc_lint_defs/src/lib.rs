@@ -8,7 +8,8 @@ use rustc_data_structures::stable_hasher::{
 };
 use rustc_error_messages::{DiagMessage, MultiSpan};
 use rustc_hir::def::Namespace;
-use rustc_hir::{HashStableContext, HirId, MissingLifetimeKind};
+use rustc_hir::def_id::DefPathHash;
+use rustc_hir::{HashStableContext, HirId, ItemLocalId};
 use rustc_macros::{Decodable, Encodable, HashStable_Generic};
 pub use rustc_span::edition::Edition;
 use rustc_span::{Ident, MacroRulesNormalizedIdent, Span, Symbol, sym};
@@ -102,7 +103,7 @@ pub enum Applicability {
 /// The index values have a type of `u16` to reduce the size of the `LintExpectationId`.
 /// It's reasonable to assume that no user will define 2^16 attributes on one node or
 /// have that amount of lints listed. `u16` values should therefore suffice.
-#[derive(Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Debug, Hash, Encodable, Decodable)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, Encodable, Decodable)]
 pub enum LintExpectationId {
     /// Used for lints emitted during the `EarlyLintPass`. This id is not
     /// hash stable and should not be cached.
@@ -156,13 +157,14 @@ impl<HCX: rustc_hir::HashStableContext> HashStable<HCX> for LintExpectationId {
 }
 
 impl<HCX: rustc_hir::HashStableContext> ToStableHashKey<HCX> for LintExpectationId {
-    type KeyType = (HirId, u16, u16);
+    type KeyType = (DefPathHash, ItemLocalId, u16, u16);
 
     #[inline]
-    fn to_stable_hash_key(&self, _: &HCX) -> Self::KeyType {
+    fn to_stable_hash_key(&self, hcx: &HCX) -> Self::KeyType {
         match self {
             LintExpectationId::Stable { hir_id, attr_index, lint_index: Some(lint_index) } => {
-                (*hir_id, *attr_index, *lint_index)
+                let (def_path_hash, lint_idx) = hir_id.to_stable_hash_key(hcx);
+                (def_path_hash, lint_idx, *attr_index, *lint_index)
             }
             _ => {
                 unreachable!("HashStable should only be called for a filled `LintExpectationId`")
@@ -199,9 +201,9 @@ pub enum Level {
     ///
     /// See RFC 2383.
     ///
-    /// The [`LintExpectationId`] is used to later link a lint emission to the actual
+    /// Requires a [`LintExpectationId`] to later link a lint emission to the actual
     /// expectation. It can be ignored in most cases.
-    Expect(LintExpectationId),
+    Expect,
     /// The `warn` level will produce a warning if the lint was violated, however the
     /// compiler will continue with its execution.
     Warn,
@@ -209,9 +211,9 @@ pub enum Level {
     /// to ensure that a lint can't be suppressed. This lint level can currently only be set
     /// via the console and is therefore session specific.
     ///
-    /// The [`LintExpectationId`] is intended to fulfill expectations marked via the
+    /// Requires a [`LintExpectationId`] to fulfill expectations marked via the
     /// `#[expect]` attribute, that will still be suppressed due to the level.
-    ForceWarn(Option<LintExpectationId>),
+    ForceWarn,
     /// The `deny` level will produce an error and stop further execution after the lint
     /// pass is complete.
     Deny,
@@ -225,9 +227,9 @@ impl Level {
     pub fn as_str(self) -> &'static str {
         match self {
             Level::Allow => "allow",
-            Level::Expect(_) => "expect",
+            Level::Expect => "expect",
             Level::Warn => "warn",
-            Level::ForceWarn(_) => "force-warn",
+            Level::ForceWarn => "force-warn",
             Level::Deny => "deny",
             Level::Forbid => "forbid",
         }
@@ -246,24 +248,30 @@ impl Level {
     }
 
     /// Converts an `Attribute` to a level.
-    pub fn from_attr(attr: &impl AttributeExt) -> Option<Self> {
-        Self::from_symbol(attr.name_or_empty(), || Some(attr.id()))
+    pub fn from_attr(attr: &impl AttributeExt) -> Option<(Self, Option<LintExpectationId>)> {
+        attr.name().and_then(|name| Self::from_symbol(name, || Some(attr.id())))
     }
 
     /// Converts a `Symbol` to a level.
-    pub fn from_symbol(s: Symbol, id: impl FnOnce() -> Option<AttrId>) -> Option<Self> {
+    pub fn from_symbol(
+        s: Symbol,
+        id: impl FnOnce() -> Option<AttrId>,
+    ) -> Option<(Self, Option<LintExpectationId>)> {
         match s {
-            sym::allow => Some(Level::Allow),
+            sym::allow => Some((Level::Allow, None)),
             sym::expect => {
                 if let Some(attr_id) = id() {
-                    Some(Level::Expect(LintExpectationId::Unstable { attr_id, lint_index: None }))
+                    Some((
+                        Level::Expect,
+                        Some(LintExpectationId::Unstable { attr_id, lint_index: None }),
+                    ))
                 } else {
                     None
                 }
             }
-            sym::warn => Some(Level::Warn),
-            sym::deny => Some(Level::Deny),
-            sym::forbid => Some(Level::Forbid),
+            sym::warn => Some((Level::Warn, None)),
+            sym::deny => Some((Level::Deny, None)),
+            sym::forbid => Some((Level::Forbid, None)),
             _ => None,
         }
     }
@@ -274,8 +282,8 @@ impl Level {
             Level::Deny => "-D",
             Level::Forbid => "-F",
             Level::Allow => "-A",
-            Level::ForceWarn(_) => "--force-warn",
-            Level::Expect(_) => {
+            Level::ForceWarn => "--force-warn",
+            Level::Expect => {
                 unreachable!("the expect level does not have a commandline flag")
             }
         }
@@ -283,15 +291,8 @@ impl Level {
 
     pub fn is_error(self) -> bool {
         match self {
-            Level::Allow | Level::Expect(_) | Level::Warn | Level::ForceWarn(_) => false,
+            Level::Allow | Level::Expect | Level::Warn | Level::ForceWarn => false,
             Level::Deny | Level::Forbid => true,
-        }
-    }
-
-    pub fn get_expectation_id(&self) -> Option<LintExpectationId> {
-        match self {
-            Level::Expect(id) | Level::ForceWarn(Some(id)) => Some(*id),
-            _ => None,
         }
     }
 }
@@ -360,6 +361,18 @@ pub struct FutureIncompatibleInfo {
     /// Set to false for lints that already include a more detailed
     /// explanation.
     pub explain_reason: bool,
+    /// If set to `true`, this will make future incompatibility warnings show up in cargo's
+    /// reports.
+    ///
+    /// When a future incompatibility warning is first inroduced, set this to `false`
+    /// (or, rather, don't override the default). This allows crate developers an opportunity
+    /// to fix the warning before blasting all dependents with a warning they can't fix
+    /// (dependents have to wait for a new release of the affected crate to be published).
+    ///
+    /// After a lint has been in this state for a while, consider setting this to true, so it
+    /// warns for everyone. It is a good signal that it is ready if you can determine that all
+    /// or most affected crates on crates.io have been updated.
+    pub report_in_deps: bool,
 }
 
 /// The reason for future incompatibility
@@ -379,46 +392,24 @@ pub struct FutureIncompatibleInfo {
 pub enum FutureIncompatibilityReason {
     /// This will be an error in a future release for all editions
     ///
-    /// This will *not* show up in cargo's future breakage report.
-    /// The warning will hence only be seen in local crates, not in dependencies.
-    ///
     /// Choose this variant when you are first introducing a "future
     /// incompatible" warning that is intended to eventually be fixed in the
-    /// future. This allows crate developers an opportunity to fix the warning
-    /// before blasting all dependents with a warning they can't fix
-    /// (dependents have to wait for a new release of the affected crate to be
-    /// published).
+    /// future.
     ///
-    /// After a lint has been in this state for a while, consider graduating
-    /// it to [`FutureIncompatibilityReason::FutureReleaseErrorReportInDeps`].
-    FutureReleaseErrorDontReportInDeps,
-    /// This will be an error in a future release, and
-    /// Cargo should create a report even for dependencies
-    ///
-    /// This is the *only* reason that will make future incompatibility warnings show up in cargo's
-    /// reports. All other future incompatibility warnings are not visible when they occur in a
-    /// dependency.
-    ///
-    /// Choose this variant after the lint has been sitting in the
-    /// [`FutureIncompatibilityReason::FutureReleaseErrorDontReportInDeps`]
-    /// state for a while, and you feel like it is ready to graduate to
-    /// warning everyone. It is a good signal that it is ready if you can
-    /// determine that all or most affected crates on crates.io have been
-    /// updated.
+    /// After a lint has been in this state for a while and you feel like it is ready to graduate
+    /// to warning everyone, consider setting [`FutureIncompatibleInfo::report_in_deps`] to true.
+    /// (see it's documentation for more guidance)
     ///
     /// After some period of time, lints with this variant can be turned into
     /// hard errors (and the lint removed). Preferably when there is some
     /// confidence that the number of impacted projects is very small (few
     /// should have a broken dependency in their dependency tree).
-    ///
-    /// [`EditionAndFutureReleaseError`]: FutureIncompatibilityReason::EditionAndFutureReleaseError
-    FutureReleaseErrorReportInDeps,
+    FutureReleaseError,
     /// Code that changes meaning in some way in a
     /// future release.
     ///
     /// Choose this variant when the semantics of existing code is changing,
-    /// (as opposed to
-    /// [`FutureIncompatibilityReason::FutureReleaseErrorDontReportInDeps`],
+    /// (as opposed to [`FutureIncompatibilityReason::FutureReleaseError`],
     /// which is for when code is going to be rejected in the future).
     FutureReleaseSemanticsChange,
     /// Previously accepted code that will become an
@@ -453,13 +444,12 @@ pub enum FutureIncompatibilityReason {
     /// This will be an error in the provided edition *and* in a future
     /// release.
     ///
-    /// This variant a combination of [`FutureReleaseErrorDontReportInDeps`]
-    /// and [`EditionError`]. This is useful in rare cases when we
-    /// want to have "preview" of a breaking change in an edition, but do a
-    /// breaking change later on all editions anyway.
+    /// This variant a combination of [`FutureReleaseError`] and [`EditionError`].
+    /// This is useful in rare cases when we want to have "preview" of a breaking
+    /// change in an edition, but do a breaking change later on all editions anyway.
     ///
     /// [`EditionError`]: FutureIncompatibilityReason::EditionError
-    /// [`FutureReleaseErrorDontReportInDeps`]: FutureIncompatibilityReason::FutureReleaseErrorDontReportInDeps
+    /// [`FutureReleaseError`]: FutureIncompatibilityReason::FutureReleaseError
     EditionAndFutureReleaseError(Edition),
     /// This will change meaning in the provided edition *and* in a future
     /// release.
@@ -477,7 +467,7 @@ pub enum FutureIncompatibilityReason {
     /// Choose this variant if the built-in text of the diagnostic of the
     /// other variants doesn't match your situation. This is behaviorally
     /// equivalent to
-    /// [`FutureIncompatibilityReason::FutureReleaseErrorDontReportInDeps`].
+    /// [`FutureIncompatibilityReason::FutureReleaseError`].
     Custom(&'static str),
 }
 
@@ -489,24 +479,9 @@ impl FutureIncompatibilityReason {
             | Self::EditionAndFutureReleaseError(e)
             | Self::EditionAndFutureReleaseSemanticsChange(e) => Some(e),
 
-            FutureIncompatibilityReason::FutureReleaseErrorDontReportInDeps
-            | FutureIncompatibilityReason::FutureReleaseErrorReportInDeps
+            FutureIncompatibilityReason::FutureReleaseError
             | FutureIncompatibilityReason::FutureReleaseSemanticsChange
             | FutureIncompatibilityReason::Custom(_) => None,
-        }
-    }
-
-    pub fn has_future_breakage(self) -> bool {
-        match self {
-            FutureIncompatibilityReason::FutureReleaseErrorReportInDeps => true,
-
-            FutureIncompatibilityReason::FutureReleaseErrorDontReportInDeps
-            | FutureIncompatibilityReason::FutureReleaseSemanticsChange
-            | FutureIncompatibilityReason::EditionError(_)
-            | FutureIncompatibilityReason::EditionSemanticsChange(_)
-            | FutureIncompatibilityReason::EditionAndFutureReleaseError(_)
-            | FutureIncompatibilityReason::EditionAndFutureReleaseSemanticsChange(_)
-            | FutureIncompatibilityReason::Custom(_) => false,
         }
     }
 }
@@ -515,8 +490,9 @@ impl FutureIncompatibleInfo {
     pub const fn default_fields_for_macro() -> Self {
         FutureIncompatibleInfo {
             reference: "",
-            reason: FutureIncompatibilityReason::FutureReleaseErrorDontReportInDeps,
+            reason: FutureIncompatibilityReason::FutureReleaseError,
             explain_reason: true,
+            report_in_deps: false,
         }
     }
 }
@@ -634,12 +610,6 @@ pub enum DeprecatedSinceKind {
     InVersion(String),
 }
 
-#[derive(Debug)]
-pub enum ElidedLifetimeResolution {
-    Static,
-    Param(Symbol, Span),
-}
-
 // This could be a closure, but then implementing derive trait
 // becomes hacky (and it gets allocated).
 #[derive(Debug)]
@@ -652,10 +622,6 @@ pub enum BuiltinLintDiag {
     },
     MacroExpandedMacroExportsAccessedByAbsolutePaths(Span),
     ElidedLifetimesInPaths(usize, Span, bool, Span),
-    ElidedNamedLifetimes {
-        elided: (Span, MissingLifetimeKind),
-        resolution: ElidedLifetimeResolution,
-    },
     UnknownCrateTypes {
         span: Span,
         candidate: Option<Symbol>,
@@ -697,6 +663,14 @@ pub enum BuiltinLintDiag {
         is_string: bool,
         suggestion: Span,
     },
+    HiddenUnicodeCodepoints {
+        label: String,
+        count: usize,
+        span_label: Span,
+        labels: Option<Vec<(char, Span)>>,
+        escape: bool,
+        spans: Vec<(char, Span)>,
+    },
     TrailingMacro(bool, Ident),
     BreakWithLabelAndLoop(Span),
     UnicodeTextFlow(Span, String),
@@ -735,6 +709,7 @@ pub enum BuiltinLintDiag {
         ty: String,
     },
     UnusedExternCrate {
+        span: Span,
         removal_span: Span,
     },
     ExternCrateNotIdiomatic {
@@ -803,7 +778,6 @@ pub enum BuiltinLintDiag {
     UnnameableTestItems,
     DuplicateMacroAttribute,
     CfgAttrNoAttributes,
-    MissingFragmentSpecifier,
     MetaVariableStillRepeating(MacroRulesNormalizedIdent),
     MetaVariableWrongOperator,
     DuplicateMatcherBinding,

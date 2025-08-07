@@ -1067,7 +1067,7 @@ pub fn _mm_unpacklo_ps(a: __m128, b: __m128) -> __m128 {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_movehl_ps)
 #[inline]
 #[target_feature(enable = "sse")]
-#[cfg_attr(all(test, not(target_env = "msvc")), assert_instr(movhlps))]
+#[cfg_attr(test, assert_instr(movhlps))]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub fn _mm_movehl_ps(a: __m128, b: __m128) -> __m128 {
     // TODO; figure why this is a different instruction on msvc?
@@ -1080,7 +1080,7 @@ pub fn _mm_movehl_ps(a: __m128, b: __m128) -> __m128 {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_movelh_ps)
 #[inline]
 #[target_feature(enable = "sse")]
-#[cfg_attr(all(test, not(target_env = "msvc")), assert_instr(movlhps))]
+#[cfg_attr(test, assert_instr(movlhps))]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub fn _mm_movelh_ps(a: __m128, b: __m128) -> __m128 {
     unsafe { simd_shuffle!(a, b, [0, 1, 4, 5]) }
@@ -1158,7 +1158,12 @@ pub unsafe fn _mm_load_ps1(p: *const f32) -> __m128 {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_load_ps)
 #[inline]
 #[target_feature(enable = "sse")]
-#[cfg_attr(test, assert_instr(movaps))]
+// FIXME: Rust doesn't emit alignment attributes for MSVC x86-32. Ref https://github.com/rust-lang/rust/pull/139261
+// All aligned load/store intrinsics are affected
+#[cfg_attr(
+    all(test, not(all(target_arch = "x86", target_env = "msvc"))),
+    assert_instr(movaps)
+)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 #[allow(clippy::cast_ptr_alignment)]
 pub unsafe fn _mm_load_ps(p: *const f32) -> __m128 {
@@ -1213,7 +1218,10 @@ pub unsafe fn _mm_loadu_ps(p: *const f32) -> __m128 {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_loadr_ps)
 #[inline]
 #[target_feature(enable = "sse")]
-#[cfg_attr(test, assert_instr(movaps))]
+#[cfg_attr(
+    all(test, not(all(target_arch = "x86", target_env = "msvc"))),
+    assert_instr(movaps)
+)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm_loadr_ps(p: *const f32) -> __m128 {
     let a = _mm_load_ps(p);
@@ -1253,7 +1261,10 @@ pub unsafe fn _mm_store_ss(p: *mut f32, a: __m128) {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_store1_ps)
 #[inline]
 #[target_feature(enable = "sse")]
-#[cfg_attr(test, assert_instr(movaps))]
+#[cfg_attr(
+    all(test, not(all(target_arch = "x86", target_env = "msvc"))),
+    assert_instr(movaps)
+)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 #[allow(clippy::cast_ptr_alignment)]
 pub unsafe fn _mm_store1_ps(p: *mut f32, a: __m128) {
@@ -1266,7 +1277,10 @@ pub unsafe fn _mm_store1_ps(p: *mut f32, a: __m128) {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_store_ps1)
 #[inline]
 #[target_feature(enable = "sse")]
-#[cfg_attr(test, assert_instr(movaps))]
+#[cfg_attr(
+    all(test, not(all(target_arch = "x86", target_env = "msvc"))),
+    assert_instr(movaps)
+)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub unsafe fn _mm_store_ps1(p: *mut f32, a: __m128) {
     _mm_store1_ps(p, a);
@@ -1285,7 +1299,10 @@ pub unsafe fn _mm_store_ps1(p: *mut f32, a: __m128) {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_store_ps)
 #[inline]
 #[target_feature(enable = "sse")]
-#[cfg_attr(test, assert_instr(movaps))]
+#[cfg_attr(
+    all(test, not(all(target_arch = "x86", target_env = "msvc"))),
+    assert_instr(movaps)
+)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 #[allow(clippy::cast_ptr_alignment)]
 pub unsafe fn _mm_store_ps(p: *mut f32, a: __m128) {
@@ -1329,7 +1346,10 @@ pub unsafe fn _mm_storeu_ps(p: *mut f32, a: __m128) {
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_storer_ps)
 #[inline]
 #[target_feature(enable = "sse")]
-#[cfg_attr(test, assert_instr(movaps))]
+#[cfg_attr(
+    all(test, not(all(target_arch = "x86", target_env = "msvc"))),
+    assert_instr(movaps)
+)]
 #[stable(feature = "simd_x86", since = "1.27.0")]
 #[allow(clippy::cast_ptr_alignment)]
 pub unsafe fn _mm_storer_ps(p: *mut f32, a: __m128) {
@@ -1884,9 +1904,10 @@ pub unsafe fn _mm_prefetch<const STRATEGY: i32>(p: *const i8) {
     prefetch(p, (STRATEGY >> 2) & 1, STRATEGY & 3, 1);
 }
 
-/// Returns vector of type __m128 with indeterminate elements.
-/// Despite being "undefined", this is some valid value and not equivalent to [`mem::MaybeUninit`].
-/// In practice, this is equivalent to [`mem::zeroed`].
+/// Returns vector of type __m128 with indeterminate elements.with indetermination elements.
+/// Despite using the word "undefined" (following Intel's naming scheme), this non-deterministically
+/// picks some valid value and is not equivalent to [`mem::MaybeUninit`].
+/// In practice, this is typically equivalent to [`mem::zeroed`].
 ///
 /// [Intel's documentation](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_undefined_ps)
 #[inline]
@@ -3029,7 +3050,7 @@ mod tests {
     }
 
     #[simd_test(enable = "sse")]
-    unsafe fn test_mm_shuffle() {
+    unsafe fn test_MM_SHUFFLE() {
         assert_eq!(_MM_SHUFFLE(0, 1, 1, 3), 0b00_01_01_11);
         assert_eq!(_MM_SHUFFLE(3, 1, 1, 0), 0b11_01_01_00);
         assert_eq!(_MM_SHUFFLE(1, 2, 2, 1), 0b01_10_10_01);

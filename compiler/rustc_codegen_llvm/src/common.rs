@@ -4,8 +4,8 @@ use std::borrow::Borrow;
 
 use libc::{c_char, c_uint};
 use rustc_abi as abi;
+use rustc_abi::HasDataLayout;
 use rustc_abi::Primitive::Pointer;
-use rustc_abi::{AddressSpace, HasDataLayout};
 use rustc_ast::Mutability;
 use rustc_codegen_ssa::common::TypeKind;
 use rustc_codegen_ssa::traits::*;
@@ -67,12 +67,12 @@ use crate::value::Value;
 /// the `OperandBundleDef` value created for MSVC landing pads.
 pub(crate) struct Funclet<'ll> {
     cleanuppad: &'ll Value,
-    operand: llvm::OperandBundleOwned<'ll>,
+    operand: llvm::OperandBundleBox<'ll>,
 }
 
 impl<'ll> Funclet<'ll> {
     pub(crate) fn new(cleanuppad: &'ll Value) -> Self {
-        Funclet { cleanuppad, operand: llvm::OperandBundleOwned::new("funclet", &[cleanuppad]) }
+        Funclet { cleanuppad, operand: llvm::OperandBundleBox::new("funclet", &[cleanuppad]) }
     }
 
     pub(crate) fn cleanuppad(&self) -> &'ll Value {
@@ -80,7 +80,7 @@ impl<'ll> Funclet<'ll> {
     }
 
     pub(crate) fn bundle(&self) -> &llvm::OperandBundle<'ll> {
-        self.operand.raw()
+        self.operand.as_ref()
     }
 }
 
@@ -99,14 +99,14 @@ impl<'ll, CX: Borrow<SCx<'ll>>> BackendTypes for GenericCx<'ll, CX> {
     type DIVariable = &'ll llvm::debuginfo::DIVariable;
 }
 
-impl<'ll> CodegenCx<'ll, '_> {
+impl<'ll, CX: Borrow<SCx<'ll>>> GenericCx<'ll, CX> {
     pub(crate) fn const_array(&self, ty: &'ll Type, elts: &[&'ll Value]) -> &'ll Value {
         let len = u64::try_from(elts.len()).expect("LLVMConstArray2 elements len overflow");
         unsafe { llvm::LLVMConstArray2(ty, elts.as_ptr(), len) }
     }
 
     pub(crate) fn const_bytes(&self, bytes: &[u8]) -> &'ll Value {
-        bytes_in_context(self.llcx, bytes)
+        bytes_in_context(self.llcx(), bytes)
     }
 
     pub(crate) fn const_get_elt(&self, v: &'ll Value, idx: u64) -> &'ll Value {
@@ -269,7 +269,8 @@ impl<'ll, 'tcx> ConstCodegenMethods for CodegenCx<'ll, 'tcx> {
             }
             Scalar::Ptr(ptr, _size) => {
                 let (prov, offset) = ptr.into_parts();
-                let (base_addr, base_addr_space) = match self.tcx.global_alloc(prov.alloc_id()) {
+                let global_alloc = self.tcx.global_alloc(prov.alloc_id());
+                let base_addr = match global_alloc {
                     GlobalAlloc::Memory(alloc) => {
                         // For ZSTs directly codegen an aligned pointer.
                         // This avoids generating a zero-sized constant value and actually needing a
@@ -301,12 +302,10 @@ impl<'ll, 'tcx> ConstCodegenMethods for CodegenCx<'ll, 'tcx> {
                                     format!("alloc_{hash:032x}").as_bytes(),
                                 );
                             }
-                            (value, AddressSpace::DATA)
+                            value
                         }
                     }
-                    GlobalAlloc::Function { instance, .. } => {
-                        (self.get_fn_addr(instance), self.data_layout().instruction_address_space)
-                    }
+                    GlobalAlloc::Function { instance, .. } => self.get_fn_addr(instance),
                     GlobalAlloc::VTable(ty, dyn_ty) => {
                         let alloc = self
                             .tcx
@@ -319,14 +318,15 @@ impl<'ll, 'tcx> ConstCodegenMethods for CodegenCx<'ll, 'tcx> {
                             .unwrap_memory();
                         let init = const_alloc_to_llvm(self, alloc, /*static*/ false);
                         let value = self.static_addr_of_impl(init, alloc.inner().align, None);
-                        (value, AddressSpace::DATA)
+                        value
                     }
                     GlobalAlloc::Static(def_id) => {
                         assert!(self.tcx.is_static(def_id));
                         assert!(!self.tcx.is_thread_local_static(def_id));
-                        (self.get_static(def_id), AddressSpace::DATA)
+                        self.get_static(def_id)
                     }
                 };
+                let base_addr_space = global_alloc.address_space(self);
                 let llval = unsafe {
                     llvm::LLVMConstInBoundsGEP2(
                         self.type_i8(),

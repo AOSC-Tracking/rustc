@@ -2,7 +2,8 @@ use std::borrow::Cow;
 
 use rustc_data_structures::intern::Interned;
 use rustc_error_messages::MultiSpan;
-use rustc_macros::HashStable;
+use rustc_macros::{HashStable, TyDecodable, TyEncodable};
+use rustc_type_ir::walk::TypeWalker;
 use rustc_type_ir::{self as ir, TypeFlags, WithCachedTypeInfo};
 
 use crate::ty::{self, Ty, TyCtxt};
@@ -162,6 +163,10 @@ impl<'tcx> rustc_type_ir::inherent::Const<TyCtxt<'tcx>> for Const<'tcx> {
         Const::new_bound(tcx, debruijn, var)
     }
 
+    fn new_placeholder(tcx: TyCtxt<'tcx>, placeholder: ty::PlaceholderConst) -> Self {
+        Const::new_placeholder(tcx, placeholder)
+    }
+
     fn new_unevaluated(interner: TyCtxt<'tcx>, uv: ty::UnevaluatedConst<'tcx>) -> Self {
         Const::new_unevaluated(interner, uv)
     }
@@ -243,4 +248,31 @@ impl<'tcx> Const<'tcx> {
     pub fn is_ct_infer(self) -> bool {
         matches!(self.kind(), ty::ConstKind::Infer(_))
     }
+
+    /// Iterator that walks `self` and any types reachable from
+    /// `self`, in depth-first order. Note that just walks the types
+    /// that appear in `self`, it does not descend into the fields of
+    /// structs or variants. For example:
+    ///
+    /// ```text
+    /// isize => { isize }
+    /// Foo<Bar<isize>> => { Foo<Bar<isize>>, Bar<isize>, isize }
+    /// [isize] => { [isize], isize }
+    /// ```
+    pub fn walk(self) -> TypeWalker<TyCtxt<'tcx>> {
+        TypeWalker::new(self.into())
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, TyEncodable, TyDecodable, HashStable)]
+pub enum AnonConstKind {
+    /// `feature(generic_const_exprs)` anon consts are allowed to use arbitrary generic parameters in scope
+    GCE,
+    /// stable `min_const_generics` anon consts are not allowed to use any generic parameters
+    MCG,
+    /// anon consts used as the length of a repeat expr are syntactically allowed to use generic parameters
+    /// but must not depend on the actual instantiation. See #76200 for more information
+    RepeatExprCount,
+    /// anon consts outside of the type system, e.g. enum discriminants
+    NonTypeSystem,
 }

@@ -2,22 +2,19 @@ r[items.generics]
 # Generic parameters
 
 r[items.generics.syntax]
-> **<sup>Syntax</sup>**\
-> _GenericParams_ :\
-> &nbsp;&nbsp; &nbsp;&nbsp; `<` `>`\
-> &nbsp;&nbsp;  | `<` (_GenericParam_ `,`)<sup>\*</sup> _GenericParam_ `,`<sup>?</sup> `>`
->
-> _GenericParam_ :\
-> &nbsp;&nbsp; [_OuterAttribute_]<sup>\*</sup> ( _LifetimeParam_ | _TypeParam_ | _ConstParam_ )
->
-> _LifetimeParam_ :\
-> &nbsp;&nbsp; [_Lifetime_]&nbsp;( `:` [_LifetimeBounds_] )<sup>?</sup>
->
-> _TypeParam_ :\
-> &nbsp;&nbsp; [IDENTIFIER]&nbsp;( `:` [_TypeParamBounds_]<sup>?</sup> )<sup>?</sup> ( `=` [_Type_] )<sup>?</sup>
->
-> _ConstParam_:\
-> &nbsp;&nbsp; `const` [IDENTIFIER] `:` [_Type_] ( `=` _[Block][block]_ | [IDENTIFIER] | -<sup>?</sup>[LITERAL] )<sup>?</sup>
+```grammar,items
+GenericParams -> `<` ( GenericParam (`,` GenericParam)* `,`? )? `>`
+
+GenericParam -> OuterAttribute* ( LifetimeParam | TypeParam | ConstParam )
+
+LifetimeParam -> Lifetime ( `:` LifetimeBounds )?
+
+TypeParam -> IDENTIFIER ( `:` TypeParamBounds? )? ( `=` Type )?
+
+ConstParam ->
+    `const` IDENTIFIER `:` Type
+    ( `=` BlockExpression | IDENTIFIER | `-`?LiteralExpression )?
+```
 
 r[items.generics.syntax.intro]
 [Functions], [type aliases], [structs], [enumerations], [unions], [traits], and
@@ -30,7 +27,7 @@ r[items.generics.syntax.decl-order]
 The order of generic parameters is restricted to lifetime parameters and then type and const parameters intermixed.
 
 r[items.generics.syntax.duplicate-params]
-The same parameter name may not be declared more than once in a _GenericParams_ list.
+The same parameter name may not be declared more than once in a [GenericParams] list.
 
 Some examples of items with type, const, and lifetime parameters:
 
@@ -149,29 +146,55 @@ r[items.generics.const.argument]
 A const argument in a [path] specifies the const value to use for that item.
 
 r[items.generics.const.argument.const-expr]
-The argument must be a [const expression] of the type ascribed to the const
-parameter. The const expression must be a [block expression][block]
-(surrounded with braces) unless it is a single path segment (an [IDENTIFIER])
-or a [literal] (with a possibly leading `-` token).
+The argument must either be an [inferred const] or be a [const expression] of the type ascribed to the const parameter. The const expression must be a [block expression][block] (surrounded with braces) unless it is a single path segment (an [IDENTIFIER]) or a [literal] (with a possibly leading `-` token).
 
 > [!NOTE]
 > This syntactic restriction is necessary to avoid requiring infinite lookahead when parsing an expression inside of a type.
 
 ```rust
-fn double<const N: i32>() {
-    println!("doubled: {}", N * 2);
-}
+struct S<const N: i64>;
+const C: i64 = 1;
+fn f<const N: i64>() -> S<N> { S }
 
-const SOME_CONST: i32 = 12;
+let _ = f::<1>(); // Literal.
+let _ = f::<-1>(); // Negative literal.
+let _ = f::<{ 1 + 2 }>(); // Constant expression.
+let _ = f::<C>(); // Single segment path.
+let _ = f::<{ C + 1 }>(); // Constant expression.
+let _: S<1> = f::<_>(); // Inferred const.
+let _: S<1> = f::<(((_)))>(); // Inferred const.
+```
 
-fn example() {
-    // Example usage of a const argument.
-    double::<9>();
-    double::<-123>();
-    double::<{7 + 8}>();
-    double::<SOME_CONST>();
-    double::<{ SOME_CONST + 5 }>();
+> [!NOTE]
+> In a generic argument list, an [inferred const] is parsed as an [inferred type][InferredType] but then semantically treated as a separate kind of [const generic argument].
+
+r[items.generics.const.inferred]
+Where a const argument is expected, an `_` (optionally surrounding by any number of matching parentheses), called the *inferred const* ([path rules][paths.expr.complex-const-params], [array expression rules][expr.array.length-restriction]), can be used instead. This asks the compiler to infer the const argument if possible based on surrounding information.
+
+```rust
+fn make_buf<const N: usize>() -> [u8; N] {
+    [0; _]
+    //  ^ Infers `N`.
 }
+let _: [u8; 1024] = make_buf::<_>();
+//                             ^ Infers `1024`.
+```
+
+> [!NOTE]
+> An [inferred const] is not semantically an [expression][Expression] and so is not accepted within braces.
+>
+> ```rust,compile_fail
+> fn f<const N: usize>() -> [u8; N] { [0; _] }
+> let _: [_; 1] = f::<{ _ }>();
+> //                    ^ ERROR `_` not allowed here
+> ```
+
+r[items.generics.const.inferred.constraint]
+The inferred const cannot be used in item signatures.
+
+```rust,compile_fail
+fn f<const N: usize>(x: [u8; N]) -> [u8; _] { x }
+//                                       ^ ERROR not allowed
 ```
 
 r[items.generics.const.type-ambiguity]
@@ -234,19 +257,17 @@ r[items.generics.where]
 ## Where clauses
 
 r[items.generics.where.syntax]
-> **<sup>Syntax</sup>**\
-> _WhereClause_ :\
-> &nbsp;&nbsp; `where` ( _WhereClauseItem_ `,` )<sup>\*</sup> _WhereClauseItem_ <sup>?</sup>
->
-> _WhereClauseItem_ :\
-> &nbsp;&nbsp; &nbsp;&nbsp; _LifetimeWhereClauseItem_\
-> &nbsp;&nbsp; | _TypeBoundWhereClauseItem_
->
-> _LifetimeWhereClauseItem_ :\
-> &nbsp;&nbsp; [_Lifetime_] `:` [_LifetimeBounds_]
->
-> _TypeBoundWhereClauseItem_ :\
-> &nbsp;&nbsp; [_ForLifetimes_]<sup>?</sup> [_Type_] `:` [_TypeParamBounds_]<sup>?</sup>
+```grammar,items
+WhereClause -> `where` ( WhereClauseItem `,` )* WhereClauseItem?
+
+WhereClauseItem ->
+      LifetimeWhereClauseItem
+    | TypeBoundWhereClauseItem
+
+LifetimeWhereClauseItem -> Lifetime `:` LifetimeBounds
+
+TypeBoundWhereClauseItem -> ForLifetimes? Type `:` TypeParamBounds?
+```
 
 r[items.generics.where.intro]
 *Where clauses* provide another way to specify bounds on type and lifetime
@@ -255,7 +276,7 @@ parameters.
 
 r[items.generics.where.higher-ranked-lifetimes]
 The `for` keyword can be used to introduce [higher-ranked lifetimes]. It only
-allows [_LifetimeParam_] parameters.
+allows [LifetimeParam] parameters.
 
 ```rust
 struct A<T>
@@ -289,16 +310,6 @@ struct Foo<#[my_flexible_clone(unbounded)] H> {
 }
 ```
 
-[IDENTIFIER]: ../identifiers.md
-
-[_ForLifetimes_]: ../trait-bounds.md#higher-ranked-trait-bounds
-[_LifetimeParam_]: #generic-parameters
-[_LifetimeBounds_]: ../trait-bounds.md
-[_Lifetime_]: ../trait-bounds.md
-[_OuterAttribute_]: ../attributes.md
-[_Type_]: ../types.md#type-expressions
-[_TypeParamBounds_]: ../trait-bounds.md
-
 [array repeat expression]: ../expressions/array-expr.md
 [arrays]: ../types/array.md
 [slices]: ../types/slice.md
@@ -308,6 +319,7 @@ struct Foo<#[my_flexible_clone(unbounded)] H> {
 [block]: ../expressions/block-expr.md
 [const contexts]: ../const_eval.md#const-context
 [const expression]: ../const_eval.md#constant-expressions
+[const generic argument]: items.generics.const.argument
 [const item]: constant-items.md
 [enumerations]: enumerations.md
 [functions]: functions.md
@@ -316,6 +328,7 @@ struct Foo<#[my_flexible_clone(unbounded)] H> {
 [generic parameter scopes]: ../names/scopes.md#generic-parameter-scopes
 [higher-ranked lifetimes]: ../trait-bounds.md#higher-ranked-trait-bounds
 [implementations]: implementations.md
+[inferred const]: items.generics.const.inferred
 [item declarations]: ../statements.md#item-declarations
 [item]: ../items.md
 [literal]: ../expressions/literal-expr.md

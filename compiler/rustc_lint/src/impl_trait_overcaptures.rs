@@ -41,7 +41,7 @@ declare_lint! {
     ///
     /// ### Example
     ///
-    /// ```rust,compile_fail
+    /// ```rust,compile_fail,edition2021
     /// # #![deny(impl_trait_overcaptures)]
     /// # use std::fmt::Display;
     /// let mut x = vec![];
@@ -392,7 +392,7 @@ where
                         }
                         _ => {
                             self.tcx.dcx().span_delayed_bug(
-                                self.tcx.hir().span(arg.hir_id()),
+                                self.tcx.hir_span(arg.hir_id()),
                                 "no valid for captured arg",
                             );
                         }
@@ -460,8 +460,8 @@ fn extract_def_id_from_arg<'tcx>(
     generics: &'tcx ty::Generics,
     arg: ty::GenericArg<'tcx>,
 ) -> DefId {
-    match arg.unpack() {
-        ty::GenericArgKind::Lifetime(re) => match *re {
+    match arg.kind() {
+        ty::GenericArgKind::Lifetime(re) => match re.kind() {
             ty::ReEarlyParam(ebr) => generics.region_param(ebr, tcx).def_id,
             ty::ReBound(
                 _,
@@ -530,7 +530,7 @@ impl<'tcx> TypeRelation<TyCtxt<'tcx>> for FunctionalVariances<'tcx> {
         a: ty::Region<'tcx>,
         _: ty::Region<'tcx>,
     ) -> RelateResult<'tcx, ty::Region<'tcx>> {
-        let def_id = match *a {
+        let def_id = match a.kind() {
             ty::ReEarlyParam(ebr) => self.generics.region_param(ebr, self.tcx).def_id,
             ty::ReBound(
                 _,

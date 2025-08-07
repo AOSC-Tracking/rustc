@@ -45,8 +45,9 @@ mod task_queue {
         }
     }
 
+    // Specifying linkage/symbol name is solely to ensure a single instance between this crate and its unit tests
     #[cfg_attr(test, linkage = "available_externally")]
-    #[unsafe(export_name = "_ZN16__rust_internals3std3sys3sgx6thread10TASK_QUEUEE")]
+    #[unsafe(export_name = "_ZN16__rust_internals3std3sys3pal3sgx6thread10TASK_QUEUEE")]
     static TASK_QUEUE: Mutex<Vec<Task>> = Mutex::new(Vec::new());
 
     pub(super) fn lock() -> MutexGuard<'static, Vec<Task>> {
@@ -95,7 +96,11 @@ pub mod wait_notify {
 
 impl Thread {
     // unsafe: see thread::Builder::spawn_unchecked for safety requirements
-    pub unsafe fn new(_stack: usize, p: Box<dyn FnOnce() + Send>) -> io::Result<Thread> {
+    pub unsafe fn new(
+        _stack: usize,
+        _name: Option<&str>,
+        p: Box<dyn FnOnce() + Send>,
+    ) -> io::Result<Thread> {
         let mut queue_lock = task_queue::lock();
         unsafe { usercalls::launch_thread()? };
         let (task, handle) = task_queue::Task::new(p);

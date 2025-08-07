@@ -22,7 +22,7 @@ use crate::errors::{LongRunning, LongRunningWarn};
 use crate::fluent_generated as fluent;
 use crate::interpret::{
     self, AllocId, AllocInit, AllocRange, ConstAllocation, CtfeProvenance, FnArg, Frame,
-    GlobalAlloc, ImmTy, InterpCx, InterpResult, MPlaceTy, OpTy, Pointer, RangeSet, Scalar,
+    GlobalAlloc, ImmTy, InterpCx, InterpResult, OpTy, PlaceTy, Pointer, RangeSet, Scalar,
     compile_time_machine, interp_ok, throw_exhaust, throw_inval, throw_ub, throw_ub_custom,
     throw_unsup, throw_unsup_format,
 };
@@ -226,7 +226,7 @@ impl<'tcx> CompileTimeInterpCx<'tcx> {
         &mut self,
         instance: ty::Instance<'tcx>,
         args: &[FnArg<'tcx>],
-        _dest: &MPlaceTy<'tcx>,
+        _dest: &PlaceTy<'tcx>,
         _ret: Option<mir::BasicBlock>,
     ) -> InterpResult<'tcx, Option<ty::Instance<'tcx>>> {
         let def_id = instance.def_id();
@@ -249,7 +249,7 @@ impl<'tcx> CompileTimeInterpCx<'tcx> {
             return Err(ConstEvalErrKind::Panic { msg, file, line, col }).into();
         } else if self.tcx.is_lang_item(def_id, LangItem::PanicFmt) {
             // For panic_fmt, call const_panic_fmt instead.
-            let const_def_id = self.tcx.require_lang_item(LangItem::ConstPanicFmt, None);
+            let const_def_id = self.tcx.require_lang_item(LangItem::ConstPanicFmt, self.tcx.span);
             let new_instance = ty::Instance::expect_resolve(
                 *self.tcx,
                 self.typing_env(),
@@ -343,7 +343,7 @@ impl<'tcx> interpret::Machine<'tcx> for CompileTimeMachine<'tcx> {
         orig_instance: ty::Instance<'tcx>,
         _abi: &FnAbi<'tcx, Ty<'tcx>>,
         args: &[FnArg<'tcx>],
-        dest: &MPlaceTy<'tcx>,
+        dest: &PlaceTy<'tcx>,
         ret: Option<mir::BasicBlock>,
         _unwind: mir::UnwindAction, // unwinding is not supported in consts
     ) -> InterpResult<'tcx, Option<(&'tcx mir::Body<'tcx>, ty::Instance<'tcx>)>> {
@@ -385,7 +385,7 @@ impl<'tcx> interpret::Machine<'tcx> for CompileTimeMachine<'tcx> {
         ecx: &mut InterpCx<'tcx, Self>,
         instance: ty::Instance<'tcx>,
         args: &[OpTy<'tcx>],
-        dest: &MPlaceTy<'tcx, Self::Provenance>,
+        dest: &PlaceTy<'tcx, Self::Provenance>,
         target: Option<mir::BasicBlock>,
         _unwind: mir::UnwindAction,
     ) -> InterpResult<'tcx, Option<ty::Instance<'tcx>>> {
@@ -502,6 +502,7 @@ impl<'tcx> interpret::Machine<'tcx> for CompileTimeMachine<'tcx> {
             RemainderByZero(op) => RemainderByZero(eval_to_int(op)?),
             ResumedAfterReturn(coroutine_kind) => ResumedAfterReturn(*coroutine_kind),
             ResumedAfterPanic(coroutine_kind) => ResumedAfterPanic(*coroutine_kind),
+            ResumedAfterDrop(coroutine_kind) => ResumedAfterDrop(*coroutine_kind),
             MisalignedPointerDereference { required, found } => MisalignedPointerDereference {
                 required: eval_to_int(required)?,
                 found: eval_to_int(found)?,
@@ -546,7 +547,7 @@ impl<'tcx> interpret::Machine<'tcx> for CompileTimeMachine<'tcx> {
                         rustc_session::lint::builtin::LONG_RUNNING_CONST_EVAL,
                         hir_id,
                     )
-                    .0
+                    .level
                     .is_error();
                 let span = ecx.cur_span();
                 ecx.tcx.emit_node_span_lint(
@@ -733,6 +734,9 @@ impl<'tcx> interpret::Machine<'tcx> for CompileTimeMachine<'tcx> {
             // Don't bother caching, we're only doing one validation at the end anyway.
             Cow::Owned(compute_range())
         }
+    }
+
+    fn get_default_alloc_params(&self) -> <Self::Bytes as mir::interpret::AllocBytes>::AllocParams {
     }
 }
 

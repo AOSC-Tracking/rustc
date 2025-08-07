@@ -1,13 +1,4 @@
-#![feature(
-    no_core,
-    lang_items,
-    never_type,
-    linkage,
-    extern_types,
-    naked_functions,
-    thread_local,
-    repr_simd
-)]
+#![feature(no_core, lang_items, never_type, linkage, extern_types, thread_local, repr_simd)]
 #![no_core]
 #![allow(dead_code, non_camel_case_types, internal_features)]
 
@@ -213,11 +204,8 @@ fn main() {
         assert_eq!(intrinsics::size_of_val(a) as u8, 16);
         assert_eq!(intrinsics::size_of_val(&0u32) as u8, 4);
 
-        assert_eq!(intrinsics::min_align_of::<u16>() as u8, 2);
-        assert_eq!(
-            intrinsics::min_align_of_val(&a) as u8,
-            intrinsics::min_align_of::<&str>() as u8
-        );
+        assert_eq!(intrinsics::align_of::<u16>() as u8, 2);
+        assert_eq!(intrinsics::align_of_val(&a) as u8, intrinsics::align_of::<&str>() as u8);
 
         assert!(!intrinsics::needs_drop::<u8>());
         assert!(!intrinsics::needs_drop::<[u8]>());
@@ -387,11 +375,9 @@ global_asm! {
 }
 
 #[cfg(all(not(jit), target_arch = "x86_64"))]
-#[naked]
+#[unsafe(naked)]
 extern "C" fn naked_test() {
-    unsafe {
-        naked_asm!("ret");
-    }
+    naked_asm!("ret")
 }
 
 #[repr(C)]

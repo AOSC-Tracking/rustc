@@ -1391,7 +1391,7 @@ fn update_precise_git_revisions() {
 
     // Now make a tag looks like an oid.
     // It requires a git fetch, as the oid cannot be found in preexisting git db.
-    let arbitrary_tag: String = std::iter::repeat('a').take(head_id.len()).collect();
+    let arbitrary_tag: String = "a".repeat(head_id.len());
     git::tag(&git_repo, &arbitrary_tag);
 
     p.cargo("update git --precise")
@@ -2705,6 +2705,44 @@ fn update_breaking_pre_release_upgrade() {
 [UPGRADING] bar ^2.0.0-beta.21 -> ^3.0.0
 [LOCKING] 1 package to latest compatible version
 [UPDATING] bar v2.0.0-beta.21 -> v3.0.0
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn prefixed_v_in_version() {
+    Package::new("bar", "1.0.0").publish();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+        [package]
+        name  =  "foo"
+        version  =  "0.0.1"
+        edition  =  "2015"
+        authors  =  []
+
+        [dependencies]
+        bar = "1.0.0"
+    "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("generate-lockfile").run();
+
+    Package::new("bar", "1.0.1").publish();
+    p.cargo("update bar --precise v1.0.1")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] the version provided, `v1.0.1` is not a valid SemVer version
+
+[HELP] try changing the version to `1.0.1`
+
+Caused by:
+  unexpected character 'v' while parsing major version number
 
 "#]])
         .run();

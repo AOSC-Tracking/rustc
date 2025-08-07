@@ -1,4 +1,4 @@
-use rustc_attr_parsing::{AttributeKind, ReprAttr, find_attr};
+use rustc_attr_data_structures::{AttributeKind, ReprAttr, find_attr};
 use rustc_hir::Attribute;
 use rustc_lint::LateContext;
 use rustc_span::Span;
@@ -30,7 +30,7 @@ pub(super) fn check(cx: &LateContext<'_>, item_span: Span, attrs: &[Attribute], 
                     diag.warn(
                         "unqualified `#[repr(packed)]` defaults to `#[repr(Rust, packed)]`, which has no stable ABI",
                     )
-                    .help("qualify the desired ABI explicity via `#[repr(C, packed)]` or `#[repr(Rust, packed)]`")
+                    .help("qualify the desired ABI explicitly via `#[repr(C, packed)]` or `#[repr(Rust, packed)]`")
                     .span_label(packed_span, "`packed` representation set here");
                 },
             );

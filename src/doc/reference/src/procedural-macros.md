@@ -1,5 +1,5 @@
 r[macro.proc]
-## Procedural Macros
+# Procedural Macros
 
 r[macro.proc.intro]
 *Procedural macros* allow creating syntax extensions as execution of a function.
@@ -43,7 +43,7 @@ Procedural macros have two ways of reporting errors. The first is to panic. The
 second is to emit a [`compile_error`] macro invocation.
 
 r[macro.proc.proc_macro]
-### The `proc_macro` crate
+## The `proc_macro` crate
 
 r[macro.proc.proc_macro.intro]
 Procedural macro crates almost always will link to the compiler-provided
@@ -67,8 +67,7 @@ cannot modify a `Span` itself, you can always change the `Span` *associated*
 with any token, such as through getting a `Span` from another token.
 
 r[macro.proc.hygiene]
-### Procedural macro hygiene
-
+## Procedural macro hygiene
 
 Procedural macros are *unhygienic*. This means they behave as if the output
 token stream was simply written inline to the code it's next to. This means that
@@ -81,7 +80,7 @@ by ensuring that generated functions have names that are unlikely to clash with
 other functions (like `__internal_foo` instead of `foo`).
 
 r[macro.proc.function]
-### Function-like procedural macros
+## Function-like procedural macros
 
 r[macro.proc.function.intro]
 *Function-like procedural macros* are procedural macros that are invoked using
@@ -132,7 +131,7 @@ expressions], [item] positions, including items in [`extern` blocks], inherent
 and trait [implementations], and [trait definitions].
 
 r[macro.proc.derive]
-### Derive macros
+## Derive macros
 
 r[macro.proc.derive.intro]
 *Derive macros* define new inputs for the [`derive` attribute]. These macros
@@ -183,7 +182,7 @@ fn main() {
 ```
 
 r[macro.proc.derive.attributes]
-#### Derive macro helper attributes
+### Derive macro helper attributes
 
 r[macro.proc.derive.attributes.intro]
 Derive macros can add additional [attributes] into the scope of the [item]
@@ -222,7 +221,7 @@ struct Struct {
 ```
 
 r[macro.proc.attribute]
-### Attribute macros
+## Attribute macros
 
 r[macro.proc.attribute.intro]
 *Attribute macros* define new [outer attributes][attributes] which can be
@@ -308,7 +307,7 @@ fn invoke4() {}
 ```
 
 r[macro.proc.token]
-### Declarative macro tokens and procedural macro tokens
+## Declarative macro tokens and procedural macro tokens
 
 r[macro.proc.token.intro]
 Declarative `macro_rules` macros and procedural macros use similar, but
@@ -351,8 +350,9 @@ r[macro.proc.token.conversion.to-proc_macro]
 When passed to a proc-macro
 - All multi-character operators are broken into single characters.
 - Lifetimes are broken into a `'` character and an identifier.
-- All metavariable substitutions are represented as their underlying token
-  streams.
+- The keyword metavariable [`$crate`] is passed as a single identifier.
+- All other metavariable substitutions are represented as their underlying
+  token streams.
     - Such token streams may be wrapped into delimited groups ([`Group`]) with
       implicit delimiters ([`Delimiter::None`]) when it's necessary for
       preserving parsing priorities.
@@ -377,6 +377,7 @@ their equivalent `#[doc = r"str"]` attributes when passed to macros.
 [Cargo's build scripts]: ../cargo/reference/build-scripts.html
 [Derive macros]: #derive-macros
 [Function-like macros]: #function-like-procedural-macros
+[`$crate`]: macro.decl.hygiene.crate
 [`Delimiter::None`]: proc_macro::Delimiter::None
 [`Group`]: proc_macro::Group
 [`TokenStream`]: proc_macro::TokenStream

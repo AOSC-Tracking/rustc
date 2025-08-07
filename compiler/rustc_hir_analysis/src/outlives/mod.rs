@@ -25,7 +25,7 @@ fn inferred_outlives_of(tcx: TyCtxt<'_>, item_def_id: LocalDefId) -> &[(ty::Clau
         }
         DefKind::AnonConst if tcx.features().generic_const_exprs() => {
             let id = tcx.local_def_id_to_hir_id(item_def_id);
-            if tcx.hir().opt_const_param_default_param_def_id(id).is_some() {
+            if tcx.hir_opt_const_param_default_param_def_id(id).is_some() {
                 // In `generics_of` we set the generics' parent to be our parent's parent which means that
                 // we lose out on the predicates of our actual parent if we dont return those predicates here.
                 // (See comment in `generics_of` for more information on why the parent shenanigans is necessary)
@@ -69,8 +69,8 @@ fn inferred_outlives_crate(tcx: TyCtxt<'_>, (): ()) -> CratePredicatesMap<'_> {
         .map(|(&def_id, set)| {
             let predicates =
                 &*tcx.arena.alloc_from_iter(set.as_ref().skip_binder().iter().filter_map(
-                    |(ty::OutlivesPredicate(kind1, region2), &span)| {
-                        match kind1.unpack() {
+                    |(ty::OutlivesPredicate(arg1, region2), &span)| {
+                        match arg1.kind() {
                             GenericArgKind::Type(ty1) => Some((
                                 ty::ClauseKind::TypeOutlives(ty::OutlivesPredicate(ty1, *region2))
                                     .upcast(tcx),

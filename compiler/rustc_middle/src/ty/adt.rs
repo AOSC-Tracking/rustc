@@ -53,6 +53,8 @@ bitflags::bitflags! {
         const IS_VARIANT_LIST_NON_EXHAUSTIVE = 1 << 8;
         /// Indicates whether the type is `UnsafeCell`.
         const IS_UNSAFE_CELL              = 1 << 9;
+        /// Indicates whether the type is `UnsafePinned`.
+        const IS_UNSAFE_PINNED              = 1 << 10;
     }
 }
 rustc_data_structures::external_bitflags_debug! { AdtFlags }
@@ -227,8 +229,12 @@ impl<'tcx> rustc_type_ir::inherent::AdtDef<TyCtxt<'tcx>> for AdtDef<'tcx> {
         )
     }
 
-    fn sized_constraint(self, tcx: TyCtxt<'tcx>) -> Option<ty::EarlyBinder<'tcx, Ty<'tcx>>> {
-        self.sized_constraint(tcx)
+    fn sizedness_constraint(
+        self,
+        tcx: TyCtxt<'tcx>,
+        sizedness: ty::SizedTraitKind,
+    ) -> Option<ty::EarlyBinder<'tcx, Ty<'tcx>>> {
+        self.sizedness_constraint(tcx, sizedness)
     }
 
     fn is_fundamental(self) -> bool {
@@ -236,7 +242,7 @@ impl<'tcx> rustc_type_ir::inherent::AdtDef<TyCtxt<'tcx>> for AdtDef<'tcx> {
     }
 
     fn destructor(self, tcx: TyCtxt<'tcx>) -> Option<AdtDestructorKind> {
-        Some(match self.destructor(tcx)?.constness {
+        Some(match tcx.constness(self.destructor(tcx)?.did) {
             hir::Constness::Const => AdtDestructorKind::Const,
             hir::Constness::NotConst => AdtDestructorKind::NotConst,
         })
@@ -301,6 +307,9 @@ impl AdtDefData {
         }
         if tcx.is_lang_item(did, LangItem::UnsafeCell) {
             flags |= AdtFlags::IS_UNSAFE_CELL;
+        }
+        if tcx.is_lang_item(did, LangItem::UnsafePinned) {
+            flags |= AdtFlags::IS_UNSAFE_PINNED;
         }
 
         AdtDefData { did, variants, flags, repr }
@@ -403,6 +412,12 @@ impl<'tcx> AdtDef<'tcx> {
     #[inline]
     pub fn is_unsafe_cell(self) -> bool {
         self.flags().contains(AdtFlags::IS_UNSAFE_CELL)
+    }
+
+    /// Returns `true` if this is `UnsafePinned<T>`.
+    #[inline]
+    pub fn is_unsafe_pinned(self) -> bool {
+        self.flags().contains(AdtFlags::IS_UNSAFE_PINNED)
     }
 
     /// Returns `true` if this is `ManuallyDrop<T>`.
@@ -623,10 +638,15 @@ impl<'tcx> AdtDef<'tcx> {
         tcx.adt_async_destructor(self.did())
     }
 
-    /// Returns a type such that `Self: Sized` if and only if that type is `Sized`,
-    /// or `None` if the type is always sized.
-    pub fn sized_constraint(self, tcx: TyCtxt<'tcx>) -> Option<ty::EarlyBinder<'tcx, Ty<'tcx>>> {
-        if self.is_struct() { tcx.adt_sized_constraint(self.did()) } else { None }
+    /// If this ADT is a struct, returns a type such that `Self: {Meta,Pointee,}Sized` if and only
+    /// if that type is `{Meta,Pointee,}Sized`, or `None` if this ADT is always
+    /// `{Meta,Pointee,}Sized`.
+    pub fn sizedness_constraint(
+        self,
+        tcx: TyCtxt<'tcx>,
+        sizedness: ty::SizedTraitKind,
+    ) -> Option<ty::EarlyBinder<'tcx, Ty<'tcx>>> {
+        if self.is_struct() { tcx.adt_sizedness_constraint((self.did(), sizedness)) } else { None }
     }
 }
 

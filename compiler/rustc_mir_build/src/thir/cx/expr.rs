@@ -9,7 +9,7 @@ use rustc_middle::hir::place::{
     Place as HirPlace, PlaceBase as HirPlaceBase, ProjectionKind as HirProjectionKind,
 };
 use rustc_middle::middle::region;
-use rustc_middle::mir::{self, BinOp, BorrowKind, UnOp};
+use rustc_middle::mir::{self, AssignOp, BinOp, BorrowKind, UnOp};
 use rustc_middle::thir::*;
 use rustc_middle::ty::adjustment::{
     Adjust, Adjustment, AutoBorrow, AutoBorrowMutability, PointerCoercion,
@@ -38,7 +38,10 @@ impl<'tcx> ThirBuildCx<'tcx> {
     }
 
     pub(crate) fn mirror_exprs(&mut self, exprs: &'tcx [hir::Expr<'tcx>]) -> Box<[ExprId]> {
-        exprs.iter().map(|expr| self.mirror_expr_inner(expr)).collect()
+        // `mirror_exprs` may also recurse deeply, so it needs protection from stack overflow.
+        // Note that we *could* forward to `mirror_expr` for that, but we can consolidate the
+        // overhead of stack growth by doing it outside the iteration.
+        ensure_sufficient_stack(|| exprs.iter().map(|expr| self.mirror_expr_inner(expr)).collect())
     }
 
     #[instrument(level = "trace", skip(self, hir_expr))]
@@ -191,7 +194,7 @@ impl<'tcx> ThirBuildCx<'tcx> {
                 let pointer_target = ExprKind::Field {
                     lhs: self.thir.exprs.push(expr),
                     variant_index: FIRST_VARIANT,
-                    name: FieldIdx::from(0u32),
+                    name: FieldIdx::ZERO,
                 };
                 let arg = Expr { temp_lifetime, ty: pin_ty, span, kind: pointer_target };
                 let arg = self.thir.exprs.push(arg);
@@ -220,13 +223,13 @@ impl<'tcx> ThirBuildCx<'tcx> {
                 });
 
                 // kind = Pin { __pointer: pointer }
-                let pin_did = self.tcx.require_lang_item(rustc_hir::LangItem::Pin, Some(span));
+                let pin_did = self.tcx.require_lang_item(rustc_hir::LangItem::Pin, span);
                 let args = self.tcx.mk_args(&[new_pin_target.into()]);
                 let kind = ExprKind::Adt(Box::new(AdtExpr {
                     adt_def: self.tcx.adt_def(pin_did),
                     variant_index: FIRST_VARIANT,
                     args,
-                    fields: Box::new([FieldExpr { name: FieldIdx::from(0u32), expr }]),
+                    fields: Box::new([FieldExpr { name: FieldIdx::ZERO, expr }]),
                     user_ty: None,
                     base: AdtExprBase::None,
                 }));
@@ -489,7 +492,7 @@ impl<'tcx> ThirBuildCx<'tcx> {
                     self.overloaded_operator(expr, Box::new([lhs, rhs]))
                 } else {
                     ExprKind::AssignOp {
-                        op: bin_op(op.node),
+                        op: assign_op(op.node),
                         lhs: self.mirror_expr(lhs),
                         rhs: self.mirror_expr(rhs),
                     }
@@ -1220,6 +1223,9 @@ impl<'tcx> ThirBuildCx<'tcx> {
                 HirProjectionKind::OpaqueCast => {
                     ExprKind::Use { source: self.thir.exprs.push(captured_place_expr) }
                 }
+                HirProjectionKind::UnwrapUnsafeBinder => ExprKind::PlaceUnwrapUnsafeBinder {
+                    source: self.thir.exprs.push(captured_place_expr),
+                },
                 HirProjectionKind::Index | HirProjectionKind::Subslice => {
                     // We don't capture these projections, so we can ignore them here
                     continue;
@@ -1345,5 +1351,20 @@ fn bin_op(op: hir::BinOpKind) -> BinOp {
         hir::BinOpKind::Ge => BinOp::Ge,
         hir::BinOpKind::Gt => BinOp::Gt,
         _ => bug!("no equivalent for ast binop {:?}", op),
+    }
+}
+
+fn assign_op(op: hir::AssignOpKind) -> AssignOp {
+    match op {
+        hir::AssignOpKind::AddAssign => AssignOp::AddAssign,
+        hir::AssignOpKind::SubAssign => AssignOp::SubAssign,
+        hir::AssignOpKind::MulAssign => AssignOp::MulAssign,
+        hir::AssignOpKind::DivAssign => AssignOp::DivAssign,
+        hir::AssignOpKind::RemAssign => AssignOp::RemAssign,
+        hir::AssignOpKind::BitXorAssign => AssignOp::BitXorAssign,
+        hir::AssignOpKind::BitAndAssign => AssignOp::BitAndAssign,
+        hir::AssignOpKind::BitOrAssign => AssignOp::BitOrAssign,
+        hir::AssignOpKind::ShlAssign => AssignOp::ShlAssign,
+        hir::AssignOpKind::ShrAssign => AssignOp::ShrAssign,
     }
 }

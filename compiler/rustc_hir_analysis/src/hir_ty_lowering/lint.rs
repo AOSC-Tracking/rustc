@@ -86,6 +86,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 "expected a type, found a trait"
             );
             if self_ty.span.can_be_used_for_suggestions()
+                && poly_trait_ref.trait_ref.trait_def_id().is_some()
                 && !self.maybe_suggest_impl_trait(self_ty, &mut diag)
                 && !self.maybe_suggest_dyn_trait(self_ty, sugg, &mut diag)
             {
@@ -102,7 +103,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
             // In case there is an associated type with the same name
             // Add the suggestion to this error
             if let Some(mut sugg) =
-                tcx.dcx().steal_non_err(self_ty.span, StashKey::AssociatedTypeSuggestion)
+                self.dcx().steal_non_err(self_ty.span, StashKey::AssociatedTypeSuggestion)
                 && let Suggestions::Enabled(ref mut s1) = diag.suggestions
                 && let Suggestions::Enabled(ref mut s2) = sugg.suggestions
             {
@@ -140,7 +141,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
 
         let generics = match tcx.hir_node_by_def_id(parent_item) {
             hir::Node::Item(hir::Item {
-                kind: hir::ItemKind::Struct(_, variant, generics),
+                kind: hir::ItemKind::Struct(_, generics, variant),
                 ..
             }) => {
                 if !variant.fields().iter().any(|field| field.hir_id == parent_hir_id) {
@@ -148,7 +149,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 }
                 generics
             }
-            hir::Node::Item(hir::Item { kind: hir::ItemKind::Enum(_, def, generics), .. }) => {
+            hir::Node::Item(hir::Item { kind: hir::ItemKind::Enum(_, generics, def), .. }) => {
                 if !def
                     .variants
                     .iter()
@@ -268,7 +269,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
             hir::Node::Field(field) => {
                 // Enums can't have unsized fields, fields can only have an unsized tail field.
                 if let hir::Node::Item(hir::Item {
-                    kind: hir::ItemKind::Struct(_, variant, _), ..
+                    kind: hir::ItemKind::Struct(_, _, variant), ..
                 }) = tcx.parent_hir_node(field.hir_id)
                     && variant
                         .fields()
@@ -500,8 +501,8 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
         let names: Vec<_> = tcx
             .associated_items(trait_def_id)
             .in_definition_order()
-            .filter(|assoc| assoc.kind.namespace() == Namespace::ValueNS)
-            .map(|cand| cand.name)
+            .filter(|assoc| assoc.namespace() == Namespace::ValueNS)
+            .map(|cand| cand.name())
             .collect();
         if let Some(typo) = find_best_match_for_name(&names, segment.ident.name, None) {
             diag.span_suggestion_verbose(

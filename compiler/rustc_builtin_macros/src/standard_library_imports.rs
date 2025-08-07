@@ -36,16 +36,15 @@ pub fn inject(
     let span = DUMMY_SP.with_def_site_ctxt(expn_id.to_expn_id());
     let call_site = DUMMY_SP.with_call_site_ctxt(expn_id.to_expn_id());
 
-    let ecfg = ExpansionConfig::default("std_lib_injection".to_string(), features);
+    let ecfg = ExpansionConfig::default(sym::std_lib_injection, features);
     let cx = ExtCtxt::new(sess, ecfg, resolver, None);
 
     let ident_span = if edition >= Edition2018 { span } else { call_site };
 
     let item = cx.item(
         span,
-        Ident::new(name, ident_span),
         thin_vec![cx.attr_word(sym::macro_use, span)],
-        ast::ItemKind::ExternCrate(None),
+        ast::ItemKind::ExternCrate(None, Ident::new(name, ident_span)),
     );
 
     krate.items.insert(0, item);
@@ -68,7 +67,6 @@ pub fn inject(
     // Inject the relevant crate's prelude.
     let use_item = cx.item(
         span,
-        Ident::empty(),
         thin_vec![cx.attr_word(sym::prelude_import, span)],
         ast::ItemKind::Use(ast::UseTree {
             prefix: cx.path(span, import_path),

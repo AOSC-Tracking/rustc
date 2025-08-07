@@ -84,7 +84,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         self.annotate_expected_due_to_let_ty(err, expr, error);
         self.annotate_loop_expected_due_to_inference(err, expr, error);
-        if self.annotate_mut_binding_to_immutable_binding(err, expr, error) {
+        if self.annotate_mut_binding_to_immutable_binding(err, expr, expr_ty, expected, error) {
             return;
         }
 
@@ -260,7 +260,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         mut expected_ty_expr: Option<&'tcx hir::Expr<'tcx>>,
         allow_two_phase: AllowTwoPhase,
     ) -> Result<Ty<'tcx>, Diag<'a>> {
-        let expected = self.resolve_vars_with_obligations(expected);
+        let expected = if self.next_trait_solver() {
+            expected
+        } else {
+            self.resolve_vars_with_obligations(expected)
+        };
 
         let e = match self.coerce(expr, checked_ty, expected, allow_two_phase, None) {
             Ok(ty) => return Ok(ty),
@@ -722,8 +726,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     )) => {
                         if let Some(hir::Node::Item(hir::Item {
                             kind:
-                                hir::ItemKind::Static(ident, ty, ..)
-                                | hir::ItemKind::Const(ident, ty, ..),
+                                hir::ItemKind::Static(_, ident, ty, _)
+                                | hir::ItemKind::Const(ident, _, ty, _),
                             ..
                         })) = self.tcx.hir_get_if_local(*def_id)
                         {
@@ -799,17 +803,17 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// Detect the following case
     ///
     /// ```text
-    /// fn change_object(mut a: &Ty) {
+    /// fn change_object(mut b: &Ty) {
     ///     let a = Ty::new();
     ///     b = a;
     /// }
     /// ```
     ///
-    /// where the user likely meant to modify the value behind there reference, use `a` as an out
+    /// where the user likely meant to modify the value behind there reference, use `b` as an out
     /// parameter, instead of mutating the local binding. When encountering this we suggest:
     ///
     /// ```text
-    /// fn change_object(a: &'_ mut Ty) {
+    /// fn change_object(b: &'_ mut Ty) {
     ///     let a = Ty::new();
     ///     *b = a;
     /// }
@@ -818,13 +822,15 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         &self,
         err: &mut Diag<'_>,
         expr: &hir::Expr<'_>,
+        expr_ty: Ty<'tcx>,
+        expected: Ty<'tcx>,
         error: Option<TypeError<'tcx>>,
     ) -> bool {
-        if let Some(TypeError::Sorts(ExpectedFound { expected, found })) = error
+        if let Some(TypeError::Sorts(ExpectedFound { .. })) = error
             && let ty::Ref(_, inner, hir::Mutability::Not) = expected.kind()
 
             // The difference between the expected and found values is one level of borrowing.
-            && self.can_eq(self.param_env, *inner, found)
+            && self.can_eq(self.param_env, *inner, expr_ty)
 
             // We have an `ident = expr;` assignment.
             && let hir::Node::Expr(hir::Expr { kind: hir::ExprKind::Assign(lhs, rhs, _), .. }) =
@@ -865,10 +871,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // `&'name Ty` -> `&'name mut Ty` or `&Ty` -> `&mut Ty`
                 vec![(
                     ty_ref.1.ty.span.shrink_to_lo(),
-                    format!(
-                        "{}mut ",
-                        if ty_ref.0.ident.span.lo() == ty_ref.0.ident.span.hi() { "" } else { " " },
-                    ),
+                    format!("{}mut ", if ty_ref.0.ident.span.is_empty() { "" } else { " " },),
                 )]
             };
             sugg.extend([
@@ -999,10 +1002,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let container = with_no_trimmed_paths!(self.tcx.def_path_str(container_id));
         for def_id in pick.import_ids {
             let hir_id = self.tcx.local_def_id_to_hir_id(def_id);
-            path_span.push_span_label(
-                self.tcx.hir().span(hir_id),
-                format!("`{container}` imported here"),
-            );
+            path_span
+                .push_span_label(self.tcx.hir_span(hir_id), format!("`{container}` imported here"));
         }
         let tail = with_no_trimmed_paths!(match &other_methods_in_scope[..] {
             [] => return,
@@ -1094,14 +1095,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     /// This function checks whether the method is not static and does not accept other parameters than `self`.
     fn has_only_self_parameter(&self, method: &AssocItem) -> bool {
-        match method.kind {
-            ty::AssocKind::Fn => {
-                method.fn_has_self_parameter
-                    && self.tcx.fn_sig(method.def_id).skip_binder().inputs().skip_binder().len()
-                        == 1
-            }
-            _ => false,
-        }
+        method.is_method()
+            && self.tcx.fn_sig(method.def_id).skip_binder().inputs().skip_binder().len() == 1
     }
 
     /// If the given `HirId` corresponds to a block with a trailing expression, return that expression
@@ -1115,27 +1110,26 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
     }
 
-    // Returns whether the given expression is a destruct assignment desugaring.
-    // For example, `(a, b) = (1, &2);`
-    // Here we try to find the pattern binding of the expression,
-    // `default_binding_modes` is false only for destruct assignment desugaring.
+    /// Returns whether the given expression is a destruct assignment desugaring.
+    /// For example, `(a, b) = (1, &2);`
+    /// Here we try to find the pattern binding of the expression,
+    /// `default_binding_modes` is false only for destruct assignment desugaring.
     pub(crate) fn is_destruct_assignment_desugaring(&self, expr: &hir::Expr<'_>) -> bool {
         if let hir::ExprKind::Path(hir::QPath::Resolved(
             _,
             hir::Path { res: hir::def::Res::Local(bind_hir_id), .. },
         )) = expr.kind
-        {
-            let bind = self.tcx.hir_node(*bind_hir_id);
-            let parent = self.tcx.parent_hir_node(*bind_hir_id);
-            if let hir::Node::Pat(hir::Pat {
+            && let bind = self.tcx.hir_node(*bind_hir_id)
+            && let parent = self.tcx.parent_hir_node(*bind_hir_id)
+            && let hir::Node::Pat(hir::Pat {
                 kind: hir::PatKind::Binding(_, _hir_id, _, _), ..
             }) = bind
-                && let hir::Node::Pat(hir::Pat { default_binding_modes: false, .. }) = parent
-            {
-                return true;
-            }
+            && let hir::Node::Pat(hir::Pat { default_binding_modes: false, .. }) = parent
+        {
+            true
+        } else {
+            false
         }
-        false
     }
 
     fn explain_self_literal(

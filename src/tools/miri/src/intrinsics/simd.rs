@@ -306,7 +306,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                     let c = this.read_scalar(&this.project_index(&c, i)?)?;
                     let dest = this.project_index(&dest, i)?;
 
-                    let fuse: bool = intrinsic_name == "fma" || this.machine.rng.get_mut().random();
+                    let fuse: bool = intrinsic_name == "fma"
+                        || (this.machine.float_nondet && this.machine.rng.get_mut().random());
 
                     // Works for f32 and f64.
                     // FIXME: using host floats to work around https://github.com/rust-lang/miri/issues/2468.
@@ -320,7 +321,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                             let b = b.to_f32()?;
                             let c = c.to_f32()?;
                             let res = if fuse {
-                                a.to_host().mul_add(b.to_host(), c.to_host()).to_soft()
+                                a.mul_add(b, c).value
                             } else {
                                 ((a * b).value + c).value
                             };
@@ -332,7 +333,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                             let b = b.to_f64()?;
                             let c = c.to_f64()?;
                             let res = if fuse {
-                                a.to_host().mul_add(b.to_host(), c.to_host()).to_soft()
+                                a.mul_add(b, c).value
                             } else {
                                 ((a * b).value + c).value
                             };
@@ -506,7 +507,6 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 };
 
                 let dest_len = u32::try_from(dest_len).unwrap();
-                let bitmask_len = u32::try_from(bitmask_len).unwrap();
                 for i in 0..dest_len {
                     let bit_i = simd_bitmask_index(i, dest_len, this.data_layout().endian);
                     let mask = mask & 1u64.strict_shl(bit_i);
@@ -517,17 +517,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                     let val = if mask != 0 { yes } else { no };
                     this.write_immediate(*val, &dest)?;
                 }
-                for i in dest_len..bitmask_len {
-                    // If the mask is "padded", ensure that padding is all-zero.
-                    // This deliberately does not use `simd_bitmask_index`; these bits are outside
-                    // the bitmask. It does not matter in which order we check them.
-                    let mask = mask & 1u64.strict_shl(i);
-                    if mask != 0 {
-                        throw_ub_format!(
-                            "a SIMD bitmask less than 8 bits long must be filled with 0s for the remaining bits"
-                        );
-                    }
-                }
+                // The remaining bits of the mask are ignored.
             }
             // Converts a "vector of bool" into a bitmask.
             "bitmask" => {
@@ -645,7 +635,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 let index_len = index.len();
 
                 assert_eq!(left_len, right_len);
-                assert_eq!(index_len as u64, dest_len);
+                assert_eq!(u64::try_from(index_len).unwrap(), dest_len);
 
                 for i in 0..dest_len {
                     let src_index: u64 =

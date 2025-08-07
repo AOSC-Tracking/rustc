@@ -198,6 +198,103 @@ fn prepare_for_2018() {
 }
 
 #[cargo_test]
+fn fix_tests_with_edition() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "2018"
+            "#,
+        )
+        .file(
+            "src/lib.rs",
+            r#"
+                #![allow(ellipsis_inclusive_range_patterns)]
+                pub fn foo() {}
+
+                #[cfg(test)]
+                mod tests {
+                    #[test]
+                    fn it_works() {
+                        f();
+                    }
+                    fn f() -> bool {
+                        let x = 123;
+                        match x {
+                            0...100 => true,
+                            _ => false,
+                        }
+                    }
+                }
+            "#,
+        )
+        .build();
+
+    p.cargo("fix --edition --allow-no-vcs")
+        .with_stderr_data(str![[r#"
+[MIGRATING] Cargo.toml from 2018 edition to 2021
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[MIGRATING] src/lib.rs from 2018 edition to 2021
+[FIXED] src/lib.rs (1 fix)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .with_stdout_data("")
+        .run();
+    // Check that the test is fixed.
+    assert!(p.read_file("src/lib.rs").contains(r#"0..=100 => true,"#));
+}
+
+#[cargo_test]
+fn fix_tests_with_edition_idioms() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = 'foo'
+                version = '0.1.0'
+                edition = '2018'
+            "#,
+        )
+        .file(
+            "src/lib.rs",
+            r#"
+                pub fn foo() {}
+
+                #[cfg(test)]
+                mod tests {
+                    #[test]
+                    fn it_works() {
+                        f();
+                    }
+
+                    use std::any::Any;
+                    pub fn f() {
+                        let _x: Box<Any> = Box::new(3);
+                    }
+                }
+            "#,
+        )
+        .build();
+
+    p.cargo("fix --edition-idioms --allow-no-vcs")
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[FIXED] src/lib.rs (1 fix)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .with_stdout_data("")
+        .run();
+    // Check that the test is fixed.
+    assert!(p.read_file("src/lib.rs").contains("Box<dyn Any>"));
+}
+
+#[cargo_test]
 fn local_paths() {
     let p = project()
         .file(
@@ -708,7 +805,7 @@ fn does_not_warn_about_dirty_ignored_files() {
 }
 
 #[cargo_test]
-fn fix_all_targets_by_default() {
+fn do_not_fix_tests_by_default() {
     let p = project()
         .file("src/lib.rs", "pub fn foo() { let mut x = 3; let _ = x; }")
         .file("tests/foo.rs", "pub fn foo() { let mut x = 3; let _ = x; }")
@@ -717,7 +814,7 @@ fn fix_all_targets_by_default() {
         .env("__CARGO_FIX_YOLO", "1")
         .run();
     assert!(!p.read_file("src/lib.rs").contains("let mut x"));
-    assert!(!p.read_file("tests/foo.rs").contains("let mut x"));
+    assert!(p.read_file("tests/foo.rs").contains("let mut x"));
 }
 
 #[cargo_test]
@@ -869,7 +966,7 @@ fn prepare_for_already_on_latest_unstable() {
         .run();
 }
 
-#[cargo_test(nightly, reason = "edition2024 hasn't hit stable yet")]
+#[cargo_test]
 fn prepare_for_already_on_latest_stable() {
     // Stable counterpart of prepare_for_already_on_latest_unstable.
     if Edition::LATEST_UNSTABLE.is_some() {
@@ -1330,7 +1427,6 @@ fn fix_to_broken_code() {
     p.cargo("fix --allow-no-vcs --broken-code")
         .cwd("bar")
         .env("RUSTC", p.root().join("foo/target/debug/foo"))
-        .with_status(101)
         .with_stderr_data(str![[r#"
 ...
 [WARNING] failed to automatically apply fixes suggested by rustc to crate `bar`
@@ -2446,7 +2542,7 @@ edition = "2021"
     );
 }
 
-#[cargo_test]
+#[cargo_test(nightly, reason = "-Zscript is unstable")]
 fn migrate_removes_project_for_script() {
     let p = project()
         .file(
@@ -2480,7 +2576,7 @@ fn main() {
 [MIGRATING] foo.rs from 2021 edition to 2024
 [FIXED] foo.rs (1 fix)
 [CHECKING] foo v0.0.0 ([ROOT]/foo/foo.rs)
-[MIGRATING] [ROOT]/home/.cargo/target/[HASH]/foo.rs from 2021 edition to 2024
+[MIGRATING] foo.rs from 2021 edition to 2024
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -2863,6 +2959,106 @@ dep_df_false = { workspace = true, default-features = false }
 dep_simple = { workspace = true}
 dep_df_true = { workspace = true}
 dep_df_false = { workspace = true, default-features = false }
+
+"#]],
+    );
+}
+
+#[cargo_test]
+fn fix_edition_skips_old_editions() {
+    // Checks that -Zfix-edition will skip things that are not 2024.
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"[workspace]
+            members = ["e2021", "e2024"]
+            resolver = "3"
+            "#,
+        )
+        .file(
+            "e2021/Cargo.toml",
+            r#"
+            [package]
+            name = "e2021"
+            edition = "2021"
+            "#,
+        )
+        .file("e2021/src/lib.rs", "")
+        .file(
+            "e2024/Cargo.toml",
+            r#"
+                [package]
+                name = "e2024"
+                edition = "2024"
+            "#,
+        )
+        .file("e2024/src/lib.rs", "")
+        .build();
+
+    // Doing the whole workspace should skip since there is a 2021 in the mix.
+    p.cargo("fix -Zfix-edition=start=2024 -v")
+        .masquerade_as_nightly_cargo(&["fix-edition"])
+        .with_stderr_data(str![[r#"
+[SKIPPING] not all packages are at edition 2024
+
+"#]])
+        .run();
+
+    // Same with `end`.
+    p.cargo("fix -Zfix-edition=end=2024,future -v")
+        .masquerade_as_nightly_cargo(&["fix-edition"])
+        .with_stderr_data(str![[r#"
+[SKIPPING] not all packages are at edition 2024
+
+"#]])
+        .run();
+
+    // Doing an individual package at the correct edition should check it.
+    p.cargo("fix -Zfix-edition=start=2024 -p e2024")
+        .masquerade_as_nightly_cargo(&["fix-edition"])
+        .with_stderr_data(str![[r#"
+[CHECKING] e2024 v0.0.0 ([ROOT]/foo/e2024)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test(nightly, reason = "future edition is always unstable")]
+fn fix_edition_future() {
+    // Checks that the -Zfix-edition can work for the future.
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [package]
+            name = "foo"
+            edition = "2024""#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("fix -Zfix-edition=end=2024,future")
+        .masquerade_as_nightly_cargo(&["fix-edition"])
+        .with_stderr_data(str![[r#"
+[MIGRATING] Cargo.toml from 2024 edition to future
+[CHECKING] foo v0.0.0 ([ROOT]/foo)
+[MIGRATING] src/lib.rs from 2024 edition to future
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+     Updated edition to future
+[CHECKING] foo v0.0.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    assert_e2e().eq(
+        p.read_file("Cargo.toml"),
+        str![[r#"
+cargo-features = ["unstable-editions"]
+
+            [package]
+            name = "foo"
+edition = "future"
 
 "#]],
     );

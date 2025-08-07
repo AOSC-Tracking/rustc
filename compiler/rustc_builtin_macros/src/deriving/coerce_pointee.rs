@@ -1,5 +1,4 @@
 use ast::HasAttrs;
-use ast::ptr::P;
 use rustc_ast::mut_visit::MutVisitor;
 use rustc_ast::visit::BoundKind;
 use rustc_ast::{
@@ -30,7 +29,7 @@ pub(crate) fn expand_deriving_coerce_pointee(
     item.visit_with(&mut DetectNonGenericPointeeAttr { cx });
 
     let (name_ident, generics) = if let Annotatable::Item(aitem) = item
-        && let ItemKind::Struct(struct_data, g) = &aitem.kind
+        && let ItemKind::Struct(ident, g, struct_data) = &aitem.kind
     {
         if !matches!(
             struct_data,
@@ -40,7 +39,7 @@ pub(crate) fn expand_deriving_coerce_pointee(
             cx.dcx().emit_err(RequireOneField { span });
             return;
         }
-        (aitem.ident, g)
+        (*ident, g)
     } else {
         cx.dcx().emit_err(RequireTransparent { span });
         return;
@@ -108,7 +107,6 @@ pub(crate) fn expand_deriving_coerce_pointee(
         push(Annotatable::Item(
             cx.item(
                 span,
-                Ident::empty(),
                 attrs.clone(),
                 ast::ItemKind::Impl(Box::new(ast::Impl {
                     safety: ast::Safety::Default,
@@ -153,7 +151,6 @@ pub(crate) fn expand_deriving_coerce_pointee(
         let trait_ref = cx.trait_ref(trait_path);
         let item = cx.item(
             span,
-            Ident::empty(),
             attrs.clone(),
             ast::ItemKind::Impl(Box::new(ast::Impl {
                 safety: ast::Safety::Default,
@@ -380,11 +377,11 @@ struct TypeSubstitution<'a> {
 }
 
 impl<'a> ast::mut_visit::MutVisitor for TypeSubstitution<'a> {
-    fn visit_ty(&mut self, ty: &mut P<ast::Ty>) {
+    fn visit_ty(&mut self, ty: &mut ast::Ty) {
         if let Some(name) = ty.kind.is_simple_path()
             && name == self.from_name
         {
-            **ty = self.to_ty.clone();
+            *ty = self.to_ty.clone();
             self.rewritten = true;
         } else {
             ast::mut_visit::walk_ty(self, ty);

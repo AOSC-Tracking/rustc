@@ -36,7 +36,7 @@ impl ConfigRelativePath {
     /// Same as [`Self::resolve_path`] but will make string replacements
     /// before resolving the path.
     ///
-    /// `replacements` should be an an [`IntoIterator`] of tuples with the "from" and "to" for the
+    /// `replacements` should be an [`IntoIterator`] of tuples with the "from" and "to" for the
     /// string replacement
     pub fn resolve_templated_path(
         &self,
@@ -57,6 +57,20 @@ impl ConfigRelativePath {
                 raw_template: self.0.val.clone(),
             });
         };
+
+        if value.contains("{") {
+            return Err(ResolveTemplateError::UnexpectedBracket {
+                bracket_type: BracketType::Opening,
+                raw_template: self.0.val.clone(),
+            });
+        }
+
+        if value.contains("}") {
+            return Err(ResolveTemplateError::UnexpectedBracket {
+                bracket_type: BracketType::Closing,
+                raw_template: self.0.val.clone(),
+            });
+        }
 
         Ok(self.0.definition.root(gctx).join(&value))
     }
@@ -139,4 +153,14 @@ pub enum ResolveTemplateError {
         variable: String,
         raw_template: String,
     },
+    UnexpectedBracket {
+        bracket_type: BracketType,
+        raw_template: String,
+    },
+}
+
+#[derive(Debug)]
+pub enum BracketType {
+    Opening,
+    Closing,
 }

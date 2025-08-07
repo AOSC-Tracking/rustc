@@ -27,7 +27,7 @@ use rustc_span::source_map;
 use rustc_span::symbol::sym;
 use tracing::{debug, info};
 
-use crate::clean::inline::build_external_trait;
+use crate::clean::inline::build_trait;
 use crate::clean::{self, ItemId};
 use crate::config::{Options as RustdocOptions, OutputFormat, RenderOptions};
 use crate::formats::cache::Cache;
@@ -149,15 +149,12 @@ pub(crate) fn new_dcx(
     diagnostic_width: Option<usize>,
     unstable_opts: &UnstableOptions,
 ) -> rustc_errors::DiagCtxt {
-    let fallback_bundle = rustc_errors::fallback_fluent_bundle(
-        rustc_driver::DEFAULT_LOCALE_RESOURCES.to_vec(),
-        false,
-    );
+    let translator = rustc_driver::default_translator();
     let emitter: Box<DynEmitter> = match error_format {
         ErrorOutputType::HumanReadable { kind, color_config } => {
             let short = kind.short();
             Box::new(
-                HumanEmitter::new(stderr_destination(color_config), fallback_bundle)
+                HumanEmitter::new(stderr_destination(color_config), translator)
                     .sm(source_map.map(|sm| sm as _))
                     .short_message(short)
                     .diagnostic_width(diagnostic_width)
@@ -178,7 +175,7 @@ pub(crate) fn new_dcx(
                 JsonEmitter::new(
                     Box::new(io::BufWriter::new(io::stderr())),
                     Some(source_map),
-                    fallback_bundle,
+                    translator,
                     pretty,
                     json_rendered,
                     color_config,
@@ -321,6 +318,7 @@ pub(crate) fn create_config(
                 (rustc_interface::DEFAULT_QUERY_PROVIDERS.typeck)(tcx, def_id)
             };
         }),
+        extra_symbols: Vec::new(),
         make_codegen_backend: None,
         registry: rustc_driver::diagnostics_registry(),
         ice_file: None,
@@ -344,9 +342,7 @@ pub(crate) fn run_global_ctxt(
     // (see `override_queries` in the `config`)
 
     // NOTE: These are copy/pasted from typeck/lib.rs and should be kept in sync with those changes.
-    let _ = tcx.sess.time("wf_checking", || {
-        tcx.try_par_hir_for_each_module(|module| tcx.ensure_ok().check_mod_type_wf(module))
-    });
+    let _ = tcx.sess.time("wf_checking", || tcx.ensure_ok().check_type_wf(()));
 
     tcx.dcx().abort_if_errors();
 
@@ -384,11 +380,9 @@ pub(crate) fn run_global_ctxt(
     //
     // Note that in case of `#![no_core]`, the trait is not available.
     if let Some(sized_trait_did) = ctxt.tcx.lang_items().sized_trait() {
-        let sized_trait = build_external_trait(&mut ctxt, sized_trait_did);
+        let sized_trait = build_trait(&mut ctxt, sized_trait_did);
         ctxt.external_traits.insert(sized_trait_did, sized_trait);
     }
-
-    debug!("crate: {:?}", tcx.hir_crate(()));
 
     let mut krate = tcx.sess.time("clean_crate", || clean::krate(&mut ctxt));
 
@@ -411,9 +405,7 @@ pub(crate) fn run_global_ctxt(
     // Process all of the crate attributes, extracting plugin metadata along
     // with the passes which we are supposed to run.
     for attr in krate.module.attrs.lists(sym::doc) {
-        let name = attr.name_or_empty();
-
-        if attr.is_word() && name == sym::document_private_items {
+        if attr.is_word() && attr.has_name(sym::document_private_items) {
             ctxt.render_options.document_private = true;
         }
     }
