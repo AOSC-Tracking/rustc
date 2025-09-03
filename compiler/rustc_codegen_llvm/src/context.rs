@@ -840,7 +840,7 @@ impl<'ll, 'tcx> MiscCodegenMethods<'tcx> for CodegenCx<'ll, 'tcx> {
     fn declare_c_main(&self, fn_type: Self::Type) -> Option<Self::Function> {
         let entry_name = self.sess().target.entry_name.as_ref();
         if self.get_declared_value(entry_name).is_none() {
-            Some(self.declare_entry_fn(
+            let llfn = self.declare_entry_fn(
                 entry_name,
                 llvm::CallConv::from_conv(
                     self.sess().target.entry_abi,
@@ -848,7 +848,11 @@ impl<'ll, 'tcx> MiscCodegenMethods<'tcx> for CodegenCx<'ll, 'tcx> {
                 ),
                 llvm::UnnamedAddr::Global,
                 fn_type,
-            ))
+            );
+            if let Some(attr) = attributes::target_features_attr(self, vec![]) {
+                attributes::apply_to_llfn(llfn, llvm::AttributePlace::Function, &[attr])
+            }
+            Some(llfn)
         } else {
             // If the symbol already exists, it is an error: for example, the user wrote
             // #[no_mangle] extern "C" fn main(..) {..}
