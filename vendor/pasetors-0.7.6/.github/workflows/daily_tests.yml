@@ -1,0 +1,32 @@
+name: Tests
+permissions:
+  contents: read
+on:
+  schedule:
+    - cron: "0 0 * * *" # Midnight of each day
+
+jobs:
+  tests:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchain:
+          - stable
+          - nightly
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        with:
+          toolchain: ${{ matrix.toolchain }}
+
+      - name: Run cargo test - debug
+        run: cargo test --all-features
+
+      - name: Run cargo test - release
+        run: cargo test --release --all-features

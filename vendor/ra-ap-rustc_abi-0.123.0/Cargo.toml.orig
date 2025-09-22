@@ -1,0 +1,32 @@
+[dependencies]
+bitflags = "2.4.1"
+tracing = "0.1"
+
+[dependencies.rand]
+default-features = false
+optional = true
+version = "0.9.0"
+
+[dependencies.rand_xoshiro]
+optional = true
+version = "0.7.0"
+
+[dependencies.rustc_hashes]
+package = "ra-ap-rustc_hashes"
+version = "0.123.0"
+
+[dependencies.rustc_index]
+default-features = false
+package = "ra-ap-rustc_index"
+version = "0.123.0"
+
+[features]
+nightly = []
+
+[package]
+description = "\nAutomatically published version of the package `rustc_abi`\nin the rust-lang/rust repository from commit 052114f0c5e8d49f62f8caba364b07017310ab09\n\nThe publishing script for this crate lives at:\nhttps://github.com/rust-analyzer/rustc-auto-publish\n"
+edition = "2024"
+license = "MIT / Apache-2.0"
+name = "ra-ap-rustc_abi"
+repository = "https://github.com/rust-lang/rust"
+version = "0.123.0"

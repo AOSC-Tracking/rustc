@@ -7,11 +7,11 @@ use std::sync::mpsc::channel;
 use std::thread;
 use std::{env, str};
 
-use cargo_test_support::cargo_process;
+use crate::prelude::*;
+use crate::utils::cargo_process;
 use cargo_test_support::git;
 use cargo_test_support::install::assert_has_installed_exe;
 use cargo_test_support::paths;
-use cargo_test_support::prelude::*;
 use cargo_test_support::registry::Package;
 use cargo_test_support::str;
 use cargo_test_support::{basic_manifest, execs, project, slow_cpu_multiplier};
@@ -164,16 +164,18 @@ fn multiple_registry_fetches() {
     execs().run_output(&b);
 
     let suffix = env::consts::EXE_SUFFIX;
-    assert!(p
-        .root()
-        .join("a/target/debug")
-        .join(format!("foo{}", suffix))
-        .is_file());
-    assert!(p
-        .root()
-        .join("b/target/debug")
-        .join(format!("bar{}", suffix))
-        .is_file());
+    assert!(
+        p.root()
+            .join("a/target/debug")
+            .join(format!("foo{}", suffix))
+            .is_file()
+    );
+    assert!(
+        p.root()
+            .join("b/target/debug")
+            .join(format!("bar{}", suffix))
+            .is_file()
+    );
 }
 
 #[cargo_test]

@@ -66,6 +66,7 @@ Each new feature described below should explain how to use it.
     * [-Z allow-features](#allow-features) --- Provides a way to restrict which unstable features are used.
 * Build scripts and linking
     * [Metabuild](#metabuild) --- Provides declarative build scripts.
+    * [Multiple Build Scripts](#multiple-build-scripts) --- Allows use of multiple build scripts.
 * Resolver and features
     * [no-index-update](#no-index-update) --- Prevents cargo from updating the index cache.
     * [avoid-dev-deps](#avoid-dev-deps) --- Prevents the resolver from including dev-dependencies during resolution.
@@ -332,6 +333,24 @@ extra-info = "qwerty"
 Metabuild packages should have a public function called `metabuild` that
 performs the same actions as a regular `build.rs` script would perform.
 
+## Multiple Build Scripts
+* Tracking Issue: [#14903](https://github.com/rust-lang/cargo/issues/14903)
+* Original Pull Request: [#15630](https://github.com/rust-lang/cargo/pull/15630)
+
+Multiple Build Scripts feature allows you to have multiple build scripts in your package.
+
+Include `cargo-features` at the top of `Cargo.toml` and add `multiple-build-scripts` to enable feature.
+Add the paths of the build scripts as an array in `package.build`. For example:
+
+```toml
+cargo-features = ["multiple-build-scripts"]
+
+[package]
+name = "mypackage"
+version = "0.0.1"
+build = ["foo.rs", "bar.rs"]
+```
+
 ## public-dependency
 * Tracking Issue: [#44663](https://github.com/rust-lang/rust/issues/44663)
 
@@ -461,7 +480,7 @@ that are uplifted into the target or artifact directories.
   // crate is compiled differently (different opt-level, features, etc).
   "crates": [
     {
-      // Package ID specification
+      // Fully qualified package ID specification
       "id": "path+file:///sample-package#0.1.0",
       // List of target kinds: bin, lib, rlib, dylib, cdylib, staticlib, proc-macro, example, test, bench, custom-build
       "kind": ["bin"],
@@ -943,6 +962,18 @@ will only warn and ignore the profile option. Versions of Cargo prior to the
 introduction of this feature will give an "unused manifest key" warning, but
 will otherwise function without erroring. This allows using the hint in a
 crate's `Cargo.toml` without mandating the use of a newer Cargo to build it.
+
+A crate can also provide this hint automatically for crates that depend on it,
+using the `[hints]` table (which will likewise be ignored by older Cargo):
+
+```toml
+[hints]
+mostly-unused = true
+```
+
+This will cause the crate to default to hint-mostly-unused, unless overridden
+via `profile`, which takes precedence, and which can only be specified in the
+top-level crate being built.
 
 ## rustdoc-map
 * Tracking Issue: [#8296](https://github.com/rust-lang/cargo/issues/8296)
@@ -1880,7 +1911,7 @@ Specify which packages participate in [feature unification](../reference/feature
 * `selected`: Merge dependency features from all packages specified for the current build.
 * `workspace`: Merge dependency features across all workspace members,
   regardless of which packages are specified for the current build.
-* `package` _(unimplemented)_: Dependency features are considered on a package-by-package basis,
+* `package`: Dependency features are considered on a package-by-package basis,
   preferring duplicate builds of dependencies when different sets of features are activated by the packages.
 
 ## Package message format

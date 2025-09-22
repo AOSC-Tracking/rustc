@@ -16,6 +16,7 @@ mod build_plan;
 mod build_script;
 mod build_script_env;
 mod build_script_extra_link_arg;
+mod build_scripts_multiple;
 mod cache_lock;
 mod cache_messages;
 mod cargo;
@@ -105,6 +106,7 @@ mod git_shallow;
 mod glob_targets;
 mod global_cache_tracker;
 mod help;
+mod hints;
 mod https;
 mod inheritable_workspace_fields;
 mod install;
@@ -182,6 +184,7 @@ mod timings;
 mod tool_paths;
 mod unit_graph;
 mod update;
+mod utils;
 mod vendor;
 mod verify_project;
 mod version;
@@ -191,10 +194,16 @@ mod weak_dep_features;
 mod workspaces;
 mod yank;
 
-use cargo_test_support::prelude::*;
+use crate::prelude::*;
+
+pub mod prelude {
+    pub use crate::utils::ext::CargoCommandExt;
+    pub use crate::utils::ext::CargoProjectExt;
+    pub use cargo_test_support::prelude::*;
+}
 
 #[cargo_test]
 fn aaa_trigger_cross_compile_disabled_check() {
     // This triggers the cross compile disabled check to run ASAP, see #5141
-    cargo_test_support::cross_compile::disabled();
+    crate::utils::cross_compile::disabled();
 }

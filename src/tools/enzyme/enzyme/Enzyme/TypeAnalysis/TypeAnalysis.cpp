@@ -1220,6 +1220,8 @@ void TypeAnalyzer::considerTBAA() {
   auto &DL = fntypeinfo.Function->getParent()->getDataLayout();
 
   for (BasicBlock &BB : *fntypeinfo.Function) {
+    if (notForAnalysis.count(&BB))
+      continue;
     for (Instruction &I : BB) {
       if (auto MD = I.getMetadata("enzyme_type")) {
         auto TT = TypeTree::fromMD(MD);
@@ -3940,9 +3942,14 @@ void TypeAnalyzer::visitIntrinsicInst(llvm::IntrinsicInst &I) {
   case Intrinsic::nearbyint:
   case Intrinsic::round:
   case Intrinsic::sqrt:
+#if LLVM_VERSION_MAJOR >= 21
+  case Intrinsic::nvvm_fabs:
+  case Intrinsic::nvvm_fabs_ftz:
+#else
   case Intrinsic::nvvm_fabs_f:
   case Intrinsic::nvvm_fabs_d:
   case Intrinsic::nvvm_fabs_ftz_f:
+#endif
   case Intrinsic::fabs:
     // No direction check as always valid
     updateAnalysis(

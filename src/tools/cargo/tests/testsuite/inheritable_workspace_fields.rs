@@ -1,6 +1,6 @@
 //! Tests for inheriting Cargo.toml fields with field.workspace = true
 
-use cargo_test_support::prelude::*;
+use crate::prelude::*;
 use cargo_test_support::registry::{Dependency, Package, RegistryBuilder};
 use cargo_test_support::{
     basic_lib_manifest, basic_manifest, git, paths, project, publish, registry, str,
@@ -1407,12 +1407,11 @@ fn error_malformed_workspace_root() {
         .cwd("bar")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] invalid array
-expected `]`
- --> ../Cargo.toml:3:24
+[ERROR] unclosed array, expected `]`
+ --> ../Cargo.toml:4:13
   |
-3 |             members = [invalid toml
-  |                        ^
+4 | ...
+  | ^
   |
 
 "#]])

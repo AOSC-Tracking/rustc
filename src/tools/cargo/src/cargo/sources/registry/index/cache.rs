@@ -75,13 +75,13 @@ use anyhow::bail;
 use cargo_util::registry::make_dep_path;
 use semver::Version;
 
-use crate::util::cache_lock::CacheLockMode;
-use crate::util::Filesystem;
 use crate::CargoResult;
 use crate::GlobalContext;
+use crate::util::Filesystem;
+use crate::util::cache_lock::CacheLockMode;
 
-use super::split;
 use super::INDEX_V_MAX;
+use super::split;
 
 /// The current version of [`SummariesCache`].
 const CURRENT_CACHE_VERSION: u8 = 3;
@@ -204,7 +204,7 @@ impl<'a> SummariesCache<'a> {
         let size = self
             .versions
             .iter()
-            .map(|(_version, data)| (10 + data.len()))
+            .map(|(_version, data)| 10 + data.len())
             .sum();
         let mut contents = Vec::with_capacity(size);
         contents.push(CURRENT_CACHE_VERSION);

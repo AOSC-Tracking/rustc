@@ -2,12 +2,12 @@
 
 use std::fmt::{self, Write};
 
+use crate::prelude::*;
+use crate::utils::tools;
 use cargo_test_support::compare::assert_e2e;
 use cargo_test_support::install::exe;
-use cargo_test_support::prelude::*;
 use cargo_test_support::registry::Package;
 use cargo_test_support::str;
-use cargo_test_support::tools;
 use cargo_test_support::{basic_bin_manifest, basic_manifest, git, project};
 
 #[cargo_test]
@@ -781,11 +781,12 @@ fn check_artifacts() {
     p.cargo("check --example ex1").run();
     assert!(!p.root().join("target/debug/libfoo.rmeta").is_file());
     assert!(!p.root().join("target/debug/libfoo.rlib").is_file());
-    assert!(!p
-        .root()
-        .join("target/debug/examples")
-        .join(exe("ex1"))
-        .is_file());
+    assert!(
+        !p.root()
+            .join("target/debug/examples")
+            .join(exe("ex1"))
+            .is_file()
+    );
     assert_eq!(p.glob("target/debug/deps/libfoo-*.rmeta").count(), 1);
     assert_eq!(p.glob("target/debug/examples/libex1-*.rmeta").count(), 1);
 

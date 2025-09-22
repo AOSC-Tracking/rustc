@@ -62,7 +62,7 @@ private:
   TypeResults &TR = gutils->TR;
   std::function<unsigned(llvm::Instruction *, CacheType, llvm::IRBuilder<> &)>
       getIndex;
-  const std::map<llvm::CallInst *, const std::vector<bool>>
+  const std::map<llvm::CallInst *, std::pair<bool, const std::vector<bool>>>
       overwritten_args_map;
   const AugmentedReturn *augmentedReturn;
   const std::map<llvm::ReturnInst *, llvm::StoreInst *> *replacedReturns;
@@ -80,7 +80,7 @@ public:
       std::function<unsigned(llvm::Instruction *, CacheType,
                              llvm::IRBuilder<> &)>
           getIndex,
-      const std::map<llvm::CallInst *, const std::vector<bool>>
+      const std::map<llvm::CallInst *, std::pair<bool, const std::vector<bool>>>
           overwritten_args_map,
       const AugmentedReturn *augmentedReturn,
       const std::map<llvm::ReturnInst *, llvm::StoreInst *> *replacedReturns,
@@ -2251,7 +2251,7 @@ public:
                   auto res = Builder2.CreateFDiv(
                       Builder2.CreateFNeg(Builder2.CreateFMul(idiff, lop0)),
                       lop1);
-                  if (EnzymeStrongZero) {
+                  if (gutils->strongZero) {
                     res = CreateSelect(
                         Builder2,
                         Builder2.CreateFCmpOEQ(
@@ -2276,7 +2276,7 @@ public:
                       Builder2.CreateFNeg(Builder2.CreateFMul(
                           s, Builder2.CreateFDiv(idiff, lop0))),
                       lop1);
-                  if (EnzymeStrongZero) {
+                  if (gutils->strongZero) {
                     res = CreateSelect(
                         Builder2,
                         Builder2.CreateFCmpOEQ(
@@ -2522,7 +2522,8 @@ public:
                     prev, ConstantInt::get(prev->getType(), num, false), "",
                     /*NUW*/ true, /*NSW*/ true);
                 prev = Builder2.CreateBitCast(
-                    checkedMul(Builder2, Builder2.CreateBitCast(idiff, FT),
+                    checkedMul(gutils->strongZero, Builder2,
+                               Builder2.CreateBitCast(idiff, FT),
                                Builder2.CreateBitCast(prev, FT)),
                     prev->getType());
                 return prev;
@@ -2748,7 +2749,8 @@ public:
                     prev, ConstantInt::get(prev->getType(), num, false), "",
                     /*NUW*/ true, /*NSW*/ true);
                 prev = Builder2.CreateBitCast(
-                    checkedMul(Builder2, Builder2.CreateBitCast(difi, FT),
+                    checkedMul(gutils->strongZero, Builder2,
+                               Builder2.CreateBitCast(difi, FT),
                                Builder2.CreateBitCast(prev, FT)),
                     prev->getType());
 
@@ -3661,20 +3663,35 @@ public:
       break;
     case DerivativeMode::ReverseModeGradient:
     case DerivativeMode::ReverseModeCombined: {
-      IRBuilder<> Builder2(&FI);
-      getReverseBuilder(Builder2);
-      auto order = FI.getOrdering();
-      switch (order) {
-      case AtomicOrdering::Acquire:
-        order = AtomicOrdering::Release;
-        break;
-      case AtomicOrdering::Release:
-        order = AtomicOrdering::Acquire;
-        break;
-      default:
-        break;
+      bool emitReverse = true;
+      if (EnzymeJuliaAddrLoad) {
+        if (auto prev = dyn_cast_or_null<CallBase>(FI.getPrevNode())) {
+          if (auto F = prev->getCalledFunction())
+            if (F->getName() == "julia.safepoint")
+              emitReverse = false;
+        }
+        if (auto prev = dyn_cast_or_null<CallBase>(FI.getNextNode())) {
+          if (auto F = prev->getCalledFunction())
+            if (F->getName() == "julia.safepoint")
+              emitReverse = false;
+        }
       }
-      Builder2.CreateFence(order, FI.getSyncScopeID());
+      if (emitReverse) {
+        IRBuilder<> Builder2(&FI);
+        getReverseBuilder(Builder2);
+        auto order = FI.getOrdering();
+        switch (order) {
+        case AtomicOrdering::Acquire:
+          order = AtomicOrdering::Release;
+          break;
+        case AtomicOrdering::Release:
+          order = AtomicOrdering::Acquire;
+          break;
+        default:
+          break;
+        }
+        Builder2.CreateFence(order, FI.getSyncScopeID());
+      }
     }
     }
     eraseIfUnused(FI);
@@ -3786,7 +3803,11 @@ public:
     switch (Mode) {
     case DerivativeMode::ReverseModePrimal: {
       switch (ID) {
+#if LLVM_VERSION_MAJOR <= 20
       case Intrinsic::nvvm_barrier0:
+#else
+      case Intrinsic::nvvm_barrier_cta_sync_aligned_all:
+#endif
       case Intrinsic::nvvm_barrier0_popc:
       case Intrinsic::nvvm_barrier0_and:
       case Intrinsic::nvvm_barrier0_or:
@@ -3843,15 +3864,29 @@ public:
       case Intrinsic::nvvm_barrier0_and:
       case Intrinsic::nvvm_barrier0_or: {
         SmallVector<Value *, 1> args = {};
+#if LLVM_VERSION_MAJOR > 20
+        auto cal = cast<CallInst>(Builder2.CreateCall(
+            getIntrinsicDeclaration(
+                M, Intrinsic::nvvm_barrier_cta_sync_aligned_all),
+            args));
+        cal->setCallingConv(getIntrinsicDeclaration(
+                                M, Intrinsic::nvvm_barrier_cta_sync_aligned_all)
+                                ->getCallingConv());
+#else
         auto cal = cast<CallInst>(Builder2.CreateCall(
             getIntrinsicDeclaration(M, Intrinsic::nvvm_barrier0), args));
         cal->setCallingConv(getIntrinsicDeclaration(M, Intrinsic::nvvm_barrier0)
                                 ->getCallingConv());
+#endif
         cal->setDebugLoc(gutils->getNewFromOriginal(I.getDebugLoc()));
         return false;
       }
 
+#if LLVM_VERSION_MAJOR <= 20
       case Intrinsic::nvvm_barrier0:
+#else
+      case Intrinsic::nvvm_barrier_cta_sync_aligned_all:
+#endif
       case Intrinsic::amdgcn_s_barrier:
       case Intrinsic::nvvm_membar_cta:
       case Intrinsic::nvvm_membar_gl:
@@ -4051,9 +4086,10 @@ public:
       }
     }
 
-    assert(overwritten_args_map.find(&call) != overwritten_args_map.end());
-    const std::vector<bool> &overwritten_args =
-        overwritten_args_map.find(&call)->second;
+    auto found_ow = overwritten_args_map.find(&call);
+    assert(found_ow != overwritten_args_map.end());
+    const bool subsequent_calls_may_write = found_ow->second.first;
+    const std::vector<bool> &overwritten_args = found_ow->second.second;
 
     IRBuilder<> BuilderZ(gutils->getNewFromOriginal(&call));
     BuilderZ.setFastMathFlags(getFast());
@@ -4197,8 +4233,9 @@ public:
             RequestContext(&call, &BuilderZ), cast<Function>(called),
             subretType, argsInverted, TR.analyzer->interprocedural,
             /*return is used*/ false,
-            /*shadowReturnUsed*/ false, nextTypeInfo, overwritten_args, false,
-            gutils->runtimeActivity, gutils->getWidth(),
+            /*shadowReturnUsed*/ false, nextTypeInfo,
+            subsequent_calls_may_write, overwritten_args, false,
+            gutils->runtimeActivity, gutils->strongZero, gutils->getWidth(),
             /*AtomicAdd*/ true,
             /*OpenMP*/ true);
         if (Mode == DerivativeMode::ReverseModePrimal) {
@@ -4412,6 +4449,7 @@ public:
                 .todiff = cast<Function>(called),
                 .retType = subretType,
                 .constant_args = argsInverted,
+                .subsequent_calls_may_write = subsequent_calls_may_write,
                 .overwritten_args = overwritten_args,
                 .returnUsed = false,
                 .shadowReturnUsed = false,
@@ -4424,7 +4462,7 @@ public:
                 .forceAnonymousTape = false,
                 .typeInfo = nextTypeInfo,
                 .runtimeActivity = gutils->runtimeActivity,
-            },
+                .strongZero = gutils->strongZero},
             TR.analyzer->interprocedural, subdata,
             /*omp*/ true);
 
@@ -4730,6 +4768,7 @@ public:
 
   void recursivelyHandleSubfunction(llvm::CallInst &call,
                                     llvm::Function *called,
+                                    bool subsequent_calls_may_write,
                                     const std::vector<bool> &overwritten_args,
                                     bool shadowReturnUsed,
                                     DIFFE_TYPE subretType, bool subretused) {
@@ -4921,8 +4960,9 @@ public:
             subretType, argsInverted, TR.analyzer->interprocedural,
             /*returnValue*/ subretused, Mode,
             ((DiffeGradientUtils *)gutils)->FreeMemory, gutils->runtimeActivity,
-            gutils->getWidth(), tape ? tape->getType() : nullptr, nextTypeInfo,
-            overwritten_args,
+            gutils->strongZero, gutils->getWidth(),
+            tape ? tape->getType() : nullptr, nextTypeInfo,
+            subsequent_calls_may_write, overwritten_args,
             /*augmented*/ subdata);
         FT = cast<Function>(newcalled)->getFunctionType();
       } else {
@@ -5310,8 +5350,9 @@ public:
               RequestContext(&call, &BuilderZ), cast<Function>(called),
               subretType, argsInverted, TR.analyzer->interprocedural,
               /*return is used*/ subretused, shadowReturnUsed, nextTypeInfo,
-              overwritten_args, false, gutils->runtimeActivity,
-              gutils->getWidth(), gutils->AtomicAdd);
+              subsequent_calls_may_write, overwritten_args, false,
+              gutils->runtimeActivity, gutils->strongZero, gutils->getWidth(),
+              gutils->AtomicAdd);
           if (Mode == DerivativeMode::ReverseModePrimal) {
             assert(augmentedReturn);
             auto subaugmentations =
@@ -5752,21 +5793,23 @@ public:
 
       newcalled = gutils->Logic.CreatePrimalAndGradient(
           RequestContext(&call, &Builder2),
-          (ReverseCacheKey){.todiff = cast<Function>(called),
-                            .retType = subretType,
-                            .constant_args = argsInverted,
-                            .overwritten_args = overwritten_args,
-                            .returnUsed = replaceFunction && subretused,
-                            .shadowReturnUsed =
-                                shadowReturnUsed && replaceFunction,
-                            .mode = subMode,
-                            .width = gutils->getWidth(),
-                            .freeMemory = true,
-                            .AtomicAdd = gutils->AtomicAdd,
-                            .additionalType = tape ? tape->getType() : nullptr,
-                            .forceAnonymousTape = false,
-                            .typeInfo = nextTypeInfo,
-                            .runtimeActivity = gutils->runtimeActivity},
+          (ReverseCacheKey){
+              .todiff = cast<Function>(called),
+              .retType = subretType,
+              .constant_args = argsInverted,
+              .subsequent_calls_may_write = subsequent_calls_may_write,
+              .overwritten_args = overwritten_args,
+              .returnUsed = replaceFunction && subretused,
+              .shadowReturnUsed = shadowReturnUsed && replaceFunction,
+              .mode = subMode,
+              .width = gutils->getWidth(),
+              .freeMemory = true,
+              .AtomicAdd = gutils->AtomicAdd,
+              .additionalType = tape ? tape->getType() : nullptr,
+              .forceAnonymousTape = false,
+              .typeInfo = nextTypeInfo,
+              .runtimeActivity = gutils->runtimeActivity,
+              .strongZero = gutils->strongZero},
           TR.analyzer->interprocedural, subdata);
       if (!newcalled)
         return;
@@ -6007,6 +6050,7 @@ public:
 
   bool handleKnownCallDerivatives(llvm::CallInst &call, llvm::Function *called,
                                   llvm::StringRef funcName,
+                                  bool subsequent_calls_may_write,
                                   const std::vector<bool> &overwritten_args,
                                   llvm::CallInst *const newCall);
 
@@ -6041,11 +6085,16 @@ public:
     assert(overwritten_args_map.find(&call) != overwritten_args_map.end() ||
            Mode == DerivativeMode::ForwardMode ||
            Mode == DerivativeMode::ForwardModeError);
+    const bool subsequent_calls_may_write =
+        (Mode == DerivativeMode::ForwardMode ||
+         Mode == DerivativeMode::ForwardModeError)
+            ? false
+            : overwritten_args_map.find(&call)->second.first;
     const std::vector<bool> &overwritten_args =
         (Mode == DerivativeMode::ForwardMode ||
          Mode == DerivativeMode::ForwardModeError)
             ? std::vector<bool>()
-            : overwritten_args_map.find(&call)->second;
+            : overwritten_args_map.find(&call)->second.second;
 
     auto called = getFunctionFromCall(&call);
     StringRef funcName = getFuncNameFromCall(&call);
@@ -6286,7 +6335,8 @@ public:
       }
     }
 
-    if (handleKnownCallDerivatives(call, called, funcName, overwritten_args,
+    if (handleKnownCallDerivatives(call, called, funcName,
+                                   subsequent_calls_may_write, overwritten_args,
                                    newCall))
       return;
 
@@ -6487,9 +6537,9 @@ public:
       return;
     }
 
-    return recursivelyHandleSubfunction(call, called, overwritten_args,
-                                        shadowReturnUsed, subretType,
-                                        subretused);
+    return recursivelyHandleSubfunction(
+        call, called, subsequent_calls_may_write, overwritten_args,
+        shadowReturnUsed, subretType, subretused);
   }
 };
 

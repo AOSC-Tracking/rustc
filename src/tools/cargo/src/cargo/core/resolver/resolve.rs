@@ -4,9 +4,9 @@ use cargo_util_schemas::manifest::RustVersion;
 use super::encode::Metadata;
 use crate::core::dependency::DepKind;
 use crate::core::{Dependency, PackageId, PackageIdSpec, PackageIdSpecQuery, Summary, Target};
+use crate::util::Graph;
 use crate::util::errors::CargoResult;
 use crate::util::interning::InternedString;
-use crate::util::Graph;
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -388,6 +388,10 @@ unable to verify that `{0}` is the same as when the lockfile was generated
 
     pub fn checksums(&self) -> &HashMap<PackageId, Option<String>> {
         &self.checksums
+    }
+
+    pub fn set_checksum(&mut self, pkg_id: PackageId, checksum: String) {
+        self.checksums.insert(pkg_id, Some(checksum));
     }
 
     pub fn metadata(&self) -> &Metadata {

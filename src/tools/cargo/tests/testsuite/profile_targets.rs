@@ -2,8 +2,8 @@
 //! example, the `test` profile applying to test targets, but not other
 //! targets, etc.
 
-use cargo_test_support::prelude::*;
-use cargo_test_support::{basic_manifest, project, str, Project};
+use crate::prelude::*;
+use cargo_test_support::{Project, basic_manifest, project, str};
 
 fn all_target_project() -> Project {
     // This abuses the `codegen-units` setting so that we can verify exactly

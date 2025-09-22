@@ -1,0 +1,31 @@
+[package]
+name = "mysqlclient-sys"
+version = "0.4.5"
+description = "Auto-generated rust bindings for libmysqlclient"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sgrif/mysqlclient-sys"
+documentation = "https://docs.rs/mysqlclient-sys"
+build = "build.rs"
+links = "mysqlclient"
+edition = "2021"
+keywords = ["bindings", "libmysqlclient", "mysqlclient-sys"]
+categories = ["database", "external-ffi-bindings"]
+
+[build-dependencies]
+pkg-config = "0.3.9"
+bindgen = { version = "0.71.0", optional = true }
+semver = "1.0.26"
+
+[dependencies]
+mysqlclient-src = { version = "0.1.0", path = "mysqlclient-src", optional = true }
+
+[target.'cfg(target_env = "msvc")'.build-dependencies]
+vcpkg = "0.2.4"
+
+[features]
+default = []
+buildtime_bindgen = ["dep:bindgen"]
+bundled = ["dep:mysqlclient-src"]
+
+[workspace]
+members = ["mysqlclient-src"]

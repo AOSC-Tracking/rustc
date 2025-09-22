@@ -1,8 +1,8 @@
 //! Tests for whether or not warnings are displayed for build scripts.
 
-use cargo_test_support::prelude::*;
+use crate::prelude::*;
 use cargo_test_support::registry::Package;
-use cargo_test_support::{project, str, Project};
+use cargo_test_support::{Project, project, str};
 
 static WARNING1: &str = "Hello! I'm a warning. :)";
 static WARNING2: &str = "And one more!";

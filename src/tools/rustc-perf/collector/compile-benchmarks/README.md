@@ -79,6 +79,8 @@ compiler in interesting ways.
 - **externs**: A large number of extern functions has caused [slowdowns in the past](https://github.com/rust-lang/rust/pull/78448).
 - **helloworld-tiny**: A trivial program optimized with flags that should reduce binary size.
   Gives a lower bound on compiled binary size.
+- **include-blob**: Stress test for including binary and string blobs with `include_str!` and
+  `include_bytes!`. Its build script generates 30 MiB blobs that are then included into the program.
 - **issue-46449**: A small program that caused [poor
   performance](https://github.com/rust-lang/rust/issues/46449) in the past.
 - **issue-58319**: A small program that caused [poor
@@ -140,6 +142,9 @@ Rust code being written today.
 
 - **encoding**: An old crate providing character encoding support. Contains
   some large tables.
+- **cargo**: An old version of Cargo, corresponding to the 1.24.0 Rust release.
+  Two of its dependencies (`socket2` and `url`) had to be vendored, to provide patches
+  so that it can compile with old rustc.
 - **futures**: v0.1.0 of the popular `futures` crate, which was used by many
   Rust programs. Newer versions of this crate (e.g. v0.3.21 from February 2021)
   contain very little code, instead relying on sub-crates. This makes them less
@@ -151,8 +156,6 @@ Rust code being written today.
   obligation processing.
 - **regex**: See above. This is an older version of the crate.
 - **piston-image**: See above. This is an older version of the `image` crate.
-- **style-servo**: An old version of Servo's `style` crate. A large crate, and
-  one used by old versions of Firefox. Built with `--features=gecko`.
 - **syn**: See above. This is an older version (0.11.11) of the crate.
 - **tokio-webpush-simple**: A simple web server built with a very old version
   of tokio. Uses futures a lot, but doesn't use `async`/`await`.
@@ -200,6 +203,7 @@ Rust code being written today.
       applies correctly, e.g. `target/release/collector bench_local +nightly
       --id Test --profiles=Check --scenarios=IncrPatched
       --include=$NEW_BENCHMARK`
+  - Add the new entry to `collector/src/benchmark_set/compile_benchmarks.rs`.
   - Add the new entry to `collector/compile-benchmarks/README.md`.
   - Add a new licensing entry to `collector/compile-benchmarks/REUSE.toml` (see existing entries
   for inspiration).
@@ -242,6 +246,7 @@ Rust code being written today.
 - In the first commit just remove the old code.
   - Do this with `git rm -r` on the directory.
 - In the second commit do everything else.
+  - Remove the entry from `collector/src/benchmark_set/compile_benchmarks.rs`.
   - Remove the entry from `collector/compile-benchmarks/README.md`.
   - Remove the entry from `collector/compile-benchmarks/REUSE.toml`.
   - `git grep` for occurrences of the old benchmark name (e.g. in

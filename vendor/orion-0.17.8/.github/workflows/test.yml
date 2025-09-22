@@ -1,0 +1,171 @@
+on:
+  # Test on PRs for any branch
+  pull_request:
+    branches:
+      - "*"
+  push:
+    branches:
+      - master
+
+# NOTE: Should we use fail-fast: false?
+
+name: Tests
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        toolchain:
+          - stable
+          - beta
+          - nightly
+          - 1.80.0 # MSRV
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
+        with:
+          toolchain: ${{ matrix.toolchain }}
+
+      - name: Test debug-mode, default features
+        run: cargo test
+
+      - name: Test debug-mode, all features
+        run: cargo test --all-features
+
+      - name: Test debug-mode, no default features
+        run: cargo test --no-default-features
+
+      - name: Test debug-mode, no-default + alloc feature
+        run: cargo test --no-default-features --features alloc --tests
+
+      - name: Test release-mode, default features
+        run: cargo test --release
+
+      - name: Test release-mode, all features
+        run: cargo test --release --all-features
+
+      - name: Test release-mode, no default features
+        run: cargo test --release --no-default-features
+
+      - name: Test release-mode, no-default + alloc feature
+        run: cargo test --release --no-default-features --features alloc --tests
+
+  sanitizers:
+    name: Tests w. sanitizers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
+        with:
+          toolchain: nightly
+          targets: x86_64-unknown-linux-gnu
+
+      # Release (LeakSanitizer is enabled by default with AddressSanitizer for x86_64 Linux builds)
+      # https://github.com/google/sanitizers/wiki/AddressSanitizerLeakSanitizer
+      - run: RUSTFLAGS="-Z sanitizer=address" ASAN_OPTIONS="detect_odr_violation=0" cargo test --all-features --tests --release --target x86_64-unknown-linux-gnu
+      - run: RUSTFLAGS="-Z sanitizer=address" ASAN_OPTIONS="detect_odr_violation=0" cargo test --no-default-features --tests --release --target x86_64-unknown-linux-gnu
+
+  no_std:
+    name: no_std build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchain:
+          - stable
+          - nightly
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - uses: houseabsolute/actions-rust-cross@e10d0dcde72fe30fbc0912ddec9c57c070a16529
+        with:
+          command: build
+          target: thumbv7em-none-eabi
+          args: "--release --no-default-features"
+
+  cross_compilation:
+    name: Linux/ARM - Release tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch:
+          - i686-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
+          - powerpc64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - uses: houseabsolute/actions-rust-cross@e10d0dcde72fe30fbc0912ddec9c57c070a16529
+        with:
+          command: test
+          target: ${{ matrix.arch }}
+          args: "--release"
+
+  # https://rustwasm.github.io/docs/book/reference/add-wasm-support-to-crate.html#maintaining-ongoing-support-for-webassembly
+  web_assembly:
+    name: WebAssembly - Release build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch:
+          - wasm32-unknown-unknown
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
+        with:
+          toolchain: stable
+          targets: ${{ matrix.arch }}
+
+      - run: cargo check --no-default-features --target ${{ matrix.arch }}
+
+  docs:
+    name: Build documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
+        with:
+          toolchain: stable
+
+      - run: cargo doc --no-deps --all-features
+
+  benches:
+    name: Build and check benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
+        with:
+          toolchain: stable
+
+      - run: cargo test --benches

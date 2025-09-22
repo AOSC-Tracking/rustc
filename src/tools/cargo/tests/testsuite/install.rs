@@ -7,17 +7,17 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::thread;
 
+use crate::prelude::*;
+use crate::utils::cargo_process;
 use cargo_test_support::compare::assert_e2e;
 use cargo_test_support::cross_compile;
 use cargo_test_support::git;
-use cargo_test_support::prelude::*;
 use cargo_test_support::registry::{self, Package};
 use cargo_test_support::str;
-use cargo_test_support::{
-    basic_manifest, cargo_process, project, project_in, symlink_supported, t,
-};
+use cargo_test_support::{basic_manifest, project, project_in, symlink_supported, t};
 use cargo_util::{ProcessBuilder, ProcessError};
 
+use crate::utils::cross_compile::disabled as cross_compile_disabled;
 use cargo_test_support::install::{assert_has_installed_exe, assert_has_not_installed_exe, exe};
 use cargo_test_support::paths;
 
@@ -1120,11 +1120,11 @@ Caused by:
   invalid TOML found for metadata
 
 Caused by:
-  TOML parse error at line 1, column 1
+  TOML parse error at line 1, column 4
     |
   1 | v1]
-    | ^
-  invalid key
+    |    ^
+  key with no value, expected `=`
 
 "#]])
         .run();
@@ -1604,7 +1604,7 @@ fn install_target_native() {
 
 #[cargo_test]
 fn install_target_foreign() {
-    if cross_compile::disabled() {
+    if cross_compile_disabled() {
         return;
     }
 
@@ -1956,15 +1956,19 @@ fn git_repo_replace() {
     path.push(".cargo/.crates.toml");
 
     assert_ne!(old_rev, new_rev);
-    assert!(fs::read_to_string(path.clone())
-        .unwrap()
-        .contains(&format!("{}", old_rev)));
+    assert!(
+        fs::read_to_string(path.clone())
+            .unwrap()
+            .contains(&format!("{}", old_rev))
+    );
     cargo_process("install --force --git")
         .arg(p.url().to_string())
         .run();
-    assert!(fs::read_to_string(path)
-        .unwrap()
-        .contains(&format!("{}", new_rev)));
+    assert!(
+        fs::read_to_string(path)
+            .unwrap()
+            .contains(&format!("{}", new_rev))
+    );
 }
 
 #[cargo_test]

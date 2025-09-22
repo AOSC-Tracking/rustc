@@ -2,9 +2,9 @@
 
 use std::fs;
 
-use cargo_test_support::prelude::*;
+use crate::prelude::*;
 use cargo_test_support::registry::{Package, RegistryBuilder};
-use cargo_test_support::{basic_manifest, paths, project, str, ProjectBuilder};
+use cargo_test_support::{ProjectBuilder, basic_manifest, paths, project, str};
 
 #[cargo_test]
 fn adding_and_removing_packages() {

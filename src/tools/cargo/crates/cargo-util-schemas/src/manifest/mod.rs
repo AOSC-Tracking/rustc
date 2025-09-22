@@ -56,6 +56,7 @@ pub struct TomlManifest {
     pub build_dependencies2: Option<BTreeMap<PackageName, InheritableDependency>>,
     pub target: Option<BTreeMap<String, TomlPlatform>>,
     pub lints: Option<InheritableLints>,
+    pub hints: Option<Hints>,
 
     pub workspace: Option<TomlWorkspace>,
     pub profile: Option<TomlProfiles>,
@@ -85,6 +86,7 @@ impl TomlManifest {
                 .map(|_| "build-dependencies"),
             self.target.as_ref().map(|_| "target"),
             self.lints.as_ref().map(|_| "lints"),
+            self.hints.as_ref().map(|_| "hints"),
         ]
         .into_iter()
         .flatten()
@@ -182,7 +184,7 @@ pub struct TomlPackage {
     pub name: Option<PackageName>,
     pub version: Option<InheritableSemverVersion>,
     pub authors: Option<InheritableVecString>,
-    pub build: Option<StringOrBool>,
+    pub build: Option<TomlPackageBuild>,
     pub metabuild: Option<StringOrVec>,
     pub default_target: Option<String>,
     pub forced_target: Option<String>,
@@ -254,12 +256,13 @@ impl TomlPackage {
         self.authors.as_ref().map(|v| v.normalized()).transpose()
     }
 
-    pub fn normalized_build(&self) -> Result<Option<&String>, UnresolvedError> {
-        let readme = self.build.as_ref().ok_or(UnresolvedError)?;
-        match readme {
-            StringOrBool::Bool(false) => Ok(None),
-            StringOrBool::Bool(true) => Err(UnresolvedError),
-            StringOrBool::String(value) => Ok(Some(value)),
+    pub fn normalized_build(&self) -> Result<Option<&[String]>, UnresolvedError> {
+        let build = self.build.as_ref().ok_or(UnresolvedError)?;
+        match build {
+            TomlPackageBuild::Auto(false) => Ok(None),
+            TomlPackageBuild::Auto(true) => Err(UnresolvedError),
+            TomlPackageBuild::SingleScript(value) => Ok(Some(std::slice::from_ref(value))),
+            TomlPackageBuild::MultipleScript(scripts) => Ok(Some(scripts)),
         }
     }
 
@@ -1008,6 +1011,7 @@ impl TomlProfile {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "unstable-schema", derive(schemars::JsonSchema))]
 pub enum ProfilePackageSpec {
     Spec(PackageIdSpec),
     All,
@@ -1149,7 +1153,7 @@ impl<'de> de::Deserialize<'de> for TomlDebugInfo {
                         return Err(serde_untagged::de::Error::invalid_value(
                             Unexpected::Signed(value),
                             &expecting,
-                        ))
+                        ));
                     }
                 };
                 Ok(debuginfo)
@@ -1165,7 +1169,7 @@ impl<'de> de::Deserialize<'de> for TomlDebugInfo {
                         return Err(serde_untagged::de::Error::invalid_value(
                             Unexpected::Str(value),
                             &expecting,
-                        ))
+                        ));
                     }
                 };
                 Ok(debuginfo)
@@ -1355,6 +1359,7 @@ macro_rules! str_newtype {
         /// Verified string newtype
         #[derive(Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[serde(transparent)]
+        #[cfg_attr(feature = "unstable-schema", derive(schemars::JsonSchema))]
         pub struct $name<T: AsRef<str> = String>(T);
 
         impl<T: AsRef<str>> $name<T> {
@@ -1641,6 +1646,17 @@ pub enum TomlLintLevel {
     Allow,
 }
 
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+#[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "unstable-schema", derive(schemars::JsonSchema))]
+pub struct Hints {
+    #[cfg_attr(
+        feature = "unstable-schema",
+        schemars(with = "Option<TomlValueWrapper>")
+    )]
+    pub mostly_unused: Option<toml::Value>,
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct InvalidCargoFeatures {}
 
@@ -1698,6 +1714,34 @@ impl<'de> Deserialize<'de> for StringOrBool {
         UntaggedEnumVisitor::new()
             .bool(|b| Ok(StringOrBool::Bool(b)))
             .string(|s| Ok(StringOrBool::String(s.to_owned())))
+            .deserialize(deserializer)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+#[serde(untagged)]
+#[cfg_attr(feature = "unstable-schema", derive(schemars::JsonSchema))]
+pub enum TomlPackageBuild {
+    /// If build scripts are disabled or enabled.
+    /// If true, `build.rs` in the root folder will be the build script.
+    Auto(bool),
+
+    /// Path of Build Script if there's just one script.
+    SingleScript(String),
+
+    /// Vector of paths if multiple build script are to be used.
+    MultipleScript(Vec<String>),
+}
+
+impl<'de> Deserialize<'de> for TomlPackageBuild {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        UntaggedEnumVisitor::new()
+            .bool(|b| Ok(TomlPackageBuild::Auto(b)))
+            .string(|s| Ok(TomlPackageBuild::SingleScript(s.to_owned())))
+            .seq(|value| value.deserialize().map(TomlPackageBuild::MultipleScript))
             .deserialize(deserializer)
     }
 }

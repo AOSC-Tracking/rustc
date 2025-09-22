@@ -1,6 +1,6 @@
 use chrono::offset::TimeZone;
 use chrono::{DateTime, Utc};
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use intern::intern;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -13,9 +13,7 @@ pub mod interpolate;
 pub mod metric;
 pub mod pool;
 pub mod selector;
-
-#[cfg(test)]
-mod tests;
+pub mod tests;
 
 pub use pool::{Connection, Pool};
 
@@ -210,6 +208,8 @@ pub enum Profile {
     Debug,
     /// A doc build
     Doc,
+    /// A doc build with `--output-format=json` option.
+    DocJson,
     /// An optimized "release" build
     Opt,
     /// A Clippy run
@@ -223,8 +223,14 @@ impl Profile {
             Profile::Opt => "opt",
             Profile::Debug => "debug",
             Profile::Doc => "doc",
+            Profile::DocJson => "doc-json",
             Profile::Clippy => "clippy",
         }
+    }
+
+    /// Set of default profiles that should be benchmarked for a master/try artifact.
+    pub fn default_profiles() -> Vec<Self> {
+        vec![Profile::Check, Profile::Debug, Profile::Doc, Profile::Opt]
     }
 }
 
@@ -235,6 +241,7 @@ impl std::str::FromStr for Profile {
             "check" => Profile::Check,
             "debug" => Profile::Debug,
             "doc" => Profile::Doc,
+            "doc-json" => Profile::DocJson,
             "opt" => Profile::Opt,
             "clippy" => Profile::Clippy,
             _ => return Err(format!("{} is not a profile", s)),
@@ -307,6 +314,7 @@ impl Scenario {
     }
 }
 
+use anyhow::anyhow;
 use std::cmp::Ordering;
 use std::str::FromStr;
 
@@ -361,6 +369,10 @@ impl Target {
         match self {
             Target::X86_64UnknownLinuxGnu => "x86_64-unknown-linux-gnu",
         }
+    }
+
+    pub fn all() -> Vec<Self> {
+        vec![Self::X86_64UnknownLinuxGnu]
     }
 }
 
@@ -448,7 +460,7 @@ struct ArtifactInfo<'a> {
 }
 
 impl ArtifactId {
-    fn info(&self) -> ArtifactInfo {
+    fn info(&self) -> ArtifactInfo<'_> {
         let (name, date, ty) = match self {
             Self::Commit(commit) => (
                 commit.sha.as_str(),
@@ -793,4 +805,307 @@ pub struct ArtifactCollection {
     pub artifact: ArtifactId,
     pub duration: Duration,
     pub end_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum BenchmarkRequestStatus {
+    WaitingForArtifacts,
+    ArtifactsReady,
+    InProgress,
+    Completed { completed_at: DateTime<Utc> },
+}
+
+const BENCHMARK_REQUEST_STATUS_WAITING_FOR_ARTIFACTS_STR: &str = "waiting_for_artifacts";
+const BENCHMARK_REQUEST_STATUS_ARTIFACTS_READY_STR: &str = "artifacts_ready";
+const BENCHMARK_REQUEST_STATUS_IN_PROGRESS_STR: &str = "in_progress";
+const BENCHMARK_REQUEST_STATUS_COMPLETED_STR: &str = "completed";
+
+impl BenchmarkRequestStatus {
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            Self::WaitingForArtifacts => BENCHMARK_REQUEST_STATUS_WAITING_FOR_ARTIFACTS_STR,
+            Self::ArtifactsReady => BENCHMARK_REQUEST_STATUS_ARTIFACTS_READY_STR,
+            Self::InProgress => BENCHMARK_REQUEST_STATUS_IN_PROGRESS_STR,
+            Self::Completed { .. } => BENCHMARK_REQUEST_STATUS_COMPLETED_STR,
+        }
+    }
+
+    pub(crate) fn from_str_and_completion_date(
+        text: &str,
+        completion_date: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<Self> {
+        match text {
+            BENCHMARK_REQUEST_STATUS_WAITING_FOR_ARTIFACTS_STR => Ok(Self::WaitingForArtifacts),
+            BENCHMARK_REQUEST_STATUS_ARTIFACTS_READY_STR => Ok(Self::ArtifactsReady),
+            BENCHMARK_REQUEST_STATUS_IN_PROGRESS_STR => Ok(Self::InProgress),
+            BENCHMARK_REQUEST_STATUS_COMPLETED_STR => Ok(Self::Completed {
+                completed_at: completion_date.ok_or_else(|| {
+                    anyhow!("No completion date for a completed BenchmarkRequestStatus")
+                })?,
+            }),
+            _ => Err(anyhow!("Unknown BenchmarkRequestStatus `{text}`")),
+        }
+    }
+
+    pub(crate) fn completed_at(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Completed { completed_at } => Some(*completed_at),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for BenchmarkRequestStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+const BENCHMARK_REQUEST_TRY_STR: &str = "try";
+const BENCHMARK_REQUEST_MASTER_STR: &str = "master";
+const BENCHMARK_REQUEST_RELEASE_STR: &str = "release";
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BenchmarkRequestType {
+    /// A Try commit
+    Try {
+        sha: Option<String>,
+        parent_sha: Option<String>,
+        pr: u32,
+    },
+    /// A Master commit
+    Master {
+        sha: String,
+        parent_sha: String,
+        pr: u32,
+    },
+    /// A release only has a tag
+    Release { tag: String },
+}
+
+impl fmt::Display for BenchmarkRequestType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BenchmarkRequestType::Try { .. } => write!(f, "{BENCHMARK_REQUEST_TRY_STR}"),
+            BenchmarkRequestType::Master { .. } => write!(f, "{BENCHMARK_REQUEST_MASTER_STR}"),
+            BenchmarkRequestType::Release { .. } => write!(f, "{BENCHMARK_REQUEST_RELEASE_STR}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BenchmarkRequest {
+    commit_type: BenchmarkRequestType,
+    created_at: DateTime<Utc>,
+    status: BenchmarkRequestStatus,
+    backends: String,
+    profiles: String,
+}
+
+impl BenchmarkRequest {
+    /// Create a release benchmark request that is in the `ArtifactsReady` status.
+    pub fn create_release(tag: &str, created_at: DateTime<Utc>) -> Self {
+        Self {
+            commit_type: BenchmarkRequestType::Release {
+                tag: tag.to_string(),
+            },
+            created_at,
+            status: BenchmarkRequestStatus::ArtifactsReady,
+            backends: String::new(),
+            profiles: String::new(),
+        }
+    }
+
+    /// Create a try request that is in the `WaitingForArtifacts` status.
+    pub fn create_try_without_artifacts(
+        pr: u32,
+        created_at: DateTime<Utc>,
+        backends: &str,
+        profiles: &str,
+    ) -> Self {
+        Self {
+            commit_type: BenchmarkRequestType::Try {
+                pr,
+                sha: None,
+                parent_sha: None,
+            },
+            created_at,
+            status: BenchmarkRequestStatus::WaitingForArtifacts,
+            backends: backends.to_string(),
+            profiles: profiles.to_string(),
+        }
+    }
+
+    /// Create a master benchmark request that is in the `ArtifactsReady` status.
+    pub fn create_master(sha: &str, parent_sha: &str, pr: u32, created_at: DateTime<Utc>) -> Self {
+        Self {
+            commit_type: BenchmarkRequestType::Master {
+                pr,
+                sha: sha.to_string(),
+                parent_sha: parent_sha.to_string(),
+            },
+            created_at,
+            status: BenchmarkRequestStatus::ArtifactsReady,
+            backends: String::new(),
+            profiles: String::new(),
+        }
+    }
+
+    /// Get either the `sha` for a `try` or `master` commit or a `tag` for a
+    /// `release`
+    pub fn tag(&self) -> Option<&str> {
+        match &self.commit_type {
+            BenchmarkRequestType::Try { sha, .. } => sha.as_deref(),
+            BenchmarkRequestType::Master { sha, .. } => Some(sha),
+            BenchmarkRequestType::Release { tag } => Some(tag),
+        }
+    }
+
+    pub fn pr(&self) -> Option<&u32> {
+        match &self.commit_type {
+            BenchmarkRequestType::Try { pr, .. } | BenchmarkRequestType::Master { pr, .. } => {
+                Some(pr)
+            }
+            BenchmarkRequestType::Release { .. } => None,
+        }
+    }
+
+    pub fn parent_sha(&self) -> Option<&str> {
+        match &self.commit_type {
+            BenchmarkRequestType::Try { parent_sha, .. } => parent_sha.as_deref(),
+            BenchmarkRequestType::Master { parent_sha, .. } => Some(parent_sha),
+            BenchmarkRequestType::Release { .. } => None,
+        }
+    }
+
+    pub fn status(&self) -> BenchmarkRequestStatus {
+        self.status
+    }
+
+    pub fn created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+
+    pub fn is_master(&self) -> bool {
+        matches!(self.commit_type, BenchmarkRequestType::Master { .. })
+    }
+
+    pub fn is_try(&self) -> bool {
+        matches!(self.commit_type, BenchmarkRequestType::Try { .. })
+    }
+
+    pub fn is_release(&self) -> bool {
+        matches!(self.commit_type, BenchmarkRequestType::Release { .. })
+    }
+
+    /// Get the codegen backends for the request
+    pub fn backends(&self) -> anyhow::Result<Vec<CodegenBackend>> {
+        // Empty string; default to LLVM.
+        if self.backends.trim().is_empty() {
+            return Ok(vec![CodegenBackend::Llvm]);
+        }
+
+        self.backends
+            .split(',')
+            .map(|s| {
+                CodegenBackend::from_str(s).map_err(|_| anyhow::anyhow!("Invalid backend: {s}"))
+            })
+            .collect()
+    }
+
+    /// Get the profiles for the request
+    pub fn profiles(&self) -> anyhow::Result<Vec<Profile>> {
+        // No profile string; fall back to the library defaults.
+        if self.profiles.trim().is_empty() {
+            return Ok(Profile::default_profiles());
+        }
+
+        self.profiles
+            .split(',')
+            .map(Profile::from_str)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("Invalid backend: {e}"))
+    }
+}
+
+/// Cached information about benchmark requests in the DB
+/// FIXME: only store non-try requests here
+pub struct BenchmarkRequestIndex {
+    /// Tags (SHA or release name) of all known benchmark requests
+    all: HashSet<String>,
+    /// Tags (SHA or release name) of all benchmark requests in the completed status
+    completed: HashSet<String>,
+}
+
+impl BenchmarkRequestIndex {
+    /// Do we already have a benchmark request for the passed `tag`?
+    pub fn contains_tag(&self, tag: &str) -> bool {
+        self.all.contains(tag)
+    }
+
+    /// Return tags of already completed benchmark requests.
+    pub fn completed_requests(&self) -> &HashSet<String> {
+        &self.completed
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BenchmarkJobStatus {
+    Queued,
+    InProgress {
+        started_at: DateTime<Utc>,
+    },
+    Completed {
+        started_at: DateTime<Utc>,
+        completed_at: DateTime<Utc>,
+        success: bool,
+    },
+}
+
+const BENCHMARK_JOB_STATUS_QUEUED_STR: &str = "queued";
+const BENCHMARK_JOB_STATUS_IN_PROGRESS_STR: &str = "in_progress";
+const BENCHMARK_JOB_STATUS_SUCCESS_STR: &str = "success";
+const BENCHMARK_JOB_STATUS_FAILURE_STR: &str = "failure";
+
+impl BenchmarkJobStatus {
+    pub fn as_str(&self) -> &str {
+        match self {
+            BenchmarkJobStatus::Queued => BENCHMARK_JOB_STATUS_QUEUED_STR,
+            BenchmarkJobStatus::InProgress { .. } => BENCHMARK_JOB_STATUS_IN_PROGRESS_STR,
+            BenchmarkJobStatus::Completed { success, .. } => {
+                if *success {
+                    BENCHMARK_JOB_STATUS_SUCCESS_STR
+                } else {
+                    BENCHMARK_JOB_STATUS_FAILURE_STR
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Display for BenchmarkJobStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BenchmarkSet(u32);
+
+/// A single unit of work generated from a benchmark request. Split by profiles
+/// and backends
+///
+/// Each request is split into several `BenchmarkJob`s. Collectors poll the
+/// queue and claim a job only when its `benchmark_set` matches one of the sets
+/// they are responsible for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BenchmarkJob {
+    target: Target,
+    backend: CodegenBackend,
+    profile: Profile,
+    request_tag: String,
+    benchmark_set: BenchmarkSet,
+    created_at: DateTime<Utc>,
+    status: BenchmarkJobStatus,
+    retry: u32,
 }

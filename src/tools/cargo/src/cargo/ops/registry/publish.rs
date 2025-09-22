@@ -11,8 +11,8 @@ use std::io::Seek;
 use std::io::SeekFrom;
 use std::time::Duration;
 
-use anyhow::bail;
 use anyhow::Context as _;
+use anyhow::bail;
 use cargo_credential::Operation;
 use cargo_credential::Secret;
 use cargo_util::paths;
@@ -21,35 +21,36 @@ use crates_io::NewCrateDependency;
 use crates_io::Registry;
 use itertools::Itertools;
 
-use crate::core::dependency::DepKind;
-use crate::core::manifest::ManifestMetadata;
-use crate::core::resolver::CliFeatures;
+use crate::CargoResult;
+use crate::GlobalContext;
 use crate::core::Dependency;
 use crate::core::Package;
 use crate::core::PackageId;
 use crate::core::PackageIdSpecQuery;
 use crate::core::SourceId;
 use crate::core::Workspace;
+use crate::core::dependency::DepKind;
+use crate::core::manifest::ManifestMetadata;
+use crate::core::resolver::CliFeatures;
 use crate::ops;
-use crate::ops::registry::RegistrySourceIds;
 use crate::ops::PackageOpts;
 use crate::ops::Packages;
 use crate::ops::RegistryOrIndex;
-use crate::sources::source::QueryKind;
-use crate::sources::source::Source;
+use crate::ops::registry::RegistrySourceIds;
+use crate::sources::CRATES_IO_REGISTRY;
 use crate::sources::RegistrySource;
 use crate::sources::SourceConfigMap;
-use crate::sources::CRATES_IO_REGISTRY;
-use crate::util::auth;
-use crate::util::cache_lock::CacheLockMode;
-use crate::util::context::JobsConfig;
-use crate::util::toml::prepare_for_publish;
+use crate::sources::source::QueryKind;
+use crate::sources::source::Source;
 use crate::util::Graph;
 use crate::util::Progress;
 use crate::util::ProgressStyle;
 use crate::util::VersionExt as _;
-use crate::CargoResult;
-use crate::GlobalContext;
+use crate::util::auth;
+use crate::util::cache_lock::CacheLockMode;
+use crate::util::context::JobsConfig;
+use crate::util::errors::ManifestError;
+use crate::util::toml::prepare_for_publish;
 
 use super::super::check_dep_has_version;
 
@@ -68,17 +69,7 @@ pub struct PublishOpts<'gctx> {
 }
 
 pub fn publish(ws: &Workspace<'_>, opts: &PublishOpts<'_>) -> CargoResult<()> {
-    let multi_package_mode = ws.gctx().cli_unstable().package_workspace;
     let specs = opts.to_publish.to_package_id_specs(ws)?;
-
-    if !multi_package_mode {
-        if specs.len() > 1 {
-            bail!("the `-p` argument must be specified to select a single package to publish")
-        }
-        if Packages::Default == opts.to_publish && ws.is_virtual() {
-            bail!("the `-p` argument must be specified in the root of a virtual workspace")
-        }
-    }
 
     let member_ids: Vec<_> = ws.members().map(|p| p.package_id()).collect();
     // Check that the specs match members.
@@ -96,13 +87,12 @@ pub fn publish(ws: &Workspace<'_>, opts: &PublishOpts<'_>) -> CargoResult<()> {
     // If `--workspace` is passed,
     // the intent is more like "publish all publisable packages in this workspace",
     // so skip `publish=false` packages.
-    let allow_unpublishable = multi_package_mode
-        && match &opts.to_publish {
-            Packages::Default => ws.is_virtual(),
-            Packages::All(_) => true,
-            Packages::OptOut(_) => true,
-            Packages::Packages(_) => false,
-        };
+    let allow_unpublishable = match &opts.to_publish {
+        Packages::Default => ws.is_virtual(),
+        Packages::All(_) => true,
+        Packages::OptOut(_) => true,
+        Packages::Packages(_) => false,
+    };
     if !unpublishable.is_empty() && !allow_unpublishable {
         bail!(
             "{} cannot be published.\n\
@@ -139,7 +129,7 @@ pub fn publish(ws: &Workspace<'_>, opts: &PublishOpts<'_>) -> CargoResult<()> {
         None => {
             let reg = super::infer_registry(&just_pkgs)?;
             validate_registry(&just_pkgs, reg.as_ref())?;
-            if let Some(RegistryOrIndex::Registry(ref registry)) = &reg {
+            if let Some(RegistryOrIndex::Registry(registry)) = &reg {
                 if registry != CRATES_IO_REGISTRY {
                     // Don't warn for crates.io.
                     opts.gctx.shell().note(&format!(
@@ -171,7 +161,15 @@ pub fn publish(ws: &Workspace<'_>, opts: &PublishOpts<'_>) -> CargoResult<()> {
 
         for (pkg, _) in &pkgs {
             verify_unpublished(pkg, &mut source, &source_ids, opts.dry_run, opts.gctx)?;
-            verify_dependencies(pkg, &registry, source_ids.original)?;
+            verify_dependencies(pkg, &registry, source_ids.original).map_err(|err| {
+                ManifestError::new(
+                    err.context(format!(
+                        "failed to verify manifest at `{}`",
+                        pkg.manifest_path().display()
+                    )),
+                    pkg.manifest_path().into(),
+                )
+            })?;
         }
     }
 
@@ -193,6 +191,7 @@ pub fn publish(ws: &Workspace<'_>, opts: &PublishOpts<'_>) -> CargoResult<()> {
             keep_going: opts.keep_going,
             cli_features: opts.cli_features.clone(),
             reg_or_index: reg_or_index.clone(),
+            dry_run: opts.dry_run,
         },
         pkgs,
     )?;
@@ -329,7 +328,9 @@ pub fn publish(ws: &Workspace<'_>, opts: &PublishOpts<'_>) -> CargoResult<()> {
                 break;
             } else {
                 let failed_list = package_list(plan.iter(), "and");
-                bail!("unable to publish {failed_list} due to a timeout while waiting for published dependencies to be available.");
+                bail!(
+                    "unable to publish {failed_list} due to a timeout while waiting for published dependencies to be available."
+                );
             }
         }
         for id in &confirmed {
@@ -484,12 +485,14 @@ fn verify_dependencies(
             // but also prevents someone using `--index` to specify
             // something that points to crates.io.
             if registry_src.is_crates_io() || registry.host_is_crates_io() {
-                bail!("crates cannot be published to crates.io with dependencies sourced from other\n\
+                bail!(
+                    "crates cannot be published to crates.io with dependencies sourced from other\n\
                        registries. `{}` needs to be published to crates.io before publishing this crate.\n\
                        (crate `{}` is pulled from {})",
-                      dep.package_name(),
-                      dep.package_name(),
-                      dep.source_id());
+                    dep.package_name(),
+                    dep.package_name(),
+                    dep.source_id()
+                );
             }
         }
     }

@@ -1,0 +1,17 @@
+[package]
+name = "decodeme"
+description = "Decoding definitions of the profiling event data from `measureme`"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+measureme.workspace = true
+memchr.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true

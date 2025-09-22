@@ -6,27 +6,26 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::str::{self, FromStr};
 
-use crate::core::summary::MissingDependencyError;
 use crate::AlreadyPrintedError;
-use anyhow::{anyhow, bail, Context as _};
+use crate::core::summary::MissingDependencyError;
+use anyhow::{Context as _, anyhow, bail};
 use cargo_platform::Platform;
 use cargo_util::paths;
 use cargo_util_schemas::manifest::{
     self, PackageName, PathBaseName, TomlDependency, TomlDetailedDependency, TomlManifest,
-    TomlWorkspace,
+    TomlPackageBuild, TomlWorkspace,
 };
 use cargo_util_schemas::manifest::{RustVersion, StringOrBool};
 use itertools::Itertools;
 use lazycell::LazyCell;
 use pathdiff::diff_paths;
-use toml_edit::ImDocument;
 use url::Url;
 
 use crate::core::compiler::{CompileKind, CompileTarget};
 use crate::core::dependency::{Artifact, ArtifactTarget, DepKind};
 use crate::core::manifest::{ManifestMetadata, TargetSourcePath};
 use crate::core::resolver::ResolveBehavior;
-use crate::core::{find_workspace_root, resolve_relative_path, CliUnstable, FeatureValue};
+use crate::core::{CliUnstable, FeatureValue, find_workspace_root, resolve_relative_path};
 use crate::core::{Dependency, Manifest, Package, PackageId, Summary, Target};
 use crate::core::{Edition, EitherManifest, Feature, Features, VirtualManifest, Workspace};
 use crate::core::{GitReference, PackageIdSpec, SourceId, WorkspaceConfig, WorkspaceRootConfig};
@@ -34,7 +33,7 @@ use crate::sources::{CRATES_IO_INDEX, CRATES_IO_REGISTRY};
 use crate::util::errors::{CargoResult, ManifestError};
 use crate::util::interning::InternedString;
 use crate::util::lints::{get_span, rel_cwd_manifest_path};
-use crate::util::{self, context::ConfigRelativePath, GlobalContext, IntoUrl, OptVersionReq};
+use crate::util::{self, GlobalContext, IntoUrl, OptVersionReq, context::ConfigRelativePath};
 
 mod embedded;
 mod targets;
@@ -166,16 +165,28 @@ fn read_toml_string(path: &Path, is_embedded: bool, gctx: &GlobalContext) -> Car
 }
 
 #[tracing::instrument(skip_all)]
-fn parse_document(contents: &str) -> Result<toml_edit::ImDocument<String>, toml_edit::de::Error> {
-    toml_edit::ImDocument::parse(contents.to_owned()).map_err(Into::into)
+fn parse_document(
+    contents: &str,
+) -> Result<toml::Spanned<toml::de::DeTable<'static>>, toml::de::Error> {
+    let mut table = toml::de::DeTable::parse(contents)?;
+    table.get_mut().make_owned();
+    // SAFETY: `DeTable::make_owned` ensures no borrows remain and the lifetime does not affect
+    // layout
+    let table = unsafe {
+        std::mem::transmute::<
+            toml::Spanned<toml::de::DeTable<'_>>,
+            toml::Spanned<toml::de::DeTable<'static>>,
+        >(table)
+    };
+    Ok(table)
 }
 
 #[tracing::instrument(skip_all)]
 fn deserialize_toml(
-    document: &toml_edit::ImDocument<String>,
-) -> Result<manifest::TomlManifest, toml_edit::de::Error> {
+    document: &toml::Spanned<toml::de::DeTable<'static>>,
+) -> Result<manifest::TomlManifest, toml::de::Error> {
     let mut unused = BTreeSet::new();
-    let deserializer = toml_edit::de::Deserializer::from(document.clone());
+    let deserializer = toml::de::Deserializer::from(document.clone());
     let mut document: manifest::TomlManifest = serde_ignored::deserialize(deserializer, |path| {
         let mut key = String::new();
         stringify(&mut key, &path);
@@ -316,6 +327,7 @@ fn normalize_toml(
         build_dependencies2: None,
         target: None,
         lints: None,
+        hints: None,
         workspace: original_toml.workspace.clone().or_else(|| {
             // Prevent looking for a workspace by `read_manifest_from_str`
             is_embedded.then(manifest::TomlWorkspace::default)
@@ -344,6 +356,7 @@ fn normalize_toml(
             is_embedded,
             gctx,
             &inherit,
+            features,
         )?;
         let package_name = &normalized_package
             .normalized_name()
@@ -559,6 +572,8 @@ fn normalize_toml(
             lints,
         });
 
+        normalized_toml.hints = original_toml.hints.clone();
+
         normalized_toml.badges = original_toml.badges.clone();
     } else {
         if let Some(field) = original_toml.requires_package().next() {
@@ -607,6 +622,7 @@ fn normalize_package_toml<'a>(
     is_embedded: bool,
     gctx: &GlobalContext,
     inherit: &dyn Fn() -> CargoResult<&'a InheritableFields>,
+    features: &Features,
 ) -> CargoResult<Box<manifest::TomlPackage>> {
     let package_root = manifest_file.parent().unwrap();
 
@@ -670,9 +686,12 @@ fn normalize_package_toml<'a>(
         .transpose()?
         .map(manifest::InheritableField::Value);
     let build = if is_embedded {
-        Some(StringOrBool::Bool(false))
+        Some(TomlPackageBuild::Auto(false))
     } else {
-        targets::normalize_build(original_package.build.as_ref(), package_root)
+        if let Some(TomlPackageBuild::MultipleScript(_)) = original_package.build {
+            features.require(Feature::multiple_build_scripts())?;
+        }
+        targets::normalize_build(original_package.build.as_ref(), package_root)?
     };
     let metabuild = original_package.metabuild.clone();
     let default_target = original_package.default_target.clone();
@@ -951,7 +970,7 @@ fn load_inheritable_fields(
     match workspace_config {
         WorkspaceConfig::Root(root) => Ok(root.inheritable().clone()),
         WorkspaceConfig::Member {
-            root: Some(ref path_to_root),
+            root: Some(path_to_root),
         } => {
             let path = normalized_path
                 .parent()
@@ -1128,11 +1147,13 @@ fn lints_inherit_with(
 ) -> CargoResult<manifest::TomlLints> {
     if lints.workspace {
         if !lints.lints.is_empty() {
-            anyhow::bail!("cannot override `workspace.lints` in `lints`, either remove the overrides or `lints.workspace = true` and manually specify the lints");
+            anyhow::bail!(
+                "cannot override `workspace.lints` in `lints`, either remove the overrides or `lints.workspace = true` and manually specify the lints"
+            );
         }
-        get_ws_inheritable().with_context(|| {
-            "error inheriting `lints` from workspace root manifest's `workspace.lints`"
-        })
+        get_ws_inheritable().with_context(
+            || "error inheriting `lints` from workspace root manifest's `workspace.lints`",
+        )
     } else {
         Ok(lints.lints)
     }
@@ -1249,7 +1270,7 @@ fn deprecated_ws_default_features(
 #[tracing::instrument(skip_all)]
 pub fn to_real_manifest(
     contents: String,
-    document: toml_edit::ImDocument<String>,
+    document: toml::Spanned<toml::de::DeTable<'static>>,
     original_toml: manifest::TomlManifest,
     normalized_toml: manifest::TomlManifest,
     features: Features,
@@ -1493,7 +1514,9 @@ pub fn to_real_manifest(
 
     if let Some(links) = &normalized_package.links {
         if !targets.iter().any(|t| t.is_custom_build()) {
-            bail!("package specifies that it links to `{links}` but does not have a custom build script")
+            bail!(
+                "package specifies that it links to `{links}` but does not have a custom build script"
+            )
         }
     }
 
@@ -1608,6 +1631,8 @@ pub fn to_real_manifest(
             .unwrap_or(&default),
     )?;
 
+    let hints = normalized_toml.hints.clone();
+
     let metadata = ManifestMetadata {
         description: normalized_package
             .normalized_description()
@@ -1669,7 +1694,7 @@ pub fn to_real_manifest(
         .normalized_publish()
         .expect("previously normalized")
     {
-        Some(manifest::VecStringOrBool::VecString(ref vecstring)) => Some(vecstring.clone()),
+        Some(manifest::VecStringOrBool::VecString(vecstring)) => Some(vecstring.clone()),
         Some(manifest::VecStringOrBool::Bool(false)) => Some(vec![]),
         Some(manifest::VecStringOrBool::Bool(true)) => None,
         None => version.is_none().then_some(vec![]),
@@ -1799,6 +1824,7 @@ pub fn to_real_manifest(
         metabuild,
         resolve_behavior,
         rustflags,
+        hints,
         is_embedded,
     );
     if manifest
@@ -1834,7 +1860,7 @@ pub fn to_real_manifest(
 fn missing_dep_diagnostic(
     missing_dep: &MissingDependencyError,
     orig_toml: &TomlManifest,
-    document: &ImDocument<String>,
+    document: &toml::Spanned<toml::de::DeTable<'static>>,
     contents: &str,
     manifest_file: &Path,
     gctx: &GlobalContext,
@@ -1912,7 +1938,7 @@ fn missing_dep_diagnostic(
 
 fn to_virtual_manifest(
     contents: String,
-    document: toml_edit::ImDocument<String>,
+    document: toml::Spanned<toml::de::DeTable<'static>>,
     original_toml: manifest::TomlManifest,
     normalized_toml: manifest::TomlManifest,
     features: Features,
@@ -2752,7 +2778,7 @@ fn lints_to_rustflags(lints: &manifest::TomlLints) -> CargoResult<Vec<String>> {
 }
 
 fn emit_diagnostic(
-    e: toml_edit::de::Error,
+    e: toml::de::Error,
     contents: &str,
     manifest_file: &Path,
     gctx: &GlobalContext,
@@ -2790,7 +2816,9 @@ fn deprecated_underscore<T>(
 ) -> CargoResult<()> {
     let old_path = new_path.replace("-", "_");
     if old.is_some() && Edition::Edition2024 <= edition {
-        anyhow::bail!("`{old_path}` is unsupported as of the 2024 edition; instead use `{new_path}`\n(in the `{name}` {kind})");
+        anyhow::bail!(
+            "`{old_path}` is unsupported as of the 2024 edition; instead use `{new_path}`\n(in the `{name}` {kind})"
+        );
     } else if old.is_some() && new.is_some() {
         warnings.push(format!(
             "`{old_path}` is redundant with `{new_path}`, preferring `{new_path}` in the `{name}` {kind}"
@@ -2885,24 +2913,32 @@ fn prepare_toml_for_publish(
 
     let mut package = me.package().unwrap().clone();
     package.workspace = None;
-    if let Some(StringOrBool::String(path)) = &package.build {
-        let path = Path::new(path).to_path_buf();
-        let included = packaged_files.map(|i| i.contains(&path)).unwrap_or(true);
-        let build = if included {
-            let path = path
-                .into_os_string()
-                .into_string()
-                .map_err(|_err| anyhow::format_err!("non-UTF8 `package.build`"))?;
-            let path = normalize_path_string_sep(path);
-            StringOrBool::String(path)
-        } else {
-            ws.gctx().shell().warn(format!(
-                "ignoring `package.build` as `{}` is not included in the published package",
-                path.display()
-            ))?;
-            StringOrBool::Bool(false)
-        };
-        package.build = Some(build);
+    // Validates if build script file is included in package. If not, warn and ignore.
+    if let Some(custom_build_scripts) = package.normalized_build().expect("previously normalized") {
+        let mut included_scripts = Vec::new();
+        for script in custom_build_scripts {
+            let path = Path::new(script).to_path_buf();
+            let included = packaged_files.map(|i| i.contains(&path)).unwrap_or(true);
+            if included {
+                let path = path
+                    .into_os_string()
+                    .into_string()
+                    .map_err(|_err| anyhow::format_err!("non-UTF8 `package.build`"))?;
+                let path = normalize_path_string_sep(path);
+                included_scripts.push(path);
+            } else {
+                ws.gctx().shell().warn(format!(
+                    "ignoring `package.build` entry `{}` as it is not included in the published package",
+                    path.display()
+                ))?;
+            }
+        }
+
+        package.build = Some(match included_scripts.len() {
+            0 => TomlPackageBuild::Auto(false),
+            1 => TomlPackageBuild::SingleScript(included_scripts[0].clone()),
+            _ => TomlPackageBuild::MultipleScript(included_scripts),
+        });
     }
     let current_resolver = package
         .resolver
@@ -3050,6 +3086,7 @@ fn prepare_toml_for_publish(
             None => None,
         },
         lints: me.lints.clone(),
+        hints: me.hints.clone(),
         workspace: None,
         profile: me.profile.clone(),
         patch: None,

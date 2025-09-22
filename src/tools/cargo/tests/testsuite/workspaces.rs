@@ -3,7 +3,7 @@
 use std::env;
 use std::fs;
 
-use cargo_test_support::prelude::*;
+use crate::prelude::*;
 use cargo_test_support::registry::Package;
 use cargo_test_support::str;
 use cargo_test_support::{basic_lib_manifest, basic_manifest, git, project, sleep_ms};
@@ -1114,7 +1114,7 @@ fn new_warning_with_corrupt_ws() {
     let p = project().file("Cargo.toml", "asdf").build();
     p.cargo("new bar").with_stderr_data(str![[r#"
 [CREATING] binary (application) `bar` package
-[ERROR] expected `.`, `=`
+[ERROR] key with no value, expected `=`
  --> Cargo.toml:1:5
   |
 1 | asdf
@@ -1395,7 +1395,7 @@ fn error_if_parent_cargo_toml_is_invalid() {
         .cwd("bar")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] expected `.`, `=`
+[ERROR] key with no value, expected `=`
  --> ../Cargo.toml:1:9
   |
 1 | Totally not a TOML file
@@ -2682,22 +2682,20 @@ fn nonexistence_package_together_with_workspace() {
 "#]])
         .run();
 
-    p.cargo("publish --dry-run --package nonexistence -Zpackage-workspace --workspace")
+    p.cargo("publish --dry-run --package nonexistence --workspace")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [ERROR] package(s) `nonexistence` not found in workspace `[ROOT]/foo`
 
 "#]])
-        .masquerade_as_nightly_cargo(&["package-workspace"])
         .run();
     // With pattern *
-    p.cargo("publish --dry-run --package nonpattern* -Zpackage-workspace --workspace")
+    p.cargo("publish --dry-run --package nonpattern* --workspace")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [ERROR] package pattern(s) `nonpattern*` not found in workspace `[ROOT]/foo`
 
 "#]])
-        .masquerade_as_nightly_cargo(&["package-workspace"])
         .run();
 
     p.cargo("tree --package nonexistence  --workspace")

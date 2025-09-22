@@ -22,6 +22,7 @@ use std::pin::Pin;
 use std::process::{self, Command};
 use std::str;
 use std::sync::LazyLock;
+use std::time::Instant;
 
 pub mod bencher;
 mod etw_parser;
@@ -67,7 +68,7 @@ impl PerfTool {
             | ProfileTool(DepGraph)
             | ProfileTool(MonoItems)
             | ProfileTool(LlvmIr) => {
-                if profile == Profile::Doc {
+                if profile.is_doc() {
                     Some("rustdoc")
                 } else {
                     Some("rustc")
@@ -75,7 +76,7 @@ impl PerfTool {
             }
             ProfileTool(LlvmLines) => match profile {
                 Profile::Debug | Profile::Opt => Some("llvm-lines"),
-                Profile::Check | Profile::Doc | Profile::Clippy => None,
+                Profile::Check | Profile::Doc | Profile::DocJson | Profile::Clippy => None,
             },
         }
     }
@@ -248,7 +249,7 @@ impl<'a> CargoProcess<'a> {
         };
 
         if let Some(c) = &self.toolchain.components.clippy {
-            cmd.env("CLIPPY", &*FAKE_CLIPPY).env("CLIPPY_REAL", c);
+            cmd.env("CLIPPY_REAL", c);
         }
 
         for config in &self.toolchain.components.cargo_configs {
@@ -320,11 +321,10 @@ impl<'a> CargoProcess<'a> {
                         }
                         Some(sub) => sub,
                     }
+                } else if self.profile.is_doc() {
+                    "rustdoc"
                 } else {
-                    match self.profile {
-                        Profile::Doc => "rustdoc",
-                        _ => "rustc",
-                    }
+                    "rustc"
                 };
 
             let mut cmd = self.base_command(self.cwd, cargo_subcommand);
@@ -333,9 +333,25 @@ impl<'a> CargoProcess<'a> {
                 Profile::Check => {
                     cmd.arg("--profile").arg("check");
                 }
+                Profile::Clippy => {
+                    cmd.arg("--profile").arg("check");
+                    // Make sure that we run all lints, or else would
+                    // be pointless for allow-by-default lint benchmarks
+                    // and would cause errors with deny-by-default lints.
+                    //
+                    // Note that this takes priority over inherited `-Aclippy::*`s
+                    // and similar.
+                    let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
+                    rustflags.push_str(" -Wclippy::all");
+                    cmd.env("RUSTFLAGS", rustflags);
+                }
                 Profile::Debug => {}
                 Profile::Doc => {}
-                Profile::Clippy => {}
+                Profile::DocJson => {
+                    // Enable JSON output
+                    cmd.arg("-Zunstable-options");
+                    cmd.arg("--output-format=json");
+                }
                 Profile::Opt => {
                     cmd.arg("--release");
                 }
@@ -361,6 +377,22 @@ impl<'a> CargoProcess<'a> {
             // onto rustc for the final crate, which is exactly the crate for which
             // we want to wrap rustc.
             if needs_final {
+                if let Profile::Clippy = self.profile {
+                    // For Clippy, we still invoke `cargo rustc`, but we need to override the
+                    // executed rustc to be clippy-fake.
+                    // We only do this for the final crate, otherwise clippy would be invoked by
+                    // cargo also for building host code (build scripts/proc macros), which doesn't
+                    // really work.
+                    cmd.env("RUSTC", &*FAKE_CLIPPY);
+                }
+
+                if let Profile::DocJson = self.profile {
+                    // Document more things to stress the doc JSON machinery.
+                    // And this is what `cargo-semver-checks` does.
+                    cmd.arg("--document-private-items");
+                    cmd.arg("--document-hidden-items");
+                }
+
                 let processor = self
                     .processor_etc
                     .as_mut()
@@ -727,6 +759,7 @@ fn parse_self_profile(
     }
     let (profile, files) = if let Some(profile_path) = full_path {
         // measureme 0.8+ uses a single file
+        let start = Instant::now();
         let data = fs::read(&profile_path)?;
 
         // HACK: `decodeme` can unexpectedly panic on invalid data produced by rustc. We catch this
@@ -748,6 +781,10 @@ fn parse_self_profile(
                 return Err(std::io::Error::new(ErrorKind::InvalidData, error));
             }
         };
+        log::trace!(
+            "Self profile analyze duration: {}",
+            start.elapsed().as_secs_f64()
+        );
 
         let profile = SelfProfile {
             artifact_sizes: results.artifact_sizes,

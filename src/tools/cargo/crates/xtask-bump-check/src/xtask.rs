@@ -17,15 +17,15 @@ use std::fmt::Write;
 use std::fs;
 use std::task;
 
-use cargo::core::dependency::Dependency;
+use cargo::CargoResult;
 use cargo::core::Package;
 use cargo::core::Registry;
 use cargo::core::SourceId;
 use cargo::core::Workspace;
+use cargo::core::dependency::Dependency;
 use cargo::sources::source::QueryKind;
 use cargo::util::cache_lock::CacheLockMode;
 use cargo::util::command_prelude::*;
-use cargo::CargoResult;
 use cargo_util::ProcessBuilder;
 
 const UPSTREAM_BRANCH: &str = "master";
@@ -202,13 +202,29 @@ fn bump_check(args: &clap::ArgMatches, gctx: &cargo::util::GlobalContext) -> Car
     if github {
         println!("::group::SemVer Checks against crates.io");
     }
+
     let mut cmd = ProcessBuilder::new("cargo");
     cmd.arg("semver-checks")
         .arg("check-release")
-        .arg("--workspace");
+        .arg("--workspace")
+        .args(&["--exclude", "cargo"]);
 
     gctx.shell().status("Running", &cmd)?;
     cmd.exec()?;
+
+    // Cargo has mutually exclusive features for different HTTP backends, so
+    // pass a specific `--features` instead of including this in the
+    // `--all-features` performed by the previous command.
+    let mut cmd = ProcessBuilder::new("cargo");
+    cmd.arg("semver-checks")
+        .arg("check-release")
+        .args(&["--package", "cargo"])
+        .arg("--default-features")
+        .args(&["--features", "all-static"]);
+
+    gctx.shell().status("Running", &cmd)?;
+    cmd.exec()?;
+
     if github {
         println!("::endgroup::");
     }
@@ -368,7 +384,7 @@ fn changed<'r, 'ws>(
     for delta in diff.deltas() {
         let old = delta.old_file().path().unwrap();
         let new = delta.new_file().path().unwrap();
-        for (ref pkg_root, pkg) in ws_members.iter() {
+        for (pkg_root, pkg) in ws_members.iter() {
             if old.starts_with(pkg_root) || new.starts_with(pkg_root) {
                 changed_members.insert(pkg.name().as_str(), *pkg);
                 break;

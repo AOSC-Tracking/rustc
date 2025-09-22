@@ -3,8 +3,10 @@ use crate::github::{
     client, enqueue_shas, parse_homu_comment, rollup_pr_number, unroll_rollup,
     COMMENT_MARK_TEMPORARY, RUST_REPO_GITHUB_API_URL,
 };
+use crate::job_queue::run_new_queue;
 use crate::load::SiteCtxt;
 
+use database::BenchmarkRequest;
 use hashbrown::HashMap;
 use std::sync::Arc;
 
@@ -72,6 +74,25 @@ async fn handle_issue(
     Ok(github::Response)
 }
 
+/// The try request does not have a `sha` or a `parent_sha` but we need to keep a record
+/// of this commit existing. The DB ensures that there is only one non-completed
+/// try benchmark request per `pr`.
+async fn record_try_benchmark_request_without_artifacts(
+    conn: &dyn database::pool::Connection,
+    pr: u32,
+    backends: &str,
+) {
+    // We only want to run this if the new system is running
+    if run_new_queue() {
+        let try_request =
+            BenchmarkRequest::create_try_without_artifacts(pr, chrono::Utc::now(), backends, "");
+        log::info!("Inserting try benchmark request {try_request:?}");
+        if let Err(e) = conn.insert_benchmark_request(&try_request).await {
+            log::error!("Failed to insert try benchmark request: {}", e);
+        }
+    }
+}
+
 async fn handle_rust_timer(
     ctxt: Arc<SiteCtxt>,
     main_client: &client::Client,
@@ -97,6 +118,13 @@ async fn handle_rust_timer(
         let msg = match queue {
             Ok(cmd) => {
                 let conn = ctxt.conn().await;
+
+                record_try_benchmark_request_without_artifacts(
+                    &*conn,
+                    issue.number,
+                    cmd.params.backends.unwrap_or(""),
+                )
+                .await;
                 conn.queue_pr(
                     issue.number,
                     cmd.params.include,
@@ -137,6 +165,12 @@ async fn handle_rust_timer(
     {
         let conn = ctxt.conn().await;
         for command in &valid_build_cmds {
+            record_try_benchmark_request_without_artifacts(
+                &*conn,
+                issue.number,
+                command.params.backends.unwrap_or(""),
+            )
+            .await;
             conn.queue_pr(
                 issue.number,
                 command.params.include,
@@ -161,7 +195,7 @@ async fn handle_rust_timer(
 
 /// Parses the first occurrence of a `@rust-timer queue <shared-args>` command
 /// in the input string.
-fn parse_queue_command(body: &str) -> Option<Result<QueueCommand, String>> {
+fn parse_queue_command(body: &str) -> Option<Result<QueueCommand<'_>, String>> {
     let args = get_command_lines(body, "queue").next()?;
     let args = match parse_command_arguments(args) {
         Ok(args) => args,
@@ -176,7 +210,7 @@ fn parse_queue_command(body: &str) -> Option<Result<QueueCommand, String>> {
 }
 
 /// Parses all occurrences of a `@rust-timer build <shared-args>` command in the input string.
-fn parse_build_commands(body: &str) -> impl Iterator<Item = Result<BuildCommand, String>> {
+fn parse_build_commands(body: &str) -> impl Iterator<Item = Result<BuildCommand<'_>, String>> {
     get_command_lines(body, "build").map(|line| {
         let mut iter = line.splitn(2, ' ');
         let Some(sha) = iter.next().filter(|s| !s.is_empty() && !s.contains('=')) else {

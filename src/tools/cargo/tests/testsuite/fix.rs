@@ -1,13 +1,13 @@
 //! Tests for the `cargo fix` command.
 
+use crate::prelude::*;
+use crate::utils::tools;
 use cargo::core::Edition;
 use cargo_test_support::compare::assert_e2e;
 use cargo_test_support::git::{self, init};
 use cargo_test_support::paths;
-use cargo_test_support::prelude::*;
 use cargo_test_support::registry::{Dependency, Package};
 use cargo_test_support::str;
-use cargo_test_support::tools;
 use cargo_test_support::{basic_manifest, is_nightly, project};
 
 #[cargo_test]
@@ -192,9 +192,10 @@ fn prepare_for_2018() {
 
     println!("{}", p.read_file("src/lib.rs"));
     assert!(p.read_file("src/lib.rs").contains("use crate::foo::FOO;"));
-    assert!(p
-        .read_file("src/lib.rs")
-        .contains("let x = crate::foo::FOO;"));
+    assert!(
+        p.read_file("src/lib.rs")
+            .contains("let x = crate::foo::FOO;")
+    );
 }
 
 #[cargo_test]
@@ -2410,7 +2411,8 @@ fn fix_only_once_for_duplicates() {
             r#"
 macro_rules! foo {
     () => {
-        &1;
+        let x = Box::new(1);
+        std::mem::forget(&x);
     };
 }
 
@@ -2438,7 +2440,8 @@ fn main() {
 
 macro_rules! foo {
     () => {
-        let _ = &1;
+        let x = Box::new(1);
+        let _ = &x;
     };
 }
 

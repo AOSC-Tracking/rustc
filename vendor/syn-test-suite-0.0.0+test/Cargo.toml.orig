@@ -1,0 +1,11 @@
+[package]
+name = "syn-test-suite"
+version = "0.0.0+test"
+authors = ["David Tolnay <dtolnay@gmail.com>"]
+description = "Test suite of the syn crate"
+repository = "https://github.com/dtolnay/syn"
+license = "MIT OR Apache-2.0"
+edition = "2018"
+
+[features]
+all-features = []

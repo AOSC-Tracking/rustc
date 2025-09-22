@@ -455,7 +455,6 @@ pub mod self_profile {
         pub benchmark: String,
         #[serde(alias = "run_name")]
         pub scenario: String,
-        pub sort_idx: String,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -505,6 +504,7 @@ pub mod self_profile {
         // Nanoseconds
         pub self_time: i64,
         pub invocation_count: i32,
+        pub number_of_cache_hits: i32,
         // Nanoseconds
         pub incremental_load_time: i64,
     }

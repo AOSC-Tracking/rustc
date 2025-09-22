@@ -99,7 +99,7 @@ use crate::util::errors::{CargoResult, VerboseError};
 use crate::util::interning::InternedString;
 use crate::util::machine_message::{self, Message};
 use crate::util::{add_path_args, internal};
-use cargo_util::{paths, ProcessBuilder, ProcessError};
+use cargo_util::{ProcessBuilder, ProcessError, paths};
 use cargo_util_schemas::manifest::TomlDebugInfo;
 use cargo_util_schemas::manifest::TomlTrimPaths;
 use cargo_util_schemas::manifest::TomlTrimPathsValue;
@@ -313,7 +313,7 @@ fn rustc(
         .unwrap_or_else(|| build_runner.bcx.gctx.cwd())
         .to_path_buf();
     let fingerprint_dir = build_runner.files().fingerprint_dir(unit);
-    let script_metadata = build_runner.find_build_script_metadata(unit);
+    let script_metadatas = build_runner.find_build_script_metadatas(unit);
     let is_local = unit.is_local();
     let artifact = unit.artifact;
     let sbom_files = build_runner.sbom_output_files(unit)?;
@@ -371,7 +371,7 @@ fn rustc(
                 )?;
                 add_plugin_deps(&mut rustc, &script_outputs, &build_scripts, &root_output)?;
             }
-            add_custom_flags(&mut rustc, &script_outputs, script_metadata)?;
+            add_custom_flags(&mut rustc, &script_outputs, script_metadatas)?;
         }
 
         for output in outputs.iter() {
@@ -920,7 +920,7 @@ fn rustdoc(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<W
     let rustdoc_depinfo_enabled = build_runner.bcx.gctx.cli_unstable().rustdoc_depinfo;
 
     let mut output_options = OutputOptions::new(build_runner, unit);
-    let script_metadata = build_runner.find_build_script_metadata(unit);
+    let script_metadatas = build_runner.find_build_script_metadatas(unit);
     let scrape_outputs = if should_include_scrape_units(build_runner.bcx, unit) {
         Some(
             build_runner
@@ -960,7 +960,7 @@ fn rustdoc(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<W
         add_custom_flags(
             &mut rustdoc,
             &build_script_outputs.lock().unwrap(),
-            script_metadata,
+            script_metadatas,
         )?;
 
         // Add the output of scraped examples to the rustdoc command.
@@ -1135,10 +1135,26 @@ fn build_base_args(
         strip,
         rustflags: profile_rustflags,
         trim_paths,
-        hint_mostly_unused,
+        hint_mostly_unused: profile_hint_mostly_unused,
         ..
     } = unit.profile.clone();
+    let hints = unit.pkg.hints().cloned().unwrap_or_default();
     let test = unit.mode.is_any_test();
+
+    let warn = |msg: &str| {
+        bcx.gctx.shell().warn(format!(
+            "{}@{}: {msg}",
+            unit.pkg.package_id().name(),
+            unit.pkg.package_id().version()
+        ))
+    };
+    let unit_capped_warn = |msg: &str| {
+        if unit.show_warnings(bcx.gctx) {
+            warn(msg)
+        } else {
+            Ok(())
+        }
+    };
 
     cmd.arg("--crate-name").arg(&unit.target.crate_name());
 
@@ -1326,13 +1342,34 @@ fn build_base_args(
         opt(cmd, "-C", "incremental=", Some(dir));
     }
 
-    if hint_mostly_unused {
+    let pkg_hint_mostly_unused = match hints.mostly_unused {
+        None => None,
+        Some(toml::Value::Boolean(b)) => Some(b),
+        Some(v) => {
+            unit_capped_warn(&format!(
+                "ignoring unsupported value type ({}) for 'hints.mostly-unused', which expects a boolean",
+                v.type_str()
+            ))?;
+            None
+        }
+    };
+    if profile_hint_mostly_unused
+        .or(pkg_hint_mostly_unused)
+        .unwrap_or(false)
+    {
         if bcx.gctx.cli_unstable().profile_hint_mostly_unused {
             cmd.arg("-Zhint-mostly-unused");
         } else {
-            bcx.gctx
-                .shell()
-                .warn("ignoring 'hint-mostly-unused' profile option, pass `-Zprofile-hint-mostly-unused` to enable it")?;
+            if profile_hint_mostly_unused.is_some() {
+                // Profiles come from the top-level unit, so we don't use `unit_capped_warn` here.
+                warn(
+                    "ignoring 'hint-mostly-unused' profile option, pass `-Zprofile-hint-mostly-unused` to enable it",
+                )?;
+            } else if pkg_hint_mostly_unused.is_some() {
+                unit_capped_warn(
+                    "ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it",
+                )?;
+            }
         }
     }
 
@@ -1398,7 +1435,7 @@ fn trim_paths_args_rustdoc(
     match trim_paths {
         // rustdoc supports diagnostics trimming only.
         TomlTrimPaths::Values(values) if !values.contains(&TomlTrimPathsValue::Diagnostics) => {
-            return Ok(())
+            return Ok(());
         }
         _ => {}
     }
@@ -1686,18 +1723,20 @@ fn build_deps_args(
 fn add_custom_flags(
     cmd: &mut ProcessBuilder,
     build_script_outputs: &BuildScriptOutputs,
-    metadata: Option<UnitHash>,
+    metadata_vec: Option<Vec<UnitHash>>,
 ) -> CargoResult<()> {
-    if let Some(metadata) = metadata {
-        if let Some(output) = build_script_outputs.get(metadata) {
-            for cfg in output.cfgs.iter() {
-                cmd.arg("--cfg").arg(cfg);
-            }
-            for check_cfg in &output.check_cfgs {
-                cmd.arg("--check-cfg").arg(check_cfg);
-            }
-            for (name, value) in output.env.iter() {
-                cmd.env(name, value);
+    if let Some(metadata_vec) = metadata_vec {
+        for metadata in metadata_vec {
+            if let Some(output) = build_script_outputs.get(metadata) {
+                for cfg in output.cfgs.iter() {
+                    cmd.arg("--cfg").arg(cfg);
+                }
+                for check_cfg in &output.check_cfgs {
+                    cmd.arg("--check-cfg").arg(check_cfg);
+                }
+                for (name, value) in output.env.iter() {
+                    cmd.env(name, value);
+                }
             }
         }
     }

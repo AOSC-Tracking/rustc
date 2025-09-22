@@ -31,7 +31,6 @@
     rtm_target_feature,
     allow_internal_unstable,
     decl_macro,
-    generic_arg_infer,
     asm_experimental_arch,
     x86_amx_intrinsics,
     f16,
@@ -76,9 +75,7 @@
 #[cfg(test)]
 #[macro_use]
 extern crate std;
-#[cfg(test)]
-#[macro_use]
-extern crate std_detect;
+
 #[path = "mod.rs"]
 mod core_arch;
 

@@ -92,10 +92,6 @@ llvm::cl::opt<bool>
 llvm::cl::opt<bool>
     EnzymeFastMath("enzyme-fast-math", cl::init(true), cl::Hidden,
                    cl::desc("Use fast math on derivative compuation"));
-llvm::cl::opt<bool>
-    EnzymeStrongZero("enzyme-strong-zero", cl::init(false), cl::Hidden,
-                     cl::desc("Use additional checks to ensure correct "
-                              "behavior when handling functions with inf"));
 llvm::cl::opt<bool> EnzymeMemmoveWarning(
     "enzyme-memmove-warning", cl::init(true), cl::Hidden,
     cl::desc("Warn if using memmove implementation as a fallback for memmove"));
@@ -461,6 +457,16 @@ CallInst *CreateDealloc(llvm::IRBuilder<> &Builder, llvm::Value *ToFree) {
   }
   return res;
 }
+
+EnzymeWarning::EnzymeWarning(const llvm::Twine &RemarkName,
+                             const llvm::DiagnosticLocation &Loc,
+                             const llvm::Instruction *CodeRegion)
+    : EnzymeWarning(RemarkName, Loc, CodeRegion->getParent()->getParent()) {}
+
+EnzymeWarning::EnzymeWarning(const llvm::Twine &RemarkName,
+                             const llvm::DiagnosticLocation &Loc,
+                             const llvm::Function *CodeRegion)
+    : DiagnosticInfoUnsupported(*CodeRegion, RemarkName, Loc, DS_Warning) {}
 
 EnzymeFailure::EnzymeFailure(const llvm::Twine &RemarkName,
                              const llvm::DiagnosticLocation &Loc,
@@ -3659,11 +3665,12 @@ llvm::Value *get1ULP(llvm::IRBuilder<> &builder, llvm::Value *res) {
 llvm::Value *EmitNoDerivativeError(const std::string &message,
                                    llvm::Instruction &inst,
                                    GradientUtils *gutils,
-                                   llvm::IRBuilder<> &Builder2) {
+                                   llvm::IRBuilder<> &Builder2,
+                                   llvm::Value *condition) {
   if (CustomErrorHandler) {
     return unwrap(CustomErrorHandler(message.c_str(), wrap(&inst),
-                                     ErrorType::NoDerivative, gutils, nullptr,
-                                     wrap(&Builder2)));
+                                     ErrorType::NoDerivative, gutils,
+                                     wrap(condition), wrap(&Builder2)));
   } else if (EnzymeRuntimeError) {
     auto &M = *inst.getParent()->getParent()->getParent();
     FunctionType *FT = FunctionType::get(Type::getInt32Ty(M.getContext()),
@@ -4031,4 +4038,13 @@ arePointersGuaranteedNoAlias(TargetLibraryInfo &TLI, llvm::AAResults &AA,
   }
 
   return {};
+}
+
+bool isTargetNVPTX(llvm::Module &M) {
+#if LLVM_VERSION_MAJOR > 20
+  return M.getTargetTriple().getArch() == Triple::ArchType::nvptx ||
+         M.getTargetTriple().getArch() == Triple::ArchType::nvptx64;
+#else
+  return M.getTargetTriple().find("nvptx") != std::string::npos;
+#endif
 }

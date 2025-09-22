@@ -1,10 +1,10 @@
 //! Tests for registry authentication.
 
+use crate::prelude::*;
 use cargo_test_support::compare::assert_e2e;
-use cargo_test_support::prelude::*;
 use cargo_test_support::registry::{Package, RegistryBuilder, Token};
 use cargo_test_support::str;
-use cargo_test_support::{project, Execs, Project};
+use cargo_test_support::{Execs, Project, project};
 
 fn cargo(p: &Project, s: &str) -> Execs {
     let mut e = p.cargo(s);

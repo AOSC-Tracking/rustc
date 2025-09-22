@@ -2205,7 +2205,8 @@ void AdjointGenerator::handleMPI(llvm::CallInst &call, llvm::Function *called,
 
 bool AdjointGenerator::handleKnownCallDerivatives(
     CallInst &call, Function *called, StringRef funcName,
-    const std::vector<bool> &overwritten_args, CallInst *const newCall) {
+    bool subsequent_calls_may_write, const std::vector<bool> &overwritten_args,
+    CallInst *const newCall) {
   bool subretused = false;
   bool shadowReturnUsed = false;
   DIFFE_TYPE subretType =
@@ -2339,10 +2340,11 @@ bool AdjointGenerator::handleKnownCallDerivatives(
 
     if (startsWith(funcName, "__kmpc") &&
         funcName != "__kmpc_global_thread_num") {
-      llvm::errs() << *gutils->oldFunc << "\n";
-      llvm::errs() << call << "\n";
-      assert(0 && "unhandled openmp function");
-      llvm_unreachable("unhandled openmp function");
+      std::string s;
+      llvm::raw_string_ostream ss(s);
+      ss << " unhandled openmp function: " << call << "\n";
+      EmitNoDerivativeError(ss.str(), call, gutils, BuilderZ);
+      return true;
     }
 
     auto mod = call.getParent()->getParent()->getParent();
@@ -2748,19 +2750,26 @@ bool AdjointGenerator::handleKnownCallDerivatives(
              (forwardsShadow || backwardsShadow)) ||
             (Mode == DerivativeMode::ReverseModePrimal && forwardsShadow) ||
             (Mode == DerivativeMode::ReverseModeGradient && backwardsShadow)) {
-          SmallVector<Value *, 1> iargs;
           IRBuilder<> BuilderZ(gutils->getNewFromOriginal(&call));
-          for (auto &arg : call.args()) {
-            if (!gutils->isConstantValue(arg)) {
-              Value *ptrshadow = gutils->invertPointerM(arg, BuilderZ);
-              applyChainRule(
-                  BuilderZ,
-                  [&](Value *ptrshadow) { iargs.push_back(ptrshadow); },
-                  ptrshadow);
+          for (int i = 0; i < gutils->getWidth(); i++) {
+            SmallVector<Value *, 1> iargs;
+            bool first = true;
+            for (auto &arg : call.args()) {
+              if (!gutils->isConstantValue(arg)) {
+                Value *ptrshadow = gutils->invertPointerM(arg, BuilderZ);
+                if (gutils->getWidth() > 1) {
+                  ptrshadow = gutils->extractMeta(BuilderZ, ptrshadow, i);
+                }
+                iargs.push_back(ptrshadow);
+              } else {
+                if (first)
+                  break;
+              }
+              first = false;
             }
-          }
-          if (iargs.size()) {
-            BuilderZ.CreateCall(called, iargs);
+            if (iargs.size()) {
+              BuilderZ.CreateCall(called, iargs);
+            }
           }
         }
 
@@ -3548,32 +3557,25 @@ bool AdjointGenerator::handleKnownCallDerivatives(
     auto ifound = gutils->invertedPointers.find(&call);
     assert(ifound != gutils->invertedPointers.end());
 
-    auto placeholder = cast<PHINode>(&*ifound->second);
+    if (auto placeholder = dyn_cast<PHINode>(&*ifound->second)) {
 
-    bool needShadow =
-        DifferentialUseAnalysis::is_value_needed_in_reverse<QueryType::Shadow>(
-            gutils, &call, Mode, oldUnreachable);
-    if (!needShadow) {
+      bool needShadow = DifferentialUseAnalysis::is_value_needed_in_reverse<
+          QueryType::Shadow>(gutils, &call, Mode, oldUnreachable);
+      if (!needShadow) {
+        gutils->invertedPointers.erase(ifound);
+        gutils->erase(placeholder);
+        eraseIfUnused(call);
+        return true;
+      }
+
       gutils->invertedPointers.erase(ifound);
+      auto res = gutils->invertPointerM(&call, BuilderZ);
+
+      gutils->replaceAWithB(placeholder, res);
       gutils->erase(placeholder);
-      eraseIfUnused(call);
-      return true;
     }
-
-    Value *ptr0shadow = gutils->invertPointerM(call.getArgOperand(0), BuilderZ);
-    Value *ptr1shadow = gutils->invertPointerM(call.getArgOperand(1), BuilderZ);
-
-    Value *val = applyChainRule(
-        call.getType(), BuilderZ,
-        [&](Value *v1, Value *v2) -> Value * {
-          Value *args[2] = {v1, v2};
-          return BuilderZ.CreateCall(called, args);
-        },
-        ptr0shadow, ptr1shadow);
-
-    gutils->replaceAWithB(placeholder, val);
-    gutils->erase(placeholder);
     eraseIfUnused(call);
+
     return true;
   }
 

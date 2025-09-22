@@ -1,17 +1,18 @@
-use crate::core::shell::Verbosity;
 use crate::core::SourceId;
+use crate::core::shell::Verbosity;
 use crate::core::{GitReference, Package, Workspace};
 use crate::ops;
-use crate::sources::path::PathSource;
+use crate::sources::CRATES_IO_REGISTRY;
 use crate::sources::RegistrySource;
 use crate::sources::SourceConfigMap;
-use crate::sources::CRATES_IO_REGISTRY;
+use crate::sources::path::PathSource;
 use crate::util::cache_lock::CacheLockMode;
-use crate::util::{try_canonicalize, CargoResult, GlobalContext};
+use crate::util::{CargoResult, GlobalContext, try_canonicalize};
 
-use anyhow::{bail, Context as _};
-use cargo_util::{paths, Sha256};
+use anyhow::{Context as _, bail};
+use cargo_util::{Sha256, paths};
 use cargo_util_schemas::core::SourceKind;
+use cargo_util_schemas::manifest::TomlPackageBuild;
 use serde::Serialize;
 use walkdir::WalkDir;
 
@@ -292,7 +293,7 @@ fn sync(
                     registry.unpack_package_in(id, staging_dir.path(), &vendor_this)?;
                 if let Err(e) = fs::rename(&unpacked_src, &dst) {
                     // This fallback is mainly for Windows 10 versions earlier than 1607.
-                    // The destination of `fs::rename` can't be a diretory in older versions.
+                    // The destination of `fs::rename` can't be a directory in older versions.
                     // Can be removed once the minimal supported Windows version gets bumped.
                     tracing::warn!("failed to `mv {unpacked_src:?} {dst:?}`: {e}");
                     let paths: Vec<_> = walkdir(&unpacked_src).map(|e| e.into_path()).collect();
@@ -513,24 +514,31 @@ fn prepare_toml_for_vendor(
         .package
         .as_mut()
         .expect("venedored manifests must have packages");
-    if let Some(cargo_util_schemas::manifest::StringOrBool::String(path)) = &package.build {
-        let path = paths::normalize_path(Path::new(path));
-        let included = packaged_files.contains(&path);
-        let build = if included {
-            let path = path
-                .into_os_string()
-                .into_string()
-                .map_err(|_err| anyhow::format_err!("non-UTF8 `package.build`"))?;
-            let path = crate::util::toml::normalize_path_string_sep(path);
-            cargo_util_schemas::manifest::StringOrBool::String(path)
-        } else {
-            gctx.shell().warn(format!(
-                "ignoring `package.build` as `{}` is not included in the published package",
-                path.display()
-            ))?;
-            cargo_util_schemas::manifest::StringOrBool::Bool(false)
-        };
-        package.build = Some(build);
+    // Validates if build script file is included in package. If not, warn and ignore.
+    if let Some(custom_build_scripts) = package.normalized_build().expect("previously normalized") {
+        let mut included_scripts = Vec::new();
+        for script in custom_build_scripts {
+            let path = paths::normalize_path(Path::new(script));
+            let included = packaged_files.contains(&path);
+            if included {
+                let path = path
+                    .into_os_string()
+                    .into_string()
+                    .map_err(|_err| anyhow::format_err!("non-UTF8 `package.build`"))?;
+                let path = crate::util::toml::normalize_path_string_sep(path);
+                included_scripts.push(path);
+            } else {
+                gctx.shell().warn(format!(
+                    "ignoring `package.build` entry `{}` as it is not included in the published package",
+                    path.display()
+                ))?;
+            }
+        }
+        package.build = Some(match included_scripts.len() {
+            0 => TomlPackageBuild::Auto(false),
+            1 => TomlPackageBuild::SingleScript(included_scripts[0].clone()),
+            _ => TomlPackageBuild::MultipleScript(included_scripts),
+        });
     }
 
     let lib = if let Some(target) = &me.lib {

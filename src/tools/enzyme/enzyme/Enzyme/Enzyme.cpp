@@ -169,7 +169,7 @@ bool attributeKnownFunctions(llvm::Function &F) {
     for (int i = 0; i < 2; i++)
       if (F.getFunctionType()->getParamType(i)->isPointerTy()) {
         addFunctionNoCapture(&F, i);
-        F.addParamAttr(i, Attribute::WriteOnly);
+        F.addParamAttr(i, Attribute::ReadOnly);
       }
   }
 
@@ -739,6 +739,8 @@ public:
     StringSet<> ActiveRandomVariables;
     std::vector<bool> overwritten_args;
     bool runtimeActivity;
+    bool strongZero;
+    bool subsequent_calls_may_write;
   };
 
 #if LLVM_VERSION_MAJOR > 16
@@ -773,6 +775,11 @@ public:
     unsigned byRefSize = 0;
     bool primalReturn = false;
     bool runtimeActivity = false;
+    bool strongZero = false;
+    bool subsequent_calls_may_write =
+        mode != DerivativeMode::ForwardMode &&
+        mode != DerivativeMode::ForwardModeError &&
+        mode != DerivativeMode::ReverseModeCombined;
     StringSet<> ActiveRandomVariables;
 
     DIFFE_TYPE retType = whatType(fn->getReturnType(), mode);
@@ -1029,6 +1036,10 @@ public:
           break;
         } else if (*metaString == "enzyme_runtime_activity") {
           runtimeActivity = true;
+          skipArg = true;
+          break;
+        } else if (*metaString == "enzyme_strong_zero") {
+          strongZero = true;
           skipArg = true;
           break;
         } else if (*metaString == "enzyme_primal_return") {
@@ -1353,11 +1364,27 @@ public:
       return {};
     }
 
-    return Options({differet, tape, dynamic_interface, trace, observations,
-                    likelihood, diffeLikelihood, width, allocatedTapeSize,
-                    freeMemory, returnUsed, tapeIsPointer, differentialReturn,
-                    diffeTrace, retType, primalReturn, ActiveRandomVariables,
-                    overwritten_args, runtimeActivity});
+    return Options({differet,
+                    tape,
+                    dynamic_interface,
+                    trace,
+                    observations,
+                    likelihood,
+                    diffeLikelihood,
+                    width,
+                    allocatedTapeSize,
+                    freeMemory,
+                    returnUsed,
+                    tapeIsPointer,
+                    differentialReturn,
+                    diffeTrace,
+                    retType,
+                    primalReturn,
+                    ActiveRandomVariables,
+                    overwritten_args,
+                    runtimeActivity,
+                    strongZero,
+                    subsequent_calls_may_write});
   }
 
   static FnTypeInfo populate_type_args(TypeAnalysis &TA, llvm::Function *fn,
@@ -1670,6 +1697,7 @@ public:
     auto &retType = options.retType;
     auto &overwritten_args = options.overwritten_args;
     auto primalReturn = options.primalReturn;
+    auto subsequent_calls_may_write = options.subsequent_calls_may_write;
 
     auto Arch = Triple(CI->getModule()->getTargetTriple()).getArch();
     bool AtomicAdd = Arch == Triple::nvptx || Arch == Triple::nvptx64 ||
@@ -1697,8 +1725,9 @@ public:
         newFunc = Logic.CreateForwardDiff(
             context, fn, retType, constants, TA,
             /*should return*/ primalReturn, mode, freeMemory,
-            options.runtimeActivity, width,
-            /*addedType*/ nullptr, type_args, overwritten_args,
+            options.runtimeActivity, options.strongZero, width,
+            /*addedType*/ nullptr, type_args, subsequent_calls_may_write,
+            overwritten_args,
             /*augmented*/ nullptr);
       break;
     case DerivativeMode::ForwardModeSplit: {
@@ -1706,7 +1735,8 @@ public:
       aug = &Logic.CreateAugmentedPrimal(
           context, fn, retType, constants, TA,
           /*returnUsed*/ false, /*shadowReturnUsed*/ false, type_args,
-          overwritten_args, forceAnonymousTape, options.runtimeActivity, width,
+          subsequent_calls_may_write, overwritten_args, forceAnonymousTape,
+          options.runtimeActivity, options.strongZero, width,
           /*atomicAdd*/ AtomicAdd);
       auto &DL = fn->getParent()->getDataLayout();
       if (!forceAnonymousTape) {
@@ -1743,8 +1773,9 @@ public:
       newFunc = Logic.CreateForwardDiff(
           context, fn, retType, constants, TA,
           /*should return*/ primalReturn, mode, freeMemory,
-          options.runtimeActivity, width,
-          /*addedType*/ tapeType, type_args, overwritten_args, aug);
+          options.runtimeActivity, options.strongZero, width,
+          /*addedType*/ tapeType, type_args, subsequent_calls_may_write,
+          overwritten_args, aug);
       break;
     }
     case DerivativeMode::ReverseModeCombined:
@@ -1754,6 +1785,8 @@ public:
           (ReverseCacheKey){.todiff = fn,
                             .retType = retType,
                             .constant_args = constants,
+                            .subsequent_calls_may_write =
+                                subsequent_calls_may_write,
                             .overwritten_args = overwritten_args,
                             .returnUsed = primalReturn,
                             .shadowReturnUsed = false,
@@ -1764,7 +1797,8 @@ public:
                             .additionalType = nullptr,
                             .forceAnonymousTape = false,
                             .typeInfo = type_args,
-                            .runtimeActivity = options.runtimeActivity},
+                            .runtimeActivity = options.runtimeActivity,
+                            .strongZero = options.strongZero},
           TA, /*augmented*/ nullptr);
       break;
     case DerivativeMode::ReverseModePrimal:
@@ -1779,8 +1813,9 @@ public:
                                              retType == DIFFE_TYPE::DUP_NONEED);
       aug = &Logic.CreateAugmentedPrimal(
           context, fn, retType, constants, TA, returnUsed, shadowReturnUsed,
-          type_args, overwritten_args, forceAnonymousTape,
-          options.runtimeActivity, width,
+          type_args, subsequent_calls_may_write, overwritten_args,
+          forceAnonymousTape, options.runtimeActivity, options.strongZero,
+          width,
           /*atomicAdd*/ AtomicAdd);
       auto &DL = fn->getParent()->getDataLayout();
       if (!forceAnonymousTape) {
@@ -1822,6 +1857,8 @@ public:
             (ReverseCacheKey){.todiff = fn,
                               .retType = retType,
                               .constant_args = constants,
+                              .subsequent_calls_may_write =
+                                  subsequent_calls_may_write,
                               .overwritten_args = overwritten_args,
                               .returnUsed = false,
                               .shadowReturnUsed = false,
@@ -1832,7 +1869,8 @@ public:
                               .additionalType = tapeType,
                               .forceAnonymousTape = forceAnonymousTape,
                               .typeInfo = type_args,
-                              .runtimeActivity = options.runtimeActivity},
+                              .runtimeActivity = options.runtimeActivity,
+                              .strongZero = options.strongZero},
             TA, aug);
     }
     }
@@ -1919,6 +1957,22 @@ public:
       return false;
     }
     assert(args.size() == newFunc->getFunctionType()->getNumParams());
+    for (size_t i = 0; i < args.size(); i++) {
+      if (args[i]->getType() != newFunc->getFunctionType()->getParamType(i)) {
+        llvm::errs() << *CI << "\n";
+        llvm::errs() << *newFunc << "\n";
+        for (auto arg : args) {
+          llvm::errs() << " + " << *arg << "\n";
+        }
+        auto modestr = to_string(mode);
+        EmitFailure("BadArgumentType", CI->getDebugLoc(), CI,
+                    "Incorrect argument type passed to __enzyme_autodiff mode=",
+                    modestr, " at index ", i, " expected ",
+                    *newFunc->getFunctionType()->getParamType(i), " found ",
+                    *args[i]->getType());
+        return false;
+      }
+    }
     CallInst *diffretc = cast<CallInst>(Builder.CreateCall(newFunc, args));
     diffretc->setCallingConv(CallingConv);
     diffretc->setDebugLoc(CI->getDebugLoc());
@@ -2802,7 +2856,8 @@ public:
       auto val = GradientUtils::GetOrCreateShadowConstant(
           RequestContext(CI, &Builder), Logic,
           Logic.PPC.FAM.getResult<TargetLibraryAnalysis>(F), TA, fn,
-          pair.second, /*runtimeActivity*/ false, /*width*/ 1, AtomicAdd);
+          pair.second, /*runtimeActivity*/ false, /*strongZero*/ false,
+          /*width*/ 1, AtomicAdd);
       CI->replaceAllUsesWith(ConstantExpr::getPointerCast(val, CI->getType()));
       CI->eraseFromParent();
       Changed = true;

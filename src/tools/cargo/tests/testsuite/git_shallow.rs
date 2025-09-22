@@ -1,4 +1,4 @@
-use cargo_test_support::prelude::*;
+use crate::prelude::*;
 use cargo_test_support::registry::Package;
 use cargo_test_support::{basic_manifest, git, paths, project};
 
@@ -715,7 +715,8 @@ fn gitoxide_fetch_complete_index_then_shallow() -> anyhow::Result<()> {
         gix::open::Options::isolated(),
     )?;
     assert_eq!(
-        shallow_repo.rev_parse_single("origin/HEAD")?
+        shallow_repo
+            .rev_parse_single("origin/HEAD")?
             .ancestors()
             .all()?
             .count(),

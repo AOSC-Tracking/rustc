@@ -5,17 +5,16 @@ use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::str;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
+use crate::prelude::*;
 use cargo_test_support::git::{add_submodule, cargo_uses_gitoxide};
 use cargo_test_support::paths;
-use cargo_test_support::prelude::IntoData;
-use cargo_test_support::prelude::*;
 use cargo_test_support::registry::Package;
+use cargo_test_support::{Project, sleep_ms, str, t};
 use cargo_test_support::{basic_lib_manifest, basic_manifest, git, main_file, project};
-use cargo_test_support::{sleep_ms, str, t, Project};
 
 #[cargo_test]
 fn cargo_compile_simple_git_dep() {
@@ -1278,8 +1277,7 @@ fn unused_ambiguous_published_deps() {
     p.cargo("build").run();
     p.cargo("run")
         .with_stderr_data(str![[r#"
-[ERROR] invalid table header
-expected `.`, `]`
+[ERROR] unclosed table, expected `]`
  --> ../home/.cargo/git/checkouts/dep-[HASH]/[..]/invalid/Cargo.toml:2:29
   |
 2 |                     [package
@@ -2810,11 +2808,11 @@ fn invalid_git_dependency_manifest() {
         .with_status(101)
         .with_stderr_data(str![[r#"
 [UPDATING] git repository `[ROOTURL]/dep1`
-[ERROR] duplicate key `categories` in table `package`
+[ERROR] duplicate key
  --> ../home/.cargo/git/checkouts/dep1-[HASH]/[..]/Cargo.toml:9:21
   |
 9 |                     categories = ["algorithms"]
-  |                     ^
+  |                     ^^^^^^^^^^
   |
 [ERROR] failed to get `dep1` as a dependency of package `foo v0.5.0 ([ROOT]/foo)`
 
@@ -3164,9 +3162,10 @@ fn dirty_submodule() {
         .with_stderr_data(str![[r#"
 [WARNING] manifest has no description, license, license-file, documentation, homepage or repository.
 See https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info.
-[ERROR] 1 files in the working directory contain changes that were not yet committed into git:
+[ERROR] 2 files in the working directory contain changes that were not yet committed into git:
 
 .gitmodules
+src/lib.rs
 
 to proceed despite this and include the uncommitted changes, pass the `--allow-dirty` flag
 
@@ -3210,9 +3209,10 @@ to proceed despite this and include the uncommitted changes, pass the `--allow-d
         .with_stderr_data(str![[r#"
 [WARNING] manifest has no description, license, license-file, documentation, homepage or repository.
 See https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info.
-[ERROR] 1 files in the working directory contain changes that were not yet committed into git:
+[ERROR] 2 files in the working directory contain changes that were not yet committed into git:
 
 src/.gitmodules
+src/bar/mod.rs
 
 to proceed despite this and include the uncommitted changes, pass the `--allow-dirty` flag
 

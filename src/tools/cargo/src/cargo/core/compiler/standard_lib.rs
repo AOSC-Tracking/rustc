@@ -1,11 +1,11 @@
 //! Code for building the standard library.
 
-use crate::core::compiler::unit_dependencies::IsArtifact;
 use crate::core::compiler::UnitInterner;
+use crate::core::compiler::unit_dependencies::IsArtifact;
 use crate::core::compiler::{CompileKind, CompileMode, RustcTargetData, Unit};
 use crate::core::profiles::{Profiles, UnitFor};
-use crate::core::resolver::features::{CliFeatures, FeaturesFor, ResolvedFeatures};
 use crate::core::resolver::HasDevUnits;
+use crate::core::resolver::features::{CliFeatures, FeaturesFor, ResolvedFeatures};
 use crate::core::{PackageId, PackageSet, Resolve, Workspace};
 use crate::ops::{self, Packages};
 use crate::util::errors::CargoResult;
@@ -96,7 +96,7 @@ pub fn resolve_std<'gctx>(
         &features, /*all_features*/ false, /*uses_default_features*/ false,
     )?;
     let dry_run = false;
-    let resolve = ops::resolve_ws_with_opts(
+    let mut resolve = ops::resolve_ws_with_opts(
         &std_ws,
         target_data,
         &build_config.requested_kinds,
@@ -106,10 +106,15 @@ pub fn resolve_std<'gctx>(
         crate::core::resolver::features::ForceAllTargets::No,
         dry_run,
     )?;
+    debug_assert_eq!(resolve.specs_and_features.len(), 1);
     Ok((
         resolve.pkg_set,
         resolve.targeted_resolve,
-        resolve.resolved_features,
+        resolve
+            .specs_and_features
+            .pop()
+            .expect("resolve should have a single spec with resolved features")
+            .resolved_features,
     ))
 }
 

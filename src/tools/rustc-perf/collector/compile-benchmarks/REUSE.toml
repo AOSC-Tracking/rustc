@@ -28,6 +28,21 @@ SPDX-License-Identifier = "MPL-2.0"
 SPDX-FileCopyrightText = "Bodil Stokke"
 
 [[annotations]]
+path = "cargo/**"
+SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-lang.org)"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
+path = "cargo/socket2-0.2.3/**"
+SPDX-FileCopyrightText = "Alex Crichton"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
+path = "cargo/url-1.5.1/**"
+SPDX-FileCopyrightText = "The rust-url developers"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
 path = "cargo-0.87.1/**"
 SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-lang.org)"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
@@ -129,6 +144,11 @@ SPDX-License-Identifier = "MIT"
 path = "image-0.25.6/**"
 SPDX-FileCopyrightText = "The image-rs Developers"
 SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = "include-blob/**"
+SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-lang.org)"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
 
 [[annotations]]
 path = "inflate/**"
@@ -239,11 +259,6 @@ SPDX-License-Identifier = "MIT OR Apache-2.0"
 path = "stm32f4-0.15.1/**"
 SPDX-FileCopyrightText = "stm32-rs contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
-
-[[annotations]]
-path = "style-servo/**"
-SPDX-FileCopyrightText = "The Servo Project Developers"
-SPDX-License-Identifier = "MPL-2.0"
 
 [[annotations]]
 path = "syn/**"

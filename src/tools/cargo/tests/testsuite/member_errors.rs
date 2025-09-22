@@ -1,13 +1,13 @@
 //! Tests for workspace member errors.
 
-use cargo::core::compiler::UserIntent;
-use cargo::core::resolver::ResolveError;
+use crate::prelude::*;
 use cargo::core::Shell;
 use cargo::core::Workspace;
+use cargo::core::compiler::UserIntent;
+use cargo::core::resolver::ResolveError;
 use cargo::ops::{self, CompileOptions};
 use cargo::util::{context::GlobalContext, errors::ManifestError};
 use cargo_test_support::paths;
-use cargo_test_support::prelude::*;
 use cargo_test_support::project;
 use cargo_test_support::registry;
 use cargo_test_support::str;
@@ -50,8 +50,7 @@ fn toml_deserialize_manifest_error() {
     p.cargo("check")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] invalid string
-expected `"`, `'`
+[ERROR] extra `=`, expected nothing
  --> bar/Cargo.toml:8:25
   |
 8 |                 foobar == "0.55"

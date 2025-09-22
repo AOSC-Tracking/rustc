@@ -46,7 +46,7 @@ class FloatTypeInterface : public AutoDiffTypeInterface::ExternalModel<
                                FloatTypeInterface<ConcreteType>, ConcreteType> {
 public:
   Value createNullValue(Type self, OpBuilder &builder, Location loc) const {
-    auto fltType = self.cast<ConcreteType>();
+    auto fltType = cast<ConcreteType>(self);
     return builder.create<arith::ConstantFloatOp>(
         loc, APFloat(fltType.getFloatSemantics(), 0), fltType);
   }
@@ -69,6 +69,10 @@ public:
                             Value val) const {
     return failure();
   }
+
+  int64_t getApproxSize(Type self) const {
+    return self.getIntOrFloatBitWidth();
+  }
 };
 
 class TensorTypeInterface
@@ -76,7 +80,7 @@ class TensorTypeInterface
                                                   TensorType> {
 public:
   Value createNullValue(Type self, OpBuilder &builder, Location loc) const {
-    auto tenType = self.cast<TensorType>();
+    auto tenType = cast<TensorType>(self);
     auto ET = tenType.getElementType();
 
     if (auto F = dyn_cast<FloatType>(ET)) {
@@ -105,7 +109,7 @@ public:
 
   Value createAddOp(Type self, OpBuilder &builder, Location loc, Value a,
                     Value b) const {
-    auto tenType = self.cast<TensorType>();
+    auto tenType = cast<TensorType>(self);
     auto ET = tenType.getElementType();
     auto iface = cast<AutoDiffTypeInterface>(ET);
     return iface.createAddOp(builder, loc, a, b);
@@ -113,7 +117,7 @@ public:
 
   Value createConjOp(Type self, OpBuilder &builder, Location loc,
                      Value a) const {
-    auto tenType = self.cast<TensorType>();
+    auto tenType = cast<TensorType>(self);
     auto ET = tenType.getElementType();
     auto iface = cast<AutoDiffTypeInterface>(ET);
     auto added = iface.createConjOp(builder, loc, a);
@@ -128,6 +132,19 @@ public:
   LogicalResult zeroInPlace(Type self, OpBuilder &builder, Location loc,
                             Value val) const {
     return failure();
+  }
+
+  int64_t getApproxSize(Type self) const {
+    auto tenType = cast<TensorType>(self);
+    auto elType = cast<AutoDiffTypeInterface>(tenType.getElementType());
+    if (!elType)
+      return INT64_MAX;
+    int64_t sz = elType.getApproxSize();
+    if (sz == INT64_MAX)
+      return sz;
+    for (auto n : tenType.getShape())
+      sz *= n;
+    return sz;
   }
 };
 
@@ -161,6 +178,10 @@ public:
                             Value val) const {
     return failure();
   }
+
+  int64_t getApproxSize(Type self) const {
+    return self.getIntOrFloatBitWidth();
+  }
 };
 
 class ComplexTypeInterface
@@ -168,7 +189,7 @@ class ComplexTypeInterface
                                                   ComplexType> {
 public:
   Value createNullValue(Type self, OpBuilder &builder, Location loc) const {
-    auto fltType = self.cast<ComplexType>().getElementType().cast<FloatType>();
+    auto fltType = cast<FloatType>(cast<ComplexType>(self).getElementType());
     mlir::Attribute attrs[2] = {
         builder.getFloatAttr(fltType, APFloat(fltType.getFloatSemantics(), 0)),
         builder.getFloatAttr(fltType, APFloat(fltType.getFloatSemantics(), 0))};
@@ -193,6 +214,15 @@ public:
   LogicalResult zeroInPlace(Type self, OpBuilder &builder, Location loc,
                             Value val) const {
     return failure();
+  }
+
+  int64_t getApproxSize(Type self) const {
+    auto elType =
+        cast<AutoDiffTypeInterface>(cast<ComplexType>(self).getElementType());
+    auto elSize = elType.getApproxSize();
+    if (elSize == INT64_MAX)
+      return elSize;
+    return 2 * elSize;
   }
 };
 } // namespace

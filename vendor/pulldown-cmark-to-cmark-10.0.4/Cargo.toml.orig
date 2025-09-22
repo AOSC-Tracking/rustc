@@ -1,0 +1,25 @@
+[package]
+name = "pulldown-cmark-to-cmark"
+version = "10.0.4"
+authors = [
+    "Sebastian Thiel <byronimo@gmail.com>",
+    "Dylan Owen <dyltotheo@gmail.com>",
+    "Alessandro Ogier <alessandro.ogier@gmail.com>",
+    "Zixian Cai <2891235+caizixian@users.noreply.github.com>"]
+
+description = "Convert pulldown-cmark Events back to the string they were parsed from"
+license = "Apache-2.0"
+keywords = ["markdown", "common-mark", "render", "converter"]
+repository = "https://github.com/Byron/pulldown-cmark-to-cmark"
+homepage = "https://github.com/Byron/pulldown-cmark-to-cmark"
+documentation = "https://docs.rs/crate/pulldown-cmark-to-cmark"
+readme = "README.md"
+edition = "2018"
+include = ["src/lib.rs", "README.md", "CHANGELOG.md"]
+
+[dependencies]
+pulldown-cmark = { version = "0.9.0", default-features = false }
+
+[dev-dependencies]
+indoc = "1.0.0"
+pretty_assertions = "0.7.1"

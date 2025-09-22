@@ -1,10 +1,10 @@
 //! Tests for `include` config field.
 
-use cargo_test_support::prelude::*;
+use crate::prelude::*;
 use cargo_test_support::project;
 use cargo_test_support::str;
 
-use super::config::{assert_error, write_config_at, write_config_toml, GlobalContextBuilder};
+use super::config::{GlobalContextBuilder, assert_error, write_config_at, write_config_toml};
 
 #[cargo_test]
 fn gated() {

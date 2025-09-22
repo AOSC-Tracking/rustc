@@ -122,7 +122,7 @@ use std::sync::Arc;
 use std::thread::{self, Scope};
 use std::time::Duration;
 
-use anyhow::{format_err, Context as _};
+use anyhow::{Context as _, format_err};
 use cargo_util::ProcessBuilder;
 use jobserver::{Acquired, HelperThread};
 use semver::Version;
@@ -141,11 +141,11 @@ use crate::core::compiler::future_incompat::{
 };
 use crate::core::resolver::ResolveBehavior;
 use crate::core::{PackageId, Shell, TargetKind};
+use crate::util::CargoResult;
 use crate::util::context::WarningHandling;
 use crate::util::diagnostic_server::{self, DiagnosticPrinter};
 use crate::util::errors::AlreadyPrintedError;
 use crate::util::machine_message::{self, Message as _};
-use crate::util::CargoResult;
 use crate::util::{self, internal};
 use crate::util::{DependencyQueue, GlobalContext, Progress, ProgressStyle, Queue};
 
@@ -981,28 +981,30 @@ impl<'gctx> DrainState<'gctx> {
         show_warnings: bool,
     ) -> CargoResult<()> {
         let outputs = build_runner.build_script_outputs.lock().unwrap();
-        let Some(metadata) = build_runner.find_build_script_metadata(unit) else {
+        let Some(metadata_vec) = build_runner.find_build_script_metadatas(unit) else {
             return Ok(());
         };
         let bcx = &mut build_runner.bcx;
-        if let Some(output) = outputs.get(metadata) {
-            if !output.log_messages.is_empty()
-                && (show_warnings
-                    || output
-                        .log_messages
-                        .iter()
-                        .any(|(severity, _)| *severity == Severity::Error))
-            {
-                let msg_with_package =
-                    |msg: &str| format!("{}@{}: {}", unit.pkg.name(), unit.pkg.version(), msg);
+        for metadata in metadata_vec {
+            if let Some(output) = outputs.get(metadata) {
+                if !output.log_messages.is_empty()
+                    && (show_warnings
+                        || output
+                            .log_messages
+                            .iter()
+                            .any(|(severity, _)| *severity == Severity::Error))
+                {
+                    let msg_with_package =
+                        |msg: &str| format!("{}@{}: {}", unit.pkg.name(), unit.pkg.version(), msg);
 
-                for (severity, message) in output.log_messages.iter() {
-                    match severity {
-                        Severity::Error => {
-                            bcx.gctx.shell().error(msg_with_package(message))?;
-                        }
-                        Severity::Warning => {
-                            bcx.gctx.shell().warn(msg_with_package(message))?;
+                    for (severity, message) in output.log_messages.iter() {
+                        match severity {
+                            Severity::Error => {
+                                bcx.gctx.shell().error(msg_with_package(message))?;
+                            }
+                            Severity::Warning => {
+                                bcx.gctx.shell().warn(msg_with_package(message))?;
+                            }
                         }
                     }
                 }

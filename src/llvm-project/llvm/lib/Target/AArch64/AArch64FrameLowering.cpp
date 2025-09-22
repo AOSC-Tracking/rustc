@@ -428,6 +428,8 @@ AArch64FrameLowering::getStackIDForScalableVectors() const {
 static unsigned getFixedObjectSize(const MachineFunction &MF,
                                    const AArch64FunctionInfo *AFI, bool IsWin64,
                                    bool IsFunclet) {
+  assert(AFI->getTailCallReservedStack() % 16 == 0 &&
+         "Tail call reserved stack must be aligned to 16 bytes");
   if (!IsWin64 || IsFunclet) {
     return AFI->getTailCallReservedStack();
   } else {
@@ -435,12 +437,29 @@ static unsigned getFixedObjectSize(const MachineFunction &MF,
         !MF.getFunction().getAttributes().hasAttrSomewhere(
             Attribute::SwiftAsync))
       report_fatal_error("cannot generate ABI-changing tail call for Win64");
+    unsigned FixedObjectSize = AFI->getTailCallReservedStack();
+
     // Var args are stored here in the primary function.
-    const unsigned VarArgsArea = AFI->getVarArgsGPRSize();
-    // To support EH funclets we allocate an UnwindHelp object
-    const unsigned UnwindHelpObject = (MF.hasEHFunclets() ? 8 : 0);
-    return AFI->getTailCallReservedStack() +
-           alignTo(VarArgsArea + UnwindHelpObject, 16);
+    FixedObjectSize += AFI->getVarArgsGPRSize();
+
+    if (MF.hasEHFunclets()) {
+      // Catch objects are stored here in the primary function.
+      const MachineFrameInfo &MFI = MF.getFrameInfo();
+      const WinEHFuncInfo &EHInfo = *MF.getWinEHFuncInfo();
+      for (const WinEHTryBlockMapEntry &TBME : EHInfo.TryBlockMap) {
+        for (const WinEHHandlerType &H : TBME.HandlerArray) {
+          int FrameIndex = H.CatchObj.FrameIndex;
+          if (FrameIndex != INT_MAX) {
+            FixedObjectSize = alignTo(FixedObjectSize,
+                                      MFI.getObjectAlign(FrameIndex).value()) +
+                              MFI.getObjectSize(FrameIndex);
+          }
+        }
+      }
+      // To support EH funclets we allocate an UnwindHelp object
+      FixedObjectSize += 8;
+    }
+    return alignTo(FixedObjectSize, 16);
   }
 }
 
@@ -2501,20 +2520,33 @@ void AArch64FrameLowering::emitEpilogue(MachineFunction &MF,
 
   // Deallocate the SVE area.
   if (SVEStackSize) {
-    // If we have stack realignment or variable sized objects on the stack,
-    // restore the stack pointer from the frame pointer prior to SVE CSR
-    // restoration.
-    if (AFI->isStackRealigned() || MFI.hasVarSizedObjects()) {
-      if (int64_t CalleeSavedSize = AFI->getSVECalleeSavedStackSize()) {
-        // Set SP to start of SVE callee-save area from which they can
-        // be reloaded. The code below will deallocate the stack space
-        // space by moving FP -> SP.
-        emitFrameOffset(MBB, RestoreBegin, DL, AArch64::SP, AArch64::FP,
-                        StackOffset::getScalable(-CalleeSavedSize), TII,
+    int64_t SVECalleeSavedSize = AFI->getSVECalleeSavedStackSize();
+    // If we have stack realignment or variable-sized objects we must use the
+    // FP to restore SVE callee saves (as there is an unknown amount of
+    // data/padding between the SP and SVE CS area).
+    Register BaseForSVEDealloc =
+        (AFI->isStackRealigned() || MFI.hasVarSizedObjects()) ? AArch64::FP
+                                                              : AArch64::SP;
+    if (SVECalleeSavedSize && BaseForSVEDealloc == AArch64::FP) {
+      Register CalleeSaveBase = AArch64::FP;
+      if (int64_t CalleeSaveBaseOffset =
+              AFI->getCalleeSaveBaseToFrameRecordOffset()) {
+        // If we have have an non-zero offset to the non-SVE CS base we need to
+        // compute the base address by subtracting the offest in a temporary
+        // register first (to avoid briefly deallocating the SVE CS).
+        CalleeSaveBase = MBB.getParent()->getRegInfo().createVirtualRegister(
+            &AArch64::GPR64RegClass);
+        emitFrameOffset(MBB, RestoreBegin, DL, CalleeSaveBase, AArch64::FP,
+                        StackOffset::getFixed(-CalleeSaveBaseOffset), TII,
                         MachineInstr::FrameDestroy);
       }
-    } else {
-      if (AFI->getSVECalleeSavedStackSize()) {
+      // The code below will deallocate the stack space space by moving the
+      // SP to the start of the SVE callee-save area.
+      emitFrameOffset(MBB, RestoreBegin, DL, AArch64::SP, CalleeSaveBase,
+                      StackOffset::getScalable(-SVECalleeSavedSize), TII,
+                      MachineInstr::FrameDestroy);
+    } else if (BaseForSVEDealloc == AArch64::SP) {
+      if (SVECalleeSavedSize) {
         // Deallocate the non-SVE locals first before we can deallocate (and
         // restore callee saves) from the SVE area.
         emitFrameOffset(
@@ -3792,6 +3824,11 @@ void AArch64FrameLowering::determineCalleeSaves(MachineFunction &MF,
       CSStackSize += SpillSize;
   }
 
+  // Save number of saved regs, so we can easily update CSStackSize later to
+  // account for any additional 64-bit GPR saves. Note: After this point
+  // only 64-bit GPRs can be added to SavedRegs.
+  unsigned NumSavedRegs = SavedRegs.count();
+
   // Increase the callee-saved stack size if the function has streaming mode
   // changes, as we will need to spill the value of the VG register.
   // For locally streaming functions, we spill both the streaming and
@@ -3811,8 +3848,9 @@ void AArch64FrameLowering::determineCalleeSaves(MachineFunction &MF,
   if (AFI->hasStackHazardSlotIndex())
     CSStackSize += getStackHazardSize(MF);
 
-  // Save number of saved regs, so we can easily update CSStackSize later.
-  unsigned NumSavedRegs = SavedRegs.count();
+  // If we must call __arm_get_current_vg in the prologue preserve the LR.
+  if (requiresSaveVG(MF) && !Subtarget.hasSVE())
+    SavedRegs.set(AArch64::LR);
 
   // The frame record needs to be created by saving the appropriate registers
   uint64_t EstimatedStackSize = MFI.estimateStackSize(MF);
@@ -4494,22 +4532,38 @@ void AArch64FrameLowering::processFunctionBeforeFrameFinalized(
   // anything.
   if (!MF.hasEHFunclets())
     return;
-  const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
+
+  // Win64 C++ EH needs to allocate space for the catch objects in the fixed
+  // object area right next to the UnwindHelp object.
   WinEHFuncInfo &EHInfo = *MF.getWinEHFuncInfo();
+  int64_t CurrentOffset =
+      AFI->getVarArgsGPRSize() + AFI->getTailCallReservedStack();
+  for (WinEHTryBlockMapEntry &TBME : EHInfo.TryBlockMap) {
+    for (WinEHHandlerType &H : TBME.HandlerArray) {
+      int FrameIndex = H.CatchObj.FrameIndex;
+      if (FrameIndex != INT_MAX) {
+        CurrentOffset =
+            alignTo(CurrentOffset, MFI.getObjectAlign(FrameIndex).value());
+        CurrentOffset += MFI.getObjectSize(FrameIndex);
+        MFI.setObjectOffset(FrameIndex, -CurrentOffset);
+      }
+    }
+  }
+
+  // Create an UnwindHelp object.
+  // The UnwindHelp object is allocated at the start of the fixed object area
+  int64_t UnwindHelpOffset = alignTo(CurrentOffset + 8, Align(16));
+  assert(UnwindHelpOffset == getFixedObjectSize(MF, AFI, /*IsWin64*/ true,
+                                                /*IsFunclet*/ false) &&
+         "UnwindHelpOffset must be at the start of the fixed object area");
+  int UnwindHelpFI = MFI.CreateFixedObject(/*Size*/ 8, -UnwindHelpOffset,
+                                           /*IsImmutable=*/false);
+  EHInfo.UnwindHelpFrameIdx = UnwindHelpFI;
 
   MachineBasicBlock &MBB = MF.front();
   auto MBBI = MBB.begin();
   while (MBBI != MBB.end() && MBBI->getFlag(MachineInstr::FrameSetup))
     ++MBBI;
-
-  // Create an UnwindHelp object.
-  // The UnwindHelp object is allocated at the start of the fixed object area
-  int64_t FixedObject =
-      getFixedObjectSize(MF, AFI, /*IsWin64*/ true, /*IsFunclet*/ false);
-  int UnwindHelpFI = MFI.CreateFixedObject(/*Size*/ 8,
-                                           /*SPOffset*/ -FixedObject,
-                                           /*IsImmutable=*/false);
-  EHInfo.UnwindHelpFrameIdx = UnwindHelpFI;
 
   // We need to store -2 into the UnwindHelp object at the start of the
   // function.
@@ -4518,6 +4572,7 @@ void AArch64FrameLowering::processFunctionBeforeFrameFinalized(
   RS->backward(MBBI);
   Register DstReg = RS->FindUnusedReg(&AArch64::GPR64commonRegClass);
   assert(DstReg && "There must be a free register after frame setup");
+  const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
   BuildMI(MBB, MBBI, DL, TII.get(AArch64::MOVi64imm), DstReg).addImm(-2);
   BuildMI(MBB, MBBI, DL, TII.get(AArch64::STURXi))
       .addReg(DstReg, getKillRegState(true))

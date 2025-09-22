@@ -24,6 +24,7 @@ class Attribute<string name_> {
 }
 def ReadNone : Attribute<"ReadNone">;
 def ReadOnly : Attribute<"ReadOnly">;
+def WriteOnly : Attribute<"WriteOnly">;
 def NoUnwind : Attribute<"NoUnwind">;
 
 class CallPattern<dag patternToMatch, list<string> funcNames, list<dag> resultOps, dag forwardOps, list<Attribute> attrs=[]> {
@@ -868,7 +869,7 @@ def : CallPattern<(Op $x, $expout),
                     (InactiveArg)
                   ],
                   (ForwardFromSummedReverse),
-                  [ReadOnly, NoUnwind]
+                  [WriteOnly, NoUnwind]
                   >;
 
 // Handle both the two-arg and one-arg variants of cabs
@@ -1049,7 +1050,7 @@ def : IntrPattern<(Op $x, $y),
                   [["powi"]],
                   [
                     (Select 
-                      (Or (ICmpEQ $y, (ConstantInt<0> $y) ), (And (GlobalExpr</*needsprimal*/0, /*needsshadow*/0, "ConstantInt::get(Type::getInt1Ty(gutils->newFunc->getContext()), EnzymeStrongZero)">), (FCmpOEQ (DiffeRet), (ConstantFP<"0"> $x) ) ) ),
+                      (Or (ICmpEQ $y, (ConstantInt<0> $y) ), (And (GlobalExpr</*needsprimal*/0, /*needsshadow*/0, "ConstantInt::get(Type::getInt1Ty(gutils->newFunc->getContext()), gutils->strongZero)">), (FCmpOEQ (DiffeRet), (ConstantFP<"0"> $x) ) ) ),
                       (ConstantFP<"0"> $x),
                       (FMul (DiffeRet),
                         (FMul (SIToFP $y, (TypeOf $x)), (Call<(SameFunc)> $x, (ISub $y, (ConstantInt<1> $y))))
@@ -1103,7 +1104,7 @@ def : BinopPattern<(Op $x, $y), "FMul", 0, 0,
 def : BinopPattern<(Op $x, $y), "FDiv", 0, 0,
                     [
                       (CheckedDiv (DiffeRet), $y),
-                      (FNeg (FMul (CheckedDiv (DiffeRet), $y), (FDiv $x, $y)))
+                      (FNeg (CheckedMul (CheckedDiv (DiffeRet), $y), (FDiv $x, $y)))
                     ],
                     (CheckedDiv (FSub (SelectIfActive $x, (FMul (Shadow $x), $y), (Zero $x)), (SelectIfActive $y, (FMul (Shadow $y), $x), (Zero $y))), (FMul $y, $y))
                   >;
@@ -1130,3 +1131,21 @@ def : InstPattern<(Op $x), "Freeze", 10, 0,
                   >;
 
 include "BlasDerivatives.td"                  
+
+def : IntrPattern<(Op $x),
+                  [["acos", "19", ""]],
+                  [(FNeg (FDiv (DiffeRet), (Intrinsic<"sqrt"> (FSub (ConstantFP<"1.0"> $x), (FMul $x, $x)))))]  ,
+                  (ForwardFromSummedReverse)                
+                  >;
+
+def : IntrPattern<(Op $x),
+                  [["atan", "19", ""]],
+                  [(FDiv (DiffeRet), (FAdd (FMul $x, $x), (ConstantFP<"1.0"> $x)))]  ,
+                  (ForwardFromSummedReverse)                
+                  >;
+
+def : IntrPattern<(Op $x),
+                  [["asin", "19", ""]],
+                  [(FDiv (DiffeRet), (Intrinsic<"sqrt"> (FSub (ConstantFP<"1.0"> $x), (FMul $x, $x))))]  ,
+                  (ForwardFromSummedReverse)                
+                  >;

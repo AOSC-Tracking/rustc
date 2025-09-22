@@ -113,13 +113,19 @@ class Inst<string mnemonic, string dialect_, string postop_="", string preop_=""
 def Op {
 }
 
+class SubRoutine<dag patternToMatch, dag insts_> : Operation</*primal*/1,/*shadow*/0> {
+  dag PatternToMatch = patternToMatch;
+  dag insts = insts_;
+}
+
+def SelectIfStrongZero : StaticSelect<"gutils->strongZero">;
 def SelectIfActive : StaticSelect<"!gutils->isConstantValue(imVal)">;
 
 def SelectIfComplex : StaticSelect<[{
   auto ty = imVal.getType();
-  ty.isa<ComplexType>() ||
-    ty.isa<TensorType>() &&
-    ty.cast<TensorType>().getElementType().isa<ComplexType>();
+  isa<ComplexType>(ty) ||
+    isa<TensorType>(ty) &&
+      isa<ComplexType>(cast<TensorType>(ty).getElementType());
 }]>;
 
 class ConstantFP<string val, string dialect_, string op_, string type_=""> : Operation</*primal*/0, /*shadow*/0> {
@@ -145,9 +151,24 @@ def NegF : ArithInst<"NegFOp">;
 def MulF : ArithInst<"MulFOp">;
 def DivF : ArithInst<"DivFOp">;
 def RemF : ArithInst<"RemFOp">;
+def CmpF : ArithInst<"CmpFOp">;
+def Arith_Select : ArithInst<"SelectOp">;
 
-def CheckedMulF : ArithInst<"MulFOp">;
-def CheckedDivF : ArithInst<"DivFOp">;
+def Arith_OEQ : GlobalExpr</*needsprimal*/0, /*needsshadow*/0, "arith::CmpFPredicate::OEQ">;
+
+def CheckedMulF : SubRoutine<(Op $diffret, $x),
+                  (
+                    SelectIfStrongZero
+                    (Arith_Select (CmpF (Arith_OEQ), $diffret, (ConstantFP<"0","arith", "ConstantOp"> $diffret):$zero), $zero, (MulF $diffret, $x)),
+                    (MulF $diffret, $x)
+                  )>;
+
+def CheckedDivF : SubRoutine<(Op $diffret, $x),
+                  (
+                    SelectIfStrongZero
+                    (Arith_Select (CmpF (Arith_OEQ), $diffret, (ConstantFP<"0","arith", "ConstantOp"> $diffret):$zero), $zero, (DivF $diffret, $x)),
+                    (DivF $diffret, $x)
+                  )>;
 
 def LlvmCheckedMulF : LlvmInst<"FMulOp">;
 def LlvmExpF : LlvmInst<"ExpOp">;

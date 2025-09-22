@@ -43,28 +43,28 @@ use std::path::{Path, PathBuf};
 use std::process::{self, ExitStatus, Output};
 use std::{env, fs, str};
 
-use anyhow::{bail, Context as _};
-use cargo_util::{exit_status_to_string, is_simple_exit_code, paths, ProcessBuilder};
+use anyhow::{Context as _, bail};
+use cargo_util::{ProcessBuilder, exit_status_to_string, is_simple_exit_code, paths};
 use cargo_util_schemas::manifest::TomlManifest;
-use rustfix::diagnostics::Diagnostic;
 use rustfix::CodeFix;
+use rustfix::diagnostics::Diagnostic;
 use semver::Version;
 use tracing::{debug, trace, warn};
 
 pub use self::fix_edition::fix_edition;
+use crate::core::PackageIdSpecQuery as _;
 use crate::core::compiler::CompileKind;
 use crate::core::compiler::RustcTargetData;
 use crate::core::resolver::features::{DiffMap, FeatureOpts, FeatureResolver, FeaturesFor};
 use crate::core::resolver::{HasDevUnits, Resolve, ResolveBehavior};
-use crate::core::PackageIdSpecQuery as _;
 use crate::core::{Edition, MaybePackage, Package, PackageId, Workspace};
 use crate::ops::resolve::WorkspaceResolve;
 use crate::ops::{self, CompileOptions};
+use crate::util::GlobalContext;
 use crate::util::diagnostic_server::{Message, RustfixDiagnosticServer};
 use crate::util::errors::CargoResult;
 use crate::util::toml_mut::manifest::LocalManifest;
-use crate::util::GlobalContext;
-use crate::util::{existing_vcs_repo, LockServer, LockServerClient};
+use crate::util::{LockServer, LockServerClient, existing_vcs_repo};
 use crate::{drop_eprint, drop_eprintln};
 
 mod fix_edition;
@@ -588,7 +588,15 @@ fn check_resolver_change<'gctx>(
             feature_opts,
         )?;
 
-        let diffs = v2_features.compare_legacy(&ws_resolve.resolved_features);
+        if ws_resolve.specs_and_features.len() != 1 {
+            bail!(r#"cannot fix edition when using `feature-unification = "package"`."#);
+        }
+        let resolved_features = &ws_resolve
+            .specs_and_features
+            .first()
+            .expect("We've already checked that there is exactly one.")
+            .resolved_features;
+        let diffs = v2_features.compare_legacy(resolved_features);
         Ok((ws_resolve, diffs))
     };
     let (_, without_dev_diffs) = resolve_differences(HasDevUnits::No)?;

@@ -1,0 +1,44 @@
+name: Clippy, Format & Test
+
+on: [pull_request, push, workflow_dispatch]
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --features visual-debug -- -D warnings
+      - run: cargo clippy --features resvg -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          cargo test
+          sudo apt-get update && sudo apt-get install -y libxml2-utils
+          cargo test -- --ignored
+          cargo test --features visual-debug -- --ignored
+          cargo test --features resvg -- --ignored
+
+  semver:
+    name: Semver check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt update && sudo apt install -y cmake
+      - uses: obi1kenobi/cargo-semver-checks-action@v2

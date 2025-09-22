@@ -1,7 +1,7 @@
 use cargo_platform::Platform;
 use semver::VersionReq;
-use serde::ser;
 use serde::Serialize;
+use serde::ser;
 use std::borrow::Cow;
 use std::fmt;
 use std::path::PathBuf;
@@ -10,9 +10,9 @@ use tracing::trace;
 
 use crate::core::compiler::{CompileKind, CompileTarget};
 use crate::core::{CliUnstable, Feature, Features, PackageId, SourceId, Summary};
+use crate::util::OptVersionReq;
 use crate::util::errors::CargoResult;
 use crate::util::interning::InternedString;
-use crate::util::OptVersionReq;
 
 /// Information about a dependency requested by a Cargo manifest.
 /// Cheap to copy.
@@ -126,7 +126,7 @@ impl Dependency {
                     return Err(anyhow::Error::new(err).context(format!(
                         "failed to parse the version requirement `{}` for dependency `{}`",
                         v, name,
-                    )))
+                    )));
                 }
             },
             None => (false, OptVersionReq::Any),
@@ -443,7 +443,7 @@ impl Dependency {
         Arc::make_mut(&mut self.inner).artifact = Some(artifact);
     }
 
-    pub(crate) fn artifact(&self) -> Option<&Artifact> {
+    pub fn artifact(&self) -> Option<&Artifact> {
         self.inner.artifact.as_ref()
     }
 
@@ -508,15 +508,15 @@ impl Artifact {
         })
     }
 
-    pub(crate) fn kinds(&self) -> &[ArtifactKind] {
+    pub fn kinds(&self) -> &[ArtifactKind] {
         &self.inner
     }
 
-    pub(crate) fn is_lib(&self) -> bool {
+    pub fn is_lib(&self) -> bool {
         self.is_lib
     }
 
-    pub(crate) fn target(&self) -> Option<ArtifactTarget> {
+    pub fn target(&self) -> Option<ArtifactTarget> {
         self.target
     }
 }
@@ -633,7 +633,9 @@ impl ArtifactKind {
                 return kind
                     .strip_prefix("bin:")
                     .map(|bin_name| ArtifactKind::SelectedBinary(bin_name.into()))
-                    .ok_or_else(|| anyhow::anyhow!("'{}' is not a valid artifact specifier", kind))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("'{}' is not a valid artifact specifier", kind)
+                    });
             }
         })
     }
@@ -644,7 +646,9 @@ impl ArtifactKind {
                 .iter()
                 .any(|k| matches!(k, ArtifactKind::SelectedBinary(_)))
         {
-            anyhow::bail!("Cannot specify both 'bin' and 'bin:<name>' binary artifacts, as 'bin' selects all available binaries.");
+            anyhow::bail!(
+                "Cannot specify both 'bin' and 'bin:<name>' binary artifacts, as 'bin' selects all available binaries."
+            );
         }
         let mut kinds_without_dupes = kinds.clone();
         kinds_without_dupes.sort();

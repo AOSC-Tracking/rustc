@@ -128,7 +128,7 @@ impl SysrootDownload {
         let components = ToolchainComponents::from_binaries_and_libdir(
             sysroot_bin("rustc")?,
             Some(sysroot_bin("rustdoc")?),
-            sysroot_bin("cargo-clippy").ok(),
+            sysroot_bin("clippy-driver").ok(),
             sysroot_bin("cargo")?,
             &self.directory.join(&self.rust_sha).join("lib"),
         )?;
@@ -460,15 +460,15 @@ pub fn get_local_toolchain(
             Some(rustdoc.canonicalize().with_context(|| {
                 format!("failed to canonicalize rustdoc executable {:?}", rustdoc)
             })?)
-        } else if profiles.contains(&Profile::Doc) {
+        } else if profiles.iter().any(|p| p.is_doc()) {
             // We need a `rustdoc`. Look for one next to `rustc`.
             if let Ok(rustdoc) = rustc.with_file_name("rustdoc").canonicalize() {
                 debug!("found rustdoc: {:?}", &rustdoc);
                 Some(rustdoc)
             } else {
                 anyhow::bail!(
-                    "'Doc' build specified but '--rustdoc' not specified and no 'rustdoc' found \
-                    next to 'rustc'"
+                    "'Doc' or 'DocJson' build specified but '--rustdoc' not specified and no \
+                    'rustdoc' found next to 'rustc'"
                 );
             }
         } else {
@@ -484,12 +484,12 @@ pub fn get_local_toolchain(
         )
     } else if profiles.contains(&Profile::Clippy) {
         // We need a `clippy`. Look for one next to `rustc`.
-        if let Ok(clippy) = rustc.with_file_name("cargo-clippy").canonicalize() {
+        if let Ok(clippy) = rustc.with_file_name("clippy-driver").canonicalize() {
             debug!("found clippy: {:?}", &clippy);
             Some(clippy)
         } else {
             anyhow::bail!(
-                    "'Clippy' build specified but '--cargo-clippy' not specified and no 'cargo-clippy' found \
+                    "'Clippy' build specified but '--clippy' not specified and no 'clippy-driver' found \
                     next to 'rustc'"
                 );
         }

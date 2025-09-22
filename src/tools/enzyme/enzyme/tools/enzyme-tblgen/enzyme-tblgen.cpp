@@ -247,13 +247,29 @@ SmallVector<bool, 1> prepareArgs(const Twine &curIndent, raw_ostream &os,
                                  const DagInit *resultRoot, StringRef builder,
                                  VariableSetting &nameToOrdinal, bool lookup,
                                  ArrayRef<unsigned> retidx, StringRef origName,
-                                 bool newFromOriginal, ActionType intrinsic) {
+                                 bool newFromOriginal, ActionType intrinsic,
+                                 bool broadcastInputs = true) {
   SmallVector<bool, 1> vectorValued;
 
   size_t idx = 0;
   for (auto &&[args, names] :
        zip(resultRoot->getArgs(), resultRoot->getArgNames())) {
-    os << curIndent << "auto " << argName << "_" << idx << " = ";
+    bool has_vector = false;
+    if (isa<UnsetInit>(args) && names) {
+      auto [ord, vecValue, ext, isva] =
+          nameToOrdinal.lookup(names->getValue(), pattern, resultRoot);
+      if (!vecValue && !startsWith(ord, "local") && !isva && broadcastInputs) {
+        has_vector = true;
+      }
+    }
+    if (has_vector) {
+      if (intrinsic == MLIRDerivatives)
+        os << curIndent << "mlir::Value " << argName << "_" << idx << " = ";
+      else
+        os << curIndent << "llvm::Value* " << argName << "_" << idx << " = ";
+    } else {
+      os << curIndent << "auto " << argName << "_" << idx << " = ";
+    }
     idx++;
     if (isa<UnsetInit>(args) && names) {
       auto [ord, vecValue, ext, isva] =
@@ -291,24 +307,26 @@ SmallVector<bool, 1> prepareArgs(const Twine &curIndent, raw_ostream &os,
         }
         if (intrinsic == MLIRDerivatives) {
           os << ";\n";
-          os << curIndent << "if (gutils->width != 1) {\n";
-          if (isva) {
-            os << curIndent << INDENT << "for (auto &val : " << argName << "_"
-               << (idx - 1) << ") {\n";
-            os << curIndent << INDENT << INDENT
-               << "val = builder.create<enzyme::BroadcastOp>(op.getLoc(), val, "
-                  "llvm::SmallVector<int64_t>({gutils->width}));\n";
-            os << curIndent << INDENT << "}\n";
-          } else {
-            os << curIndent << " " << argName << "_" << (idx - 1)
-               << " = builder.create<enzyme::BroadcastOp>(\n"
-               << curIndent << "   op.getLoc(),\n"
-               << curIndent << "   " << argName << "_" << (idx - 1) << ",\n"
-               << curIndent
-               << "   llvm::SmallVector<int64_t>({gutils->width}));\n";
+          if (broadcastInputs) {
+            os << curIndent << "if (gutils->width != 1) {\n";
+            if (isva) {
+              os << curIndent << INDENT << "for (auto &val : " << argName << "_"
+                 << (idx - 1) << ") {\n";
+              os << curIndent << INDENT << INDENT
+                 << "val = builder.create<enzyme::BroadcastOp>(op.getLoc(), "
+                    "val, "
+                    "llvm::SmallVector<int64_t>({gutils->width}));\n";
+              os << curIndent << INDENT << "}\n";
+            } else {
+              os << curIndent << " " << argName << "_" << (idx - 1)
+                 << " = builder.create<enzyme::BroadcastOp>(\n"
+                 << curIndent << "   op.getLoc(),\n"
+                 << curIndent << "   " << argName << "_" << (idx - 1) << ",\n"
+                 << curIndent
+                 << "   llvm::SmallVector<int64_t>({gutils->width}));\n";
+            }
+            os << curIndent << "}";
           }
-
-          os << curIndent << "}";
         }
 
         if (lookup && intrinsic != MLIRDerivatives)
@@ -514,6 +532,7 @@ bool handle(const Twine &curIndent, const Twine &argPattern, raw_ostream &os,
       os << ";\n";
 
       os << curIndent << INDENT << "bool vectorized = false;\n";
+      os << curIndent << INDENT << "(void)vectorized;\n";
 
       os << curIndent << INDENT << "if (condition) {\n";
 
@@ -603,7 +622,6 @@ bool handle(const Twine &curIndent, const Twine &argPattern, raw_ostream &os,
           auto name = resultRoot->getArgName(0)->getAsUnquotedString();
           auto [ord1, isVec, ext, isva] =
               nameToOrdinal.lookup(name, pattern, resultTree);
-          assert(!isVec);
           assert(!ext.size());
           assert(!isva);
           ord = ord1;
@@ -943,9 +961,10 @@ bool handle(const Twine &curIndent, const Twine &argPattern, raw_ostream &os,
 
       os << "({\n";
       os << curIndent << INDENT << "// Computing subroutine " << opName << "\n";
-      SmallVector<bool, 1> vectorValued = prepareArgs(
-          curIndent + INDENT, os, argPattern, pattern, resultRoot, builder,
-          nameToOrdinal, lookup, retidx, origName, newFromOriginal, intrinsic);
+      SmallVector<bool, 1> vectorValued =
+          prepareArgs(curIndent + INDENT, os, argPattern, pattern, resultRoot,
+                      builder, nameToOrdinal, lookup, retidx, origName,
+                      newFromOriginal, intrinsic, false);
       bool anyVector = false;
       for (auto b : vectorValued)
         anyVector |= b;
@@ -1090,9 +1109,9 @@ bool handle(const Twine &curIndent, const Twine &argPattern, raw_ostream &os,
         getIntrinsic(os, intrName, intrTypes, argPattern, origName);
         os << ", ArrayRef<Value*>({";
       } else if (opName == "CheckedMul") {
-        os << "checkedMul(" << builder << ", ";
+        os << "checkedMul(gutils->strongZero, " << builder << ", ";
       } else if (opName == "CheckedDiv") {
-        os << "checkedDiv(" << builder << ", ";
+        os << "checkedDiv(gutils->strongZero, " << builder << ", ";
       } else if (intrinsic == MLIRDerivatives) {
         if (intrinsic == MLIRDerivatives) {
           auto preop = Def->getValueAsString("preop");
@@ -1817,7 +1836,7 @@ static void emitReverseCommon(raw_ostream &os, const Record *pattern,
           if (intrinsic == MLIRDerivatives) {
             os << curIndent << INDENT
                << "tmp = "
-                  "tmp.getType().cast<AutoDiffTypeInterface>().createConjOp("
+                  "cast<AutoDiffTypeInterface>(tmp.getType()).createConjOp("
                   "builder, op.getLoc(), tmp);\n";
           }
 
@@ -2485,6 +2504,21 @@ static void emitDerivatives(const RecordKeeper &recordKeeper, raw_ostream &os,
          << "                    calleeName = \"<Unknown>\";\n"
          << "                }\n"
          << "            }\n"
+         << "#if LLVM_VERSION_MAJOR >= 17\n"
+         << "            Value *moduleNameValue = "
+            "Builder2.CreateGlobalString(moduleName);\n"
+         << "            Value *functionNameValue = "
+            "Builder2.CreateGlobalString(functionName + \" (\" +"
+            "std::to_string(funcIdx) + \")\");\n"
+         << "            Value *blockNameValue = "
+            "Builder2.CreateGlobalString(blockName + \" (\" +"
+            "std::to_string(blockIdx) + \")\");\n"
+         << "            Value *opcodeNameValue = "
+            "Builder2.CreateGlobalString(opcodeName + \" (\" "
+            "+std::to_string(instIdx) + \")\");\n"
+         << "            Value *calleeNameValue = "
+            "Builder2.CreateGlobalString(calleeName);\n"
+         << "#else\n"
          << "            Value *moduleNameValue = "
             "Builder2.CreateGlobalStringPtr(moduleName);\n"
          << "            Value *functionNameValue = "
@@ -2498,6 +2532,7 @@ static void emitDerivatives(const RecordKeeper &recordKeeper, raw_ostream &os,
             "+std::to_string(instIdx) + \")\");\n"
          << "            Value *calleeNameValue = "
             "Builder2.CreateGlobalStringPtr(calleeName);\n"
+         << "#endif\n"
          << "            Builder2.CreateCall(logFunc, {origValue, "
             "errValue, opcodeNameValue, calleeNameValue, moduleNameValue, "
             "functionNameValue, blockNameValue});\n"
@@ -2597,6 +2632,49 @@ static void emitDerivatives(const RecordKeeper &recordKeeper, raw_ostream &os,
   }
 
   if (intrinsic == MLIRDerivatives) {
+    SmallVector<bool> hasActivity(patterns.size(), false);
+    for (auto patternEn : enumerate(patterns)) {
+      size_t patternIdx = patternEn.index();
+      auto &pattern = patternEn.value();
+      auto opName = pattern->getValueAsString("opName");
+      auto dialect = pattern->getValueAsString("dialect");
+
+      auto argOps = pattern->getValueAsListInit("ArgDerivatives");
+
+      auto isArgInactive = [](const llvm::Init *arg) -> bool {
+        if (auto resultRoot = dyn_cast<DagInit>(arg)) {
+          auto opName = resultRoot->getOperator()->getAsString();
+          auto Def = cast<DefInit>(resultRoot->getOperator())->getDef();
+          if (opName == "InactiveArgSpec" ||
+              Def->isSubClassOf("InactiveArgSpec")) {
+            return true;
+          }
+        }
+        return false;
+      };
+
+      if (llvm::any_of(*argOps, isArgInactive)) {
+        hasActivity[patternIdx] = true;
+
+        os << "struct " << opName << "Activity : \n";
+        os << "                   public ActivityOpInterface::ExternalModel<"
+           << opName << "Activity, " << dialect << "::" << opName << "> {\n";
+        os << "  bool isInactive(mlir::Operation *) const { return false; }\n";
+        os << "  bool isArgInactive(mlir::Operation *, size_t arg) const {\n";
+
+        for (auto argOpEn : enumerate(*argOps)) {
+          if (isArgInactive(argOpEn.value())) {
+            size_t argIdx = argOpEn.index();
+            os << "    if (arg == " << argIdx << ") { return true; }\n";
+          }
+        }
+
+        os << "    return false;\n  }\n";
+
+        os << "};\n";
+      }
+    }
+
     const auto &actpatterns =
         recordKeeper.getAllDerivedDefinitions("InactiveOp");
     for (auto &pattern : actpatterns) {
@@ -2683,13 +2761,16 @@ static void emitDerivatives(const RecordKeeper &recordKeeper, raw_ostream &os,
         recordKeeper.getAllDerivedDefinitions("AllocationOp");
 
     os << "void registerInterfaces(MLIRContext* context) {\n";
-    for (const Record *pattern : patterns) {
+    for (auto [pattern, act] : zip(patterns, hasActivity)) {
       auto opName = pattern->getValueAsString("opName");
       auto dialect = pattern->getValueAsString("dialect");
       os << "  " << dialect << "::" << opName << "::attachInterface<" << opName
          << "FwdDerivative>(*context);\n";
       os << "  " << dialect << "::" << opName << "::attachInterface<" << opName
          << "RevDerivative>(*context);\n";
+      if (act)
+        os << "  " << dialect << "::" << opName << "::attachInterface<"
+           << opName << "Activity>(*context);\n";
     }
     for (const Record *pattern : actpatterns) {
       auto opName = pattern->getValueAsString("opName");

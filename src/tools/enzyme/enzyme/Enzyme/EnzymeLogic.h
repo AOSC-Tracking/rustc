@@ -112,7 +112,8 @@ public:
   //! returned struct
   std::map<AugmentedStruct, int> returns;
 
-  std::map<llvm::CallInst *, const std::vector<bool>> overwritten_args_map;
+  std::map<llvm::CallInst *, std::pair<bool, const std::vector<bool>>>
+      overwritten_args_map;
 
   std::map<llvm::Instruction *, bool> can_modref_map;
 
@@ -128,7 +129,8 @@ public:
       llvm::Function *fn, llvm::Type *tapeType,
       std::map<std::pair<llvm::Instruction *, CacheType>, int> tapeIndices,
       std::map<AugmentedStruct, int> returns,
-      std::map<llvm::CallInst *, const std::vector<bool>> overwritten_args_map,
+      std::map<llvm::CallInst *, std::pair<bool, const std::vector<bool>>>
+          overwritten_args_map,
       std::map<llvm::Instruction *, bool> can_modref_map,
       const std::vector<DIFFE_TYPE> &constant_args, bool shadowReturnUsed)
       : fn(fn), tapeType(tapeType), tapeIndices(tapeIndices), returns(returns),
@@ -142,20 +144,24 @@ public:
 ///  Only allowed to be DUP_ARG or CONSTANT. DUP_NONEED is not allowed,
 ///  set returnValue to false instead.
 ///  \p constant_args is the activity info of the arguments
+///  \p subsequent_calls_may_write denotes whether some followup call may
+///     write to accessible memory (and thus can potentially overwrite a load
+///     made in this function).
+///  \p overwritten_args marks whether an argument may be overwritten
+///  before loads in the generated function (and thus cannot be cached).
 ///  \p returnValue is whether the primal's return should also be returned.
 ///  \p dretUsed is whether the shadow return value should also be returned.
 ///  Only allowed to be true if retType is CDIFFE_TYPE::DUP_ARG.
 ///  \p additionalArg is the type (or null) of an additional type in the
 ///  signature to hold the tape.
 ///  \p typeInfo is the type info information about the calling context
-///  \p _overwritten_args marks whether an argument may be overwritten
-///  before loads in the generated function (and thus cannot be cached).
 ///  \p AtomicAdd is whether to perform all adjoint
 ///  updates to memory in an atomic way
 struct ReverseCacheKey {
   llvm::Function *todiff;
   DIFFE_TYPE retType;
   const std::vector<DIFFE_TYPE> constant_args;
+  bool subsequent_calls_may_write;
   std::vector<bool> overwritten_args;
   bool returnUsed;
   bool shadowReturnUsed;
@@ -167,12 +173,25 @@ struct ReverseCacheKey {
   bool forceAnonymousTape;
   const FnTypeInfo typeInfo;
   bool runtimeActivity;
+  bool strongZero;
 
   ReverseCacheKey replaceTypeInfo(const FnTypeInfo &newTypeInfo) const {
-    return {todiff,      retType,          constant_args,  overwritten_args,
-            returnUsed,  shadowReturnUsed, mode,           width,
-            freeMemory,  AtomicAdd,        additionalType, forceAnonymousTape,
-            newTypeInfo, runtimeActivity};
+    return {todiff,
+            retType,
+            constant_args,
+            subsequent_calls_may_write,
+            overwritten_args,
+            returnUsed,
+            shadowReturnUsed,
+            mode,
+            width,
+            freeMemory,
+            AtomicAdd,
+            additionalType,
+            forceAnonymousTape,
+            newTypeInfo,
+            runtimeActivity,
+            strongZero};
   }
   /*
   inline bool operator==(const ReverseCacheKey& rhs) const {
@@ -208,6 +227,11 @@ struct ReverseCacheKey {
     if (std::lexicographical_compare(
             rhs.constant_args.begin(), rhs.constant_args.end(),
             constant_args.begin(), constant_args.end()))
+      return false;
+
+    if (subsequent_calls_may_write < rhs.subsequent_calls_may_write)
+      return true;
+    if (rhs.subsequent_calls_may_write < subsequent_calls_may_write)
       return false;
 
     if (std::lexicographical_compare(
@@ -267,6 +291,11 @@ struct ReverseCacheKey {
     if (runtimeActivity < rhs.runtimeActivity)
       return true;
     if (rhs.runtimeActivity < runtimeActivity)
+      return false;
+
+    if (strongZero < rhs.strongZero)
+      return true;
+    if (rhs.strongZero < strongZero)
       return false;
 
     // equal
@@ -432,6 +461,7 @@ public:
     llvm::Function *fn;
     DIFFE_TYPE retType;
     const std::vector<DIFFE_TYPE> constant_args;
+    bool subsequent_calls_may_write;
     std::vector<bool> overwritten_args;
     bool returnUsed;
     bool shadowReturnUsed;
@@ -441,6 +471,7 @@ public:
     bool omp;
     unsigned width;
     bool runtimeActivity;
+    bool strongZero;
 
     inline bool operator<(const AugmentedCacheKey &rhs) const {
       if (fn < rhs.fn)
@@ -460,6 +491,11 @@ public:
       if (std::lexicographical_compare(
               rhs.constant_args.begin(), rhs.constant_args.end(),
               constant_args.begin(), constant_args.end()))
+        return false;
+
+      if (subsequent_calls_may_write < rhs.subsequent_calls_may_write)
+        return true;
+      if (rhs.subsequent_calls_may_write < subsequent_calls_may_write)
         return false;
 
       if (std::lexicographical_compare(
@@ -511,6 +547,11 @@ public:
       if (rhs.runtimeActivity < runtimeActivity)
         return false;
 
+      if (strongZero < rhs.strongZero)
+        return true;
+      if (rhs.strongZero < strongZero)
+        return false;
+
       // equal
       return false;
     }
@@ -529,6 +570,9 @@ public:
   ///  \p constant_args is the activity info of the arguments
   ///  \p returnUsed is whether the primal's return should also be returned
   ///  \p typeInfo is the type info information about the calling context
+  ///  \p subsequent_calls_may_write denotes whether an instruction between
+  ///  forward and reverse
+  ///     may write to memory potentially read by this function.
   ///  \p _overwritten_args marks whether an argument may be rewritten before
   ///  loads in the generated function (and thus cannot be cached).
   ///  \p forceAnonymousTape forces the tape to be an i8* rather than the true
@@ -539,8 +583,10 @@ public:
       RequestContext context, llvm::Function *todiff, DIFFE_TYPE retType,
       llvm::ArrayRef<DIFFE_TYPE> constant_args, TypeAnalysis &TA,
       bool returnUsed, bool shadowReturnUsed, const FnTypeInfo &typeInfo,
+      bool subsequent_calls_may_write,
       const std::vector<bool> _overwritten_args, bool forceAnonymousTape,
-      bool runtimeActivity, unsigned width, bool AtomicAdd, bool omp = false);
+      bool runtimeActivity, bool strongZero, unsigned width, bool AtomicAdd,
+      bool omp = false);
 
   std::map<ReverseCacheKey, llvm::Function *> ReverseCachedFunctions;
 
@@ -548,6 +594,7 @@ public:
     llvm::Function *todiff;
     DIFFE_TYPE retType;
     const std::vector<DIFFE_TYPE> constant_args;
+    bool subsequent_calls_may_write;
     std::vector<bool> overwritten_args;
     bool returnUsed;
     DerivativeMode mode;
@@ -555,6 +602,7 @@ public:
     llvm::Type *additionalType;
     const FnTypeInfo typeInfo;
     bool runtimeActivity;
+    bool strongZero;
 
     inline bool operator<(const ForwardCacheKey &rhs) const {
       if (todiff < rhs.todiff)
@@ -574,6 +622,11 @@ public:
       if (std::lexicographical_compare(
               rhs.constant_args.begin(), rhs.constant_args.end(),
               constant_args.begin(), constant_args.end()))
+        return false;
+
+      if (subsequent_calls_may_write < rhs.subsequent_calls_may_write)
+        return true;
+      if (rhs.subsequent_calls_may_write < subsequent_calls_may_write)
         return false;
 
       if (std::lexicographical_compare(
@@ -615,6 +668,11 @@ public:
       if (rhs.runtimeActivity < runtimeActivity)
         return false;
 
+      if (strongZero < rhs.strongZero)
+        return true;
+      if (rhs.strongZero < strongZero)
+        return false;
+
       // equal
       return false;
     }
@@ -654,18 +712,24 @@ public:
   ///  \p additionalArg is the type (or null) of an additional type in the
   ///  signature to hold the tape.
   ///  \p FnTypeInfo is the known types of the argument and returns
+  ///  \p subsequent_calls_may_write denotes whether an instruction between
+  ///  forward and reverse
+  ///     may write to memory potentially read by this function.
   ///  \p _overwritten_args marks whether an argument may be rewritten
   ///  before loads in the generated function (and thus cannot be cached).
   ///  \p augmented is the data structure created by prior call to an
   ///   augmented forward pass
   ///  \p omp is whether this function is an OpenMP closure body.
-  llvm::Function *CreateForwardDiff(
-      RequestContext context, llvm::Function *todiff, DIFFE_TYPE retType,
-      llvm::ArrayRef<DIFFE_TYPE> constant_args, TypeAnalysis &TA,
-      bool returnValue, DerivativeMode mode, bool freeMemory,
-      bool runtimeActivity, unsigned width, llvm::Type *additionalArg,
-      const FnTypeInfo &typeInfo, const std::vector<bool> _overwritten_args,
-      const AugmentedReturn *augmented, bool omp = false);
+  llvm::Function *
+  CreateForwardDiff(RequestContext context, llvm::Function *todiff,
+                    DIFFE_TYPE retType,
+                    llvm::ArrayRef<DIFFE_TYPE> constant_args, TypeAnalysis &TA,
+                    bool returnValue, DerivativeMode mode, bool freeMemory,
+                    bool runtimeActivity, bool strongZero, unsigned width,
+                    llvm::Type *additionalArg, const FnTypeInfo &typeInfo,
+                    bool subsequent_calls_may_write,
+                    const std::vector<bool> _overwritten_args,
+                    const AugmentedReturn *augmented, bool omp = false);
 
   /// Create a function batched in its inputs.
   ///  \p context the instruction which requested this batch (or null).

@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: 2020-2021 HH Partners
+# 
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "spdx-rs"
+version = "0.5.5"
+authors = ["Mikko Murto <mikko.murto@hhpartners.fi>"]
+edition = "2018"
+license = "MIT"
+description = "Parse and interact with SPDX Documents"
+homepage = "https://github.com/doubleopen-project/spdx-rs"
+repository = "https://github.com/doubleopen-project/spdx-rs"
+documentation = "https://docs.rs/spdx-rs"
+readme = "README.md"
+keywords = ["SPDX"]
+categories = ["data-structures"]
+exclude = [
+  "/tests/",
+  "/.github/",
+  "/.gitignore"
+]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serde = { version = "1", features = [ "derive" ] }
+log = "0.4"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+thiserror = "1"
+strum = "0.24"
+strum_macros = "0.24"
+spdx-expression = "0.5.2"
+nom = "7"
+
+[dev-dependencies]
+serde_json = "1"
+anyhow = "1"

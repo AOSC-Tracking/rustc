@@ -2,38 +2,39 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::prelude::*;
 use std::io::SeekFrom;
+use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 use std::task::Poll;
 
-use crate::core::dependency::DepKind;
-use crate::core::manifest::Target;
-use crate::core::resolver::CliFeatures;
-use crate::core::resolver::HasDevUnits;
 use crate::core::PackageIdSpecQuery;
 use crate::core::Shell;
 use crate::core::Verbosity;
 use crate::core::Workspace;
+use crate::core::dependency::DepKind;
+use crate::core::manifest::Target;
+use crate::core::resolver::CliFeatures;
+use crate::core::resolver::HasDevUnits;
 use crate::core::{Package, PackageId, PackageSet, Resolve, SourceId};
 use crate::ops::lockfile::LOCKFILE_NAME;
-use crate::ops::registry::{infer_registry, RegistryOrIndex};
+use crate::ops::registry::{RegistryOrIndex, infer_registry};
 use crate::sources::path::PathEntry;
-use crate::sources::registry::index::{IndexPackage, RegistryDependency};
-use crate::sources::{PathSource, CRATES_IO_REGISTRY};
-use crate::util::cache_lock::CacheLockMode;
-use crate::util::context::JobsConfig;
-use crate::util::errors::CargoResult;
-use crate::util::restricted_names;
-use crate::util::toml::prepare_for_publish;
+use crate::sources::{CRATES_IO_REGISTRY, PathSource};
 use crate::util::FileLock;
 use crate::util::Filesystem;
 use crate::util::GlobalContext;
 use crate::util::Graph;
 use crate::util::HumanBytes;
+use crate::util::cache_lock::CacheLockMode;
+use crate::util::context::JobsConfig;
+use crate::util::errors::CargoResult;
+use crate::util::errors::ManifestError;
+use crate::util::restricted_names;
+use crate::util::toml::prepare_for_publish;
 use crate::{drop_println, ops};
-use anyhow::{bail, Context as _};
+use anyhow::{Context as _, bail};
 use cargo_util::paths;
+use cargo_util_schemas::index::{IndexPackage, RegistryDependency};
 use cargo_util_schemas::messages;
 use flate2::{Compression, GzBuilder};
 use tar::{Builder, EntryType, Header, HeaderMode};
@@ -85,6 +86,19 @@ pub struct PackageOpts<'gctx> {
     pub targets: Vec<String>,
     pub cli_features: CliFeatures,
     pub reg_or_index: Option<ops::RegistryOrIndex>,
+    /// Whether this packaging job is meant for a publishing dry-run.
+    ///
+    /// Packaging on its own has no side effects, so a dry-run doesn't
+    /// make sense from that point of view. But dry-run publishing needs
+    /// special packaging behavior, which this flag turns on.
+    ///
+    /// Specifically, we want dry-run packaging to work even if versions
+    /// have not yet been bumped. But then if you dry-run packaging in
+    /// a workspace with some declared versions that are already published,
+    /// the package verification step can fail with checksum mismatches.
+    /// So when dry-run is true, the verification step does some extra
+    /// checksum fudging in the lock file.
+    pub dry_run: bool,
 }
 
 const ORIGINAL_MANIFEST_FILE: &str = "Cargo.toml.orig";
@@ -124,6 +138,7 @@ enum GeneratedFile {
 #[tracing::instrument(skip_all)]
 fn create_package(
     ws: &Workspace<'_>,
+    opts: &PackageOpts<'_>,
     pkg: &Package,
     ar_files: Vec<ArchiveFile>,
     local_reg: Option<&TmpRegistry<'_>>,
@@ -133,7 +148,15 @@ fn create_package(
 
     // Check that the package dependencies are safe to deploy.
     for dep in pkg.dependencies() {
-        super::check_dep_has_version(dep, false)?;
+        super::check_dep_has_version(dep, false).map_err(|err| {
+            ManifestError::new(
+                err.context(format!(
+                    "failed to verify manifest at `{}`",
+                    pkg.manifest_path().display()
+                )),
+                pkg.manifest_path().into(),
+            )
+        })?;
     }
 
     let filename = pkg.package_id().tarball_name();
@@ -150,7 +173,7 @@ fn create_package(
     gctx.shell()
         .status("Packaging", pkg.package_id().to_string())?;
     dst.file().set_len(0)?;
-    let uncompressed_size = tar(ws, pkg, local_reg, ar_files, dst.file(), &filename)
+    let uncompressed_size = tar(ws, opts, pkg, local_reg, ar_files, dst.file(), &filename)
         .context("failed to prepare local package for uploading")?;
 
     dst.seek(SeekFrom::Start(0))?;
@@ -239,7 +262,7 @@ fn do_package<'a>(
     let deps = local_deps(pkgs.iter().map(|(p, f)| ((*p).clone(), f.clone())));
     let just_pkgs: Vec<_> = pkgs.iter().map(|p| p.0).collect();
 
-    let mut local_reg = if ws.gctx().cli_unstable().package_workspace {
+    let mut local_reg = {
         // The publish registry doesn't matter unless there are local dependencies that will be
         // resolved,
         // so only try to get one if we need it. If they explicitly passed a
@@ -256,8 +279,6 @@ fn do_package<'a>(
         let reg_dir = ws.build_dir().join("package").join("tmp-registry");
         sid.map(|sid| TmpRegistry::new(ws.gctx(), reg_dir, sid))
             .transpose()?
-    } else {
-        None
     };
 
     // Packages need to be created in dependency order, because dependencies must
@@ -302,7 +323,7 @@ fn do_package<'a>(
                 }
             }
         } else {
-            let tarball = create_package(ws, &pkg, ar_files, local_reg.as_ref())?;
+            let tarball = create_package(ws, &opts, &pkg, ar_files, local_reg.as_ref())?;
             if let Some(local_reg) = local_reg.as_mut() {
                 if pkg.publish() != &Some(Vec::new()) {
                     local_reg.add_package(ws, &pkg, &tarball)?;
@@ -459,7 +480,6 @@ fn prepare_archive(
 
     // Check (git) repository state, getting the current commit hash.
     let vcs_info = vcs::check_repo_state(pkg, &src_files, ws, &opts)?;
-
     build_ar_list(ws, pkg, src_files, vcs_info, opts.include_lockfile)
 }
 
@@ -691,9 +711,11 @@ fn error_custom_build_file_not_in_package(
     let tip = {
         let description_name = target.description_named();
         if path.is_file() {
-            format!("the source file of {description_name} doesn't appear to be a path inside of the package.\n\
+            format!(
+                "the source file of {description_name} doesn't appear to be a path inside of the package.\n\
             It is at `{}`, whereas the root the package is `{}`.\n",
-            path.display(), pkg.root().display()
+                path.display(),
+                pkg.root().display()
             )
         } else {
             format!("the source file of {description_name} doesn't appear to exist.\n",)
@@ -703,7 +725,8 @@ fn error_custom_build_file_not_in_package(
         "{}\
         This may cause issue during packaging, as modules resolution and resources included via macros are often relative to the path of source files.\n\
         Please update the `build` setting in the manifest at `{}` and point to a path inside the root of the package.",
-        tip,  pkg.manifest_path().display()
+        tip,
+        pkg.manifest_path().display()
     );
     anyhow::bail!(msg)
 }
@@ -711,11 +734,12 @@ fn error_custom_build_file_not_in_package(
 /// Construct `Cargo.lock` for the package to be published.
 fn build_lock(
     ws: &Workspace<'_>,
+    opts: &PackageOpts<'_>,
     publish_pkg: &Package,
     local_reg: Option<&TmpRegistry<'_>>,
 ) -> CargoResult<String> {
     let gctx = ws.gctx();
-    let orig_resolve = ops::load_pkg_lockfile(ws)?;
+    let mut orig_resolve = ops::load_pkg_lockfile(ws)?;
 
     let mut tmp_ws = Workspace::ephemeral(publish_pkg.clone(), ws.gctx(), None, true)?;
 
@@ -727,6 +751,18 @@ fn build_lock(
             local_reg.upstream,
             local_reg.root.as_path_unlocked().to_owned(),
         );
+        if opts.dry_run {
+            if let Some(orig_resolve) = orig_resolve.as_mut() {
+                let upstream_in_lock = if local_reg.upstream.is_crates_io() {
+                    SourceId::crates_io(gctx)?
+                } else {
+                    local_reg.upstream
+                };
+                for (p, s) in local_reg.checksums() {
+                    orig_resolve.set_checksum(p.with_source_id(upstream_in_lock), s.to_owned());
+                }
+            }
+        }
     }
     let mut tmp_reg = tmp_ws.package_registry()?;
 
@@ -802,6 +838,7 @@ fn check_metadata(pkg: &Package, gctx: &GlobalContext) -> CargoResult<()> {
 /// Returns the uncompressed size of the contents of the new archive file.
 fn tar(
     ws: &Workspace<'_>,
+    opts: &PackageOpts<'_>,
     pkg: &Package,
     local_reg: Option<&TmpRegistry<'_>>,
     ar_files: Vec<ArchiveFile>,
@@ -859,7 +896,7 @@ fn tar(
                     GeneratedFile::Manifest(_) => {
                         publish_pkg.manifest().to_normalized_contents()?
                     }
-                    GeneratedFile::Lockfile(_) => build_lock(ws, &publish_pkg, local_reg)?,
+                    GeneratedFile::Lockfile(_) => build_lock(ws, opts, &publish_pkg, local_reg)?,
                     GeneratedFile::VcsInfo(ref s) => serde_json::to_string_pretty(s)?,
                 };
                 header.set_entry_type(EntryType::file());
@@ -1053,6 +1090,7 @@ struct TmpRegistry<'a> {
     gctx: &'a GlobalContext,
     upstream: SourceId,
     root: Filesystem,
+    checksums: HashMap<PackageId, String>,
     _lock: FileLock,
 }
 
@@ -1064,6 +1102,7 @@ impl<'a> TmpRegistry<'a> {
             gctx,
             root,
             upstream,
+            checksums: HashMap::new(),
             _lock,
         };
         // If there's an old temporary registry, delete it.
@@ -1108,6 +1147,8 @@ impl<'a> TmpRegistry<'a> {
         let cksum = cargo_util::Sha256::new()
             .update_file(tar.file())?
             .finish_hex();
+
+        self.checksums.insert(package.package_id(), cksum.clone());
 
         let deps: Vec<_> = new_crate
             .deps
@@ -1168,5 +1209,9 @@ impl<'a> TmpRegistry<'a> {
         )?;
         dst.write_all(index_line.as_bytes())?;
         Ok(())
+    }
+
+    fn checksums(&self) -> impl Iterator<Item = (PackageId, &str)> {
+        self.checksums.iter().map(|(p, s)| (*p, s.as_str()))
     }
 }

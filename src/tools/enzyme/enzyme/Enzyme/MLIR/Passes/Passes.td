@@ -28,6 +28,13 @@ def DifferentiatePass : Pass<"enzyme"> {
       /*default=*/"",
       /*description=*/"Optimization passes to apply to generated derivative functions"
     >,
+    Option<
+      /*C++ variable name=*/"verifyPostPasses",
+      /*CLI argument=*/"verifyPostPasses",
+      /*type=*/"bool",
+      /*default=*/"true",
+      /*description=*/"Whether or not to run verifier for the postpasses pass manager."
+    >,
   ];
   let constructor = "mlir::enzyme::createDifferentiatePass()";
 }
@@ -119,6 +126,13 @@ def PrintActivityAnalysisPass : Pass<"print-activity-analysis"> {
       /*type=*/"bool",
       /*default=*/"false",
       /*description=*/"Annotate every operation and value with its activity"
+    >,
+    Option<
+      /*C++ variable name=*/"inferFromAutodiff",
+      /*CLI argument=*/"infer",
+      /*type=*/"bool",
+      /*default=*/"false",
+      /*description=*/"Infer the argument and return activity from an __enzyme_autodiff call"
     >,
     Option<
       /*C++ variable name=*/"dataflow",

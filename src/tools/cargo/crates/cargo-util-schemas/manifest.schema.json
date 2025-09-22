@@ -167,6 +167,16 @@
         }
       ]
     },
+    "hints": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Hints"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "workspace": {
       "anyOf": [
         {
@@ -195,7 +205,7 @@
       "additionalProperties": {
         "type": "object",
         "additionalProperties": {
-          "$ref": "#/$defs/TomlDependency_for_string"
+          "$ref": "#/$defs/TomlDependency"
         }
       }
     },
@@ -205,29 +215,19 @@
         "null"
       ],
       "additionalProperties": {
-        "$ref": "#/$defs/TomlDependency_for_string"
+        "$ref": "#/$defs/TomlDependency"
       }
     }
   },
   "$defs": {
     "TomlPackage": {
-      "description": "Represents the `package`/`project` sections of a `Cargo.toml`.\n\n Note that the order of the fields matters, since this is the order they\n are serialized to a TOML file. For example, you cannot have values after\n the field `metadata`, since it is a table and values cannot appear after\n tables.",
+      "description": "Represents the `package`/`project` sections of a `Cargo.toml`.\n\nNote that the order of the fields matters, since this is the order they\nare serialized to a TOML file. For example, you cannot have values after\nthe field `metadata`, since it is a table and values cannot appear after\ntables.",
       "type": "object",
       "properties": {
-        "description": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/InheritableField_for_string"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "edition": {
           "anyOf": [
             {
-              "$ref": "#/$defs/InheritableField_for_string"
+              "$ref": "#/$defs/InheritableField"
             },
             {
               "type": "null"
@@ -249,7 +249,7 @@
         "version": {
           "anyOf": [
             {
-              "$ref": "#/$defs/InheritableField_for_SemVer"
+              "$ref": "#/$defs/InheritableField2"
             },
             {
               "type": "null"
@@ -259,7 +259,7 @@
         "authors": {
           "anyOf": [
             {
-              "$ref": "#/$defs/InheritableField_for_Array_of_string"
+              "$ref": "#/$defs/InheritableField3"
             },
             {
               "type": "null"
@@ -269,7 +269,7 @@
         "build": {
           "anyOf": [
             {
-              "$ref": "#/$defs/StringOrBool"
+              "$ref": "#/$defs/TomlPackageBuild"
             },
             {
               "type": "null"
@@ -307,7 +307,7 @@
         "exclude": {
           "anyOf": [
             {
-              "$ref": "#/$defs/InheritableField_for_Array_of_string"
+              "$ref": "#/$defs/InheritableField3"
             },
             {
               "type": "null"
@@ -317,7 +317,7 @@
         "include": {
           "anyOf": [
             {
-              "$ref": "#/$defs/InheritableField_for_Array_of_string"
+              "$ref": "#/$defs/InheritableField3"
             },
             {
               "type": "null"
@@ -327,7 +327,7 @@
         "publish": {
           "anyOf": [
             {
-              "$ref": "#/$defs/InheritableField_for_VecStringOrBool"
+              "$ref": "#/$defs/InheritableField4"
             },
             {
               "type": "null"
@@ -382,10 +382,20 @@
             "null"
           ]
         },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InheritableField"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "homepage": {
           "anyOf": [
             {
-              "$ref": "#/$defs/InheritableField_for_string"
+              "$ref": "#/$defs/InheritableField"
             },
             {
               "type": "null"
@@ -395,7 +405,7 @@
         "documentation": {
           "anyOf": [
             {
-              "$ref": "#/$defs/InheritableField_for_string"
+              "$ref": "#/$defs/InheritableField"
             },
             {
               "type": "null"
@@ -405,7 +415,7 @@
         "readme": {
           "anyOf": [
             {
-              "$ref": "#/$defs/InheritableField_for_StringOrBool"
+              "$ref": "#/$defs/InheritableField5"
             },
             {
               "type": "null"
@@ -415,7 +425,7 @@
         "keywords": {
           "anyOf": [
             {
-              "$ref": "#/$defs/InheritableField_for_Array_of_string"
+              "$ref": "#/$defs/InheritableField3"
             },
             {
               "type": "null"
@@ -425,7 +435,7 @@
         "categories": {
           "anyOf": [
             {
-              "$ref": "#/$defs/InheritableField_for_Array_of_string"
+              "$ref": "#/$defs/InheritableField3"
             },
             {
               "type": "null"
@@ -435,7 +445,7 @@
         "license": {
           "anyOf": [
             {
-              "$ref": "#/$defs/InheritableField_for_string"
+              "$ref": "#/$defs/InheritableField"
             },
             {
               "type": "null"
@@ -445,7 +455,7 @@
         "license-file": {
           "anyOf": [
             {
-              "$ref": "#/$defs/InheritableField_for_string"
+              "$ref": "#/$defs/InheritableField"
             },
             {
               "type": "null"
@@ -455,7 +465,7 @@
         "repository": {
           "anyOf": [
             {
-              "$ref": "#/$defs/InheritableField_for_string"
+              "$ref": "#/$defs/InheritableField"
             },
             {
               "type": "null"
@@ -480,7 +490,7 @@
         }
       }
     },
-    "InheritableField_for_string": {
+    "InheritableField": {
       "description": "An enum that allows for inheriting keys from a workspace in a Cargo.toml.",
       "anyOf": [
         {
@@ -505,9 +515,9 @@
       ]
     },
     "WorkspaceValue": {
-      "type": "null"
+      "type": "boolean"
     },
-    "InheritableField_for_SemVer": {
+    "InheritableField2": {
       "description": "An enum that allows for inheriting keys from a workspace in a Cargo.toml.",
       "anyOf": [
         {
@@ -524,7 +534,7 @@
       "type": "string",
       "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$"
     },
-    "InheritableField_for_Array_of_string": {
+    "InheritableField3": {
       "description": "An enum that allows for inheriting keys from a workspace in a Cargo.toml.",
       "anyOf": [
         {
@@ -540,24 +550,33 @@
         }
       ]
     },
-    "StringOrBool": {
+    "TomlPackageBuild": {
       "anyOf": [
         {
+          "description": "If build scripts are disabled or enabled.\nIf true, `build.rs` in the root folder will be the build script.",
+          "type": "boolean"
+        },
+        {
+          "description": "Path of Build Script if there's just one script.",
           "type": "string"
         },
         {
-          "type": "boolean"
+          "description": "Vector of paths if multiple build script are to be used.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       ]
     },
     "StringOrVec": {
-      "description": "This can be parsed from either a TOML string or array,\n but is always stored as a vector.",
+      "description": "This can be parsed from either a TOML string or array,\nbut is always stored as a vector.",
       "type": "array",
       "items": {
         "type": "string"
       }
     },
-    "InheritableField_for_VecStringOrBool": {
+    "InheritableField4": {
       "description": "An enum that allows for inheriting keys from a workspace in a Cargo.toml.",
       "anyOf": [
         {
@@ -583,7 +602,7 @@
         }
       ]
     },
-    "InheritableField_for_StringOrBool": {
+    "InheritableField5": {
       "description": "An enum that allows for inheriting keys from a workspace in a Cargo.toml.",
       "anyOf": [
         {
@@ -593,6 +612,16 @@
         {
           "description": "The type when inheriting from a workspace.",
           "$ref": "#/$defs/TomlInheritedField"
+        }
+      ]
+    },
+    "StringOrBool": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "boolean"
         }
       ]
     },
@@ -705,7 +734,7 @@
       "anyOf": [
         {
           "description": "The type that is used when not inheriting from a workspace.",
-          "$ref": "#/$defs/TomlDependency_for_string"
+          "$ref": "#/$defs/TomlDependency"
         },
         {
           "description": "The type when inheriting from a workspace.",
@@ -713,19 +742,19 @@
         }
       ]
     },
-    "TomlDependency_for_string": {
+    "TomlDependency": {
       "anyOf": [
         {
-          "description": "In the simple format, only a version is specified, eg.\n `package = \"<version>\"`",
+          "description": "In the simple format, only a version is specified, eg.\n`package = \"<version>\"`",
           "type": "string"
         },
         {
-          "description": "The simple format is equivalent to a detailed dependency\n specifying only a version, eg.\n `package = { version = \"<version>\" }`",
-          "$ref": "#/$defs/TomlDetailedDependency_for_string"
+          "description": "The simple format is equivalent to a detailed dependency\nspecifying only a version, eg.\n`package = { version = \"<version>\" }`",
+          "$ref": "#/$defs/TomlDetailedDependency"
         }
       ]
     },
-    "TomlDetailedDependency_for_string": {
+    "TomlDetailedDependency": {
       "type": "object",
       "properties": {
         "version": {
@@ -741,7 +770,7 @@
           ]
         },
         "registry-index": {
-          "description": "The URL of the `registry` field.\n This is an internal implementation detail. When Cargo creates a\n package, it replaces `registry` with `registry-index` so that the\n manifest contains the correct URL. All users won't have the same\n registry names configured, so Cargo can't rely on just the name for\n crates published by other users.",
+          "description": "The URL of the `registry` field.\nThis is an internal implementation detail. When Cargo creates a\npackage, it replaces `registry` with `registry-index` so that the\nmanifest contains the correct URL. All users won't have the same\nregistry names configured, so Cargo can't rely on just the name for\ncrates published by other users.",
           "type": [
             "string",
             "null"
@@ -998,6 +1027,21 @@
         "$ref": "#/$defs/TomlValue"
       }
     },
+    "Hints": {
+      "type": "object",
+      "properties": {
+        "mostly-unused": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TomlValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
     "TomlWorkspace": {
       "type": "object",
       "properties": {
@@ -1060,7 +1104,7 @@
             "null"
           ],
           "additionalProperties": {
-            "$ref": "#/$defs/TomlDependency_for_string"
+            "$ref": "#/$defs/TomlDependency"
           }
         },
         "lints": {
@@ -1081,12 +1125,6 @@
       "description": "A group of fields that are inheritable by members of the workspace",
       "type": "object",
       "properties": {
-        "description": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "version": {
           "anyOf": [
             {
@@ -1105,6 +1143,12 @@
           "items": {
             "type": "string"
           }
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "homepage": {
           "type": [
@@ -1408,6 +1452,9 @@
         "Limited",
         "Full"
       ]
+    },
+    "PackageIdSpec": {
+      "type": "string"
     },
     "TomlTrimPaths": {
       "anyOf": [

@@ -14,7 +14,8 @@ pub async fn handle_dashboard(ctxt: Arc<SiteCtxt>) -> ServerResult<dashboard::Re
 
     let mut versions = index
         .artifacts()
-        .filter(|a| a.starts_with("1.") || a.starts_with("beta"))
+        // Do not consider patch releases, only consider 1.XYZ.0
+        .filter(|a| (a.starts_with("1.") && a.ends_with(".0")) || a.starts_with("beta"))
         .collect::<Vec<_>>();
     versions.sort_by(|a, b| {
         match (
@@ -174,6 +175,7 @@ pub struct ByProfile<T> {
     pub check: T,
     pub debug: T,
     pub doc: T,
+    pub doc_json: T,
     pub opt: T,
     pub clippy: T,
 }
@@ -188,6 +190,7 @@ impl<T> ByProfile<T> {
             check: f(Profile::Check).await?,
             debug: f(Profile::Debug).await?,
             doc: f(Profile::Doc).await?,
+            doc_json: f(Profile::DocJson).await?,
             opt: f(Profile::Opt).await?,
             clippy: f(Profile::Clippy).await?,
         })
@@ -201,6 +204,7 @@ impl<T> std::ops::Index<Profile> for ByProfile<T> {
             Profile::Check => &self.check,
             Profile::Debug => &self.debug,
             Profile::Doc => &self.doc,
+            Profile::DocJson => &self.doc_json,
             Profile::Opt => &self.opt,
             Profile::Clippy => &self.clippy,
         }
