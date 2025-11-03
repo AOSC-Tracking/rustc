@@ -20,7 +20,13 @@
 
 #![allow(clippy::disallowed_methods)]
 
-use cargo_test_support::{Execs, basic_manifest, paths, project, rustc_host, str};
+use cargo_test_support::Execs;
+use cargo_test_support::basic_manifest;
+use cargo_test_support::paths;
+use cargo_test_support::project;
+use cargo_test_support::rustc_host;
+use cargo_test_support::str;
+use cargo_test_support::target_spec_json;
 use cargo_test_support::{Project, prelude::*};
 use std::env;
 use std::path::{Path, PathBuf};
@@ -262,20 +268,7 @@ fn cross_custom() {
         )
         .file("dep/Cargo.toml", &basic_manifest("dep", "0.1.0"))
         .file("dep/src/lib.rs", "#![no_std] pub fn answer() -> u32 { 42 }")
-        .file(
-            "custom-target.json",
-            r#"
-            {
-                "llvm-target": "x86_64-unknown-none-gnu",
-                "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
-                "arch": "x86_64",
-                "target-endian": "little",
-                "target-pointer-width": "64",
-                "os": "none",
-                "linker-flavor": "ld.lld"
-            }
-            "#,
-        )
+        .file("custom-target.json", target_spec_json())
         .build();
 
     p.cargo("build --target custom-target.json -v")
@@ -302,23 +295,7 @@ fn custom_test_framework() {
             }
             "#,
         )
-        .file(
-            "target.json",
-            r#"
-            {
-                "llvm-target": "x86_64-unknown-none-gnu",
-                "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
-                "arch": "x86_64",
-                "target-endian": "little",
-                "target-pointer-width": "64",
-                "os": "none",
-                "linker-flavor": "ld.lld",
-                "linker": "rust-lld",
-                "executables": true,
-                "panic-strategy": "abort"
-            }
-            "#,
-        )
+        .file("target.json", target_spec_json())
         .build();
 
     // This is a bit of a hack to use the rust-lld that ships with most toolchains.
@@ -375,7 +352,7 @@ fn remap_path_scope() {
 [FINISHED] `release` profile [optimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `target/[HOST_TARGET]/release/foo`
 ...
-[..]thread '[..]' panicked at [..]src/main.rs:3:[..]:
+[..]thread [..] panicked at [..]src/main.rs:3:[..]:
 [..]remap to /rustc/<hash>[..]
 [..]at /rustc/[..]/library/std/src/[..]
 [..]at ./src/main.rs:3:[..]
@@ -419,7 +396,9 @@ fn test_proc_macro() {
 }
 
 #[cargo_test(build_std_real)]
-fn test_panic_abort() {
+fn default_features_still_included_with_extra_build_std_features() {
+    // This is a regression test to ensure when adding extra `build-std-features`,
+    // the default feature set is still respected and included.
     // See rust-lang/cargo#14935
     let p = project()
         .file(
@@ -436,7 +415,7 @@ fn test_panic_abort() {
     p.cargo("check")
         .build_std_arg("std,panic_abort")
         .env("RUSTFLAGS", "-C panic=abort")
-        .arg("-Zbuild-std-features=panic_immediate_abort")
+        .arg("-Zbuild-std-features=optimize_for_size")
         .run();
 }
 

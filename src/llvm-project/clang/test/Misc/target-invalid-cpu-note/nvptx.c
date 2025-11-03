@@ -56,8 +56,6 @@
 // CHECK-SAME: {{^}}, gfx90a
 // CHECK-SAME: {{^}}, gfx90c
 // CHECK-SAME: {{^}}, gfx9-4-generic
-// CHECK-SAME: {{^}}, gfx940
-// CHECK-SAME: {{^}}, gfx941
 // CHECK-SAME: {{^}}, gfx942
 // CHECK-SAME: {{^}}, gfx950
 // CHECK-SAME: {{^}}, gfx10-1-generic
@@ -85,5 +83,6 @@
 // CHECK-SAME: {{^}}, gfx12-generic
 // CHECK-SAME: {{^}}, gfx1200
 // CHECK-SAME: {{^}}, gfx1201
+// CHECK-SAME: {{^}}, gfx1250
 // CHECK-SAME: {{^}}, amdgcnspirv
 // CHECK-SAME: {{$}}

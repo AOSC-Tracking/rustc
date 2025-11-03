@@ -650,9 +650,6 @@ impl GlobalContext {
     ///
     /// Callers should prefer [`Workspace::build_dir`] instead.
     pub fn build_dir(&self, workspace_manifest_path: &PathBuf) -> CargoResult<Option<Filesystem>> {
-        if !self.cli_unstable().build_dir {
-            return self.target_dir();
-        }
         if let Some(val) = &self.build_config()?.build_dir {
             let replacements = vec![
                 (
@@ -1025,7 +1022,7 @@ impl GlobalContext {
     }
 
     /// Internal method for getting an environment variable as a list.
-    /// If the key is a non-mergable list and a value is found in the environment, existing values are cleared.
+    /// If the key is a non-mergeable list and a value is found in the environment, existing values are cleared.
     fn get_env_list(
         &self,
         key: &ConfigKey,
@@ -1982,7 +1979,7 @@ impl GlobalContext {
         Ok(())
     }
 
-    /// Returns a list of [target.'`cfg()`'] tables.
+    /// Returns a list of `target.'cfg()'` tables.
     ///
     /// The list is sorted by the table name.
     pub fn target_cfgs(&self) -> CargoResult<&Vec<(String, TargetCfgConfig)>> {
@@ -2771,6 +2768,15 @@ pub struct CargoBuildConfig {
     pub warnings: Option<WarningHandling>,
     /// Unstable feature `-Zsbom`.
     pub sbom: Option<bool>,
+    /// Unstable feature `-Zbuild-analysis`.
+    pub analysis: Option<CargoBuildAnalysis>,
+}
+
+/// Metrics collection for build analysis.
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct CargoBuildAnalysis {
+    pub enabled: bool,
 }
 
 /// Whether warnings should warn, be allowed, or cause an error.

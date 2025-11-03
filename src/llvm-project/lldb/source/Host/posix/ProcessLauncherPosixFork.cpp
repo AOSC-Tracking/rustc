@@ -17,6 +17,7 @@
 #include "llvm/Support/Errno.h"
 
 #include <climits>
+#include <fcntl.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -122,8 +123,14 @@ struct ForkLaunchInfo {
         ExitWithError(error_fd, "close");
       break;
     case FileAction::eFileActionDuplicate:
-      if (dup2(action.fd, action.arg) == -1)
-        ExitWithError(error_fd, "dup2");
+      if (action.fd != action.arg) {
+        if (dup2(action.fd, action.arg) == -1)
+          ExitWithError(error_fd, "dup2");
+      } else {
+        if (fcntl(action.fd, F_SETFD,
+                  fcntl(action.fd, F_GETFD) & ~FD_CLOEXEC) == -1)
+          ExitWithError(error_fd, "fcntl");
+      }
       break;
     case FileAction::eFileActionOpen:
       DupDescriptor(error_fd, action.path.c_str(), action.fd, action.arg);
@@ -233,16 +240,6 @@ MakeForkActions(const ProcessLaunchInfo &info) {
   return result;
 }
 
-static Environment::Envp FixupEnvironment(Environment env) {
-#ifdef __ANDROID__
-  // If there is no PATH variable specified inside the environment then set the
-  // path to /system/bin. It is required because the default path used by
-  // execve() is wrong on android.
-  env.try_emplace("PATH", "/system/bin");
-#endif
-  return env.getEnvp();
-}
-
 ForkLaunchInfo::ForkLaunchInfo(const ProcessLaunchInfo &info)
     : separate_process_group(
           info.GetFlags().Test(eLaunchFlagLaunchInSeparateProcessGroup)),
@@ -251,16 +248,14 @@ ForkLaunchInfo::ForkLaunchInfo(const ProcessLaunchInfo &info)
       wd(info.GetWorkingDirectory().GetPath()),
       executable(info.GetExecutableFile().GetPath()),
       argv(info.GetArguments().GetConstArgumentVector()),
-      envp(FixupEnvironment(info.GetEnvironment())),
-      actions(MakeForkActions(info)) {}
+      envp(info.GetEnvironment().getEnvp()), actions(MakeForkActions(info)) {}
 
 HostProcess
 ProcessLauncherPosixFork::LaunchProcess(const ProcessLaunchInfo &launch_info,
                                         Status &error) {
   // A pipe used by the child process to report errors.
   PipePosix pipe;
-  const bool child_processes_inherit = false;
-  error = pipe.CreateNew(child_processes_inherit);
+  error = pipe.CreateNew();
   if (error.Fail())
     return HostProcess();
 

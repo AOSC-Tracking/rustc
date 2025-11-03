@@ -1,0 +1,36 @@
+[package]
+name = "stringdex"
+version = "0.0.2"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://gitlab.com/notriddle/stringdex"
+description = "A suffixtree search system for static sites"
+
+[features]
+quickcheck = []
+test_js = []
+
+[dependencies]
+stacker = "0.1.21"
+
+[dev-dependencies]
+criterion = "0.3"
+mutants = "0.0.3"
+quickcheck = "1.0.3"
+
+[profile.release]
+overflow-checks = true
+debug-assertions = true
+
+[[bench]]
+name = "tree_builder"
+harness = false
+
+[[bench]]
+name = "write_tree"
+harness = false
+
+[[example]]
+name = "dictionary"
+doc-scrape-examples = true
+

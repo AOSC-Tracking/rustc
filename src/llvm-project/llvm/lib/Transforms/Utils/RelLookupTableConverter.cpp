@@ -18,7 +18,6 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
-#include "llvm/TargetParser/Triple.h"
 
 using namespace llvm;
 
@@ -68,7 +67,7 @@ static bool shouldConvertToRelLookupTable(Module &M, GlobalVariable &GV) {
     return false;
 
   SmallVector<GlobalVariable *, 4> GVOps;
-  Triple TT(M.getTargetTriple());
+  Triple TT = M.getTargetTriple();
   // FIXME: This should be removed in the future.
   bool ShouldDropUnnamedAddr =
       // Drop unnamed_addr to avoid matching pattern in

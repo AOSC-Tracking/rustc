@@ -73,12 +73,39 @@ r[items.extern-crate.underscore.macro_use]
 The [`macro_use` attribute] works as usual and imports the macro names
 into the [`macro_use` prelude].
 
+<!-- template:attributes -->
 r[items.extern-crate.no_link]
 ## The `no_link` attribute
 
-The *`no_link` attribute* may be specified on an `extern crate` item to
-prevent linking the crate into the output. This is commonly used to load a
-crate to access only its macros.
+r[items.extern-crate.no_link.intro]
+The *`no_link` [attribute][attributes]* may be applied to an `extern crate` item to prevent linking the crate.
+
+> [!NOTE]
+> This is helpful, e.g., when only the macros of a crate are needed.
+
+> [!EXAMPLE]
+> <!-- ignore: requires external crates -->
+> ```rust,ignore
+> #[no_link]
+> extern crate other_crate;
+>
+> other_crate::some_macro!();
+> ```
+
+r[items.extern-crate.no_link.syntax]
+The `no_link` attribute uses the [MetaWord] syntax.
+
+r[items.extern-crate.no_link.allowed-positions]
+The `no_link` attribute may only be applied to an `extern crate` declaration.
+
+> [!NOTE]
+> `rustc` ignores use in other positions but lints against it. This may become an error in the future.
+
+r[items.extern-crate.no_link.duplicates]
+Only the first use of `no_link` on an `extern crate` declaration has effect.
+
+> [!NOTE]
+> `rustc` lints against any use following the first. This may become an error in the future.
 
 [identifier]: ../identifiers.md
 [RFC 940]: https://github.com/rust-lang/rfcs/blob/master/text/0940-hyphens-considered-harmful.md
@@ -87,17 +114,3 @@ crate to access only its macros.
 [`macro_use` prelude]: ../names/preludes.md#macro_use-prelude
 [`crate_name` attributes]: ../crates-and-source-files.md#the-crate_name-attribute
 [type namespace]: ../names/namespaces.md
-
-<script>
-(function() {
-    var fragments = {
-        "#extern-prelude": "../names/preludes.html#extern-prelude",
-    };
-    var target = fragments[window.location.hash];
-    if (target) {
-        var url = window.location.toString();
-        var base = url.substring(0, url.lastIndexOf('/'));
-        window.location.replace(base + "/" + target);
-    }
-})();
-</script>

@@ -1,6 +1,19 @@
 r[input]
 # Input format
 
+r[input.syntax]
+```grammar,lexer
+@root CHAR -> <a Unicode scalar value>
+
+NUL -> U+0000
+
+TAB -> U+0009
+
+LF -> U+000A
+
+CR -> U+000D
+```
+
 r[input.intro]
 This chapter describes how a source file is interpreted as a sequence of tokens.
 
@@ -24,6 +37,7 @@ r[input.crlf]
 ## CRLF normalization
 
 Each pair of characters `U+000D` (CR) immediately followed by `U+000A` (LF) is replaced by a single `U+000A` (LF).
+This happens once, not repeatedly, so after the normalization, there can still exist `U+000D` (CR) immediately followed by `U+000A` (LF) in the input (e.g. if the raw input contained "CR CR LF LF").
 
 Other occurrences of the character `U+000D` (CR) are left in place (they are treated as [whitespace]).
 

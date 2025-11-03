@@ -70,7 +70,8 @@ rustc-wrapper = "…"           # run this wrapper instead of `rustc`
 rustc-workspace-wrapper = "…" # run this wrapper instead of `rustc` for workspace members
 rustdoc = "rustdoc"           # the doc generator tool
 target = "triple"             # build for the target triple (ignored by `cargo install`)
-target-dir = "target"         # path of where to place all generated artifacts
+target-dir = "target"         # path of where to place generated artifacts
+build-dir = "target"          # path of where to place intermediate build artifacts
 rustflags = ["…", "…"]        # custom flags to pass to all compiler invocations
 rustdocflags = ["…", "…"]     # custom flags to pass to rustdoc
 incremental = true            # whether or not to enable incremental compilation
@@ -459,11 +460,10 @@ Sets the executable to use for `rustdoc`.
 
 The default [target platform triples][target triple] to compile to.
 
-This allows passing either a string or an array of strings. Each string value
-is a target platform triple. The selected build targets will be built for each
-of the selected architectures.
-
-The string value may also be a relative path to a `.json` target spec file.
+Possible values:
+- Any supported target in `rustc --print target-list`.
+- `"host-tuple"`, which will internally be substituted by the host's target. This can be particularly useful if you're cross-compiling some crates, and don't want to specify your host's machine as a target (for instance, an `xtask` in a shared project that may be worked on by many hosts).
+- A path to a custom target specification. See [Custom Target Lookup Path](../../rustc/targets/custom.html#custom-target-lookup-path) for more information.
 
 Can be overridden with the `--target` CLI option.
 
@@ -481,6 +481,26 @@ The path to where all compiler output is placed. The default if not specified
 is a directory named `target` located at the root of the workspace.
 
 Can be overridden with the `--target-dir` CLI option.
+
+For more information see the [build cache documentation](../reference/build-cache.md).
+
+#### `build.build-dir`
+
+* Type: string (path)
+* Default: Defaults to the value of `build.target-dir`
+* Environment: `CARGO_BUILD_BUILD_DIR`
+
+The directory where intermediate build artifacts will be stored.
+Intermediate artifacts are produced by Rustc/Cargo during the build process.
+
+This option supports path templating.
+
+Available template variables:
+* `{workspace-root}` resolves to root of the current workspace.
+* `{cargo-cache-home}` resolves to `CARGO_HOME`
+* `{workspace-path-hash}` resolves to a hash of the manifest path
+
+For more information see the [build cache documentation](../reference/build-cache.md).
 
 #### `build.rustflags`
 * Type: string or array of strings

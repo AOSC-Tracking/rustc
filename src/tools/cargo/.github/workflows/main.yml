@@ -102,7 +102,7 @@ jobs:
       - name: Install cargo-semver-checks
         run: |
           mkdir installed-bins
-          curl -Lf https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.42.0/cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz \
+          curl -Lf https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.43.0/cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz --directory=./installed-bins
           echo `pwd`/installed-bins >> $GITHUB_PATH
       - run: ci/validate-version-bump.sh
@@ -143,10 +143,6 @@ jobs:
           os: macos-14
           rust: stable
           other: x86_64-apple-darwin
-        - name: macOS x86_64 nightly
-          os: macos-13
-          rust: nightly
-          other: x86_64-apple-ios
         - name: macOS aarch64 nightly
           os: macos-14
           rust: nightly
@@ -157,6 +153,14 @@ jobs:
           other: i686-pc-windows-msvc
         - name: Windows x86_64 MSVC nightly
           os: windows-latest
+          rust: nightly-msvc
+          other: i686-pc-windows-msvc
+        - name: Windows aarch64 MSVC stable
+          os: windows-11-arm
+          rust: stable-msvc
+          other: i686-pc-windows-msvc
+        - name: Windows aarch64 MSVC nightly
+          os: windows-11-arm
           rust: nightly-msvc
           other: i686-pc-windows-msvc
         - name: Windows x86_64 gnu nightly # runs out of space while trying to link the test suite
@@ -187,6 +191,10 @@ jobs:
       shell: pwsh
       run: Add-Content $env:GITHUB_PATH "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64"
       if: matrix.os == 'windows-latest'
+    - name: Add Windows debuggers bin to PATH
+      shell: pwsh
+      run: Add-Content $env:GITHUB_PATH "C:\Program Files (x86)\Windows Kits\10\Debuggers\arm64"
+      if: matrix.os == 'windows-11-arm'
     - name: Configure extra test environment
       run: echo CARGO_CONTAINER_TESTS=1 >> $GITHUB_ENV
       if: matrix.os == 'ubuntu-latest'
@@ -268,6 +276,7 @@ jobs:
     - run: rustup update nightly && rustup default nightly
     - run: rustup update stable
     - run: rustup component add rust-docs
+    - run: rustup component add rustfmt --toolchain stable
     - run: ci/validate-man.sh
     # This requires rustfmt, use stable.
     - name: Run semver-check
@@ -279,7 +288,7 @@ jobs:
     - name: Install mdbook
       run: |
         mkdir mdbook
-        curl -Lf https://github.com/rust-lang/mdBook/releases/download/v0.4.44/mdbook-v0.4.44-x86_64-unknown-linux-gnu.tar.gz | tar -xz --directory=./mdbook
+        curl -Lf https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-unknown-linux-gnu.tar.gz | tar -xz --directory=./mdbook
         echo `pwd`/mdbook >> $GITHUB_PATH
     - run: cd src/doc && mdbook build --dest-dir ../../target/doc
     - name: Run linkchecker.sh

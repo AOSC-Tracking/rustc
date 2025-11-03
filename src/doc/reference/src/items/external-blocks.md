@@ -28,8 +28,8 @@ r[items.extern.allowed-kinds]
 Two kinds of item _declarations_ are allowed in external blocks: [functions] and
 [statics].
 
-r[items.extern.fn-safety]
-Calling functions or accessing statics that are declared in external blocks is only allowed in an `unsafe` context.
+r[items.extern.safety]
+Calling unsafe functions or accessing unsafe statics that are declared in external blocks is only allowed in an [`unsafe` context].
 
 r[items.extern.namespace]
 The external block defines its functions and statics in the [value namespace] of the module or block where it is located.
@@ -391,26 +391,38 @@ r[items.extern.attributes.link.import_name_type.platform-specific]
 The `import_name_type` key is only supported on x86 Windows. Using it when
 targeting other platforms will result in a compiler error.
 
+<!-- template:attributes -->
 r[items.extern.attributes.link_name]
 ### The `link_name` attribute
 
 r[items.extern.attributes.link_name.intro]
-The *`link_name` attribute* may be specified on declarations inside an `extern`
-block to indicate the symbol to import for the given function or static.
+The *`link_name` [attribute][attributes]* may be applied to declarations inside an `extern` block to specify the symbol to import for the given function or static.
+
+> [!EXAMPLE]
+> ```rust
+> unsafe extern "C" {
+>     #[link_name = "actual_symbol_name"]
+>     safe fn name_in_rust();
+> }
+> ```
 
 r[items.extern.attributes.link_name.syntax]
-It uses the [MetaNameValueStr] syntax to specify the name of the symbol.
+The `link_name` attribute uses the [MetaNameValueStr] syntax.
 
-```rust
-unsafe extern {
-    #[link_name = "actual_symbol_name"]
-    safe fn name_in_rust();
-}
-```
+r[items.extern.attributes.link_name.allowed-positions]
+The `link_name` attribute may only be applied to a function or static item in an `extern` block.
 
-r[items.extern.attributes.link_name.exclusive]
-Using this attribute with the `link_ordinal` attribute will result in a
-compiler error.
+> [!NOTE]
+> `rustc` ignores use in other positions but lints against it. This may become an error in the future.
+
+r[items.extern.attributes.link_name.duplicates]
+Only the last use of `link_name` on an item has effect.
+
+> [!NOTE]
+> `rustc` lints against any use preceding the last. This may become an error in the future.
+
+r[items.extern.attributes.link_name.link_ordinal]
+The `link_name` attribute may not be used with the [`link_ordinal`] attribute.
 
 r[items.extern.attributes.link_ordinal]
 ### The `link_ordinal` attribute
@@ -453,6 +465,7 @@ restrictions as [regular function parameters].
 [WebAssembly module]: https://webassembly.github.io/spec/core/syntax/modules.html
 [`bundle` documentation for rustc]: ../../rustc/command-line-arguments.html#linking-modifiers-bundle
 [`dylib` versus `raw-dylib`]: #dylib-versus-raw-dylib
+[`unsafe` context]: ../unsafe-keyword.md
 [`verbatim` documentation for rustc]: ../../rustc/command-line-arguments.html#linking-modifiers-verbatim
 [`whole-archive` documentation for rustc]: ../../rustc/command-line-arguments.html#linking-modifiers-whole-archive
 [attributes]: ../attributes.md
@@ -461,3 +474,4 @@ restrictions as [regular function parameters].
 [statics]: static-items.md
 [unwind-behavior]: functions.md#unwinding
 [value namespace]: ../names/namespaces.md
+[`link_ordinal`]: items.extern.attributes.link_ordinal

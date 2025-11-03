@@ -23,7 +23,6 @@
 #include "lld/Common/Version.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Config/llvm-config.h"
-#include "llvm/Object/Wasm.h"
 #include "llvm/Option/Arg.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Support/CommandLine.h"
@@ -318,10 +317,6 @@ void LinkerDriver::addFile(StringRef path) {
     if (inWholeArchive) {
       for (const auto &[m, offset] : members) {
         auto *object = createObjectFile(m, path, offset);
-        // Mark object as live; object members are normally not
-        // live by default but -whole-archive is designed to treat
-        // them as such.
-        object->markLive();
         files.push_back(object);
       }
 
@@ -584,6 +579,7 @@ static void readConfigs(opt::InputArgList &args) {
   ctx.arg.optimize = args::getInteger(args, OPT_O, 1);
   ctx.arg.outputFile = args.getLastArgValue(OPT_o);
   ctx.arg.relocatable = args.hasArg(OPT_relocatable);
+  ctx.arg.rpath = args::getStrings(args, OPT_rpath);
   ctx.arg.gcSections =
       args.hasFlag(OPT_gc_sections, OPT_no_gc_sections, !ctx.arg.relocatable);
   for (auto *arg : args.filtered(OPT_keep_section))
@@ -643,7 +639,10 @@ static void readConfigs(opt::InputArgList &args) {
   ctx.arg.maxMemory = args::getInteger(args, OPT_max_memory, 0);
   ctx.arg.noGrowableMemory = args.hasArg(OPT_no_growable_memory);
   ctx.arg.zStackSize =
-      args::getZOptionValue(args, OPT_z, "stack-size", WasmPageSize);
+      args::getZOptionValue(args, OPT_z, "stack-size", WasmDefaultPageSize);
+  ctx.arg.pageSize = args::getInteger(args, OPT_page_size, WasmDefaultPageSize);
+  if (ctx.arg.pageSize != 1 && ctx.arg.pageSize != WasmDefaultPageSize)
+    error("--page_size=N must be either 1 or 65536");
 
   // -Bdynamic by default if -pie or -shared is specified.
   if (ctx.arg.pie || ctx.arg.shared)
@@ -999,6 +998,10 @@ static void createOptionalSymbols() {
     ctx.sym.definedTableBase = symtab->addOptionalDataSymbol("__table_base");
   }
 
+  ctx.sym.firstPageEnd = symtab->addOptionalDataSymbol("__wasm_first_page_end");
+  if (ctx.sym.firstPageEnd)
+    ctx.sym.firstPageEnd->setVA(ctx.arg.pageSize);
+
   // For non-shared memory programs we still need to define __tls_base since we
   // allow object files built with TLS to be linked into single threaded
   // programs, and such object files can contain references to this symbol.
@@ -1223,9 +1226,9 @@ static void wrapSymbols(ArrayRef<WrappedSymbol> wrapped) {
   // Update pointers in input files.
   parallelForEach(ctx.objectFiles, [&](InputFile *file) {
     MutableArrayRef<Symbol *> syms = file->getMutableSymbols();
-    for (size_t i = 0, e = syms.size(); i != e; ++i)
-      if (Symbol *s = map.lookup(syms[i]))
-        syms[i] = s;
+    for (Symbol *&sym : syms)
+      if (Symbol *s = map.lookup(sym))
+        sym = s;
   });
 
   // Update pointers in the symbol table.

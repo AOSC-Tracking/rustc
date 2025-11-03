@@ -62,10 +62,7 @@ root, including through [paths] of public modules.
 
 ### Dispatch
 
-Dispatch is the mechanism to determine which specific version of code is actually
-run when it involves polymorphism. Two major forms of dispatch are static dispatch and
-dynamic dispatch. While Rust favors static dispatch, it also supports dynamic dispatch
-through a mechanism called ‘trait objects’.
+Dispatch is the mechanism to determine which specific version of code is actually run when it involves polymorphism. Two major forms of dispatch are static dispatch and dynamic dispatch. Rust supports dynamic dispatch through the use of [trait objects][type.trait-object].
 
 ### Dynamically sized type
 
@@ -331,17 +328,3 @@ example of an uninhabited type is the [never type] `!`, or an enum with no varia
 [unions]: items/unions.md
 [variable bindings]: patterns.md
 [visibility rules]: visibility-and-privacy.md
-
-<script>
-(function() {
-    var fragments = {
-        "#object-safe-traits": "glossary.html#dyn-compatible-traits",
-    };
-    var target = fragments[window.location.hash];
-    if (target) {
-        var url = window.location.toString();
-        var base = url.substring(0, url.lastIndexOf('/'));
-        window.location.replace(base + "/" + target);
-    }
-})();
-</script>

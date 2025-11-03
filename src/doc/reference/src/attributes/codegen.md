@@ -3,48 +3,121 @@ r[attributes.codegen]
 
 The following [attributes] are used for controlling code generation.
 
-r[attributes.codegen.hint]
-## Optimization hints
-
-r[attributes.codegen.hint.cold-inline]
-The `cold` and `inline` [attributes] give suggestions to generate code in a
-way that may be faster than what it would do without the hint. The attributes
-are only hints, and may be ignored.
-
-r[attributes.codegen.hint.usage]
-Both attributes can be used on [functions]. When applied to a function in a
-[trait], they apply only to that function when used as a default function for
-a trait implementation and not to all trait implementations. The attributes
-have no effect on a trait function without a body.
-
+<!-- template:attributes -->
 r[attributes.codegen.inline]
 ### The `inline` attribute
 
 r[attributes.codegen.inline.intro]
-The *`inline` [attribute]* suggests that a copy of the attributed function
-should be placed in the caller, rather than generating code to call the
-function where it is defined.
+The *`inline` [attribute]* suggests whether a copy of the attributed function's code should be placed in the caller rather than generating a call to the function.
+
+> [!EXAMPLE]
+> ```rust
+> #[inline]
+> pub fn example1() {}
+>
+> #[inline(always)]
+> pub fn example2() {}
+>
+> #[inline(never)]
+> pub fn example3() {}
+> ```
 
 > [!NOTE]
-> The `rustc` compiler automatically inlines functions based on internal heuristics. Incorrectly inlining functions can make the program slower, so this attribute should be used with care.
+> `rustc` automatically inlines functions when doing so seems worthwhile. Use this attribute carefully as poor decisions about what to inline can slow down programs.
+
+r[attributes.codegen.inline.syntax]
+The syntax for the `inline` attribute is:
+
+```grammar,attributes
+@root InlineAttribute ->
+      `inline` `(` `always` `)`
+    | `inline` `(` `never` `)`
+    | `inline`
+```
+
+r[attributes.codegen.inline.allowed-positions]
+The `inline` attribute may only be applied to functions with [bodies] --- [closures], [async blocks], [free functions], [associated functions] in an [inherent impl] or [trait impl], and associated functions in a [trait definition] when those functions have a [default definition] .
+
+> [!NOTE]
+> `rustc` ignores use in other positions but lints against it. This may become an error in the future.
+
+> [!NOTE]
+> Though the attribute can be applied to [closures] and [async blocks], the usefulness of this is limited as we do not yet support attributes on expressions.
+>
+> ```rust
+> // We allow attributes on statements.
+> #[inline] || (); // OK
+> #[inline] async {}; // OK
+> ```
+>
+> ```rust,compile_fail,E0658
+> // We don't yet allow attributes on expressions.
+> let f = #[inline] || (); // ERROR
+> ```
+
+r[attributes.codegen.inline.duplicates]
+Only the first use of `inline` on a function has effect.
+
+> [!NOTE]
+> `rustc` lints against any use following the first. This may become an error in the future.
 
 r[attributes.codegen.inline.modes]
-There are three ways to use the inline attribute:
+The `inline` attribute supports these modes:
 
-* `#[inline]` *suggests* performing an inline expansion.
-* `#[inline(always)]` *suggests* that an inline expansion should always be
-  performed.
-* `#[inline(never)]` *suggests* that an inline expansion should never be
-  performed.
+- `#[inline]` *suggests* performing inline expansion.
+- `#[inline(always)]` *suggests* that inline expansion should always be performed.
+- `#[inline(never)]` *suggests* that inline expansion should never be performed.
 
 > [!NOTE]
-> `#[inline]` in every form is a hint, with no *requirements* on the language to place a copy of the attributed function in the caller.
+> In every form the attribute is a hint. The compiler may ignore it.
 
+r[attributes.codegen.inline.trait]
+When `inline` is applied to a function in a [trait], it applies only to the code of the [default definition].
+
+r[attributes.codegen.inline.async]
+When `inline` is applied to an [async function] or [async closure], it applies only to the code of the generated `poll` function.
+
+> [!NOTE]
+> For more details, see [Rust issue #129347](https://github.com/rust-lang/rust/issues/129347).
+
+r[attributes.codegen.inline.externally-exported]
+The `inline` attribute is ignored if the function is externally exported with [`no_mangle`] or [`export_name`].
+
+<!-- template:attributes -->
 r[attributes.codegen.cold]
 ### The `cold` attribute
 
-The *`cold` [attribute]* suggests that the attributed function is unlikely to
-be called.
+r[attributes.codegen.cold.intro]
+The *`cold` [attribute]* suggests that the attributed function is unlikely to be called which may help the compiler produce better code.
+
+> [!EXAMPLE]
+> ```rust
+> #[cold]
+> pub fn example() {}
+> ```
+
+r[attributes.codegen.cold.syntax]
+The `cold` attribute uses the [MetaWord] syntax.
+
+r[attributes.codegen.cold.allowed-positions]
+The `cold` attribute may only be applied to functions with [bodies] --- [closures], [async blocks], [free functions], [associated functions] in an [inherent impl] or [trait impl], and associated functions in a [trait definition] when those functions have a [default definition] .
+
+> [!NOTE]
+> `rustc` ignores use in other positions but lints against it. This may become an error in the future.
+
+> [!NOTE]
+> Though the attribute can be applied to [closures] and [async blocks], the usefulness of this is limited as we do not yet support attributes on expressions.
+
+<!-- TODO: rustc currently seems to allow cold on a trait function without a body, but it appears to be ignored. I think that may be a bug, and it should at least warn if not reject (like inline does). -->
+
+r[attributes.codegen.cold.duplicates]
+Only the first use of `cold` on a function has effect.
+
+> [!NOTE]
+> `rustc` lints against any use following the first. This may become an error in the future.
+
+r[attributes.codegen.cold.trait]
+When `cold` is applied to a function in a [trait], it applies only to the code of the [default definition].
 
 r[attributes.codegen.naked]
 ## The `naked` attribute
@@ -82,12 +155,31 @@ The [`track_caller`](#the-track_caller-attribute) attribute cannot be applied to
 r[attributes.codegen.naked.testing]
 The [testing attributes](testing.md) cannot be applied to a naked function.
 
+<!-- template:attributes -->
 r[attributes.codegen.no_builtins]
 ## The `no_builtins` attribute
 
-The *`no_builtins` [attribute]* may be applied at the crate level to disable
-optimizing certain code patterns to invocations of library functions that are
-assumed to exist.
+r[attributes.codegen.no_builtins.intro]
+The *`no_builtins` [attribute]* disables optimization of certain code patterns related to calls to library functions that are assumed to exist.
+
+<!-- TODO: This needs expanding, see <https://github.com/rust-lang/reference/issues/542>. -->
+
+> [!EXAMPLE]
+> ```rust
+> #![no_builtins]
+> ```
+
+r[attributes.codegen.no_builtins.syntax]
+The `no_builtins` attribute uses the [MetaWord] syntax.
+
+r[attributes.codegen.no_builtins.allowed-positions]
+The `no_builtins` attribute can only be applied to the crate root.
+
+r[attributes.codegen.no_builtins.duplicates]
+Only the first use of the `no_builtins` attribute has effect.
+
+> [!NOTE]
+> `rustc` lints against any use following the first.
 
 r[attributes.codegen.target_feature]
 ## The `target_feature` attribute
@@ -233,7 +325,9 @@ Feature     | Implicitly Enables | Description
 `sse3`      | `sse2`   | [SSE3] --- Streaming SIMD Extensions 3
 `sse4.1`    | `ssse3`  | [SSE4.1] --- Streaming SIMD Extensions 4.1
 `sse4.2`    | `sse4.1` | [SSE4.2] --- Streaming SIMD Extensions 4.2
+`sse4a`     | `sse3`   | [SSE4a] --- Streaming SIMD Extensions 4a
 `ssse3`     | `sse3`   | [SSSE3] --- Supplemental Streaming SIMD Extensions 3
+`tbm`       |          | [TBM] --- Trailing Bit Manipulation
 `vaes`      | `avx2`, `aes`     | [VAES] --- Vector AES Instructions
 `vpclmulqdq`| `avx`, `pclmulqdq`| [VPCLMULQDQ] --- Vector Carry-less multiplication of Quadwords
 `widekl`    | `kl`     | [KEYLOCKER_WIDE] --- Intel Wide Keylocker Instructions
@@ -292,7 +386,9 @@ Feature     | Implicitly Enables | Description
 [SSE3]: https://en.wikipedia.org/wiki/SSE3
 [SSE4.1]: https://en.wikipedia.org/wiki/SSE4#SSE4.1
 [SSE4.2]: https://en.wikipedia.org/wiki/SSE4#SSE4.2
+[SSE4a]: https://en.wikipedia.org/wiki/SSE4#SSE4a
 [SSSE3]: https://en.wikipedia.org/wiki/SSSE3
+[TBM]: https://en.wikipedia.org/wiki/X86_Bit_manipulation_instruction_set#TBM_(Trailing_Bit_Manipulation)
 [VAES]: https://en.wikipedia.org/wiki/AVX-512#VAES
 [VPCLMULQDQ]: https://en.wikipedia.org/wiki/AVX-512#VPCLMULQDQ
 [`xsave`]: https://www.felixcloutier.com/x86/xsave
@@ -611,56 +707,84 @@ trait object whose methods are attributed.
 > [!NOTE]
 > The aforementioned shim for function pointers is necessary because `rustc` implements `track_caller` in a codegen context by appending an implicit parameter to the function ABI, but this would be unsound for an indirect call because the parameter is not a part of the function's type and a given function pointer type may or may not refer to a function with the attribute. The creation of a shim hides the implicit parameter from callers of the function pointer, preserving soundness.
 
+<!-- template:attributes -->
 r[attributes.codegen.instruction_set]
 ## The `instruction_set` attribute
 
-r[attributes.codegen.instruction_set.allowed-positions]
-The *`instruction_set` [attribute]* may be applied to a function to control which instruction set the function will be generated for.
+r[attributes.codegen.instruction_set.intro]
+The *`instruction_set` [attribute]* specifies the instruction set that a function will use during code generation. This allows mixing more than one instruction set in a single program.
 
-r[attributes.codegen.instruction_set.behavior]
-This allows mixing more than one instruction set in a single program on CPU architectures that support it.
+> [!EXAMPLE]
+> <!-- ignore: arm-only -->
+> ```rust,ignore
+> #[instruction_set(arm::a32)]
+> fn arm_code() {}
+>
+> #[instruction_set(arm::t32)]
+> fn thumb_code() {}
+> ```
 
 r[attributes.codegen.instruction_set.syntax]
-It uses the [MetaListPaths] syntax, and a path comprised of the architecture family name and instruction set name.
+The `instruction_set` attribute uses the [MetaListPaths] syntax to specify a single path consisting of the architecture family name and instruction set name.
+
+r[attributes.codegen.instruction_set.allowed-positions]
+The `instruction_set` attribute may only be applied to functions with [bodies] --- [closures], [async blocks], [free functions], [associated functions] in an [inherent impl] or [trait impl], and associated functions in a [trait definition] when those functions have a [default definition] .
+
+> [!NOTE]
+> `rustc` ignores use in other positions but lints against it. This may become an error in the future.
+
+> [!NOTE]
+> Though the attribute can be applied to [closures] and [async blocks], the usefulness of this is limited as we do not yet support attributes on expressions.
+
+r[attributes.codegen.instruction_set.duplicates]
+The `instruction_set` attribute may be used only once on a function.
 
 r[attributes.codegen.instruction_set.target-limits]
-It is a compilation error to use the `instruction_set` attribute on a target that does not support it.
+The `instruction_set` attribute may only be used with a target that supports the given value.
+
+r[attributes.codegen.instruction_set.inline-asm]
+When the `instruction_set` attribute is used, any inline assembly in the function must use the specified instruction set instead of the target default.
 
 r[attributes.codegen.instruction_set.arm]
-### On ARM
+### `instruction_set` on ARM
 
-For the `ARMv4T` and `ARMv5te` architectures, the following are supported:
-* `arm::a32` --- Generate the function as A32 "ARM" code.
-* `arm::t32` --- Generate the function as T32 "Thumb" code.
+When targeting the `ARMv4T` and `ARMv5te` architectures, the supported values for `instruction_set` are:
 
-<!-- ignore: arm-only -->
-```rust,ignore
-#[instruction_set(arm::a32)]
-fn foo_arm_code() {}
+- `arm::a32` --- Generate the function as A32 "ARM" code.
+- `arm::t32` --- Generate the function as T32 "Thumb" code.
 
-#[instruction_set(arm::t32)]
-fn bar_thumb_code() {}
-```
+If the address of the function is taken as a function pointer, the low bit of the address will depend on the selected instruction set:
 
-Using the `instruction_set` attribute has the following effects:
-
-* If the address of the function is taken as a function pointer, the low bit of the address will be set to 0 (arm) or 1 (thumb) depending on the instruction set.
-* Any inline assembly in the function must use the specified instruction set instead of the target default.
+- For `arm::a32` ("ARM"), it will be 0.
+- For `arm::t32` ("Thumb"), it will be 1.
 
 [`-C target-cpu`]: ../../rustc/codegen-options/index.html#target-cpu
 [`-C target-feature`]: ../../rustc/codegen-options/index.html#target-feature
+[`export_name`]: abi.export_name
 [`is_aarch64_feature_detected`]: ../../std/arch/macro.is_aarch64_feature_detected.html
 [`is_x86_feature_detected`]: ../../std/arch/macro.is_x86_feature_detected.html
 [`Location`]: core::panic::Location
 [`naked_asm!`]: ../inline-assembly.md
+[`no_mangle`]: abi.no_mangle
 [`target_feature` conditional compilation option]: ../conditional-compilation.md#target_feature
 [`unused_variables`]: ../../rustc/lints/listing/warn-by-default.html#unused-variables
+[associated functions]: items.associated.fn
+[async blocks]: expr.block.async
+[async closure]: expr.closure.async
+[async function]: items.fn.async
 [attribute]: ../attributes.md
 [attributes]: ../attributes.md
+[bodies]: items.fn.body
+[closures]: expr.closure
+[default definition]: items.traits.associated-item-decls
+[free functions]: items.fn
 [function body]: ../items/functions.md#function-body
 [functions]: ../items/functions.md
+[inherent impl]: items.impl.inherent
 [rust-abi]: ../items/external-blocks.md#abi
 [target architecture]: ../conditional-compilation.md#target_arch
-[trait]: ../items/traits.md
+[trait]: items.traits
+[trait definition]: items.traits
+[trait impl]: items.impl.trait
 [undefined behavior]: ../behavior-considered-undefined.md
 [unsafe attribute]: ../attributes.md#r-attributes.safety

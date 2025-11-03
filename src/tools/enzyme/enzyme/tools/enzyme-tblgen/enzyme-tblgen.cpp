@@ -1792,6 +1792,8 @@ static void emitReverseCommon(raw_ostream &os, const Record *pattern,
     os << "        }\n";
 
   if (intrinsic == MLIRDerivatives) {
+    os << "          if (gutils->isConstantInstruction(op) || "
+          "gutils->isConstantValue(op->getResult(0))) return success();\n";
     os << "   SmallVector<Value> operands(op->getNumOperands(), nullptr);\n";
     os << "          auto neededArgs = cachedArguments(op, gutils);\n";
     os << "          size_t count = 0;\n";

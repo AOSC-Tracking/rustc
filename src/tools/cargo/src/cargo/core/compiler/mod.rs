@@ -90,6 +90,7 @@ use self::output_depinfo::output_depinfo;
 use self::output_sbom::build_sbom;
 use self::unit_graph::UnitDep;
 use crate::core::compiler::future_incompat::FutureIncompatReport;
+use crate::core::compiler::timings::SectionTiming;
 pub use crate::core::compiler::unit::{Unit, UnitInterner};
 use crate::core::manifest::TargetSourcePath;
 use crate::core::profiles::{PanicStrategy, Profile, StripInner};
@@ -104,6 +105,7 @@ use cargo_util_schemas::manifest::TomlDebugInfo;
 use cargo_util_schemas::manifest::TomlTrimPaths;
 use cargo_util_schemas::manifest::TomlTrimPathsValue;
 use rustfix::diagnostics::Applicability;
+pub(crate) use timings::CompilationSection;
 
 const RUSTDOC_CRATE_VERSION_FLAG: &str = "--crate-version";
 
@@ -181,7 +183,7 @@ fn compile<'gctx>(
     }
 
     // If we are in `--compile-time-deps` and the given unit is not a compile time
-    // dependency, skip compling the unit and jumps to dependencies, which still
+    // dependency, skip compiling the unit and jumps to dependencies, which still
     // have chances to be compile time dependencies
     if !unit.skip_non_compile_time_dep {
         // Build up the work to be done to compile this unit, enqueuing it once
@@ -1095,6 +1097,12 @@ fn add_allow_features(build_runner: &BuildRunner<'_, '_>, cmd: &mut ProcessBuild
 ///
 /// [`--error-format`]: https://doc.rust-lang.org/nightly/rustc/command-line-arguments.html#--error-format-control-how-errors-are-produced
 fn add_error_format_and_color(build_runner: &BuildRunner<'_, '_>, cmd: &mut ProcessBuilder) {
+    let enable_timings = build_runner.bcx.gctx.cli_unstable().section_timings
+        && !build_runner.bcx.build_config.timing_outputs.is_empty();
+    if enable_timings {
+        cmd.arg("-Zunstable-options");
+    }
+
     cmd.arg("--error-format=json");
     let mut json = String::from("--json=diagnostic-rendered-ansi,artifacts,future-incompat");
 
@@ -1104,6 +1112,11 @@ fn add_error_format_and_color(build_runner: &BuildRunner<'_, '_>, cmd: &mut Proc
         }
         _ => {}
     }
+
+    if enable_timings {
+        json.push_str(",timings");
+    }
+
     cmd.arg(json);
 
     let gctx = build_runner.bcx.gctx;
@@ -1602,7 +1615,7 @@ fn check_cfg_args(unit: &Unit) -> Vec<OsString> {
     arg_feature.push("))");
 
     // In addition to the package features, we also include the `test` cfg (since
-    // compiler-team#785, as to be able to someday apply yt conditionally), as well
+    // compiler-team#785, as to be able to someday apply it conditionally), as well
     // the `docsrs` cfg from the docs.rs service.
     //
     // We include `docsrs` here (in Cargo) instead of rustc, since there is a much closer
@@ -1955,6 +1968,12 @@ fn on_stderr_line_inner(
         }
         state.future_incompat_report(report.future_incompat_report);
         return Ok(true);
+    }
+
+    let res = serde_json::from_str::<SectionTiming>(compiler_message.get());
+    if let Ok(timing_record) = res {
+        state.on_section_timing_emitted(timing_record);
+        return Ok(false);
     }
 
     // Depending on what we're emitting from Cargo itself, we figure out what to

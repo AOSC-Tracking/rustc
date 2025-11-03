@@ -21,24 +21,19 @@
 #include "lld/Common/CommonLinkerContext.h"
 #include "lld/Common/Strings.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/BinaryFormat/Wasm.h"
-#include "llvm/BinaryFormat/WasmTraits.h"
 #include "llvm/Support/FileOutputBuffer.h"
-#include "llvm/Support/Format.h"
 #include "llvm/Support/FormatVariadic.h"
-#include "llvm/Support/LEB128.h"
 #include "llvm/Support/Parallel.h"
 #include "llvm/Support/RandomNumberGenerator.h"
 #include "llvm/Support/SHA1.h"
 #include "llvm/Support/xxhash.h"
 
 #include <cstdarg>
-#include <map>
 #include <optional>
 
 #define DEBUG_TYPE "lld"
@@ -320,6 +315,12 @@ static void setGlobalPtr(DefinedGlobal *g, uint64_t memoryPtr) {
   g->global->setPointerValue(memoryPtr);
 }
 
+static void checkPageAligned(StringRef name, uint64_t value) {
+  if (value != alignTo(value, ctx.arg.pageSize))
+    error(name + " must be aligned to the page size (" +
+          Twine(ctx.arg.pageSize) + " bytes)");
+}
+
 // Fix the memory layout of the output binary.  This assigns memory offsets
 // to each of the input data sections as well as the explicit stack region.
 // The default memory layout is as follows, from low to high.
@@ -445,8 +446,7 @@ void Writer::layoutMemory() {
   }
 
   if (ctx.arg.initialHeap != 0) {
-    if (ctx.arg.initialHeap != alignTo(ctx.arg.initialHeap, WasmPageSize))
-      error("initial heap must be " + Twine(WasmPageSize) + "-byte aligned");
+    checkPageAligned("initial heap", ctx.arg.initialHeap);
     uint64_t maxInitialHeap = maxMemorySetting - memoryPtr;
     if (ctx.arg.initialHeap > maxInitialHeap)
       error("initial heap too large, cannot be greater than " +
@@ -455,8 +455,7 @@ void Writer::layoutMemory() {
   }
 
   if (ctx.arg.initialMemory != 0) {
-    if (ctx.arg.initialMemory != alignTo(ctx.arg.initialMemory, WasmPageSize))
-      error("initial memory must be " + Twine(WasmPageSize) + "-byte aligned");
+    checkPageAligned("initial memory", ctx.arg.initialMemory);
     if (memoryPtr > ctx.arg.initialMemory)
       error("initial memory too small, " + Twine(memoryPtr) + " bytes needed");
     if (ctx.arg.initialMemory > maxMemorySetting)
@@ -465,9 +464,9 @@ void Writer::layoutMemory() {
     memoryPtr = ctx.arg.initialMemory;
   }
 
-  memoryPtr = alignTo(memoryPtr, WasmPageSize);
+  memoryPtr = alignTo(memoryPtr, ctx.arg.pageSize);
 
-  out.memorySec->numMemoryPages = memoryPtr / WasmPageSize;
+  out.memorySec->numMemoryPages = memoryPtr / ctx.arg.pageSize;
   log("mem: total pages = " + Twine(out.memorySec->numMemoryPages));
 
   if (ctx.sym.heapEnd) {
@@ -480,8 +479,7 @@ void Writer::layoutMemory() {
 
   uint64_t maxMemory = 0;
   if (ctx.arg.maxMemory != 0) {
-    if (ctx.arg.maxMemory != alignTo(ctx.arg.maxMemory, WasmPageSize))
-      error("maximum memory must be " + Twine(WasmPageSize) + "-byte aligned");
+    checkPageAligned("maximum memory", ctx.arg.maxMemory);
     if (memoryPtr > ctx.arg.maxMemory)
       error("maximum memory too small, " + Twine(memoryPtr) + " bytes needed");
     if (ctx.arg.maxMemory > maxMemorySetting)
@@ -503,7 +501,7 @@ void Writer::layoutMemory() {
   }
 
   if (maxMemory != 0) {
-    out.memorySec->maxMemoryPages = maxMemory / WasmPageSize;
+    out.memorySec->maxMemoryPages = maxMemory / ctx.arg.pageSize;
     log("mem: max pages   = " + Twine(out.memorySec->maxMemoryPages));
   }
 }
@@ -585,7 +583,7 @@ void Writer::populateTargetFeatures() {
 
   if (ctx.arg.extraFeatures.has_value()) {
     auto &extraFeatures = *ctx.arg.extraFeatures;
-    allowed.insert(extraFeatures.begin(), extraFeatures.end());
+    allowed.insert_range(extraFeatures);
   }
 
   // Only infer used features if user did not specify features
@@ -593,7 +591,7 @@ void Writer::populateTargetFeatures() {
 
   if (!inferFeatures) {
     auto &explicitFeatures = *ctx.arg.features;
-    allowed.insert(explicitFeatures.begin(), explicitFeatures.end());
+    allowed.insert_range(explicitFeatures);
     if (!ctx.arg.checkFeatures)
       goto done;
   }
@@ -932,7 +930,7 @@ static void finalizeIndirectFunctionTable() {
   }
 
   uint32_t tableSize = ctx.arg.tableBase + out.elemSec->numEntries();
-  WasmLimits limits = {0, tableSize, 0};
+  WasmLimits limits = {0, tableSize, 0, 0};
   if (ctx.sym.indirectFunctionTable->isDefined() && !ctx.arg.growableTable) {
     limits.Flags |= WASM_LIMITS_FLAG_HAS_MAX;
     limits.Maximum = limits.Minimum;
@@ -1047,18 +1045,18 @@ void Writer::createOutputSegments() {
   }
 
   // Sort segments by type, placing .bss last
-  std::stable_sort(segments.begin(), segments.end(),
-                   [](const OutputSegment *a, const OutputSegment *b) {
-                     auto order = [](StringRef name) {
-                       return StringSwitch<int>(name)
-                           .StartsWith(".tdata", 0)
-                           .StartsWith(".rodata", 1)
-                           .StartsWith(".data", 2)
-                           .StartsWith(".bss", 4)
-                           .Default(3);
-                     };
-                     return order(a->name) < order(b->name);
-                   });
+  llvm::stable_sort(segments,
+                    [](const OutputSegment *a, const OutputSegment *b) {
+                      auto order = [](StringRef name) {
+                        return StringSwitch<int>(name)
+                            .StartsWith(".tdata", 0)
+                            .StartsWith(".rodata", 1)
+                            .StartsWith(".data", 2)
+                            .StartsWith(".bss", 4)
+                            .Default(3);
+                      };
+                      return order(a->name) < order(b->name);
+                    });
 
   for (size_t i = 0; i < segments.size(); ++i)
     segments[i]->index = i;
@@ -1081,7 +1079,12 @@ void Writer::combineOutputSegments() {
     return;
   OutputSegment *combined = make<OutputSegment>(".data");
   combined->startVA = segments[0]->startVA;
+  std::vector<OutputSegment *> newSegments = {combined};
   for (OutputSegment *s : segments) {
+    if (!s->requiredInBinary()) {
+      newSegments.push_back(s);
+      continue;
+    }
     bool first = true;
     for (InputChunk *inSeg : s->inputSegments) {
       if (first)
@@ -1100,7 +1103,7 @@ void Writer::combineOutputSegments() {
     }
   }
 
-  segments = {combined};
+  segments = newSegments;
 }
 
 static void createFunction(DefinedFunction *func, StringRef bodyContent) {

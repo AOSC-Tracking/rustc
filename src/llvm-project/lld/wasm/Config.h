@@ -99,6 +99,7 @@ struct Config {
   // runtime).
   uint64_t tableBase;
   uint64_t zStackSize;
+  uint64_t pageSize;
   unsigned ltoPartitions;
   unsigned ltoo;
   llvm::CodeGenOptLevel ltoCgo;
@@ -125,6 +126,7 @@ struct Config {
   llvm::StringSet<> exportedSymbols;
   std::vector<llvm::StringRef> requiredExports;
   llvm::SmallVector<llvm::StringRef, 0> searchPaths;
+  llvm::SmallVector<llvm::StringRef, 0> rpath;
   llvm::CachePruningPolicy thinLTOCachePolicy;
   std::optional<std::vector<std::string>> features;
   std::optional<std::vector<std::string>> extraFeatures;
@@ -183,6 +185,10 @@ struct Ctx {
     // implementations.
     DefinedData *heapBase;
     DefinedData *heapEnd;
+
+    // __wasm_first_page_end
+    // A symbol whose address is the end of the first page in memory (if any).
+    DefinedData *firstPageEnd;
 
     // __wasm_init_memory_flag
     // Symbol whose contents are nonzero iff memory has already been

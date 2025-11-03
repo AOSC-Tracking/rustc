@@ -16,6 +16,7 @@
 #include "InputElement.h"
 #include "OutputSegment.h"
 #include "SymbolTable.h"
+#include "llvm/BinaryFormat/Wasm.h"
 #include "llvm/Support/Path.h"
 #include <optional>
 
@@ -131,6 +132,14 @@ void DylinkSection::writeBody() {
       writeUleb128(sub.os, sym->flags, "sym flags");
     }
 
+    sub.writeTo(os);
+  }
+
+  if (!ctx.arg.rpath.empty()) {
+    SubSection sub(WASM_DYLINK_RUNTIME_PATH);
+    writeUleb128(sub.os, ctx.arg.rpath.size(), "num rpath entries");
+    for (const auto ref : ctx.arg.rpath)
+      writeStr(sub.os, ref, "rpath entry");
     sub.writeTo(os);
   }
 }
@@ -249,6 +258,10 @@ void ImportSection::writeBody() {
       import.Memory.Flags |= WASM_LIMITS_FLAG_IS_SHARED;
     if (is64)
       import.Memory.Flags |= WASM_LIMITS_FLAG_IS_64;
+    if (ctx.arg.pageSize != WasmDefaultPageSize) {
+      import.Memory.Flags |= WASM_LIMITS_FLAG_HAS_PAGE_SIZE;
+      import.Memory.PageSize = ctx.arg.pageSize;
+    }
     writeImport(os, import);
   }
 
@@ -360,10 +373,14 @@ void MemorySection::writeBody() {
     flags |= WASM_LIMITS_FLAG_IS_SHARED;
   if (ctx.arg.is64.value_or(false))
     flags |= WASM_LIMITS_FLAG_IS_64;
+  if (ctx.arg.pageSize != WasmDefaultPageSize)
+    flags |= WASM_LIMITS_FLAG_HAS_PAGE_SIZE;
   writeUleb128(os, flags, "memory limits flags");
   writeUleb128(os, numMemoryPages, "initial pages");
   if (hasMax)
     writeUleb128(os, maxMemoryPages, "max pages");
+  if (ctx.arg.pageSize != WasmDefaultPageSize)
+    writeUleb128(os, llvm::Log2_64(ctx.arg.pageSize), "page size");
 }
 
 void TagSection::writeBody() {

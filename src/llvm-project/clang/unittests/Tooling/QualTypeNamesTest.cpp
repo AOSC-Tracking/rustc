@@ -304,14 +304,14 @@ TEST(QualTypeNameTest, TemplatedClass) {
   // argument directly.
   TemplateArgument Args1[] = {
       {Context, llvm::APSInt::getUnsigned(1u), Context.UnsignedIntTy}};
-  QualType A1TemplateSpecTy =
-      Context.getTemplateSpecializationType(TemplateName(A), Args1, A1RecordTy);
+  QualType A1TemplateSpecTy = Context.getTemplateSpecializationType(
+      TemplateName(A), Args1, Args1, A1RecordTy);
   EXPECT_EQ(A1TemplateSpecTy.getAsString(), "A<1>");
 
   TemplateArgument Args2[] = {
       {Context, llvm::APSInt::getUnsigned(2u), Context.UnsignedIntTy}};
-  QualType A2TemplateSpecTy =
-      Context.getTemplateSpecializationType(TemplateName(A), Args2, A2RecordTy);
+  QualType A2TemplateSpecTy = Context.getTemplateSpecializationType(
+      TemplateName(A), Args2, Args2, A2RecordTy);
   EXPECT_EQ(A2TemplateSpecTy.getAsString(), "A<2>");
 
   // Find A<1>::B and its specialization B<3>.
@@ -328,11 +328,11 @@ TEST(QualTypeNameTest, TemplatedClass) {
   TemplateArgument Args3[] = {
       {Context, llvm::APSInt::getUnsigned(3u), Context.UnsignedIntTy}};
   QualType A1B3TemplateSpecTy = Context.getTemplateSpecializationType(
-      TemplateName(A1B), Args3, A1B3RecordTy);
+      TemplateName(A1B), Args3, Args3, A1B3RecordTy);
   EXPECT_EQ(A1B3TemplateSpecTy.getAsString(), "B<3>");
 
   NestedNameSpecifier *A1Nested = NestedNameSpecifier::Create(
-      Context, nullptr, false, A1TemplateSpecTy.getTypePtr());
+      Context, nullptr, A1TemplateSpecTy.getTypePtr());
   QualType A1B3ElaboratedTy = Context.getElaboratedType(
       ElaboratedTypeKeyword::None, A1Nested, A1B3TemplateSpecTy);
   EXPECT_EQ(A1B3ElaboratedTy.getAsString(), "A<1>::B<3>");
@@ -351,11 +351,11 @@ TEST(QualTypeNameTest, TemplatedClass) {
   TemplateArgument Args4[] = {
       {Context, llvm::APSInt::getUnsigned(4u), Context.UnsignedIntTy}};
   QualType A2B4TemplateSpecTy = Context.getTemplateSpecializationType(
-      TemplateName(A2B), Args4, A2B4RecordTy);
+      TemplateName(A2B), Args4, Args4, A2B4RecordTy);
   EXPECT_EQ(A2B4TemplateSpecTy.getAsString(), "B<4>");
 
   NestedNameSpecifier *A2Nested = NestedNameSpecifier::Create(
-      Context, nullptr, false, A2TemplateSpecTy.getTypePtr());
+      Context, nullptr, A2TemplateSpecTy.getTypePtr());
   QualType A2B4ElaboratedTy = Context.getElaboratedType(
       ElaboratedTypeKeyword::None, A2Nested, A2B4TemplateSpecTy);
   EXPECT_EQ(A2B4ElaboratedTy.getAsString(), "A<2>::B<4>");
@@ -392,5 +392,32 @@ TEST(QualTypeNameTest, ConstUsing) {
                         }
                         using ::A::S;
                         void foo(const S& param1, const S param2);)");
+}
+
+TEST(QualTypeNameTest, NullableAttributesWithGlobalNs) {
+  TypeNameVisitor Visitor;
+  Visitor.WithGlobalNsPrefix = true;
+  Visitor.ExpectedQualTypeNames["param1"] = "::std::unique_ptr<int> _Nullable";
+  Visitor.ExpectedQualTypeNames["param2"] = "::std::unique_ptr<int> _Nonnull";
+  Visitor.ExpectedQualTypeNames["param3"] =
+      "::std::unique_ptr< ::std::unique_ptr<int> _Nullable> _Nonnull";
+  Visitor.ExpectedQualTypeNames["param4"] =
+      "::std::unique_ptr<int>  _Nullable const *";
+  Visitor.ExpectedQualTypeNames["param5"] =
+      "::std::unique_ptr<int>  _Nullable const *";
+  Visitor.ExpectedQualTypeNames["param6"] =
+      "::std::unique_ptr<int>  _Nullable const *";
+  Visitor.runOver(R"(namespace std {
+                        template<class T> class unique_ptr {};
+                     }
+                     void foo(
+                      std::unique_ptr<int> _Nullable param1,
+                      _Nonnull std::unique_ptr<int> param2,
+                      std::unique_ptr<std::unique_ptr<int> _Nullable> _Nonnull param3,
+                      const std::unique_ptr<int> _Nullable *param4,
+                      _Nullable std::unique_ptr<int> const *param5,
+                      std::unique_ptr<int> _Nullable const *param6
+                      );
+                     )");
 }
 }  // end anonymous namespace

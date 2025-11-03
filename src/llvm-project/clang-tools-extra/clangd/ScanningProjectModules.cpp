@@ -66,7 +66,7 @@ public:
   ///
   /// TODO: We should handle the case that there are multiple source files
   /// declaring the same module.
-  std::string getSourceForModuleName(llvm::StringRef ModuleName) const;
+  PathRef getSourceForModuleName(llvm::StringRef ModuleName) const;
 
   /// Return the direct required modules. Indirect required modules are not
   /// included.
@@ -134,13 +134,16 @@ ModuleDependencyScanner::scan(PathRef FilePath,
 
 void ModuleDependencyScanner::globalScan(
     const ProjectModules::CommandMangler &Mangler) {
+  if (GlobalScanned)
+    return;
+
   for (auto &File : CDB->getAllFiles())
     scan(File, Mangler);
 
   GlobalScanned = true;
 }
 
-std::string ModuleDependencyScanner::getSourceForModuleName(
+PathRef ModuleDependencyScanner::getSourceForModuleName(
     llvm::StringRef ModuleName) const {
   assert(
       GlobalScanned &&
@@ -189,11 +192,18 @@ public:
 
   /// RequiredSourceFile is not used intentionally. See the comments of
   /// ModuleDependencyScanner for detail.
-  std::string
-  getSourceForModuleName(llvm::StringRef ModuleName,
-                         PathRef RequiredSourceFile = PathRef()) override {
+  std::string getSourceForModuleName(llvm::StringRef ModuleName,
+                                     PathRef RequiredSourceFile) override {
     Scanner.globalScan(Mangler);
-    return Scanner.getSourceForModuleName(ModuleName);
+    return Scanner.getSourceForModuleName(ModuleName).str();
+  }
+
+  std::string getModuleNameForSource(PathRef File) override {
+    auto ScanningResult = Scanner.scan(File, Mangler);
+    if (!ScanningResult || !ScanningResult->ModuleName)
+      return {};
+
+    return *ScanningResult->ModuleName;
   }
 
 private:

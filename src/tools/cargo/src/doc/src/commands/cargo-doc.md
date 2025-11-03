@@ -12,6 +12,8 @@ cargo-doc --- Build a package's documentation
 Build the documentation for the local package and all dependencies. The output
 is placed in `target/doc` in rustdoc's usual format.
 
+**Note:** Documentation generation is cumulative: existing doc files in the target directory are preserved across different `cargo doc` invocations. To remove existing generated docs, pass `--doc` to [cargo-clean(1)](cargo-clean.html).
+
 ## OPTIONS
 
 ### Documentation Options
@@ -146,11 +148,15 @@ be specified multiple times, which enables all specified features.</dd>
 <dl>
 
 <dt class="option-term" id="option-cargo-doc---target"><a class="option-anchor" href="#option-cargo-doc---target"></a><code>--target</code> <em>triple</em></dt>
-<dd class="option-desc">Document for the given architecture. The default is the host architecture. The general format of the triple is
-<code>&lt;arch&gt;&lt;sub&gt;-&lt;vendor&gt;-&lt;sys&gt;-&lt;abi&gt;</code>. Run <code>rustc --print target-list</code> for a
-list of supported targets. This flag may be specified multiple times.</p>
-<p>This may also be specified with the <code>build.target</code>
-<a href="../reference/config.html">config value</a>.</p>
+<dd class="option-desc">Document for the specified target architecture. Flag may be specified multiple times. The default is the host architecture. The general format of the triple is
+<code>&lt;arch&gt;&lt;sub&gt;-&lt;vendor&gt;-&lt;sys&gt;-&lt;abi&gt;</code>.</p>
+<p>Possible values:</p>
+<ul>
+<li>Any supported target in <code>rustc --print target-list</code>.</li>
+<li><code>"host-tuple"</code>, which will internally be substituted by the host’s target. This can be particularly useful if you’re cross-compiling some crates, and don’t want to specify your host’s machine as a target (for instance, an <code>xtask</code> in a shared project that may be worked on by many hosts).</li>
+<li>A path to a custom target specification. See <a href="../../rustc/targets/custom.html#custom-target-lookup-path">Custom Target Lookup Path</a> for more information.</li>
+</ul>
+<p>This may also be specified with the <code>build.target</code> <a href="../reference/config.html">config value</a>.</p>
 <p>Note that specifying this flag makes Cargo run in a different mode where the
 target artifacts are placed in a separate directory. See the
 <a href="../reference/build-cache.html">build cache</a> documentation for more details.</dd>

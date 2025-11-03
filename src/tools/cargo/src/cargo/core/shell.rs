@@ -2,7 +2,7 @@ use std::fmt;
 use std::io::IsTerminal;
 use std::io::prelude::*;
 
-use annotate_snippets::{Message, Renderer};
+use annotate_snippets::{Renderer, Report};
 use anstream::AutoStream;
 use anstyle::Style;
 
@@ -168,11 +168,11 @@ impl Shell {
         self.print(&status, Some(&message), &HEADER, true)
     }
 
-    pub fn status_header<T>(&mut self, status: T) -> CargoResult<()>
+    pub fn transient_status<T>(&mut self, status: T) -> CargoResult<()>
     where
         T: fmt::Display,
     {
-        self.print(&status, None, &NOTE, true)
+        self.print(&status, None, &TRANSIENT, true)
     }
 
     /// Shortcut to right-align a status message.
@@ -222,10 +222,7 @@ impl Shell {
 
     /// Prints an amber 'warning' message.
     pub fn warn<T: fmt::Display>(&mut self, message: T) -> CargoResult<()> {
-        match self.verbosity {
-            Verbosity::Quiet => Ok(()),
-            _ => self.print(&"warning", Some(&message), &WARN, false),
-        }
+        self.print(&"warning", Some(&message), &WARN, false)
     }
 
     /// Prints a cyan 'note' message.
@@ -406,17 +403,23 @@ impl Shell {
         Ok(())
     }
 
-    /// Prints the passed in [Message] to stderr
-    pub fn print_message(&mut self, message: Message<'_>) -> std::io::Result<()> {
+    /// Prints the passed in [`Report`] to stderr
+    pub fn print_report(&mut self, report: Report<'_>, force: bool) -> CargoResult<()> {
+        if !force && matches!(self.verbosity, Verbosity::Quiet) {
+            return Ok(());
+        }
+
+        if self.needs_clear {
+            self.err_erase_line();
+        }
         let term_width = self
             .err_width()
             .diagnostic_terminal_width()
             .unwrap_or(annotate_snippets::renderer::DEFAULT_TERM_WIDTH);
-        writeln!(
-            self.err(),
-            "{}",
-            Renderer::styled().term_width(term_width).render(message)
-        )
+        let rendered = Renderer::styled().term_width(term_width).render(report);
+        self.err().write_all(rendered.as_bytes())?;
+        self.err().write_all(b"\n")?;
+        Ok(())
     }
 }
 
@@ -454,13 +457,11 @@ impl ShellOut {
         style: &Style,
         justified: bool,
     ) -> CargoResult<()> {
-        let bold = anstyle::Style::new() | anstyle::Effects::BOLD;
-
         let mut buffer = Vec::new();
         if justified {
             write!(&mut buffer, "{style}{status:>12}{style:#}")?;
         } else {
-            write!(&mut buffer, "{style}{status}{style:#}{bold}:{bold:#}")?;
+            write!(&mut buffer, "{style}{status}{style:#}:")?;
         }
         match message {
             Some(message) => writeln!(buffer, " {message}")?,

@@ -594,7 +594,7 @@ impl<'gctx> RegistrySource<'gctx> {
     /// which case deleting the directory might be the safe thing to do. That
     /// is probably unlikely, though.
     ///
-    /// To be safe, we deletes the directory and starts over again if an empty
+    /// To be safe, we delete the directory and start over again if an empty
     /// `.cargo-ok` file is found.
     ///
     /// [CVE-2022-36113]: https://blog.rust-lang.org/2022/09/14/cargo-cves.html#arbitrary-file-corruption-cve-2022-36113
@@ -661,7 +661,7 @@ impl<'gctx> RegistrySource<'gctx> {
     /// Unpacks the `.crate` tarball of the package in a given directory.
     ///
     /// Returns the path to the crate tarball directory,
-    /// whch is always `<unpack_dir>/<pkg>-<version>`.
+    /// which is always `<unpack_dir>/<pkg>-<version>`.
     ///
     /// This holds an assumption that the associated tarball already exists.
     pub fn unpack_package_in(

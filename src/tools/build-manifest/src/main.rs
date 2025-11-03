@@ -14,6 +14,7 @@ use crate::versions::{PkgType, Versions};
 
 static HOSTS: &[&str] = &[
     "aarch64-apple-darwin",
+    "aarch64-pc-windows-gnullvm",
     "aarch64-pc-windows-msvc",
     "aarch64-unknown-linux-gnu",
     "aarch64-unknown-linux-musl",
@@ -44,6 +45,7 @@ static HOSTS: &[&str] = &[
     "x86_64-apple-darwin",
     "x86_64-pc-solaris",
     "x86_64-pc-windows-gnu",
+    "x86_64-pc-windows-gnullvm",
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-freebsd",
     "x86_64-unknown-illumos",
@@ -69,6 +71,7 @@ static TARGETS: &[&str] = &[
     "aarch64-unknown-none-softfloat",
     "aarch64-unknown-redox",
     "aarch64-unknown-uefi",
+    "aarch64-unknown-managarm-mlibc",
     "amdgcn-amd-amdhsa",
     "arm64e-apple-darwin",
     "arm64e-apple-ios",
@@ -153,6 +156,7 @@ static TARGETS: &[&str] = &[
     "riscv64gc-unknown-none-elf",
     "riscv64gc-unknown-linux-gnu",
     "riscv64gc-unknown-linux-musl",
+    "riscv64gc-unknown-managarm-mlibc",
     "s390x-unknown-linux-gnu",
     "sparc64-unknown-linux-gnu",
     "sparcv9-sun-solaris",
@@ -192,6 +196,7 @@ static TARGETS: &[&str] = &[
     "x86_64-unknown-redox",
     "x86_64-unknown-hermit",
     "x86_64-unknown-uefi",
+    "x86_64-unknown-managarm-mlibc",
 ];
 
 /// This allows the manifest to contain rust-docs for hosts that don't build
@@ -470,7 +475,7 @@ impl Builder {
                 }
                 // so is rust-mingw if it's available for the target
                 PkgType::RustMingw => {
-                    if host.contains("pc-windows-gnu") {
+                    if host.ends_with("pc-windows-gnu") {
                         components.push(host_component(pkg));
                     }
                 }
