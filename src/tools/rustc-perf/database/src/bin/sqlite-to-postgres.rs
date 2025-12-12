@@ -241,9 +241,10 @@ struct Error;
 
 #[derive(Serialize)]
 struct ErrorRow<'a> {
+    id: i32,
     aid: i32,
-    benchmark: &'a str,
-    error: Nullable<&'a str>,
+    context: &'a str,
+    message: Nullable<&'a str>,
 }
 
 impl Table for Error {
@@ -252,11 +253,11 @@ impl Table for Error {
     }
 
     fn sqlite_attributes() -> &'static str {
-        "aid, benchmark, error"
+        "id, aid, context, message, job_id"
     }
 
     fn postgres_attributes() -> &'static str {
-        "aid, benchmark, error"
+        "id, aid, context, message, job_id"
     }
 
     fn postgres_generated_id_attribute() -> Option<&'static str> {
@@ -266,9 +267,10 @@ impl Table for Error {
     fn write_postgres_csv_row<W: Write>(writer: &mut csv::Writer<W>, row: &rusqlite::Row) {
         writer
             .serialize(ErrorRow {
-                aid: row.get(0).unwrap(),
-                benchmark: row.get_ref(1).unwrap().as_str().unwrap(),
-                error: row.get_ref(2).unwrap().try_into().unwrap(),
+                id: row.get(0).unwrap(),
+                aid: row.get(1).unwrap(),
+                context: row.get_ref(2).unwrap().as_str().unwrap(),
+                message: row.get_ref(3).unwrap().try_into().unwrap(),
             })
             .unwrap();
     }
@@ -780,8 +782,7 @@ async fn copy<T: Table>(
 
     let copy = postgres
         .prepare(&format!(
-            r#"copy {} ({}) from stdin (encoding utf8, format csv, null '{}')"#,
-            table, attributes, NULL_STRING,
+            r#"copy {table} ({attributes}) from stdin (encoding utf8, format csv, null '{NULL_STRING}')"#,
         ))
         .await
         .unwrap();
@@ -862,9 +863,8 @@ async fn copy<T: Table>(
                     &format!(
                         "select setval(
                             pg_get_serial_sequence($1, $2),
-                            coalesce(max({}) + 1, 1), false)
-                        from {}",
-                        generated_id_attr, table
+                            coalesce(max({generated_id_attr}) + 1, 1), false)
+                        from {table}"
                     ) as &str,
                     &[&table, &generated_id_attr],
                 )
@@ -944,7 +944,7 @@ async fn get_tables(postgres: &tokio_postgres::Transaction<'_>) -> Vec<String> {
 async fn disable_table_triggers(postgres: &tokio_postgres::Transaction<'_>, tables: &[String]) {
     for table in tables {
         postgres
-            .execute(&format!("ALTER TABLE {} DISABLE TRIGGER ALL", table), &[])
+            .execute(&format!("ALTER TABLE {table} DISABLE TRIGGER ALL"), &[])
             .await
             .unwrap();
     }
@@ -954,7 +954,7 @@ async fn disable_table_triggers(postgres: &tokio_postgres::Transaction<'_>, tabl
 async fn enable_table_triggers(postgres: &tokio_postgres::Transaction<'_>, tables: &[String]) {
     for table in tables {
         postgres
-            .execute(&format!("ALTER TABLE {} ENABLE TRIGGER ALL", table), &[])
+            .execute(&format!("ALTER TABLE {table} ENABLE TRIGGER ALL"), &[])
             .await
             .unwrap();
     }

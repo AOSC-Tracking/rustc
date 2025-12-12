@@ -2750,14 +2750,27 @@ Value *GradientUtils::cacheForReverse(IRBuilder<> &BuilderQ, Value *malloc,
         assert(innerType == Type::getInt8Ty(malloc->getContext()));
       } else {
         if (innerType != malloc->getType()) {
-          llvm::errs() << *oldFunc << "\n";
-          llvm::errs() << *newFunc << "\n";
-          llvm::errs() << "innerType: " << *innerType << "\n";
-          llvm::errs() << "malloc->getType(): " << *malloc->getType() << "\n";
-          llvm::errs() << "ret: " << *ret << " - " << *ret->getType() << "\n";
-          llvm::errs() << "malloc: " << *malloc << "\n";
-          assert(0 && "illegal loop cache type");
-          llvm_unreachable("illegal loop cache type");
+          std::string str;
+          raw_string_ostream ss(str);
+          ss << "Illegal loop cache type:\n";
+          ss << *oldFunc << "\n";
+          ss << *newFunc << "\n";
+          ss << "innerType: " << *innerType << "\n";
+          ss << "malloc->getType(): " << *malloc->getType() << "\n";
+          ss << "ret: " << *ret << " - " << *ret->getType() << "\n";
+          ss << "malloc: " << *malloc << "\n";
+          if (CustomErrorHandler) {
+            CustomErrorHandler(str.c_str(), wrap(malloc),
+                               ErrorType::InternalError, nullptr, nullptr,
+                               nullptr);
+          } else {
+            DebugLoc loc;
+            if (auto I = dyn_cast<Instruction>(malloc))
+              EmitFailure("LoopCache", I->getDebugLoc(), I, ss.str());
+            else
+              EmitFailure("LoopCache", DebugLoc(), newFunc, ss.str());
+          }
+          return UndefValue::get(malloc->getType());
         }
       }
 
@@ -4339,16 +4352,6 @@ GradientUtils *GradientUtils::CreateFromClone(
     ++returnCount;
   }
 
-  ReturnType returnValue;
-  if (returnCount == 0)
-    returnValue = ReturnType::Tape;
-  else if (returnCount == 1)
-    returnValue = ReturnType::TapeAndReturn;
-  else if (returnCount == 2)
-    returnValue = ReturnType::TapeAndTwoReturns;
-  else
-    llvm_unreachable("illegal number of elements in augmented return struct");
-
   ValueToValueMapTy invertedPointers;
   SmallPtrSet<Instruction *, 4> constants;
   SmallPtrSet<Instruction *, 20> nonconstant;
@@ -4367,7 +4370,8 @@ GradientUtils *GradientUtils::CreateFromClone(
   auto newFunc = Logic.PPC.CloneFunctionWithReturns(
       DerivativeMode::ReverseModePrimal, width, oldFunc, invertedPointers,
       constant_args, constant_values, nonconstant_values, returnvals,
-      /*returnValue*/ returnValue, retType, prefix, &originalToNew,
+      /*returnTape*/ true, /*returnPrimal*/ returnUsed,
+      /*returnShadow*/ shadowReturnUsed, prefix, &originalToNew,
       /*diffeReturnArg*/ false, /*additionalArg*/ nullptr);
 
   // Convert overwritten args from the input function to the preprocessed
@@ -8552,13 +8556,18 @@ bool GradientUtils::getContext(llvm::BasicBlock *BB, LoopContext &lc) {
 void GradientUtils::forceAugmentedReturns() {
   assert(TR.getFunction() == oldFunc);
 
+  // Pass 1: create BB-level contexts for the whole loop/function
   for (BasicBlock &oBB : *oldFunc) {
-    // Don't create derivatives for code that results in termination
     if (notForAnalysis.find(&oBB) != notForAnalysis.end())
       continue;
+    LoopContext LC;
+    getContext(cast<BasicBlock>(getNewFromOriginal(&oBB)), LC);
+  }
 
-    LoopContext loopContext;
-    getContext(cast<BasicBlock>(getNewFromOriginal(&oBB)), loopContext);
+  // Pass 2: instruction processing
+  for (BasicBlock &oBB : *oldFunc) {
+    if (notForAnalysis.find(&oBB) != notForAnalysis.end())
+      continue;
 
     for (Instruction &I : oBB) {
       Instruction *inst = &I;
@@ -9301,7 +9310,9 @@ void GradientUtils::erase(Instruction *I) {
 
 void GradientUtils::eraseWithPlaceholder(Instruction *I, Instruction *orig,
                                          const Twine &suffix, bool erase) {
-  if (!I->getType()->isVoidTy() && !I->getType()->isTokenTy()) {
+  if (I->getType()->isTokenTy()) {
+    replaceAWithB(I, UndefValue::get(I->getType()));
+  } else if (!I->getType()->isVoidTy() && !I->getType()->isTokenTy()) {
     auto inspos = I->getIterator();
 #if LLVM_VERSION_MAJOR >= 18
 #if LLVM_VERSION_MAJOR >= 21

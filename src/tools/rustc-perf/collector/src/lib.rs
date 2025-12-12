@@ -169,36 +169,42 @@ pub fn run_command(cmd: &mut Command) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_command_with_output(cmd: &mut Command) -> anyhow::Result<process::Output> {
+/// If `stream_output` is true, stdout/stderr of `cmd` should be streamed to stdout/stderr of the
+/// current process, in addition to being captured.
+fn run_command_with_output(
+    cmd: &mut Command,
+    stream_output: bool,
+) -> anyhow::Result<process::Output> {
     use anyhow::Context;
     use utils::read2;
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("failed to spawn process for cmd: {:?}", cmd))?;
+        .with_context(|| format!("failed to spawn process for cmd: {cmd:?}"))?;
 
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let mut stdout_writer = std::io::LineWriter::new(std::io::stdout());
-    let mut stderr_writer = std::io::LineWriter::new(std::io::stderr());
-    read2::read2(
+    let mut stdout_writer = std::io::LineWriter::new(std::io::stdout().lock());
+    let mut stderr_writer = std::io::LineWriter::new(std::io::stderr().lock());
+
+    let mut stdout_written = 0;
+    let mut stderr_written = 0;
+    let (stdout, stderr) = read2::read2(
         child.stdout.take().unwrap(),
         child.stderr.take().unwrap(),
         &mut |is_stdout, buffer, _is_done| {
             // Send output if trace logging is enabled
-            if log::log_enabled!(target: "raw_cargo_messages", log::Level::Trace) {
+            if stream_output || log::log_enabled!(target: "raw_cargo_messages", log::Level::Trace) {
                 use std::io::Write;
                 if is_stdout {
-                    stdout_writer.write_all(&buffer[stdout.len()..]).unwrap();
+                    stdout_writer.write_all(&buffer[stdout_written..]).unwrap();
                 } else {
-                    stderr_writer.write_all(&buffer[stderr.len()..]).unwrap();
+                    stderr_writer.write_all(&buffer[stderr_written..]).unwrap();
                 }
             }
             if is_stdout {
-                stdout = buffer.clone();
+                stdout_written = buffer.len();
             } else {
-                stderr = buffer.clone();
+                stderr_written = buffer.len();
             }
         },
     )?;
@@ -215,18 +221,28 @@ fn run_command_with_output(cmd: &mut Command) -> anyhow::Result<process::Output>
 }
 
 pub fn command_output(cmd: &mut Command) -> anyhow::Result<process::Output> {
-    let output = run_command_with_output(cmd)?;
+    let output = run_command_with_output(cmd, false)?;
+    check_command_output(&output)?;
+    Ok(output)
+}
 
+pub fn command_output_stream(cmd: &mut Command) -> anyhow::Result<process::Output> {
+    let output = run_command_with_output(cmd, true)?;
+    check_command_output(&output)?;
+    Ok(output)
+}
+
+fn check_command_output(output: &process::Output) -> anyhow::Result<()> {
     if !output.status.success() {
-        return Err(anyhow::anyhow!(
+        Err(anyhow::anyhow!(
             "expected success, got {}\n\nstderr={}\n\n stdout={}\n",
             output.status,
             String::from_utf8_lossy(&output.stderr),
             String::from_utf8_lossy(&output.stdout)
-        ));
+        ))
+    } else {
+        Ok(())
     }
-
-    Ok(output)
 }
 
 pub async fn async_command_output(
@@ -234,23 +250,18 @@ pub async fn async_command_output(
 ) -> anyhow::Result<process::Output> {
     use anyhow::Context;
 
+    log::debug!("Executing {:?}", cmd);
+
     let start = Instant::now();
     let child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("failed to spawn process for cmd: {:?}", cmd))?;
+        .with_context(|| format!("failed to spawn process for cmd: {cmd:?}"))?;
     let output = child.wait_with_output().await?;
-    log::trace!("command {cmd:?} took {} ms", start.elapsed().as_millis());
+    log::trace!("Command took {} ms", start.elapsed().as_millis());
 
-    if !output.status.success() {
-        return Err(anyhow::anyhow!(
-            "expected success, got {}\n\nstderr={}\n\n stdout={}\n",
-            output.status,
-            String::from_utf8_lossy(&output.stderr),
-            String::from_utf8_lossy(&output.stdout)
-        ));
-    }
+    check_command_output(&output)?;
 
     Ok(output)
 }
@@ -291,9 +302,17 @@ pub async fn master_commits() -> anyhow::Result<Vec<MasterCommit>> {
 #[derive(Default)]
 pub struct CollectorStepBuilder {
     steps: Vec<String>,
+    job_id: Option<u32>,
 }
 
 impl CollectorStepBuilder {
+    pub fn new(job_id: Option<u32>) -> Self {
+        Self {
+            steps: vec![],
+            job_id,
+        }
+    }
+
     pub fn record_compile_benchmarks(
         mut self,
         benchmarks: &[Benchmark],
@@ -327,9 +346,11 @@ impl CollectorStepBuilder {
         let artifact_row_id = {
             let mut tx = conn.transaction().await;
             let artifact_row_id = tx.conn().artifact_id(artifact_id).await;
-            tx.conn()
-                .collector_start(artifact_row_id, &self.steps)
-                .await;
+            if self.job_id.is_none() {
+                tx.conn()
+                    .collector_start(artifact_row_id, &self.steps)
+                    .await;
+            }
             tx.commit().await.unwrap();
             artifact_row_id
         };
@@ -342,6 +363,7 @@ impl CollectorStepBuilder {
         CollectorCtx {
             artifact_row_id,
             measured_compile_test_cases,
+            job_id: self.job_id,
         }
     }
 }
@@ -351,17 +373,26 @@ pub struct CollectorCtx {
     pub artifact_row_id: ArtifactIdNumber,
     /// Which tests cases were already computed **before** this collection began?
     pub measured_compile_test_cases: HashSet<CompileTestCase>,
+    pub job_id: Option<u32>,
 }
 
 impl CollectorCtx {
+    pub fn is_from_job_queue(&self) -> bool {
+        self.job_id.is_some()
+    }
+
     pub async fn start_compile_step(&self, conn: &dyn Connection, benchmark_name: &BenchmarkName) {
-        conn.collector_start_step(self.artifact_row_id, &benchmark_name.0)
-            .await;
+        if !self.is_from_job_queue() {
+            conn.collector_start_step(self.artifact_row_id, &benchmark_name.0)
+                .await;
+        }
     }
 
     pub async fn end_compile_step(&self, conn: &dyn Connection, benchmark_name: &BenchmarkName) {
-        conn.collector_end_step(self.artifact_row_id, &benchmark_name.0)
-            .await
+        if !self.is_from_job_queue() {
+            conn.collector_end_step(self.artifact_row_id, &benchmark_name.0)
+                .await;
+        }
     }
 
     /// Starts a new runtime benchmark collector step.
@@ -373,17 +404,23 @@ impl CollectorCtx {
         group: &BenchmarkGroup,
     ) -> Option<String> {
         let step_name = runtime_group_step_name(&group.name);
-        conn.collector_start_step(self.artifact_row_id, &step_name)
-            .await
-            .then_some(step_name)
+        if self.is_from_job_queue() {
+            Some(step_name)
+        } else {
+            conn.collector_start_step(self.artifact_row_id, &step_name)
+                .await
+                .then_some(step_name)
+        }
     }
 
     pub async fn end_runtime_step(&self, conn: &dyn Connection, group: &BenchmarkGroup) {
-        conn.collector_end_step(self.artifact_row_id, &runtime_group_step_name(&group.name))
-            .await
+        if !self.is_from_job_queue() {
+            conn.collector_end_step(self.artifact_row_id, &runtime_group_step_name(&group.name))
+                .await;
+        }
     }
 }
 
 pub fn runtime_group_step_name(benchmark_name: &str) -> String {
-    format!("runtime:{}", benchmark_name)
+    format!("runtime:{benchmark_name}")
 }

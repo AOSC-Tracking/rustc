@@ -65,7 +65,7 @@ impl Shell {
     }
 
     /// Creates a shell from a plain writable object, with no color, and max verbosity.
-    pub fn from_write(out: Box<dyn Write>) -> Shell {
+    pub fn from_write(out: Box<dyn Write + Send + Sync>) -> Shell {
         Shell {
             output: ShellOut::Write(AutoStream::never(out)), // strip all formatting on write
             verbosity: Verbosity::Verbose,
@@ -227,7 +227,10 @@ impl Shell {
 
     /// Prints a cyan 'note' message.
     pub fn note<T: fmt::Display>(&mut self, message: T) -> CargoResult<()> {
-        self.print(&"note", Some(&message), &NOTE, false)
+        let report = &[annotate_snippets::Group::with_title(
+            annotate_snippets::Level::NOTE.secondary_title(message.to_string()),
+        )];
+        self.print_report(report, false)
     }
 
     /// Updates the verbosity of the shell.
@@ -432,7 +435,7 @@ impl Default for Shell {
 /// A `Write`able object, either with or without color support
 enum ShellOut {
     /// A plain write object without color support
-    Write(AutoStream<Box<dyn Write>>),
+    Write(AutoStream<Box<dyn Write + Send + Sync>>),
     /// Color-enabled stdio, with information on whether color should be used
     Stream {
         stdout: AutoStream<std::io::Stdout>,
@@ -596,8 +599,9 @@ fn supports_term_integration(stream: &dyn IsTerminal) -> bool {
     let windows_terminal = std::env::var("WT_SESSION").is_ok();
     let conemu = std::env::var("ConEmuANSI").ok() == Some("ON".into());
     let wezterm = std::env::var("TERM_PROGRAM").ok() == Some("WezTerm".into());
+    let ghostty = std::env::var("TERM_PROGRAM").ok() == Some("ghostty".into());
 
-    (windows_terminal || conemu || wezterm) && stream.is_terminal()
+    (windows_terminal || conemu || wezterm || ghostty) && stream.is_terminal()
 }
 
 pub struct Hyperlink<D: fmt::Display> {

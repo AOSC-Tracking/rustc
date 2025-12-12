@@ -269,8 +269,7 @@ impl Server {
                     .status(StatusCode::OK)
                     .header_typed(ContentType::text_utf8())
                     .body(hyper::Body::from(format!(
-                        "Refreshed too recently ({:?} ago). Please wait.",
-                        elapsed
+                        "Refreshed too recently ({elapsed:?} ago). Please wait."
                     )))
                     .unwrap();
             }
@@ -383,6 +382,22 @@ async fn serve_req(server: Server, req: Request) -> Result<Response, ServerError
                 .handle_get_async(&req, request_handlers::handle_status_page)
                 .await;
         }
+        "/perf/status_page_new" => {
+            let ctxt: Arc<SiteCtxt> = server.ctxt.read().as_ref().unwrap().clone();
+            let result = request_handlers::handle_status_page_new(ctxt).await;
+            return match result {
+                Ok(result) => Ok(http::Response::builder()
+                    .header_typed(ContentType::json())
+                    .body(hyper::Body::from(serde_json::to_string(&result).unwrap()))
+                    .unwrap()),
+                Err(err) => Ok(http::Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header_typed(ContentType::text_utf8())
+                    .header_typed(CacheControl::new().with_no_cache().with_no_store())
+                    .body(hyper::Body::from(format!("{err:?}")))
+                    .unwrap()),
+            };
+        }
         "/perf/next_artifact" => {
             return server
                 .handle_get_async(&req, request_handlers::handle_next_artifact)
@@ -458,7 +473,7 @@ async fn serve_req(server: Server, req: Request) -> Result<Response, ServerError
     let ctxt: Arc<SiteCtxt> = server.ctxt.read().as_ref().unwrap().clone();
     let mut body = Vec::new();
     while let Some(chunk) = body_stream.next().await {
-        let chunk = chunk.map_err(|e| ServerError(format!("failed to read chunk: {:?}", e)))?;
+        let chunk = chunk.map_err(|e| ServerError(format!("failed to read chunk: {e:?}")))?;
         body.extend_from_slice(&chunk);
         // More than 10 MB of data
         if body.len() > 1024 * 1024 * 10 {
@@ -511,7 +526,7 @@ async fn serve_req(server: Server, req: Request) -> Result<Response, ServerError
                 )),
                 _ => Ok(http::Response::builder()
                     .status(StatusCode::OK)
-                    .body(hyper::Body::from(format!("unknown event: {}", event)))
+                    .body(hyper::Body::from(format!("unknown event: {event}")))
                     .unwrap()),
             }
         }
@@ -552,6 +567,7 @@ async fn serve_req(server: Server, req: Request) -> Result<Response, ServerError
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_body<D>(body: &[u8]) -> Result<D, Response>
 where
     D: DeserializeOwned,
@@ -568,14 +584,14 @@ where
                 .header_typed(ContentType::text_utf8())
                 .status(StatusCode::BAD_REQUEST)
                 .body(hyper::Body::from(format!(
-                    "Failed to deserialize request: {:?}",
-                    err
+                    "Failed to deserialize request: {err:?}"
                 )))
                 .unwrap())
         }
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_query_string<D>(uri: &http::Uri) -> Result<D, Response>
 where
     D: DeserializeOwned,
@@ -595,8 +611,7 @@ where
             .header_typed(ContentType::text_utf8())
             .status(StatusCode::BAD_REQUEST)
             .body(hyper::Body::from(format!(
-                "Failed to deserialize request {}: {:?}",
-                uri, err,
+                "Failed to deserialize request {uri}: {err:?}",
             )))
             .unwrap()),
     }
@@ -630,7 +645,7 @@ async fn handle_fs_path(
 
     async fn resolve_template(path: &str) -> Vec<u8> {
         TEMPLATES
-            .get_template(&format!("pages/{}", path))
+            .get_template(&format!("pages/{path}"))
             .await
             .unwrap()
     }
@@ -643,6 +658,7 @@ async fn handle_fs_path(
         | "/dashboard.html"
         | "/detailed-query.html"
         | "/help.html"
+        | "/status_new.html"
         | "/status.html" => resolve_template(relative_path).await,
         _ => match TEMPLATES.get_static_asset(relative_path, use_compression)? {
             Payload::Compressed(data) => {
@@ -803,7 +819,7 @@ async fn run_server(ctxt: Arc<RwLock<Option<Arc<SiteCtxt>>>>, addr: SocketAddr) 
     });
     let server = hyper::server::Server::bind(&addr).serve(svc);
     if let Err(e) = server.await {
-        eprintln!("server error: {:?}", e);
+        eprintln!("server error: {e:?}");
     }
 }
 

@@ -191,6 +191,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::task::{Poll, ready};
 
+use annotate_snippets::Level;
 use anyhow::Context as _;
 use cargo_util::paths::{self, exclude_from_backups_and_indexing};
 use flate2::read::GzDecoder;
@@ -832,10 +833,17 @@ impl<'gctx> Source for RegistrySource<'gctx> {
                     .expect("--precise <yanked-version> in use");
                 if self.selected_precise_yanked.insert((name, version.clone())) {
                     let mut shell = self.gctx.shell();
-                    shell.warn(format_args!(
-                        "selected package `{name}@{version}` was yanked by the author"
-                    ))?;
-                    shell.note("if possible, try a compatible non-yanked version")?;
+                    shell.print_report(
+                        &[Level::WARNING
+                            .secondary_title(format!(
+                                "selected package `{name}@{version}` was yanked by the author"
+                            ))
+                            .element(
+                                Level::HELP
+                                    .message("if possible, try a compatible non-yanked version"),
+                            )],
+                        false,
+                    )?;
                 }
             }
             if called {
@@ -846,8 +854,8 @@ impl<'gctx> Source for RegistrySource<'gctx> {
                 // Attempt to handle misspellings by searching for a chain of related
                 // names to the original name. The resolver will later
                 // reject any candidates that have the wrong name, and with this it'll
-                // along the way produce helpful "did you mean?" suggestions.
-                // For now we only try the canonical lysing `-` to `_` and vice versa.
+                // have enough information to offer "a similar crate exists" suggestions.
+                // For now we only try canonicalizing `-` to `_` and vice versa.
                 // More advanced fuzzy searching become in the future.
                 for name_permutation in [
                     dep.package_name().replace('-', "_"),

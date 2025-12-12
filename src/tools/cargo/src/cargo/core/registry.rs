@@ -22,6 +22,7 @@ use crate::sources::source::SourceMap;
 use crate::util::errors::CargoResult;
 use crate::util::interning::InternedString;
 use crate::util::{CanonicalUrl, GlobalContext};
+use annotate_snippets::Level;
 use anyhow::{Context as _, bail};
 use tracing::{debug, trace};
 use url::Url;
@@ -379,12 +380,27 @@ impl<'gctx> PackageRegistry<'gctx> {
                     dep.package_name()
                 );
 
-                if dep.features().len() != 0 || !dep.uses_default_features() {
-                    self.source_config.gctx().shell().warn(format!(
-                        "patch for `{}` uses the features mechanism. \
-                        default-features and features will not take effect because the patch dependency does not support this mechanism",
-                        dep.package_name()
-                    ))?;
+                let mut unused_fields = Vec::new();
+                if dep.features().len() != 0 {
+                    unused_fields.push("`features`");
+                }
+                if !dep.uses_default_features() {
+                    unused_fields.push("`default-features`")
+                }
+                if !unused_fields.is_empty() {
+                    self.source_config.gctx().shell().print_report(
+                        &[Level::WARNING
+                            .secondary_title(format!(
+                                "unused field in patch for `{}`: {}",
+                                dep.package_name(),
+                                unused_fields.join(", ")
+                            ))
+                            .element(Level::HELP.message(format!(
+                                "configure {} in the `dependencies` entry",
+                                unused_fields.join(", ")
+                            )))],
+                        false,
+                    )?;
                 }
 
                 // Go straight to the source for resolving `dep`. Load it as we
@@ -788,11 +804,9 @@ impl<'gctx> Registry for PackageRegistry<'gctx> {
 
     #[tracing::instrument(skip_all)]
     fn block_until_ready(&mut self) -> CargoResult<()> {
-        if cfg!(debug_assertions) {
-            // Force borrow to catch invalid borrows, regardless of which source is used and how it
-            // happens to behave this time
-            self.gctx.shell().verbosity();
-        }
+        // Ensure `shell` is not already in use,
+        // regardless of which source is used and how it happens to behave this time
+        self.gctx.debug_assert_shell_not_borrowed();
         for (source_id, source) in self.sources.sources_mut() {
             source
                 .block_until_ready()

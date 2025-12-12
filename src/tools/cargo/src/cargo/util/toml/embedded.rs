@@ -1,23 +1,29 @@
 use cargo_util_schemas::manifest::PackageName;
 
-use crate::CargoResult;
+use crate::util::frontmatter::FrontmatterError;
 use crate::util::frontmatter::ScriptSource;
-use crate::util::restricted_names;
 
-pub(super) fn expand_manifest(content: &str) -> CargoResult<String> {
+pub(super) fn expand_manifest(content: &str) -> Result<String, FrontmatterError> {
     let source = ScriptSource::parse(content)?;
     if let Some(span) = source.frontmatter_span() {
         match source.info() {
             Some("cargo") | None => {}
             Some(other) => {
+                let info_span = source.info_span().unwrap();
+                let close_span = source.close_span().unwrap();
                 if let Some(remainder) = other.strip_prefix("cargo,") {
-                    anyhow::bail!(
-                        "cargo does not support frontmatter infostring attributes like `{remainder}` at this time"
+                    return Err(FrontmatterError::new(
+                        format!("unsupported frontmatter infostring attributes: `{remainder}`"),
+                        info_span,
                     )
+                    .push_visible_span(close_span));
                 } else {
-                    anyhow::bail!(
-                        "frontmatter infostring `{other}` is unsupported by cargo; specify `cargo` for embedding a manifest"
-                    )
+                    return Err(FrontmatterError::new(
+                        format!(
+                            "unsupported frontmatter infostring `{other}`; specify `cargo` for embedding a manifest"
+                        ),
+                        info_span,
+                    ).push_visible_span(close_span));
                 }
             }
         }
@@ -50,25 +56,7 @@ pub fn sanitize_name(name: &str) -> String {
         '-'
     };
 
-    let mut name = PackageName::sanitize(name, placeholder).into_inner();
-
-    loop {
-        if restricted_names::is_keyword(&name) {
-            name.push(placeholder);
-        } else if restricted_names::is_conflicting_artifact_name(&name) {
-            // Being an embedded manifest, we always assume it is a `[[bin]]`
-            name.push(placeholder);
-        } else if name == "test" {
-            name.push(placeholder);
-        } else if restricted_names::is_windows_reserved(&name) {
-            // Go ahead and be consistent across platforms
-            name.push(placeholder);
-        } else {
-            break;
-        }
-    }
-
-    name
+    PackageName::sanitize(name, placeholder).into_inner()
 }
 
 #[cfg(test)]

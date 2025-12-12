@@ -78,6 +78,8 @@ use crate::util::CanonicalUrl;
 use crate::util::cache_lock::CacheLockMode;
 use crate::util::context::FeatureUnification;
 use crate::util::errors::CargoResult;
+use annotate_snippets::Group;
+use annotate_snippets::Level;
 use anyhow::Context as _;
 use cargo_util::paths;
 use cargo_util_schemas::core::PartialVersion;
@@ -209,14 +211,27 @@ pub fn resolve_ws_with_opts<'gctx>(
                     .warn(format!("package replacement is not used: {}", replace_spec))?
             }
 
-            if dep.features().len() != 0 || !dep.uses_default_features() {
-                ws.gctx()
-                .shell()
-                .warn(format!(
-                    "replacement for `{}` uses the features mechanism. \
-                    default-features and features will not take effect because the replacement dependency does not support this mechanism",
-                    dep.package_name()
-                ))?
+            let mut unused_fields = Vec::new();
+            if dep.features().len() != 0 {
+                unused_fields.push("`features`");
+            }
+            if !dep.uses_default_features() {
+                unused_fields.push("`default-features`")
+            }
+            if !unused_fields.is_empty() {
+                ws.gctx().shell().print_report(
+                    &[Level::WARNING
+                        .secondary_title(format!(
+                            "unused field in replacement for `{}`: {}",
+                            dep.package_name(),
+                            unused_fields.join(", ")
+                        ))
+                        .element(Level::NOTE.message(format!(
+                            "configure {} in the `dependencies` entry",
+                            unused_fields.join(", ")
+                        )))],
+                    false,
+                )?;
             }
         }
 
@@ -517,7 +532,7 @@ pub fn add_overrides<'a>(
     ws: &Workspace<'a>,
 ) -> CargoResult<()> {
     let gctx = ws.gctx();
-    let Some(paths) = gctx.get_list("paths")? else {
+    let Some(paths) = gctx.paths_overrides()? else {
         return Ok(());
     };
 
@@ -798,7 +813,7 @@ fn emit_warnings_of_unused_patches(
     resolve: &Resolve,
     registry: &PackageRegistry<'_>,
 ) -> CargoResult<()> {
-    const MESSAGE: &str = "was not used in the crate graph.";
+    const MESSAGE: &str = "was not used in the crate graph";
 
     // Patch package with the source URLs being patch
     let mut patch_pkgid_to_urls = HashMap::new();
@@ -822,8 +837,8 @@ fn emit_warnings_of_unused_patches(
 
     let mut unemitted_unused_patches = Vec::new();
     for unused in resolve.unused_patches().iter() {
-        // Show alternative source URLs if the source URLs being patch
-        // cannot not be found in the crate graph.
+        // Show alternative source URLs if the source URLs being patched
+        // cannot be found in the crate graph.
         match (
             source_ids_grouped_by_pkg_name.get(&unused.name()),
             patch_pkgid_to_urls.get(unused),
@@ -833,18 +848,17 @@ fn emit_warnings_of_unused_patches(
                     .iter()
                     .all(|id| !patched_urls.contains(id.canonical_url())) =>
             {
-                use std::fmt::Write;
-                let mut msg = String::new();
-                writeln!(msg, "Patch `{}` {}", unused, MESSAGE)?;
-                write!(
-                    msg,
-                    "Perhaps you misspelled the source URL being patched.\n\
-                    Possible URLs for `[patch.<URL>]`:",
-                )?;
-                for id in ids.iter() {
-                    write!(msg, "\n    {}", id.display_registry_name())?;
+                let mut help = "perhaps you meant one of the following:".to_owned();
+                for id in ids {
+                    help.push_str("\n\t");
+                    help.push_str(&id.display_registry_name());
                 }
-                ws.gctx().shell().warn(msg)?;
+                ws.gctx().shell().print_report(
+                    &[Level::WARNING
+                        .secondary_title(format!("patch `{unused}` {MESSAGE}"))
+                        .element(Level::HELP.message(help))],
+                    false,
+                )?;
             }
             _ => unemitted_unused_patches.push(unused),
         }
@@ -852,13 +866,18 @@ fn emit_warnings_of_unused_patches(
 
     // Show general help message.
     if !unemitted_unused_patches.is_empty() {
-        let warnings: Vec<_> = unemitted_unused_patches
+        let mut warnings: Vec<_> = unemitted_unused_patches
             .iter()
-            .map(|pkgid| format!("Patch `{}` {}", pkgid, MESSAGE))
+            .map(|pkgid| {
+                Group::with_title(
+                    Level::WARNING.secondary_title(format!("patch `{pkgid}` {MESSAGE}")),
+                )
+            })
             .collect();
-        ws.gctx()
-            .shell()
-            .warn(format!("{}\n{}", warnings.join("\n"), UNUSED_PATCH_WARNING))?;
+        warnings.push(Group::with_title(
+            Level::HELP.secondary_title(UNUSED_PATCH_WARNING),
+        ));
+        ws.gctx().shell().print_report(&warnings, false)?;
     }
 
     return Ok(());

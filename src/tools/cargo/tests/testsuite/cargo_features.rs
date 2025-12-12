@@ -698,8 +698,9 @@ fn publish_allowed() {
         .masquerade_as_nightly_cargo(&["test-dummy-unstable"])
         .with_stderr_data(str![[r#"
 [UPDATING] crates.io index
-[WARNING] manifest has no description, license, license-file, documentation, homepage or repository.
-See https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info.
+[WARNING] manifest has no description, license, license-file, documentation, homepage or repository
+  |
+  = [NOTE] see https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info
 [PACKAGING] a v0.0.1 ([ROOT]/foo)
 [PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
 [VERIFYING] a v0.0.1 ([ROOT]/foo)
@@ -707,8 +708,8 @@ See https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [UPLOADING] a v0.0.1 ([ROOT]/foo)
 [UPLOADED] a v0.0.1 to registry `crates-io`
-[NOTE] waiting for a v0.0.1 to be available at registry `crates-io`.
-You may press ctrl-c to skip waiting; the crate should be available shortly.
+[NOTE] waiting for a v0.0.1 to be available at registry `crates-io`
+[HELP] you may press ctrl-c to skip waiting; the crate should be available shortly
 [PUBLISHED] a v0.0.1 at registry `crates-io`
 
 "#]])

@@ -1,4 +1,25 @@
-//! Support for deserializing configuration via `serde`
+//! Deserialization for converting [`ConfigValue`] instances to target types.
+//!
+//! The [`Deserializer`] type is the main driver of deserialization.
+//! The workflow is roughly:
+//!
+//! 1. [`GlobalContext::get<T>()`] creates [`Deserializer`] and calls `T::deserialize()`
+//! 2. Then call type-specific deserialize methods as in normal serde deserialization.
+//!     - For primitives, `deserialize_*` methods look up [`ConfigValue`] instances
+//!       in [`GlobalContext`] and convert.
+//!     - Structs and maps are handled by [`ConfigMapAccess`].
+//!     - Sequences are handled by [`ConfigSeqAccess`],
+//!       which later uses [`ArrayItemDeserializer`] for each array item.
+//!     - [`Value<T>`] is delegated to [`ValueDeserializer`] in `deserialize_struct`.
+//!
+//! The purpose of this workflow is to:
+//!
+//! - Retrieve the correct config value based on source location precedence
+//! - Provide richer error context showing where a config is defined
+//! - Provide a richer internal API to map to concrete config types
+//!   without touching underlying [`ConfigValue`] directly
+//!
+//! [`ConfigValue`]: CV
 
 use crate::util::context::value;
 use crate::util::context::{ConfigError, ConfigKey, GlobalContext};
@@ -155,8 +176,32 @@ impl<'de, 'gctx> de::Deserializer<'de> for Deserializer<'gctx> {
         V: de::Visitor<'de>,
     {
         if name == "StringList" {
-            let vals = self.gctx.get_list_or_string(&self.key)?;
-            let vals: Vec<String> = vals.into_iter().map(|vd| vd.0).collect();
+            let mut res = Vec::new();
+
+            match self.gctx.get_cv(&self.key)? {
+                Some(CV::List(val, _def)) => res.extend(val),
+                Some(CV::String(val, def)) => {
+                    let split_vs = val
+                        .split_whitespace()
+                        .map(|s| CV::String(s.to_string(), def.clone()));
+                    res.extend(split_vs);
+                }
+                Some(val) => {
+                    self.gctx
+                        .expected("string or array of strings", &self.key, &val)?;
+                }
+                None => {}
+            }
+
+            self.gctx.get_env_list(&self.key, &mut res)?;
+
+            let vals: Vec<String> = res
+                .into_iter()
+                .map(|val| match val {
+                    CV::String(s, _defintion) => Ok(s),
+                    other => Err(ConfigError::expected(&self.key, "string", &other)),
+                })
+                .collect::<Result<_, _>>()?;
             visitor.visit_newtype_struct(vals.into_deserializer())
         } else {
             visitor.visit_newtype_struct(self)
@@ -371,7 +416,7 @@ impl<'de, 'gctx> de::MapAccess<'de> for ConfigMapAccess<'gctx> {
                         .gctx
                         .get_cv_with_env(&self.de.key)
                         .ok()
-                        .and_then(|cv| cv.map(|cv| cv.get_definition().clone())),
+                        .and_then(|cv| cv.map(|cv| cv.definition().clone())),
                 )
             });
         self.de.key.pop();
@@ -380,19 +425,29 @@ impl<'de, 'gctx> de::MapAccess<'de> for ConfigMapAccess<'gctx> {
 }
 
 struct ConfigSeqAccess {
-    list_iter: vec::IntoIter<(String, Definition)>,
+    /// The config key to the sequence.
+    key: ConfigKey,
+    list_iter: vec::IntoIter<CV>,
 }
 
 impl ConfigSeqAccess {
     fn new(de: Deserializer<'_>) -> Result<ConfigSeqAccess, ConfigError> {
         let mut res = Vec::new();
-        if let Some(v) = de.gctx._get_list(&de.key)? {
-            res.extend(v.val);
+
+        match de.gctx.get_cv(&de.key)? {
+            Some(CV::List(val, _definition)) => {
+                res.extend(val);
+            }
+            Some(val) => {
+                de.gctx.expected("list", &de.key, &val)?;
+            }
+            None => {}
         }
 
         de.gctx.get_env_list(&de.key, &mut res)?;
 
         Ok(ConfigSeqAccess {
+            key: de.key,
             list_iter: res.into_iter(),
         })
     }
@@ -407,15 +462,32 @@ impl<'de> de::SeqAccess<'de> for ConfigSeqAccess {
     {
         match self.list_iter.next() {
             // TODO: add `def` to error?
-            Some((value, def)) => {
+            Some(val @ CV::String(..)) => {
                 // This might be a String or a Value<String>.
-                // ValueDeserializer will handle figuring out which one it is.
-                let maybe_value_de = ValueDeserializer::new_with_string(value, def);
-                seed.deserialize(maybe_value_de).map(Some)
+                // ArrayItemDeserializer will handle figuring out which one it is.
+                seed.deserialize(ArrayItemDeserializer::new(val)).map(Some)
             }
+            Some(val) => Err(ConfigError::expected(&self.key, "list of string", &val)),
             None => Ok(None),
         }
     }
+}
+
+/// Source of data for [`ValueDeserializer`]
+enum ValueSource<'gctx> {
+    /// The deserializer used to actually deserialize a Value struct.
+    Deserializer {
+        de: Deserializer<'gctx>,
+        definition: Definition,
+    },
+    /// A [`ConfigValue`](CV).
+    ///
+    /// This is used for situations where you can't address a string via a TOML key,
+    /// such as a string inside an array.
+    /// The [`ConfigSeqAccess`] doesn't know if the type it should deserialize to
+    /// is a `String` or `Value<String>`,
+    /// so [`ArrayItemDeserializer`] needs to be able to handle both.
+    ConfigValue(CV),
 }
 
 /// This is a deserializer that deserializes into a `Value<T>` for
@@ -427,18 +499,7 @@ impl<'de> de::SeqAccess<'de> for ConfigSeqAccess {
 /// See more comments in `value.rs` for the protocol used here.
 struct ValueDeserializer<'gctx> {
     hits: u32,
-    definition: Definition,
-    /// The deserializer, used to actually deserialize a Value struct.
-    /// This is `None` if deserializing a string.
-    de: Option<Deserializer<'gctx>>,
-    /// A string value to deserialize.
-    ///
-    /// This is used for situations where you can't address a string via a
-    /// TOML key, such as a string inside an array. The `ConfigSeqAccess`
-    /// doesn't know if the type it should deserialize to is a `String` or
-    /// `Value<String>`, so `ValueDeserializer` needs to be able to handle
-    /// both.
-    str_value: Option<String>,
+    source: ValueSource<'gctx>,
 }
 
 impl<'gctx> ValueDeserializer<'gctx> {
@@ -463,20 +524,24 @@ impl<'gctx> ValueDeserializer<'gctx> {
                 (_, None) => env_def,
             }
         };
+
         Ok(ValueDeserializer {
             hits: 0,
-            definition,
-            de: Some(de),
-            str_value: None,
+            source: ValueSource::Deserializer { de, definition },
         })
     }
 
-    fn new_with_string(s: String, definition: Definition) -> ValueDeserializer<'gctx> {
+    fn with_cv(cv: CV) -> ValueDeserializer<'gctx> {
         ValueDeserializer {
             hits: 0,
-            definition,
-            de: None,
-            str_value: Some(s),
+            source: ValueSource::ConfigValue(cv),
+        }
+    }
+
+    fn definition(&self) -> &Definition {
+        match &self.source {
+            ValueSource::Deserializer { definition, .. } => definition,
+            ValueSource::ConfigValue(cv) => cv.definition(),
         }
     }
 }
@@ -507,55 +572,76 @@ impl<'de, 'gctx> de::MapAccess<'de> for ValueDeserializer<'gctx> {
         // If this is the first time around we deserialize the `value` field
         // which is the actual deserializer
         if self.hits == 1 {
-            if let Some(de) = &self.de {
-                return seed
+            return match &self.source {
+                ValueSource::Deserializer { de, definition } => seed
                     .deserialize(de.clone())
-                    .map_err(|e| e.with_key_context(&de.key, Some(self.definition.clone())));
-            } else {
-                return seed
-                    .deserialize(self.str_value.as_ref().unwrap().clone().into_deserializer());
-            }
+                    .map_err(|e| e.with_key_context(&de.key, Some(definition.clone()))),
+                ValueSource::ConfigValue(cv) => {
+                    seed.deserialize(ArrayItemDeserializer::new(cv.clone()))
+                }
+            };
         }
 
         // ... otherwise we're deserializing the `definition` field, so we need
         // to figure out where the field we just deserialized was defined at.
-        match &self.definition {
+        match self.definition() {
+            Definition::BuiltIn => seed.deserialize(0.into_deserializer()),
             Definition::Path(path) => {
-                seed.deserialize(Tuple2Deserializer(0i32, path.to_string_lossy()))
+                seed.deserialize(Tuple2Deserializer(1i32, path.to_string_lossy()))
             }
             Definition::Environment(env) => {
-                seed.deserialize(Tuple2Deserializer(1i32, env.as_str()))
+                seed.deserialize(Tuple2Deserializer(2i32, env.as_str()))
             }
             Definition::Cli(path) => {
                 let s = path
                     .as_ref()
                     .map(|p| p.to_string_lossy())
                     .unwrap_or_default();
-                seed.deserialize(Tuple2Deserializer(2i32, s))
+                seed.deserialize(Tuple2Deserializer(3i32, s))
             }
         }
     }
 }
 
-// Deserializer is only implemented to handle deserializing a String inside a
-// sequence (like `Vec<String>` or `Vec<Value<String>>`). `Value<String>` is
-// handled by deserialize_struct, and the plain `String` is handled by all the
-// other functions here.
-impl<'de, 'gctx> de::Deserializer<'de> for ValueDeserializer<'gctx> {
+/// A deserializer for individual [`ConfigValue`](CV) items in arrays
+///
+/// This deserializer is only implemented to handle deserializing a String
+/// inside a sequence (like `Vec<String>` or `Vec<Value<String>>`).
+/// `Value<String>` is handled by `deserialize_struct` in [`ValueDeserializer`],
+/// and the plain `String` is handled by all the other functions here.
+#[derive(Clone)]
+struct ArrayItemDeserializer {
+    cv: CV,
+}
+
+impl ArrayItemDeserializer {
+    fn new(cv: CV) -> Self {
+        Self { cv }
+    }
+
+    fn into_inner(self) -> String {
+        match self.cv {
+            CV::String(s, _def) => s,
+            _ => unreachable!("string expected"),
+        }
+    }
+}
+
+impl<'de> de::Deserializer<'de> for ArrayItemDeserializer {
     type Error = ConfigError;
 
     fn deserialize_str<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        visitor.visit_str(&self.str_value.expect("string expected"))
+        visitor.visit_str(&self.into_inner())
     }
 
     fn deserialize_string<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        visitor.visit_string(self.str_value.expect("string expected"))
+        visitor.visit_string(self.into_inner())
     }
 
     fn deserialize_struct<V>(
@@ -572,7 +658,7 @@ impl<'de, 'gctx> de::Deserializer<'de> for ValueDeserializer<'gctx> {
         //
         // See more comments in `value.rs` for the protocol used here.
         if name == value::NAME && fields == value::FIELDS {
-            return visitor.visit_map(self);
+            return visitor.visit_map(ValueDeserializer::with_cv(self.cv));
         }
         unimplemented!("only strings and Value can be deserialized from a sequence");
     }
@@ -581,7 +667,7 @@ impl<'de, 'gctx> de::Deserializer<'de> for ValueDeserializer<'gctx> {
     where
         V: de::Visitor<'de>,
     {
-        visitor.visit_string(self.str_value.expect("string expected"))
+        visitor.visit_string(self.into_inner())
     }
 
     fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>

@@ -99,6 +99,8 @@ ConcreteType eunwrap(CConcreteType CDT, llvm::LLVMContext &ctx) {
     return ConcreteType(llvm::Type::getX86_FP80Ty(ctx));
   case DT_BFloat16:
     return ConcreteType(llvm::Type::getBFloatTy(ctx));
+  case DT_FP128:
+    return ConcreteType(llvm::Type::getFP128Ty(ctx));
   case DT_Unknown:
     return BaseType::Unknown;
   }
@@ -133,6 +135,8 @@ CConcreteType ewrap(const ConcreteType &CT) {
       return DT_X86_FP80;
     if (flt->isBFloatTy())
       return DT_BFloat16;
+    if (flt->isFP128Ty())
+      return DT_FP128;
   } else {
     switch (CT.SubTypeEnum) {
     case BaseType::Integer:
@@ -871,6 +875,14 @@ void EnzymeTypeTreeShiftIndiciesEq(CTypeTreeRef CTT, const char *datalayout,
   *(TypeTree *)CTT =
       ((TypeTree *)CTT)->ShiftIndices(DL, offset, maxSize, addOffset);
 }
+void EnzymeTypeTreeInsertEq(CTypeTreeRef CTT, const int64_t *indices,
+                            size_t len, CConcreteType ct, LLVMContextRef ctx) {
+  std::vector<int> seq;
+  for (size_t i = 0; i < len; i++) {
+    seq.push_back(indices[i]);
+  }
+  ((TypeTree *)CTT)->insert(seq, eunwrap(ct, *unwrap(ctx)));
+}
 const char *EnzymeTypeTreeToString(CTypeTreeRef src) {
   std::string tmp = ((TypeTree *)src)->str();
   char *cstr = new char[tmp.length() + 1];
@@ -1000,6 +1012,10 @@ void EnzymeCloneFunctionDISubprogramInto(LLVMValueRef NF, LLVMValueRef F) {
 
 void EnzymeReplaceFunctionImplementation(LLVMModuleRef M) {
   ReplaceFunctionImplementation(*unwrap(M));
+}
+
+void EnzymeDetectReadonlyOrThrow(LLVMModuleRef M) {
+  DetectReadonlyOrThrow(*unwrap(M));
 }
 
 void EnzymeDumpModuleRef(LLVMModuleRef M) {

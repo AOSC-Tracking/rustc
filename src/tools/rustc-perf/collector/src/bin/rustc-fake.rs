@@ -30,8 +30,7 @@ fn run_with_determinism_env(mut cmd: Command) {
     let status = cmd.status().expect("failed to spawn");
     assert!(
         status.success(),
-        "command did not complete successfully: {:?}",
-        cmd
+        "command did not complete successfully: {cmd:?}"
     );
 }
 
@@ -70,7 +69,7 @@ fn main() {
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
     {
-        args.push(OsString::from(format!("-Zthreads={}", count)));
+        args.push(OsString::from(format!("-Zthreads={count}")));
     }
 
     args.push(OsString::from("-Adeprecated"));
@@ -356,11 +355,18 @@ fn main() {
 
             "Eprintln" => {
                 let mut cmd = Command::new(tool);
+
+                let file_path = "eprintln";
                 cmd.args(args).stderr(std::process::Stdio::from(
-                    std::fs::File::create("eprintln").unwrap(),
+                    std::fs::File::create(file_path).unwrap(),
                 ));
 
-                run_with_determinism_env(cmd);
+                determinism_env(&mut cmd);
+                let status = cmd.status().expect("failed to spawn");
+                if !status.success() {
+                    let stderr = std::fs::read_to_string(file_path).unwrap_or_default();
+                    panic!("command did not complete successfully: {cmd:?}\nstderr:\n{stderr}");
+                }
             }
 
             "LlvmLines" => {
@@ -408,7 +414,7 @@ fn main() {
             }
 
             _ => {
-                panic!("unknown wrapper: {}", wrapper);
+                panic!("unknown wrapper: {wrapper}");
             }
         }
     } else if args.iter().any(|arg| arg == "--skip-this-rustc") {
@@ -421,7 +427,7 @@ fn main() {
                 .iter()
                 .any(|arg| arg == "-vV" || arg == "--print=file-names")
             {
-                eprintln!("{:?} {:?}", tool, args);
+                eprintln!("{tool:?} {args:?}");
                 eprintln!("exiting -- non-wrapped rustc");
                 std::process::exit(1);
             }
@@ -441,7 +447,7 @@ fn process_self_profile_output(prof_out_dir: PathBuf, args: &[OsString]) {
         .and_then(|args| args[1].to_str())
         .expect("rustc to be invoked with crate name");
     println!("!self-profile-dir:{}", prof_out_dir.to_str().unwrap());
-    println!("!self-profile-crate:{}", crate_name);
+    println!("!self-profile-crate:{crate_name}");
 }
 
 #[cfg(windows)]
@@ -456,9 +462,9 @@ fn exec(cmd: &mut Command) -> ! {
 #[cfg(unix)]
 fn exec(cmd: &mut Command) -> ! {
     use std::os::unix::prelude::*;
-    let cmd_d = format!("{:?}", cmd);
+    let cmd_d = format!("{cmd:?}");
     let error = cmd.exec();
-    panic!("failed to exec `{}`: {}", cmd_d, error);
+    panic!("failed to exec `{cmd_d}`: {error}");
 }
 
 #[cfg(unix)]

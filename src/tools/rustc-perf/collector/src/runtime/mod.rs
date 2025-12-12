@@ -15,7 +15,7 @@ pub use benchmark::{
 use database::{ArtifactIdNumber, CollectionId, Connection};
 
 use crate::utils::git::get_rustc_perf_commit;
-use crate::{run_command_with_output, CollectorCtx};
+use crate::{command_output, CollectorCtx};
 
 mod benchmark;
 mod profile;
@@ -37,7 +37,7 @@ pub async fn bench_runtime(
     iterations: u32,
 ) -> anyhow::Result<()> {
     let filtered = suite.filtered_benchmark_count(&filter);
-    println!("Executing {} benchmarks\n", filtered);
+    println!("Executing {filtered} benchmarks\n");
 
     let rustc_perf_version = get_rustc_perf_commit();
     let mut benchmark_index = 0;
@@ -87,12 +87,13 @@ pub async fn bench_runtime(
         .with_context(|| format!("Failed to execute runtime benchmark group {}", group.name));
 
         if let Err(error) = result {
-            eprintln!("collector error: {:#}", error);
+            eprintln!("collector error: {error:#}");
             tx.conn()
                 .record_error(
                     collector.artifact_row_id,
                     &step_name,
-                    &format!("{:?}", error),
+                    &format!("{error:?}"),
+                    collector.job_id,
                 )
                 .await;
         };
@@ -218,15 +219,7 @@ fn execute_runtime_benchmark_binary(
         command.args(["--include", &filter.include.join(",")]);
     }
 
-    let output = run_command_with_output(&mut command)?;
-    if !output.status.success() {
-        return Err(anyhow::anyhow!(
-            "Process finished with exit code {}\n{}",
-            output.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
+    let output = command_output(&mut command)?;
     let reader = BufReader::new(Cursor::new(output.stdout));
     Ok(reader.lines().map(|line| {
         Ok(line.and_then(|line| Ok(serde_json::from_str::<BenchmarkMessage>(&line)?))?)

@@ -689,9 +689,9 @@ fn print_lockfile_updates(
     }
 
     if ws.gctx().shell().verbosity() == Verbosity::Verbose {
-        ws.gctx().shell().note(
-            "to see how you depend on a package, run `cargo tree --invert --package <dep>@<ver>`",
-        )?;
+        ws.gctx()
+            .shell()
+            .note("to see how you depend on a package, run `cargo tree --invert <dep>@<ver>`")?;
     } else {
         if 0 < unchanged_behind {
             ws.gctx().shell().note(format!(
@@ -1058,11 +1058,11 @@ impl PackageChangeKind {
 
     pub fn style(&self) -> anstyle::Style {
         match self {
-            Self::Added => style::NOTE,
-            Self::Removed => style::ERROR,
-            Self::Upgraded => style::GOOD,
-            Self::Downgraded => style::WARN,
-            Self::Unchanged => anstyle::Style::new().bold(),
+            Self::Added => style::UPDATE_ADDED,
+            Self::Removed => style::UPDATE_REMOVED,
+            Self::Upgraded => style::UPDATE_UPGRADED,
+            Self::Downgraded => style::UPDATE_DOWNGRADED,
+            Self::Unchanged => style::UPDATE_UNCHANGED,
         }
     }
 }

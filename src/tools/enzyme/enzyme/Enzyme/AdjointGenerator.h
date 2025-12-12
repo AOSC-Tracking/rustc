@@ -5005,14 +5005,10 @@ public:
         auto ft = call.getFunctionType();
         bool retActive = subretType != DIFFE_TYPE::CONSTANT;
 
-        ReturnType subretVal =
-            subretused
-                ? (retActive ? ReturnType::TwoReturns : ReturnType::Return)
-                : (retActive ? ReturnType::Return : ReturnType::Void);
-
         FT = getFunctionTypeForClone(
             ft, Mode, gutils->getWidth(), tape ? tape->getType() : nullptr,
-            argsInverted, false, subretVal, subretType);
+            argsInverted, false, /*returnTape*/ false,
+            /*returnPrimal*/ subretused, /*returnShadow*/ retActive);
         PointerType *fptype = PointerType::getUnqual(FT);
         newcalled = BuilderZ.CreatePointerCast(newcalled,
                                                PointerType::getUnqual(fptype));
@@ -5255,9 +5251,12 @@ public:
 
           Value *darg = nullptr;
 
-          if (writeOnlyNoCapture && !replaceFunction &&
-              TR.query(call.getArgOperand(i))[{-1, -1}] == BaseType::Pointer) {
-            darg = getUndefinedValueForType(M, argi->getType());
+          if (((writeOnlyNoCapture && TR.query(call.getArgOperand(
+                                          i))[{-1, -1}] == BaseType::Pointer) ||
+               gutils->isConstantInstruction(&call)) &&
+              !replaceFunction) {
+            darg = getUndefinedValueForType(
+                M, gutils->getShadowType(argi->getType()));
           } else {
             darg = gutils->invertPointerM(call.getArgOperand(i), Builder2);
             revType = (revType == ValueType::None) ? ValueType::Shadow
@@ -5265,8 +5264,12 @@ public:
           }
           args.push_back(lookup(darg, Builder2));
         }
-        pre_args.push_back(
-            gutils->invertPointerM(call.getArgOperand(i), BuilderZ));
+        if (Mode == DerivativeMode::ReverseModeGradient && !replaceFunction) {
+          pre_args.push_back(getUndefinedValueForType(M, argi->getType()));
+        } else {
+          pre_args.push_back(
+              gutils->invertPointerM(call.getArgOperand(i), BuilderZ));
+        }
         preType =
             (preType == ValueType::None) ? ValueType::Shadow : ValueType::Both;
 
@@ -6018,8 +6021,19 @@ public:
         eraseIfUnused(call, /*erase*/ false, /*check*/ false);
       }
 
+      SmallPtrSet<Value *, 2> postCreateSet(postCreate.begin(),
+                                            postCreate.end());
       for (auto a : postCreate) {
         a->moveBefore(*Builder2.GetInsertBlock(), Builder2.GetInsertPoint());
+        for (size_t i = 0; i < a->getNumOperands(); i++) {
+          auto op = dyn_cast<Instruction>(a->getOperand(i));
+          if (!op || postCreateSet.count(op))
+            continue;
+          if (gutils->isOriginal(op->getParent())) {
+            IRBuilder<> BuilderA(a);
+            a->setOperand(i, gutils->lookupM(op, BuilderA));
+          }
+        }
       }
 
       gutils->originalToNewFn[&call] = retval ? retval : diffes;

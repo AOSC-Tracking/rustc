@@ -1,0 +1,42 @@
+[dependencies]
+bitflags = "2.4.1"
+derive-where = "1.2.7"
+ena = "0.14.3"
+indexmap = "2.0.0"
+rustc-hash = "2.0.0"
+thin-vec = "0.2.12"
+tracing = "0.1"
+
+[dependencies.arrayvec]
+default-features = false
+version = "0.7"
+
+[dependencies.rustc_ast_ir]
+default-features = false
+package = "ra-ap-rustc_ast_ir"
+version = "0.133.0"
+
+[dependencies.rustc_index]
+default-features = false
+package = "ra-ap-rustc_index"
+version = "0.133.0"
+
+[dependencies.rustc_type_ir_macros]
+package = "ra-ap-rustc_type_ir_macros"
+version = "0.133.0"
+
+[dependencies.smallvec]
+default-features = false
+features = ["const_generics"]
+version = "1.8.1"
+
+[features]
+nightly = []
+
+[package]
+description = "\nAutomatically published version of the package `rustc_type_ir`\nin the rust-lang/rust repository from commit dfa22235d858086511bedc4acde9db1c045ffbac\n\nThe publishing script for this crate lives at:\nhttps://github.com/rust-analyzer/rustc-auto-publish\n"
+edition = "2024"
+license = "MIT / Apache-2.0"
+name = "ra-ap-rustc_type_ir"
+repository = "https://github.com/rust-lang/rust"
+version = "0.133.0"

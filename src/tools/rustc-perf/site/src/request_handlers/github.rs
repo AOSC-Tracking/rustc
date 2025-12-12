@@ -3,7 +3,7 @@ use crate::github::{
     client, enqueue_shas, parse_homu_comment, rollup_pr_number, unroll_rollup,
     COMMENT_MARK_TEMPORARY, RUST_REPO_GITHUB_API_URL,
 };
-use crate::job_queue::run_new_queue;
+use crate::job_queue::should_use_job_queue;
 use crate::load::SiteCtxt;
 
 use database::BenchmarkRequest;
@@ -23,7 +23,9 @@ pub async fn handle_github(
 
 async fn handle_push(ctxt: Arc<SiteCtxt>, push: github::Push) -> ServerResult<github::Response> {
     let gh_client = client::Client::from_ctxt(&ctxt, RUST_REPO_GITHUB_API_URL.to_owned());
-    if push.r#ref != "refs/heads/master" || push.sender.login != "bors" {
+    if push.r#ref != format!("refs/heads/{}", push.repository.default_branch)
+        || push.sender.login != "bors"
+    {
         return Ok(github::Response);
     }
     let rollup_pr_number = match rollup_pr_number(&gh_client, &push.head_commit.message).await? {
@@ -82,14 +84,10 @@ async fn record_try_benchmark_request_without_artifacts(
     pr: u32,
     backends: &str,
 ) {
-    // We only want to run this if the new system is running
-    if run_new_queue() {
-        let try_request =
-            BenchmarkRequest::create_try_without_artifacts(pr, chrono::Utc::now(), backends, "");
-        log::info!("Inserting try benchmark request {try_request:?}");
-        if let Err(e) = conn.insert_benchmark_request(&try_request).await {
-            log::error!("Failed to insert try benchmark request: {}", e);
-        }
+    let try_request = BenchmarkRequest::create_try_without_artifacts(pr, backends, "");
+    log::info!("Inserting try benchmark request {try_request:?}");
+    if let Err(e) = conn.insert_benchmark_request(&try_request).await {
+        log::error!("Failed to insert try benchmark request: {}", e);
     }
 }
 
@@ -119,20 +117,23 @@ async fn handle_rust_timer(
             Ok(cmd) => {
                 let conn = ctxt.conn().await;
 
-                record_try_benchmark_request_without_artifacts(
-                    &*conn,
-                    issue.number,
-                    cmd.params.backends.unwrap_or(""),
-                )
-                .await;
-                conn.queue_pr(
-                    issue.number,
-                    cmd.params.include,
-                    cmd.params.exclude,
-                    cmd.params.runs,
-                    cmd.params.backends,
-                )
-                .await;
+                if should_use_job_queue(issue.number) {
+                    record_try_benchmark_request_without_artifacts(
+                        &*conn,
+                        issue.number,
+                        cmd.params.backends.unwrap_or(""),
+                    )
+                    .await;
+                } else {
+                    conn.queue_pr(
+                        issue.number,
+                        cmd.params.include,
+                        cmd.params.exclude,
+                        cmd.params.runs,
+                        cmd.params.backends,
+                    )
+                    .await;
+                }
                 format!(
                     "Awaiting bors try build completion.
 
@@ -165,20 +166,23 @@ async fn handle_rust_timer(
     {
         let conn = ctxt.conn().await;
         for command in &valid_build_cmds {
-            record_try_benchmark_request_without_artifacts(
-                &*conn,
-                issue.number,
-                command.params.backends.unwrap_or(""),
-            )
-            .await;
-            conn.queue_pr(
-                issue.number,
-                command.params.include,
-                command.params.exclude,
-                command.params.runs,
-                command.params.backends,
-            )
-            .await;
+            if should_use_job_queue(issue.number) {
+                record_try_benchmark_request_without_artifacts(
+                    &*conn,
+                    issue.number,
+                    command.params.backends.unwrap_or(""),
+                )
+                .await;
+            } else {
+                conn.queue_pr(
+                    issue.number,
+                    command.params.include,
+                    command.params.exclude,
+                    command.params.runs,
+                    command.params.backends,
+                )
+                .await;
+            }
         }
     }
 
@@ -309,12 +313,12 @@ pub async fn get_authorized_users() -> Result<Vec<u64>, String> {
         .get(&url)
         .send()
         .await
-        .map_err(|err| format!("failed to fetch authorized users: {}", err))?
+        .map_err(|err| format!("failed to fetch authorized users: {err}"))?
         .error_for_status()
-        .map_err(|err| format!("failed to fetch authorized users: {}", err))?
+        .map_err(|err| format!("failed to fetch authorized users: {err}"))?
         .json::<rust_team_data::v1::Permission>()
         .await
-        .map_err(|err| format!("failed to fetch authorized users: {}", err))
+        .map_err(|err| format!("failed to fetch authorized users: {err}"))
         .map(|perms| perms.github_ids)
 }
 
@@ -465,7 +469,7 @@ Otherwise LGTM."#),
             @r#"Some(Ok(QueueCommand { params: BenchmarkParameters { include: Some("foo,bar"), exclude: None, runs: None, backends: None } }))"#);
     }
 
-    fn get_build_commands(body: &str) -> Vec<Result<BuildCommand, String>> {
+    fn get_build_commands(body: &str) -> Vec<Result<BuildCommand<'_>, String>> {
         parse_build_commands(body).collect()
     }
 

@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use annotate_snippets::Level;
 use anyhow::{Context as _, anyhow, bail};
 use glob::glob;
 use itertools::Itertools;
@@ -25,7 +26,9 @@ use crate::util::context::FeatureUnification;
 use crate::util::edit_distance;
 use crate::util::errors::{CargoResult, ManifestError};
 use crate::util::interning::InternedString;
-use crate::util::lints::{analyze_cargo_lints_table, check_im_a_teapot};
+use crate::util::lints::{
+    analyze_cargo_lints_table, blanket_hint_mostly_unused, check_im_a_teapot,
+};
 use crate::util::toml::{InheritableFields, read_manifest};
 use crate::util::{
     Filesystem, GlobalContext, IntoUrl, context::CargoResolverConfig, context::ConfigRelativePath,
@@ -212,7 +215,6 @@ impl<'gctx> Workspace<'gctx> {
     /// before returning it, so `Ok` is only returned for valid workspaces.
     pub fn new(manifest_path: &Path, gctx: &'gctx GlobalContext) -> CargoResult<Workspace<'gctx>> {
         let mut ws = Workspace::new_default(manifest_path.to_path_buf(), gctx);
-        ws.target_dir = gctx.target_dir()?;
 
         if manifest_path.is_relative() {
             bail!(
@@ -223,11 +225,8 @@ impl<'gctx> Workspace<'gctx> {
             ws.root_manifest = ws.find_root(manifest_path)?;
         }
 
-        ws.build_dir = gctx.build_dir(
-            ws.root_manifest
-                .as_ref()
-                .unwrap_or(&manifest_path.to_path_buf()),
-        )?;
+        ws.target_dir = gctx.target_dir()?;
+        ws.build_dir = gctx.build_dir(ws.root_manifest())?;
 
         ws.custom_metadata = ws
             .load_workspace_config()?
@@ -409,10 +408,7 @@ impl<'gctx> Workspace<'gctx> {
     }
 
     pub fn profiles(&self) -> Option<&TomlProfiles> {
-        match self.root_maybe() {
-            MaybePackage::Package(p) => p.manifest().profiles(),
-            MaybePackage::Virtual(vm) => vm.profiles(),
-        }
+        self.root_maybe().profiles()
     }
 
     /// Returns the root path of this workspace.
@@ -443,20 +439,32 @@ impl<'gctx> Workspace<'gctx> {
     }
 
     pub fn build_dir(&self) -> Filesystem {
-        self.build_dir.clone().unwrap_or_else(|| self.target_dir())
+        self.build_dir
+            .clone()
+            .or_else(|| self.target_dir.clone())
+            .unwrap_or_else(|| self.default_build_dir())
     }
 
     fn default_target_dir(&self) -> Filesystem {
         if self.root_maybe().is_embedded() {
-            let hash = crate::util::hex::short_hash(&self.root_manifest().to_string_lossy());
-            let mut rel_path = PathBuf::new();
-            rel_path.push("target");
-            rel_path.push(&hash[0..2]);
-            rel_path.push(&hash[2..]);
-
-            self.gctx().home().join(rel_path)
+            self.build_dir().join("target")
         } else {
             Filesystem::new(self.root().join("target"))
+        }
+    }
+
+    fn default_build_dir(&self) -> Filesystem {
+        if self.root_maybe().is_embedded() {
+            let default = ConfigRelativePath::new(
+                "{cargo-cache-home}/build/{workspace-path-hash}"
+                    .to_owned()
+                    .into(),
+            );
+            self.gctx()
+                .custom_build_dir(&default, self.root_manifest())
+                .expect("template is correct")
+        } else {
+            self.default_target_dir()
         }
     }
 
@@ -671,7 +679,7 @@ impl<'gctx> Workspace<'gctx> {
 
     fn default_lock_root(&self) -> Filesystem {
         if self.root_maybe().is_embedded() {
-            self.target_dir()
+            self.build_dir()
         } else {
             Filesystem::new(self.root().to_owned())
         }
@@ -907,10 +915,7 @@ impl<'gctx> Workspace<'gctx> {
 
     /// Returns the unstable nightly-only features enabled via `cargo-features` in the manifest.
     pub fn unstable_features(&self) -> &Features {
-        match self.root_maybe() {
-            MaybePackage::Package(p) => p.manifest().unstable_features(),
-            MaybePackage::Virtual(vm) => vm.unstable_features(),
-        }
+        self.root_maybe().unstable_features()
     }
 
     pub fn resolve_behavior(&self) -> ResolveBehavior {
@@ -1142,18 +1147,18 @@ impl<'gctx> Workspace<'gctx> {
                         .max()
                     {
                         let resolver = edition.default_resolve_behavior().to_manifest();
-                        self.gctx.shell().warn(format_args!(
-                            "virtual workspace defaulting to `resolver = \"1\"` despite one or more workspace members being on edition {edition} which implies `resolver = \"{resolver}\"`"
-                        ))?;
-                        self.gctx.shell().note(
-                            "to keep the current resolver, specify `workspace.resolver = \"1\"` in the workspace root's manifest",
-                        )?;
-                        self.gctx.shell().note(format_args!(
-                            "to use the edition {edition} resolver, specify `workspace.resolver = \"{resolver}\"` in the workspace root's manifest"
-                        ))?;
-                        self.gctx.shell().note(
-                            "for more details see https://doc.rust-lang.org/cargo/reference/resolver.html#resolver-versions",
-                        )?;
+                        let report = &[Level::WARNING
+                            .primary_title(format!(
+                                "virtual workspace defaulting to `resolver = \"1\"` despite one or more workspace members being on edition {edition} which implies `resolver = \"{resolver}\"`"
+                            ))
+                            .elements([
+                                Level::NOTE.message("to keep the current resolver, specify `workspace.resolver = \"1\"` in the workspace root's manifest"),
+                                Level::NOTE.message(
+                                    format!("to use the edition {edition} resolver, specify `workspace.resolver = \"{resolver}\"` in the workspace root's manifest"),
+                                ),
+                                Level::NOTE.message("for more details see https://doc.rust-lang.org/cargo/reference/resolver.html#resolver-versions"),
+                            ])];
+                        self.gctx.shell().print_report(report, false)?;
                     }
                 }
             }
@@ -1206,14 +1211,17 @@ impl<'gctx> Workspace<'gctx> {
 
     pub fn emit_warnings(&self) -> CargoResult<()> {
         let mut first_emitted_error = None;
+
+        if let Err(e) = self.emit_ws_lints() {
+            first_emitted_error = Some(e);
+        }
+
         for (path, maybe_pkg) in &self.packages.packages {
             if let MaybePackage::Package(pkg) = maybe_pkg {
-                if self.gctx.cli_unstable().cargo_lints {
-                    if let Err(e) = self.emit_lints(pkg, &path)
-                        && first_emitted_error.is_none()
-                    {
-                        first_emitted_error = Some(e);
-                    }
+                if let Err(e) = self.emit_pkg_lints(pkg, &path)
+                    && first_emitted_error.is_none()
+                {
+                    first_emitted_error = Some(e);
                 }
             }
             let warnings = match maybe_pkg {
@@ -1248,7 +1256,7 @@ impl<'gctx> Workspace<'gctx> {
         }
     }
 
-    pub fn emit_lints(&self, pkg: &Package, path: &Path) -> CargoResult<()> {
+    pub fn emit_pkg_lints(&self, pkg: &Package, path: &Path) -> CargoResult<()> {
         let mut error_count = 0;
         let toml_lints = pkg
             .manifest()
@@ -1262,26 +1270,74 @@ impl<'gctx> Workspace<'gctx> {
             .cloned()
             .unwrap_or(manifest::TomlToolLints::default());
 
-        let ws_contents = match self.root_maybe() {
-            MaybePackage::Package(pkg) => pkg.manifest().contents(),
-            MaybePackage::Virtual(v) => v.contents(),
-        };
+        let ws_contents = self.root_maybe().contents();
 
-        let ws_document = match self.root_maybe() {
-            MaybePackage::Package(pkg) => pkg.manifest().document(),
-            MaybePackage::Virtual(v) => v.document(),
-        };
+        let ws_document = self.root_maybe().document();
 
-        analyze_cargo_lints_table(
-            pkg,
-            &path,
-            &cargo_lints,
-            ws_contents,
-            ws_document,
-            self.root_manifest(),
-            self.gctx,
-        )?;
-        check_im_a_teapot(pkg, &path, &cargo_lints, &mut error_count, self.gctx)?;
+        if self.gctx.cli_unstable().cargo_lints {
+            analyze_cargo_lints_table(
+                pkg,
+                &path,
+                &cargo_lints,
+                ws_contents,
+                ws_document,
+                self.root_manifest(),
+                self.gctx,
+            )?;
+            check_im_a_teapot(pkg, &path, &cargo_lints, &mut error_count, self.gctx)?;
+        }
+
+        if error_count > 0 {
+            Err(crate::util::errors::AlreadyPrintedError::new(anyhow!(
+                "encountered {error_count} errors(s) while running lints"
+            ))
+            .into())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn emit_ws_lints(&self) -> CargoResult<()> {
+        let mut error_count = 0;
+
+        let cargo_lints = match self.root_maybe() {
+            MaybePackage::Package(pkg) => {
+                let toml = pkg.manifest().normalized_toml();
+                if let Some(ws) = &toml.workspace {
+                    ws.lints.as_ref()
+                } else {
+                    toml.lints.as_ref().map(|l| &l.lints)
+                }
+            }
+            MaybePackage::Virtual(vm) => vm
+                .normalized_toml()
+                .workspace
+                .as_ref()
+                .unwrap()
+                .lints
+                .as_ref(),
+        }
+        .and_then(|t| t.get("cargo"))
+        .cloned()
+        .unwrap_or(manifest::TomlToolLints::default());
+
+        if self.gctx.cli_unstable().cargo_lints {
+            // Calls to lint functions go in here
+        }
+
+        // This is a short term hack to allow `blanket_hint_mostly_unused`
+        // to run without requiring `-Zcargo-lints`, which should hopefully
+        // improve the testing expierience while we are collecting feedback
+        if self.gctx.cli_unstable().profile_hint_mostly_unused {
+            blanket_hint_mostly_unused(
+                self.root_maybe(),
+                self.root_manifest(),
+                &cargo_lints,
+                &mut error_count,
+                self.gctx,
+            )?;
+        }
+
         if error_count > 0 {
             Err(crate::util::errors::AlreadyPrintedError::new(anyhow!(
                 "encountered {error_count} errors(s) while running lints"
@@ -1888,6 +1944,41 @@ impl MaybePackage {
             MaybePackage::Virtual(_) => false,
         }
     }
+
+    pub fn contents(&self) -> &str {
+        match self {
+            MaybePackage::Package(p) => p.manifest().contents(),
+            MaybePackage::Virtual(v) => v.contents(),
+        }
+    }
+
+    pub fn document(&self) -> &toml::Spanned<toml::de::DeTable<'static>> {
+        match self {
+            MaybePackage::Package(p) => p.manifest().document(),
+            MaybePackage::Virtual(v) => v.document(),
+        }
+    }
+
+    pub fn edition(&self) -> Edition {
+        match self {
+            MaybePackage::Package(p) => p.manifest().edition(),
+            MaybePackage::Virtual(_) => Edition::default(),
+        }
+    }
+
+    pub fn profiles(&self) -> Option<&TomlProfiles> {
+        match self {
+            MaybePackage::Package(p) => p.manifest().profiles(),
+            MaybePackage::Virtual(v) => v.profiles(),
+        }
+    }
+
+    pub fn unstable_features(&self) -> &Features {
+        match self {
+            MaybePackage::Package(p) => p.manifest().unstable_features(),
+            MaybePackage::Virtual(vm) => vm.unstable_features(),
+        }
+    }
 }
 
 impl WorkspaceRootConfig {
@@ -2037,7 +2128,7 @@ fn find_workspace_root_with_loader(
 ) -> CargoResult<Option<PathBuf>> {
     // Check if there are any workspace roots that have already been found that would work
     {
-        let roots = gctx.ws_roots.borrow();
+        let roots = gctx.ws_roots();
         // Iterate through the manifests parent directories until we find a workspace
         // root. Note we skip the first item since that is just the path itself
         for current in manifest_path.ancestors().skip(1) {

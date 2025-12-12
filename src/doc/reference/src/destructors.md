@@ -3,7 +3,7 @@ r[destructors]
 
 r[destructors.intro]
 When an [initialized]&#32;[variable] or [temporary] goes out of
-[scope](#drop-scopes), its *destructor* is run, or it is *dropped*. [Assignment]
+[scope](#drop-scopes), its *destructor* is run or it is *dropped*. [Assignment]
 also runs the destructor of its left-hand operand, if it's initialized. If a
 variable has been partially initialized, only its initialized fields are
 dropped.
@@ -11,7 +11,7 @@ dropped.
 r[destructors.operation]
 The destructor of a type `T` consists of:
 
-1. If `T: Drop`, calling [`<T as std::ops::Drop>::drop`](std::ops::Drop::drop)
+1. If `T: Drop`, calling [`<T as core::ops::Drop>::drop`](core::ops::Drop::drop)
 2. Recursively running the destructor of all of its fields.
     * The fields of a [struct] are dropped in declaration order.
     * The fields of the active [enum variant] are dropped in declaration order.
@@ -25,7 +25,7 @@ The destructor of a type `T` consists of:
 
 r[destructors.drop_in_place]
 If a destructor must be run manually, such as when implementing your own smart
-pointer, [`std::ptr::drop_in_place`] can be used.
+pointer, [`core::ptr::drop_in_place`] can be used.
 
 Some examples:
 
@@ -266,6 +266,9 @@ smallest scope that contains the expression and is one of the following:
 > [!NOTE]
 > The [scrutinee] of a `match` expression is not a temporary scope, so temporaries in the scrutinee can be dropped after the `match` expression. For example, the temporary for `1` in `match 1 { ref mut z => z };` lives until the end of the statement.
 
+> [!NOTE]
+> The desugaring of a [destructuring assignment] restricts the temporary scope of its assigned value operand (the RHS). For details, see [expr.assign.destructure.tmp-scopes].
+
 r[destructors.scope.temporary.edition2024]
 > [!EDITION-2024]
 > The 2024 edition added two new temporary scope narrowing rules: `if let` temporaries are dropped before the `else` block, and temporaries of tail expressions of blocks are dropped immediately after the tail expression is evaluated.
@@ -398,11 +401,7 @@ println!("{:?}", C);
 ```
 
 r[destructors.scope.lifetime-extension.sub-expressions]
-If a [borrow][borrow expression], [dereference][dereference expression],
-[field][field expression], or [tuple indexing expression] has an extended
-temporary scope then so does its operand. If an [indexing expression] has an
-extended temporary scope then the indexed expression also has an extended
-temporary scope.
+If a [borrow], [dereference][dereference expression], [field][field expression], or [tuple indexing expression] has an extended temporary scope, then so does its operand. If an [indexing expression] has an extended temporary scope, then the indexed expression also has an extended temporary scope.
 
 r[destructors.scope.lifetime-extension.patterns]
 #### Extending based on patterns
@@ -474,24 +473,32 @@ let &ref x = &*&temp(); // OK
 r[destructors.scope.lifetime-extension.exprs]
 #### Extending based on expressions
 
+r[destructors.scope.lifetime-extension.exprs.extending]
 For a let statement with an initializer, an *extending expression* is an
 expression which is one of the following:
 
 * The initializer expression.
-* The operand of an extending [borrow expression].
+* The operand of an extending [borrow] expression.
+* The [super operands] of an extending [super macro call] expression.
 * The operand(s) of an extending [array][array expression], [cast][cast
   expression], [braced struct][struct expression], or [tuple][tuple expression]
   expression.
-* The arguments to an extending [tuple struct] or [tuple variant] constructor expression.
+* The arguments to an extending [tuple struct] or [tuple enum variant] constructor expression.
 * The final expression of an extending [block expression] except for an [async block expression].
 * The final expression of an extending [`if`] expression's consequent, `else if`, or `else` block.
 * An arm expression of an extending [`match`] expression.
 
+> [!NOTE]
+> The desugaring of a [destructuring assignment] makes its assigned value operand (the RHS) an extending expression within a newly-introduced block. For details, see [expr.assign.destructure.tmp-ext].
+
 So the borrow expressions in `&mut 0`, `(&1, &mut 2)`, and `Some(&mut 3)`
 are all extending expressions. The borrows in `&0 + &1` and `f(&mut 0)` are not.
 
-The operand of any extending borrow expression has its temporary scope
-extended.
+r[destructors.scope.lifetime-extension.exprs.borrows]
+The operand of an extending [borrow] expression has its [temporary scope] [extended].
+
+r[destructors.scope.lifetime-extension.exprs.super-macros]
+The [super temporaries] of an extending [super macro call] expression have their [scopes][temporary scopes] [extended].
 
 > [!NOTE]
 > `rustc` does not treat [array repeat operands] of extending [array] expressions as extending expressions. Whether it should is an open question.
@@ -503,9 +510,10 @@ extended.
 Here are some examples where expressions have extended temporary scopes:
 
 ```rust,edition2024
+# use core::pin::pin;
 # use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 # static X: AtomicU64 = AtomicU64::new(0);
-# struct S;
+# #[derive(Debug)] struct S;
 # impl Drop for S { fn drop(&mut self) { X.fetch_add(1, Relaxed); } }
 # const fn temp() -> S { S }
 let x = &temp(); // Operand of borrow.
@@ -515,6 +523,11 @@ let x = &raw const *&temp(); // Operand of raw borrow.
 let x = &temp() as &dyn Send; // Operand of cast.
 # x;
 let x = (&*&temp(),); // Operand of tuple constructor.
+# x;
+struct W<T>(T);
+let x = W(&temp()); // Argument to tuple struct constructor.
+# x;
+let x = Some(&temp()); // Argument to tuple enum variant constructor.
 # x;
 let x = { [Some(&temp())] }; // Final expr of block.
 # x;
@@ -527,6 +540,12 @@ let x = if true { &temp() } else { &temp() };
 //           Final exprs of `if`/`else` blocks.
 # x;
 let x = match () { _ => &temp() }; // `match` arm expression.
+# x;
+let x = pin!(temp()); // Super operand of super macro call expression.
+# x;
+let x = pin!({ &mut temp() }); // As above.
+# x;
+let x = format_args!("{:?}", temp()); // As above.
 # x;
 //
 // All of the temporaries above are still live here.
@@ -587,18 +606,34 @@ let x = 'a: { break 'a &temp() }; // ERROR
 # x;
 ```
 
+```rust,edition2024,compile_fail,E0716
+# use core::pin::pin;
+# fn temp() {}
+// The argument to `pin!` is only an extending expression if the call
+// is an extending expression. Since it's not, the inner block is not
+// an extending expression, so the temporaries in its trailing
+// expression are dropped immediately.
+pin!({ &temp() }); // ERROR
+```
+
+```rust,edition2024,compile_fail,E0716
+# fn temp() {}
+// As above.
+format_args!("{:?}", { &temp() }); // ERROR
+```
+
 r[destructors.forget]
 ## Not running destructors
 
 r[destructors.manually-suppressing]
 ### Manually suppressing destructors
 
-[`std::mem::forget`] can be used to prevent the destructor of a variable from being run,
-and [`std::mem::ManuallyDrop`] provides a wrapper to prevent a
+[`core::mem::forget`] can be used to prevent the destructor of a variable from being run,
+and [`core::mem::ManuallyDrop`] provides a wrapper to prevent a
 variable or field from being dropped automatically.
 
 > [!NOTE]
-> Preventing a destructor from being run via [`std::mem::forget`] or other means is safe even if it has a type that isn't `'static`. Besides the places where destructors are guaranteed to run as defined by this document, types may *not* safely rely on a destructor being run for soundness.
+> Preventing a destructor from being run via [`core::mem::forget`] or other means is safe even if it has a type that isn't `'static`. Besides the places where destructors are guaranteed to run as defined by this document, types may *not* safely rely on a destructor being run for soundness.
 
 r[destructors.process-termination]
 ### Process termination without unwinding
@@ -613,6 +648,7 @@ There is one additional case to be aware of: when a panic reaches a [non-unwindi
 [binding modes]: patterns.md#binding-modes
 [closure]: types/closure.md
 [destructors]: destructors.md
+[destructuring assignment]: expr.assign.destructure
 [expression]: expressions.md
 [identifier pattern]: patterns.md#identifier-patterns
 [initialized]: glossary.md#initialized
@@ -641,18 +677,24 @@ There is one additional case to be aware of: when a panic reaches a [non-unwindi
 [tuple pattern]: patterns.md#tuple-patterns
 [tuple struct pattern]: patterns.md#tuple-struct-patterns
 [tuple struct]: type.struct.tuple
-[tuple variant]: type.enum.declaration
+[tuple enum variant]: type.enum.declaration
 
 [array expression]: expressions/array-expr.md#array-expressions
 [array repeat operands]: expr.array.repeat-operand
 [async block expression]: expr.block.async
 [block expression]: expressions/block-expr.md
-[borrow expression]: expressions/operator-expr.md#borrow-operators
+[borrow]: expr.operator.borrow
 [cast expression]: expressions/operator-expr.md#type-cast-expressions
 [dereference expression]: expressions/operator-expr.md#the-dereference-operator
+[extended]: destructors.scope.lifetime-extension
 [field expression]: expressions/field-expr.md
 [indexing expression]: expressions/array-expr.md#array-and-slice-indexing-expressions
 [struct expression]: expressions/struct-expr.md
+[super macro call]: expr.super-macros
+[super operands]: expr.super-macros
+[super temporaries]: expr.super-macros
+[temporary scope]: destructors.scope.temporary
+[temporary scopes]: destructors.scope.temporary
 [tuple expression]: expressions/tuple-expr.md#tuple-expressions
 [tuple indexing expression]: expressions/tuple-expr.md#tuple-indexing-expressions
 

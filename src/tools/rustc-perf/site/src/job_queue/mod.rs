@@ -1,102 +1,136 @@
 mod utils;
 
-use std::{str::FromStr, sync::Arc};
-
+use crate::github::comparison_summary::post_comparison_comment;
 use crate::job_queue::utils::{parse_release_string, ExtractIf};
 use crate::load::{partition_in_place, SiteCtxt};
 use chrono::Utc;
 use collector::benchmark_set::benchmark_set_count;
-use database::{BenchmarkRequest, BenchmarkRequestIndex, BenchmarkRequestStatus, Target};
-use hashbrown::HashSet;
+use database::{
+    BenchmarkJobKind, BenchmarkRequest, BenchmarkRequestIndex, BenchmarkRequestStatus,
+    BenchmarkRequestType, CodegenBackend, Date, PendingBenchmarkRequests, Profile, QueuedCommit,
+    Target,
+};
 use parking_lot::RwLock;
-use tokio::time::{self, Duration};
+use std::{str::FromStr, sync::Arc};
+use tokio::time::{self, Duration, MissedTickBehavior};
 
-pub fn run_new_queue() -> bool {
-    std::env::var("RUN_CRON")
+pub fn is_job_queue_enabled() -> bool {
+    std::env::var("USE_JOB_QUEUE")
         .ok()
         .and_then(|x| x.parse().ok())
-        .unwrap_or(false)
+        .unwrap_or(true)
+}
+
+/// rust-lang/rust PR that will be used for testing the job queue.
+const TEST_PR_FOR_JOB_QUEUE: u32 = 147039;
+
+pub fn should_use_job_queue(pr: u32) -> bool {
+    is_job_queue_enabled() && pr == TEST_PR_FOR_JOB_QUEUE
 }
 
 /// Store the latest master commits or do nothing if all of them are
-/// already in the database
+/// already in the database.
+/// Returns `true` if at least one benchmark request was inserted.
 async fn create_benchmark_request_master_commits(
-    ctxt: &Arc<SiteCtxt>,
-    conn: &dyn database::pool::Connection,
+    ctxt: &SiteCtxt,
+    _conn: &dyn database::pool::Connection,
     index: &BenchmarkRequestIndex,
-) -> anyhow::Result<()> {
-    let master_commits = &ctxt.get_master_commits().commits;
-    // TODO; delete at some point in the future
-    let cutoff: chrono::DateTime<Utc> = chrono::DateTime::from_str("2025-07-24T00:00:00.000Z")?;
+) -> anyhow::Result<bool> {
+    let now = Utc::now();
 
+    let master_commits = ctxt.get_master_commits();
+    // Only consider the last ~month of master commits
+    let master_commits = master_commits
+        .commits
+        .iter()
+        .filter(|c| now.signed_duration_since(c.time) < chrono::Duration::days(29));
+
+    // TODO; delete at some point in the future
+    let cutoff: chrono::DateTime<Utc> = chrono::DateTime::from_str("2025-08-27T00:00:00.000Z")?;
+
+    let inserted = false;
     for master_commit in master_commits {
         // We don't want to add masses of obsolete data
         if master_commit.time >= cutoff && !index.contains_tag(&master_commit.sha) {
-            let pr = master_commit.pr.unwrap_or(0);
-            let benchmark = BenchmarkRequest::create_master(
-                &master_commit.sha,
-                &master_commit.parent_sha,
-                pr,
-                master_commit.time,
-            );
-            log::info!("Inserting master benchmark request {benchmark:?}");
-            if let Err(error) = conn.insert_benchmark_request(&benchmark).await {
-                log::error!("Failed to insert master benchmark request: {error:?}");
-            }
+            // let pr = master_commit.pr.unwrap_or(0);
+            // let benchmark = BenchmarkRequest::create_master(
+            //     &master_commit.sha,
+            //     &master_commit.parent_sha,
+            //     pr,
+            //     master_commit.time,
+            // );
+            // log::info!("Inserting master benchmark request {benchmark:?}");
+
+            // Do not create benchmark requests on production, to allow running in parallel with
+            // the old system.
+            // if let Err(error) = conn.insert_benchmark_request(&benchmark).await {
+            //     log::error!("Failed to insert master benchmark request: {error:?}");
+            // } else {
+            //     inserted = true;
+            // }
         }
     }
-    Ok(())
+    Ok(inserted)
 }
 
 /// Store the latest release commits or do nothing if all of them are
 /// already in the database
+/// Returns `true` if at least one benchmark request was inserted.
 async fn create_benchmark_request_releases(
-    conn: &dyn database::pool::Connection,
+    _conn: &dyn database::pool::Connection,
     index: &BenchmarkRequestIndex,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let releases: String = reqwest::get("https://static.rust-lang.org/manifests.txt")
         .await?
         .text()
         .await?;
     // TODO; delete at some point in the future
-    let cutoff: chrono::DateTime<Utc> = chrono::DateTime::from_str("2025-06-01T00:00:00.000Z")?;
+    let cutoff: chrono::DateTime<Utc> = chrono::DateTime::from_str("2025-08-27T00:00:00.000Z")?;
 
-    let releases: Vec<_> = releases
+    let releases = releases
         .lines()
         .rev()
         .filter_map(parse_release_string)
-        .take(20)
-        .collect();
+        .take(20);
 
-    for (name, date_time) in releases {
-        if date_time >= cutoff && !index.contains_tag(&name) {
-            let release_request = BenchmarkRequest::create_release(&name, date_time);
-            log::info!("Inserting release benchmark request {release_request:?}");
-            if let Err(error) = conn.insert_benchmark_request(&release_request).await {
-                log::error!("Failed to insert release benchmark request: {error}");
-            }
+    let inserted = false;
+    for (name, commit_date) in releases {
+        if commit_date >= cutoff && !index.contains_tag(&name) {
+            // let release_request = BenchmarkRequest::create_release(&name, commit_date);
+            // log::info!("Inserting release benchmark request {release_request:?}");
+
+            // Do not create benchmark requests on production, to allow running in parallel with
+            // the old system.
+            // if let Err(error) = conn.insert_benchmark_request(&release_request).await {
+            //     log::error!("Failed to insert release benchmark request: {error}");
+            // } else {
+            //     inserted = true;
+            // }
         }
     }
-    Ok(())
+    Ok(inserted)
 }
 
-/// Sorts try and master requests that are in the `ArtifactsReady` status.
+/// Sorts try and master requests that are in the `ArtifactsReady` status and return them in the
+/// correct queue order, where the first returned request will be the first to be benchmarked next.
 /// Doesn't consider in-progress requests or release artifacts.
-fn sort_benchmark_requests(index: &BenchmarkRequestIndex, request_queue: &mut [BenchmarkRequest]) {
-    let mut done: HashSet<String> = index.completed_requests().clone();
+fn sort_benchmark_requests(pending: PendingBenchmarkRequests) -> Vec<BenchmarkRequest> {
+    let PendingBenchmarkRequests {
+        requests: mut pending,
+        completed_parent_tags: mut done,
+    } = pending;
 
-    // Ensure all the items are ready to be sorted, if they are not this is
-    // undefined behaviour
-    assert!(request_queue.iter().all(|bmr| {
+    // Ensure all the items are ready to be sorted
+    assert!(pending.iter().all(|bmr| {
         bmr.status() == BenchmarkRequestStatus::ArtifactsReady && (bmr.is_master() || bmr.is_try())
     }));
 
     let mut finished = 0;
-    while finished < request_queue.len() {
+    while finished < pending.len() {
         // The next level is those elements in the unordered queue which
         // are ready to be benchmarked (i.e., those with parent in done or no
         // parent).
-        let level_len = partition_in_place(request_queue[finished..].iter_mut(), |bmr| {
+        let level_len = partition_in_place(pending[finished..].iter_mut(), |bmr| {
             bmr.parent_sha().is_none_or(|parent| done.contains(parent))
         });
 
@@ -109,16 +143,16 @@ fn sort_benchmark_requests(index: &BenchmarkRequestIndex, request_queue: &mut [B
                 panic!("No master/try commit is ready for benchmarking");
             } else {
                 log::warn!("No master/try commit is ready for benchmarking");
-                return;
+                return pending;
             }
         }
 
         // Everything in level has the same topological order, then we sort based on heuristics
-        let level = &mut request_queue[finished..][..level_len];
+        let level = &mut pending[finished..][..level_len];
         level.sort_unstable_by_key(|bmr| {
             (
                 // PR number takes priority
-                *bmr.pr().unwrap_or(&0),
+                bmr.pr().unwrap_or(0),
                 // Order master commits before try commits
                 if bmr.is_master() { 0 } else { 1 },
                 bmr.created_at(),
@@ -130,14 +164,15 @@ fn sort_benchmark_requests(index: &BenchmarkRequestIndex, request_queue: &mut [B
             // that all of the statuses of the benchmark requests are
             // `ArtifactsReady` it is implausable for this `expect(...)` to be
             // hit.
-            done.insert(
-                c.tag()
-                    .expect("Tag should exist on a benchmark request being sorted")
-                    .to_string(),
-            );
+            let tag = c
+                .tag()
+                .expect("Tag should exist on a benchmark request being sorted")
+                .to_string();
+            done.insert(tag);
         }
         finished += level_len;
     }
+    pending
 }
 
 /// Creates a benchmark request queue that determines in what order will
@@ -148,13 +183,12 @@ fn sort_benchmark_requests(index: &BenchmarkRequestIndex, request_queue: &mut [B
 /// Does not consider requests that are waiting for artifacts or that are alredy completed.
 pub async fn build_queue(
     conn: &dyn database::pool::Connection,
-    index: &BenchmarkRequestIndex,
 ) -> anyhow::Result<Vec<BenchmarkRequest>> {
     // Load ArtifactsReady and InProgress benchmark requests
     let mut pending = conn.load_pending_benchmark_requests().await?;
 
     // The queue starts with in progress
-    let mut queue: Vec<BenchmarkRequest> = pending.extract_if_stable(|request| {
+    let mut queue: Vec<BenchmarkRequest> = pending.requests.extract_if_stable(|request| {
         matches!(request.status(), BenchmarkRequestStatus::InProgress)
     });
 
@@ -162,8 +196,9 @@ pub async fn build_queue(
     queue.sort_unstable_by_key(|req| req.created_at());
 
     // Add release artifacts ordered by the release tag (1.87.0 before 1.88.0) and `created_at`.
-    let mut release_artifacts: Vec<BenchmarkRequest> =
-        pending.extract_if_stable(|request| request.is_release());
+    let mut release_artifacts: Vec<BenchmarkRequest> = pending
+        .requests
+        .extract_if_stable(|request| request.is_release());
 
     release_artifacts.sort_unstable_by(|a, b| {
         a.tag()
@@ -172,7 +207,8 @@ pub async fn build_queue(
     });
 
     queue.append(&mut release_artifacts);
-    sort_benchmark_requests(index, &mut pending);
+
+    let mut pending = sort_benchmark_requests(pending);
     queue.append(&mut pending);
     Ok(queue)
 }
@@ -182,31 +218,62 @@ pub async fn build_queue(
 /// This is performed atomically, in a transaction.
 pub async fn enqueue_benchmark_request(
     conn: &mut dyn database::pool::Connection,
-    benchmark_request: &BenchmarkRequest,
+    request: &BenchmarkRequest,
 ) -> anyhow::Result<()> {
     let mut tx = conn.transaction().await;
 
-    let Some(request_tag) = benchmark_request.tag() else {
-        panic!("Benchmark request {benchmark_request:?} has no tag");
+    let Some(request_tag) = request.tag() else {
+        panic!("Benchmark request {request:?} has no tag");
     };
 
-    log::info!("Enqueuing jobs for request {benchmark_request:?}");
+    log::info!("Enqueuing jobs for request {request:?}");
 
-    let backends = benchmark_request.backends()?;
-    let profiles = benchmark_request.profiles()?;
+    let backends = request.backends()?;
+    let profiles = request.profiles()?;
+    // Prevent the error from spamming the logs
+    // let mut has_emitted_parent_sha_error = false;
+
+    // Enqueue Rustc job for only for x86_64 & llvm. This benchmark is how long
+    // it takes to build the rust compiler. It takes a while to run and is
+    // assumed that if the compilation of other rust project improve then this
+    // too would improve.
+    tx.conn()
+        .enqueue_benchmark_job(
+            request_tag,
+            Target::X86_64UnknownLinuxGnu,
+            CodegenBackend::Llvm,
+            Profile::Opt,
+            0u32,
+            BenchmarkJobKind::Rustc,
+        )
+        .await?;
 
     // Target x benchmark_set x backend x profile -> BenchmarkJob
     for target in Target::all() {
+        // Enqueue Runtime job for all targets using LLVM as the backend for
+        // runtime benchmarks
+        tx.conn()
+            .enqueue_benchmark_job(
+                request_tag,
+                target,
+                CodegenBackend::Llvm,
+                Profile::Opt,
+                0u32,
+                BenchmarkJobKind::Runtime,
+            )
+            .await?;
+
         for benchmark_set in 0..benchmark_set_count(target.into()) {
-            for backend in backends.iter() {
-                for profile in profiles.iter() {
+            for &backend in backends.iter() {
+                for &profile in profiles.iter() {
                     tx.conn()
                         .enqueue_benchmark_job(
                             request_tag,
-                            &target,
+                            target,
                             backend,
                             profile,
                             benchmark_set as u32,
+                            BenchmarkJobKind::Compiletime,
                         )
                         .await?;
                     // If there is a parent, we create a job for it too. The
@@ -214,17 +281,37 @@ pub async fn enqueue_benchmark_request(
                     // If the parent job has been deleted from the database
                     // but was already benchmarked then the collector will ignore
                     // it as it will see it already has results.
-                    if let Some(parent_sha) = benchmark_request.parent_sha() {
-                        tx.conn()
-                            .enqueue_benchmark_job(
-                                parent_sha,
-                                &target,
-                                backend,
-                                profile,
-                                benchmark_set as u32,
-                            )
-                            .await?;
-                    }
+
+                    // Do not enqueue parent jobs to allow parallel execution with the old system
+                    // If the parent artifact wouldn't be benchmarked yet, we would benchmark the
+                    // parent with the new system.
+                    // if let Some(parent_sha) = request.parent_sha() {
+                    //     let (is_foreign_key_violation, result) = tx
+                    //         .conn()
+                    //         .enqueue_parent_benchmark_job(
+                    //             parent_sha,
+                    //             target,
+                    //             backend,
+                    //             profile,
+                    //             benchmark_set as u32,
+                    //             BenchmarkJobKind::Compiletime,
+                    //         )
+                    //         .await;
+                    //
+                    //     // At some point in time the parent_sha may not refer
+                    //     // to a `benchmark_request` and we want to be able to
+                    //     // see that error.
+                    //     if let Err(e) = result {
+                    //         if is_foreign_key_violation && !has_emitted_parent_sha_error {
+                    //             log::error!("Failed to create job for parent sha {e:?}");
+                    //             has_emitted_parent_sha_error = true;
+                    //         } else if has_emitted_parent_sha_error && is_foreign_key_violation {
+                    //             continue;
+                    //         } else {
+                    //             return Err(e);
+                    //         }
+                    //     }
+                    // }
                 }
             }
         }
@@ -237,23 +324,33 @@ pub async fn enqueue_benchmark_request(
     Ok(())
 }
 
-/// Try to find a benchmark request that should be enqueue next, and if such request is found,
-/// enqueue it.
-async fn try_enqueue_next_benchmark_request(
+/// Update the state of benchmark requests.
+/// If there is a request that has artifacts ready, and nothing is currently in-progress,
+/// it will be enqueued.
+/// If there is a request whose jobs have all completed, it will be marked as completed.
+///
+/// Returns benchmark requests that were completed.
+async fn process_benchmark_requests(
     conn: &mut dyn database::pool::Connection,
-    index: &mut BenchmarkRequestIndex,
-) -> anyhow::Result<()> {
-    let queue = build_queue(conn, index).await?;
+) -> anyhow::Result<Vec<BenchmarkRequest>> {
+    let queue = build_queue(conn).await?;
 
-    #[allow(clippy::never_loop)]
+    log::debug!("Current queue: {queue:?}");
+
+    let mut completed = vec![];
     for request in queue {
         match request.status() {
-            BenchmarkRequestStatus::ArtifactsReady => {
-                enqueue_benchmark_request(conn, &request).await?;
+            BenchmarkRequestStatus::InProgress => {
+                let tag = request.tag().expect("In progress request without a tag");
+                if conn.maybe_mark_benchmark_request_as_completed(tag).await? {
+                    log::info!("Request {tag} marked as completed");
+                    completed.push(request);
+                    continue;
+                }
                 break;
             }
-            BenchmarkRequestStatus::InProgress => {
-                // TODO: Try to mark as completed
+            BenchmarkRequestStatus::ArtifactsReady => {
+                enqueue_benchmark_request(conn, &request).await?;
                 break;
             }
             BenchmarkRequestStatus::WaitingForArtifacts
@@ -262,78 +359,133 @@ async fn try_enqueue_next_benchmark_request(
             }
         }
     }
-    Ok(())
+    Ok(completed)
 }
 
-/// For queueing jobs, add the jobs you want to queue to this function
-async fn cron_enqueue_jobs(site_ctxt: &Arc<SiteCtxt>) -> anyhow::Result<()> {
-    let mut conn = site_ctxt.conn().await;
-    let mut index = conn.load_benchmark_request_index().await?;
+/// Creates new benchmark requests, enqueues jobs for ready benchmark requests and
+/// finishes completed benchmark requests.
+async fn perform_queue_tick(ctxt: &SiteCtxt) -> anyhow::Result<()> {
+    let mut conn = ctxt.conn().await;
+    if !conn.supports_job_queue() {
+        return Ok(());
+    }
+
+    let index = ctxt.known_benchmark_requests.load();
+
+    let mut requests_inserted = false;
     // Put the master commits into the `benchmark_requests` queue
-    create_benchmark_request_master_commits(site_ctxt, &*conn, &index).await?;
+    requests_inserted |= create_benchmark_request_master_commits(ctxt, &*conn, &index).await?;
     // Put the releases into the `benchmark_requests` queue
-    create_benchmark_request_releases(&*conn, &index).await?;
-    try_enqueue_next_benchmark_request(&mut *conn, &mut index).await?;
+    requests_inserted |= create_benchmark_request_releases(&*conn, &index).await?;
+    // Enqueue waiting requests and try to complete in-progress ones
+    let completed_reqs = process_benchmark_requests(&mut *conn).await?;
+
+    // If some change happened, reload the benchmark request index
+    if requests_inserted {
+        ctxt.known_benchmark_requests
+            .store(Arc::new(conn.load_benchmark_request_index().await?));
+    }
+
+    // Send a comment to GitHub for completed requests and reload the DB index
+    if !completed_reqs.is_empty() {
+        let index = database::Index::load(&mut *conn).await;
+        log::info!("index has {} commits", index.commits().len());
+        ctxt.index.store(Arc::new(index));
+
+        // Refresh the landing page
+        ctxt.landing_page.store(Arc::new(None));
+
+        // Send comments to GitHub
+        for request in completed_reqs {
+            let (is_master, pr, sha, parent_sha) = match request.commit_type() {
+                BenchmarkRequestType::Try {
+                    pr,
+                    parent_sha,
+                    sha,
+                } => (
+                    false,
+                    *pr,
+                    sha.clone().expect("Completed try commit without a SHA"),
+                    parent_sha
+                        .clone()
+                        .expect("Completed try commit without a parent SHA"),
+                ),
+                BenchmarkRequestType::Master {
+                    pr,
+                    sha,
+                    parent_sha,
+                } => (true, *pr, sha.clone(), parent_sha.clone()),
+                BenchmarkRequestType::Release { .. } => continue,
+            };
+            let commit = QueuedCommit {
+                pr,
+                sha,
+                parent_sha,
+                include: None,
+                exclude: None,
+                runs: None,
+                commit_date: request.commit_date().map(Date),
+                backends: Some(
+                    request
+                        .backends()?
+                        .into_iter()
+                        .map(|b| b.as_str())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ),
+            };
+            post_comparison_comment(ctxt, commit, is_master).await?;
+        }
+    }
+
     Ok(())
 }
 
-/// Entry point for the cron
-pub async fn cron_main(site_ctxt: Arc<RwLock<Option<Arc<SiteCtxt>>>>, seconds: u64) {
-    let mut interval = time::interval(Duration::from_secs(seconds));
+/// Entry point for the cron job that manages the benchmark request and job queue.
+pub async fn create_queue_process(
+    site_ctxt: Arc<RwLock<Option<Arc<SiteCtxt>>>>,
+    run_interval: Duration,
+) {
+    let mut interval = time::interval(run_interval);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
     let ctxt = site_ctxt.clone();
 
     loop {
-        interval.tick().await;
-
         if let Some(ctxt_clone) = {
             let guard = ctxt.read();
             guard.as_ref().cloned()
         } {
-            match cron_enqueue_jobs(&ctxt_clone).await {
+            match perform_queue_tick(&ctxt_clone).await {
                 Ok(_) => log::info!("Cron job finished"),
                 Err(e) => log::error!("Cron job failed to execute: {e:?}"),
             }
         }
+
+        interval.tick().await;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use chrono::{Datelike, Duration, TimeZone, Utc};
+    use crate::job_queue::build_queue;
+    use chrono::Utc;
     use database::tests::run_postgres_test;
+    use database::{
+        BenchmarkJobConclusion, BenchmarkJobKind, BenchmarkRequest, BenchmarkRequestStatus,
+        BenchmarkSet, CodegenBackend, Profile, Target,
+    };
 
-    fn days_ago(day_str: &str) -> chrono::DateTime<Utc> {
-        // Walk backwards until the first non-digit, then slice
-        let days = day_str
-            .strip_prefix("days")
-            .unwrap()
-            .parse::<i64>()
-            .unwrap();
-
-        let timestamp = Utc::now() - Duration::days(days);
-        // zero out the seconds
-        Utc.with_ymd_and_hms(
-            timestamp.year(),
-            timestamp.month(),
-            timestamp.day(),
-            0,
-            0,
-            0,
-        )
-        .unwrap()
+    fn create_master(sha: &str, parent: &str, pr: u32) -> BenchmarkRequest {
+        BenchmarkRequest::create_master(sha, parent, pr, Utc::now())
     }
 
-    fn create_master(sha: &str, parent: &str, pr: u32, age_days: &str) -> BenchmarkRequest {
-        BenchmarkRequest::create_master(sha, parent, pr, days_ago(age_days))
+    fn create_try(pr: u32) -> BenchmarkRequest {
+        BenchmarkRequest::create_try_without_artifacts(pr, "", "")
     }
 
-    fn create_try(pr: u32, age_days: &str) -> BenchmarkRequest {
-        BenchmarkRequest::create_try_without_artifacts(pr, days_ago(age_days), "", "")
-    }
-
-    fn create_release(tag: &str, age_days: &str) -> BenchmarkRequest {
-        BenchmarkRequest::create_release(tag, days_ago(age_days))
+    fn create_release(tag: &str) -> BenchmarkRequest {
+        BenchmarkRequest::create_release(tag, Utc::now())
     }
 
     async fn db_insert_requests(
@@ -341,33 +493,76 @@ mod tests {
         requests: &[BenchmarkRequest],
     ) {
         for request in requests {
-            conn.insert_benchmark_request(&request).await.unwrap();
+            conn.insert_benchmark_request(request).await.unwrap();
         }
     }
 
-    async fn mark_as_completed(conn: &dyn database::pool::Connection, shas: &[&str]) {
-        let completed_at = Utc::now();
-        for sha in shas {
-            conn.update_benchmark_request_status(
-                sha,
-                BenchmarkRequestStatus::Completed { completed_at },
-            )
+    async fn complete_request(
+        db: &dyn database::pool::Connection,
+        request_tag: &str,
+        collector_name: &str,
+        benchmark_set: u32,
+        target: Target,
+    ) {
+        /* Create job for the request */
+        db.enqueue_benchmark_job(
+            request_tag,
+            target,
+            CodegenBackend::Llvm,
+            Profile::Opt,
+            benchmark_set,
+            BenchmarkJobKind::Compiletime,
+        )
+        .await
+        .unwrap();
+
+        let (job, _) = db
+            .dequeue_benchmark_job(collector_name, target, BenchmarkSet::new(benchmark_set))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(job.request_tag(), request_tag);
+
+        /* Mark the job as complete */
+        db.mark_benchmark_job_as_completed(job.id(), BenchmarkJobConclusion::Success)
             .await
             .unwrap();
+
+        assert!(db
+            .maybe_mark_benchmark_request_as_completed(request_tag)
+            .await
+            .unwrap());
+    }
+
+    async fn mark_as_completed(
+        conn: &dyn database::pool::Connection,
+        shas: &[&str],
+        collector_name: &str,
+        benchmark_set: u32,
+        target: database::Target,
+    ) {
+        for sha in shas {
+            complete_request(conn, sha, collector_name, benchmark_set, target).await;
         }
     }
 
     fn queue_order_matches(queue: &[BenchmarkRequest], expected: &[&str]) {
-        let queue_shas: Vec<&str> = queue
-            .iter()
-            .filter_map(|request| request.tag().map(|tag| tag))
-            .collect();
+        let queue_shas: Vec<&str> = queue.iter().filter_map(|request| request.tag()).collect();
         assert_eq!(queue_shas, expected)
     }
 
     #[tokio::test]
     async fn queue_ordering() {
         run_postgres_test(|ctx| async {
+            let db = ctx.db();
+            let target = Target::X86_64UnknownLinuxGnu;
+            let collector_name = "collector-1";
+            let benchmark_set = 1;
+
+            db.add_collector_config(collector_name, target, benchmark_set, true)
+                .await
+                .unwrap();
             /* Key:
              * +---------------------+
              * | m - master          |
@@ -426,37 +621,40 @@ mod tests {
              *           | t "baz" R pr17 | 6: a try with a low PR, blocked by parent
              *           +----------------+
              **/
-
-            let db = ctx.db_client().connection().await;
             let requests = vec![
-                create_master("bar", "parent1", 10, "days2"),
-                create_master("345", "parent2", 11, "days2"),
-                create_master("aaa", "parent3", 12, "days2"),
-                create_master("rrr", "parent4", 13, "days2"),
-                create_master("123", "bar", 14, "days2"),
-                create_master("foo", "345", 15, "days2"),
-                create_try(16, "days1"),
-                create_release("v1.2.3", "days2"),
-                create_try(17, "days1"),
-                create_master("mmm", "aaa", 18, "days2"),
+                create_master("bar", "parent1", 10),
+                create_master("345", "parent2", 11),
+                create_master("aaa", "parent3", 12),
+                create_master("rrr", "parent4", 13),
+                create_master("123", "bar", 14),
+                create_master("foo", "345", 15),
+                create_try(16),
+                create_release("v1.2.3"),
+                create_try(17),
+                create_master("mmm", "aaa", 18),
             ];
 
-            db_insert_requests(&*db, &requests).await;
-            db.attach_shas_to_try_benchmark_request(16, "try1", "rrr")
+            db_insert_requests(db, &requests).await;
+            db.attach_shas_to_try_benchmark_request(16, "try1", "rrr", Utc::now())
                 .await
                 .unwrap();
             db.update_benchmark_request_status("try1", BenchmarkRequestStatus::InProgress)
                 .await
                 .unwrap();
-            db.attach_shas_to_try_benchmark_request(17, "baz", "foo")
+            db.attach_shas_to_try_benchmark_request(17, "baz", "foo", Utc::now())
                 .await
                 .unwrap();
 
-            mark_as_completed(&*db, &["bar", "345", "aaa", "rrr"]).await;
+            mark_as_completed(
+                db,
+                &["bar", "345", "aaa", "rrr"],
+                collector_name,
+                benchmark_set,
+                target,
+            )
+            .await;
 
-            let index = db.load_benchmark_request_index().await.unwrap();
-
-            let sorted: Vec<BenchmarkRequest> = build_queue(&*db, &index).await.unwrap();
+            let sorted: Vec<BenchmarkRequest> = build_queue(db).await.unwrap();
 
             queue_order_matches(&sorted, &["try1", "v1.2.3", "123", "foo", "mmm", "baz"]);
             Ok(ctx)

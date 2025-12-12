@@ -173,7 +173,7 @@ impl Processor for ProfileProcessor<'_> {
                         } else if filename_str.ends_with(".mm_profdata") {
                             utils::fs::rename(path, filepath(&zsp_dir, "Zsp.mm_profdata"))?;
                         } else {
-                            panic!("unexpected file {:?}", path);
+                            panic!("unexpected file {path:?}");
                         }
                     }
                     assert!(num_files == 3 || num_files == 1);
@@ -250,11 +250,13 @@ impl Processor for ProfileProcessor<'_> {
                 }
 
                 // Samply produces (via rustc-fake) a data file called
-                // `profile.json`. We copy it from the temp dir to the output dir,
-                // giving it a new name in the process.
+                // `profile.json.gz`. We copy it from the temp dir to the output dir,
+                // giving it a new name in the process. The new name must end
+                // in `.gz` for `samply load` to handle it.
                 Profiler::Samply => {
-                    let tmp_samply_file = filepath(data.cwd, "profile.json");
-                    let samply_file = filepath(self.output_dir, &out_file("samply"));
+                    let tmp_samply_file = filepath(data.cwd, "profile.json.gz");
+                    let samply_file =
+                        filepath(self.output_dir, &format!("{}.gz", out_file("samply")));
 
                     fs::copy(tmp_samply_file, samply_file)?;
                 }
@@ -357,7 +359,7 @@ impl Processor for ProfileProcessor<'_> {
                             continue;
                         }
 
-                        writeln!(&mut final_file, "{}", line)?;
+                        writeln!(&mut final_file, "{line}")?;
                     }
                 }
 
@@ -398,11 +400,10 @@ impl Processor for ProfileProcessor<'_> {
                     for (cgu, items) in &by_cgu {
                         let cgu_file = filepath(&out_dir, cgu);
                         let mut file = io::BufWriter::new(
-                            fs::File::create(&cgu_file)
-                                .with_context(|| format!("{:?}", cgu_file))?,
+                            fs::File::create(&cgu_file).with_context(|| format!("{cgu_file:?}"))?,
                         );
                         for (name, linkage) in items {
-                            writeln!(&mut file, "{} {}", name, linkage)?;
+                            writeln!(&mut file, "{name} {linkage}")?;
                         }
                     }
                 }

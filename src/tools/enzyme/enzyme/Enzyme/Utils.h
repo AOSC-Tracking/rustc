@@ -620,6 +620,8 @@ static inline llvm::Type *FloatToIntTy(llvm::Type *T) {
     return llvm::IntegerType::get(T->getContext(), 64);
   if (T->isX86_FP80Ty())
     return llvm::IntegerType::get(T->getContext(), 80);
+  if (T->isFP128Ty())
+    return llvm::IntegerType::get(T->getContext(), 128);
   assert(0 && "unknown floating point type");
   return nullptr;
 }
@@ -641,6 +643,10 @@ static inline llvm::Type *IntToFloatTy(llvm::Type *T) {
       return llvm::Type::getFloatTy(T->getContext());
     case 64:
       return llvm::Type::getDoubleTy(T->getContext());
+    case 80:
+      return llvm::Type::getX86_FP80Ty(T->getContext());
+    case 128:
+      return llvm::Type::getFP128Ty(T->getContext());
     }
   }
   assert(0 && "unknown int to floating point type");
@@ -1646,6 +1652,85 @@ static inline bool isReadOnly(const llvm::CallBase *call, ssize_t arg = -1) {
   return false;
 }
 
+// Whether the function does not write to memory visible before the function in
+// all cases that it doesn't error. In other words, the legal operations here
+// are:
+//.  1) Throw [in which case any operation guaranteed to throw is valid]
+//.  2) Read from any memory
+//.  3) Write to memory which did not exist did not exist prior to the function
+// call. This means that one can write .     to memory whose allocation happened
+// within the call to F (including a local alloca, a malloc call, even if .
+// returned). This is also legal to write to an sret and/or returnroots
+// parameter (which must be an alloca).
+static inline bool isLocalReadOnlyOrThrow(const llvm::Function *F) {
+  if (isReadOnly(F))
+    return true;
+
+  if (F->hasFnAttribute("enzyme_LocalReadOnlyOrThrow") ||
+      F->hasFnAttribute("enzyme_ReadOnlyOrThrow"))
+    return true;
+
+  return false;
+}
+
+static inline bool isLocalReadOnlyOrThrow(const llvm::CallBase *call) {
+  if (isReadOnly(call))
+    return true;
+
+  if (call->hasFnAttr("enzyme_LocalReadOnlyOrThrow") ||
+      call->hasFnAttr("enzyme_ReadOnlyOrThrow"))
+    return true;
+
+  if (auto F = getFunctionFromCall(call)) {
+    // Do not use function attrs for if different calling conv, such as a julia
+    // call wrapping args into an array. This is because the wrapped array
+    // may be nocapure/readonly, but the actual arg (which will be put in the
+    // array) may not be.
+    if (F->getCallingConv() == call->getCallingConv())
+      if (isLocalReadOnlyOrThrow(F))
+        return true;
+  }
+  return false;
+}
+
+// Whether the function does not write to memory visible outside the function in
+// all cases that it doesn't error. In other words, the legal operations here
+// are:
+//.  1) Throw [in which case any operation guaranteed to throw is valid]
+//.  2) Read from any memory
+//.  3) Write to memory which did not exist did not exist prior to the function
+// call. This means that one can write .     to memory whose lifetime is
+// entirely contained within F (including a local alloca, a malloc call locally
+// freed, but not .     a returned malloc call).
+static inline bool isReadOnlyOrThrow(const llvm::Function *F) {
+  if (isReadOnly(F))
+    return true;
+
+  if (F->hasFnAttribute("enzyme_ReadOnlyOrThrow"))
+    return true;
+
+  return false;
+}
+
+static inline bool isReadOnlyOrThrow(const llvm::CallBase *call) {
+  if (isReadOnly(call))
+    return true;
+
+  if (call->hasFnAttr("enzyme_ReadOnlyOrThrow"))
+    return true;
+
+  if (auto F = getFunctionFromCall(call)) {
+    // Do not use function attrs for if different calling conv, such as a julia
+    // call wrapping args into an array. This is because the wrapped array
+    // may be nocapure/readonly, but the actual arg (which will be put in the
+    // array) may not be.
+    if (F->getCallingConv() == call->getCallingConv())
+      if (isReadOnlyOrThrow(F))
+        return true;
+  }
+  return false;
+}
+
 static inline bool isWriteOnly(const llvm::Function *F, ssize_t arg = -1) {
 #if LLVM_VERSION_MAJOR >= 14
   if (F->onlyWritesMemory())
@@ -2235,6 +2320,9 @@ bool isNVLoad(const llvm::Value *V);
 //! as a capture (for the number of loads set).
 bool notCapturedBefore(llvm::Value *V, llvm::Instruction *inst,
                        size_t checkLoadCaptured);
+
+//! Check if value if b captured
+bool notCaptured(llvm::Value *V);
 
 // Return true if guaranteed not to alias
 // Return false if guaranteed to alias [with possible offset depending on flag].

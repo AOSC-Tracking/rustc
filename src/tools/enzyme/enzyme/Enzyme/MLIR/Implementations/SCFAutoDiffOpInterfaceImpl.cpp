@@ -26,6 +26,7 @@
 #include "mlir/IR/Types.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Support/LogicalResult.h"
+#include "mlir/Transforms/RegionUtils.h"
 #include "llvm/ADT/STLExtras.h"
 #include <functional>
 
@@ -73,19 +74,21 @@ public:
   LogicalResult removeEnzymeOps(Operation *op,
                                 PatternRewriter &rewriter) const {
     auto forOp = cast<scf::ForOp>(op);
-    scf::ForOp otherForOp; // where caches pops are
+    scf::ForOp otherForOp = nullptr; // where caches pops are
 
     // There is support for two push/pop removal modes, one is using immutable
     // tensors, the other uses memrefs. memref is the default, but tensor can be
     // enabled with enzyme.cache_use_tensor
     enum CacheType cacheType = MEMREF;
-    if (op->hasAttr("enzyme.cache_use_tensor"))
+    if (op->hasAttr("enzyme.cache_use_tensor")) {
       cacheType = TENSOR;
+    }
 
     // Gradients whose values need to be passed as iteration variables.
     llvm::SetVector<Value> updatedGradients;
 
     llvm::MapVector<Value, CacheInfo> cachesMap;
+    SmallVector<CacheInfo> toDelete;
 
     Block *body = forOp.getBody();
 
@@ -102,10 +105,25 @@ public:
         if (cachesMap.contains(pushedValue)) {
           info = info.merge(cachesMap.lookup(pushedValue), rewriter);
         }
+
+        if (info.pushOp->getBlock() == body && info.popOp->getBlock() == body &&
+            info.pushOp->isBeforeInBlock(info.popOp)) {
+          toDelete.push_back(info);
+          continue;
+        }
         cachesMap[pushedValue] = info;
 
         otherForOp = cast<scf::ForOp>(info.popOp->getParentOp());
       }
+    }
+
+    while (!toDelete.empty()) {
+      CacheInfo info = toDelete.pop_back_val();
+      rewriter.replaceAllUsesWith(info.popOp.getResult(),
+                                  info.pushOp.getValue());
+      rewriter.eraseOp(info.pushOp);
+      rewriter.eraseOp(info.popOp);
+      rewriter.eraseOp(info.initOp);
     }
 
     SmallVector<CacheInfo> caches =
@@ -115,17 +133,19 @@ public:
     if (updatedGradients.empty() && caches.empty())
       return success();
 
-    if (forOp->hasAttr("enzyme.enable_mincut")) {
-      mlir::enzyme::minCutCache(forOp.getBody(), otherForOp.getBody(), caches,
-                                rewriter);
-      if (caches.empty())
-        return success();
-    }
+    DenseMap<Value, llvm::SmallVector<Operation *>> updatedGradientUsers;
 
     for (auto &it : *body) {
       Operation *op = &it;
 
       auto getOp = dyn_cast<enzyme::GetOp>(op);
+
+      if (getOp && updatedGradients.contains(getOp.getGradient())) {
+        updatedGradientUsers[getOp.getGradient()].push_back(getOp);
+      } else if (auto setOp = dyn_cast<enzyme::SetOp>(op)) {
+        updatedGradientUsers[setOp.getGradient()].push_back(setOp);
+      }
+
       if (!getOp || updatedGradients.contains(getOp.getGradient()))
         continue;
 
@@ -150,15 +170,27 @@ public:
 
       {
         OpBuilder::InsertionGuard guard(rewriter);
+        // here we do a primitive form of mem2reg within the loop. We have a
+        // sorted (by instruction number) list of all users of the instruction.
+        Value val = newArg;
+        for (auto user : updatedGradientUsers[grad]) {
+          if (auto getOp = dyn_cast<enzyme::GetOp>(user)) {
+            rewriter.replaceOp(getOp, val);
+          } else {
+            auto setOp = cast<enzyme::SetOp>(user);
+            val = setOp.getValue();
+            rewriter.eraseOp(setOp);
+          }
+        }
+        // rewriter.setInsertionPointToStart(body);
+        // rewriter.create<enzyme::SetOp>(grad.getLoc(), grad, newArg);
 
-        rewriter.setInsertionPointToStart(body);
-        rewriter.create<enzyme::SetOp>(grad.getLoc(), grad, newArg);
+        // rewriter.setInsertionPoint(term);
 
-        rewriter.setInsertionPoint(term);
-
-        auto outputVal =
-            rewriter.create<enzyme::GetOp>(grad.getLoc(), Ty, grad).getResult();
-        term->insertOperands(term->getNumOperands(), ValueRange(outputVal));
+        // auto outputVal =
+        //     rewriter.create<enzyme::GetOp>(grad.getLoc(), Ty,
+        //     grad).getResult();
+        term->insertOperands(term->getNumOperands(), ValueRange(val));
       }
     }
 
@@ -170,7 +202,14 @@ public:
       inductionVariable = body->getArgument(0);
     }
 
+    if (forOp->hasAttr("enzyme.enable_mincut")) {
+      mlir::enzyme::minCutCache(forOp.getBody(), otherForOp.getBody(), caches,
+                                rewriter);
+    }
+
     SmallVector<Value> newPushValues;
+
+    unsigned numNewValuePushes = 0;
 
     for (auto &info : caches) {
       Value cache = info.initOp.getResult();
@@ -283,6 +322,8 @@ public:
 
           term->insertOperands(term->getNumOperands(),
                                ValueRange(newCacheValue));
+
+          numNewValuePushes++;
         }
       } else if (cacheType == MEMREF) {
         Value initValue = rewriter.create<memref::AllocOp>(
@@ -330,6 +371,7 @@ public:
     }
 
     auto numInitArgs = forOp.getInitArgs().size();
+    rewriter.setInsertionPoint(forOp);
     auto newFor = rewriter.create<scf::ForOp>(
         op->getLoc(), forOp.getLowerBound(), forOp.getUpperBound(),
         forOp.getStep(), newOperands);
@@ -342,10 +384,9 @@ public:
     }
 
     if (cacheType == TENSOR) {
-      for (auto res : newFor->getResults().slice(forOp.getNumResults(),
-                                                 newFor.getNumResults() -
-                                                     forOp.getNumResults()))
-        newPushValues.push_back(res);
+      for (int i = 0; i < numNewValuePushes; ++i)
+        newPushValues.push_back(
+            newFor->getResult(newFor->getNumResults() - numNewValuePushes + i));
     }
 
     rewriter.eraseOp(forOp);
@@ -544,9 +585,66 @@ public:
   }
 };
 
+struct ForOpADDataFlow
+    : public ADDataFlowOpInterface::ExternalModel<ForOpADDataFlow, scf::ForOp> {
+  SmallVector<Value> getPotentialIncomingValuesRes(Operation *op,
+                                                   OpResult res) const {
+    auto forOp = cast<scf::ForOp>(op);
+    return {
+        forOp->getOperand(res.getResultNumber() + 3),
+        forOp.getBody()->getTerminator()->getOperand(res.getResultNumber())};
+  }
+  SmallVector<Value> getPotentialIncomingValuesArg(Operation *op,
+                                                   BlockArgument arg) const {
+    auto forOp = cast<scf::ForOp>(op);
+    auto idx = arg.getArgNumber() - forOp.getNumInductionVars();
+    return {forOp->getOperand(idx + 3),
+            forOp.getBody()->getTerminator()->getOperand(idx)};
+  }
+  SmallVector<Value> getPotentialTerminatorUsers(Operation *op, Operation *term,
+                                                 Value val) const {
+    auto forOp = cast<scf::ForOp>(op);
+    SmallVector<Value> sv;
+
+    for (auto &&[res, arg, barg] :
+         llvm::zip_equal(forOp->getResults(), term->getOperands(),
+                         forOp.getBody()->getArguments().drop_front())) {
+      if (arg == val) {
+        sv.push_back(res);
+        sv.push_back(barg);
+      }
+    }
+
+    return sv;
+  }
+};
+
 struct ForOpInterfaceReverse
     : public ReverseAutoDiffOpInterface::ExternalModel<ForOpInterfaceReverse,
                                                        scf::ForOp> {
+private:
+  static Value makeIntConstant(Location loc, OpBuilder builder, int64_t val,
+                               Type ty) {
+    return builder.create<arith::ConstantOp>(loc, IntegerAttr::get(ty, val))
+        .getResult();
+  };
+
+  static void preserveAttributesButCheckpointing(Operation *newOp,
+                                                 Operation *oldOp) {
+    for (auto attr : oldOp->getDiscardableAttrs()) {
+      if (attr.getName() != "enzyme.enable_checkpointing")
+        newOp->setAttr(attr.getName(), attr.getValue());
+    }
+  }
+
+  static bool needsCheckpointing(scf::ForOp forOp) {
+    return forOp->hasAttrOfType<BoolAttr>("enzyme.enable_checkpointing") &&
+           forOp->getAttrOfType<BoolAttr>("enzyme.enable_checkpointing")
+               .getValue() &&
+           getConstantNumberOfIterations(forOp).has_value();
+  }
+
+public:
   LogicalResult createReverseModeAdjoint(Operation *op, OpBuilder &builder,
                                          MGradientUtilsReverse *gutils,
                                          SmallVector<Value> caches) const {
@@ -562,10 +660,6 @@ struct ForOpInterfaceReverse
                           !gutils->isConstantValue(op->getResult(i));
     }
 
-    auto start = gutils->popCache(caches[0], builder);
-    auto end = gutils->popCache(caches[1], builder);
-    auto step = gutils->popCache(caches[2], builder);
-
     SmallVector<Value> incomingGradients;
     for (auto &&[active, res] :
          llvm::zip_equal(operandsActive, op->getResults())) {
@@ -576,8 +670,194 @@ struct ForOpInterfaceReverse
       }
     }
 
+    if (needsCheckpointing(forOp)) {
+      int64_t numIters = getConstantNumberOfIterations(forOp).value();
+      int64_t nInner = std::sqrt(numIters), nOuter = nInner;
+      int64_t trailingIters = numIters - nInner * nOuter;
+
+      bool hasTrailing = trailingIters > 0;
+
+      auto numIterArgs = forOp.getNumRegionIterArgs();
+
+      SetVector<Value> outsideRefs;
+      getUsedValuesDefinedAbove(op->getRegions(), outsideRefs);
+
+      IRMapping &mapping = gutils->originalToNewFn;
+
+      assert(outsideRefs.size() == caches.size() - numIterArgs);
+
+      SmallVector<Value> cachedOutsideRefs;
+      for (auto [i, ref] : llvm::enumerate(outsideRefs)) {
+        Value refVal = gutils->popCache(caches[numIterArgs + i], builder);
+        cachedOutsideRefs.push_back(refVal);
+        mapping.map(ref, refVal);
+      }
+
+      auto ivTy = forOp.getLowerBound().getType();
+      Value outerUB = makeIntConstant(forOp.getLowerBound().getLoc(), builder,
+                                      nOuter + hasTrailing, ivTy);
+      auto revOuter = builder.create<scf::ForOp>(
+          op->getLoc(),
+          makeIntConstant(forOp.getLowerBound().getLoc(), builder, 0, ivTy),
+          outerUB,
+          makeIntConstant(forOp.getLowerBound().getLoc(), builder, 1, ivTy),
+          incomingGradients);
+      preserveAttributesButCheckpointing(revOuter, forOp);
+
+      OpBuilder::InsertionGuard guard(builder);
+      builder.setInsertionPointToEnd(revOuter.getBody());
+
+      Location loc = forOp.getInductionVar().getLoc();
+      Value currentOuterStep = builder.create<arith::SubIOp>(
+          loc, makeIntConstant(loc, builder, nOuter, ivTy),
+          revOuter.getInductionVar());
+
+      SmallVector<Value> initArgs(numIterArgs, nullptr);
+      for (int i = 0; i < numIterArgs; ++i) {
+        initArgs[i] = gutils->popCache(caches[i], builder);
+      }
+
+      auto nInnerCst = makeIntConstant(forOp.getLowerBound().getLoc(), builder,
+                                       nInner, ivTy);
+      Value zero = makeIntConstant(forOp.getLowerBound().getLoc(), builder, 0,
+                                   ivTy),
+            one = makeIntConstant(forOp.getLowerBound().getLoc(), builder, 1,
+                                  ivTy);
+
+      Value nInnerUB = nInnerCst;
+      if (trailingIters > 0) {
+        // this is the first reverse iteration
+        Location loc = forOp.getUpperBound().getLoc();
+        nInnerUB = builder.create<arith::SelectOp>(
+            loc,
+            builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                          revOuter.getInductionVar(), zero),
+            makeIntConstant(loc, builder, trailingIters, ivTy), nInnerCst);
+      }
+
+      auto revInner = builder.create<scf::ForOp>(forOp.getLoc(), zero, nInnerUB,
+                                                 one, initArgs);
+      preserveAttributesButCheckpointing(revInner, forOp);
+
+      revInner->setAttrs(op->getAttrs());
+      revInner->removeAttr("enzyme.enable_checkpointing");
+
+      llvm::APInt stepI;
+      if (!matchPattern(forOp.getStep(), m_ConstantInt(&stepI))) {
+        op->emitError() << "step size is not known constant\n";
+        return failure();
+      }
+
+      llvm::APInt startI;
+      if (!matchPattern(forOp.getLowerBound(), m_ConstantInt(&startI))) {
+        op->emitError() << "lower bound is not known constant\n";
+        return failure();
+      }
+
+      builder.setInsertionPointToEnd(revInner.getBody());
+
+      Value currentIV = builder.create<arith::AddIOp>(
+          loc,
+          builder.create<arith::MulIOp>(
+              loc,
+              builder.create<arith::AddIOp>(
+                  loc,
+                  builder.create<arith::MulIOp>(loc, currentOuterStep,
+                                                nInnerCst),
+                  revInner.getInductionVar()),
+              builder.create<arith::ConstantOp>(loc,
+                                                IntegerAttr::get(ivTy, stepI))),
+          builder.create<arith::ConstantOp>(loc,
+                                            IntegerAttr::get(ivTy, startI)));
+
+      for (auto [oldArg, newArg] :
+           llvm::zip_equal(forOp.getBody()->getArguments(),
+                           revInner.getBody()->getArguments()))
+        mapping.map(oldArg, newArg);
+      mapping.map(forOp.getInductionVar(), currentIV);
+
+      for (auto &it : *forOp.getBody()) {
+        auto newOp = builder.clone(it, mapping);
+        gutils->originalToNewFnOps[&it] = newOp;
+      }
+
+      builder.setInsertionPointToEnd(revOuter.getBody());
+
+      auto revLoop = builder.create<scf::ForOp>(
+          forOp.getLoc(), zero, nInnerUB, one,
+          revOuter.getBody()->getArguments().drop_front());
+      preserveAttributesButCheckpointing(revLoop, forOp);
+
+      Block *revLoopBody = revLoop.getBody();
+      builder.setInsertionPointToEnd(revLoopBody);
+
+      int revIdx = 1;
+      for (auto &&[active, operand] :
+           llvm::zip_equal(operandsActive,
+                           forOp.getBody()->getTerminator()->getOperands())) {
+        if (active) {
+          gutils->addToDiffe(operand, revLoopBody->getArgument(revIdx),
+                             builder);
+          revIdx++;
+        }
+      }
+
+      Block *origBody = forOp.getBody();
+
+      bool valid = true;
+
+      auto first = origBody->rbegin();
+      first++; // skip terminator
+
+      auto last = origBody->rend();
+
+      for (auto it = first; it != last; ++it) {
+        Operation *op = &*it;
+        valid &= gutils->Logic.visitChild(op, builder, gutils).succeeded();
+      }
+
+      SmallVector<Value> newResults;
+      for (auto &&[active, arg] : llvm::zip_equal(
+               operandsActive, origBody->getArguments().drop_front())) {
+        if (active) {
+          newResults.push_back(gutils->diffe(arg, builder));
+          if (!gutils->isConstantValue(arg))
+            gutils->zeroDiffe(arg, builder);
+        }
+      }
+
+      builder.setInsertionPointToEnd(revLoopBody);
+      builder.create<scf::YieldOp>(forOp.getBody()->getTerminator()->getLoc(),
+                                   newResults);
+
+      builder.setInsertionPointToEnd(revOuter.getBody());
+      builder.create<scf::YieldOp>(forOp.getBody()->getTerminator()->getLoc(),
+                                   revLoop.getResults());
+
+      builder.setInsertionPointAfter(revOuter);
+
+      revIdx = 0;
+      for (auto &&[active, arg] : llvm::zip_equal(
+               operandsActive,
+               op->getOperands().slice(3, op->getNumOperands() - 3))) {
+        if (active) {
+          if (!gutils->isConstantValue(arg)) {
+            gutils->addToDiffe(arg, revOuter->getResult(revIdx), builder);
+          }
+          revIdx++;
+        }
+      }
+
+      return success(valid);
+    }
+
+    auto start = gutils->popCache(caches[0], builder);
+    auto end = gutils->popCache(caches[1], builder);
+    auto step = gutils->popCache(caches[2], builder);
+
     auto repFor = builder.create<scf::ForOp>(forOp.getLoc(), start, end, step,
                                              incomingGradients);
+    preserveAttributesButCheckpointing(repFor, forOp);
 
     bool valid = true;
     for (auto &&[oldReg, newReg] :
@@ -663,9 +943,99 @@ struct ForOpInterfaceReverse
   SmallVector<Value> cacheValues(Operation *op,
                                  MGradientUtilsReverse *gutils) const {
     auto forOp = cast<scf::ForOp>(op);
-
     Operation *newOp = gutils->getNewFromOriginal(op);
     OpBuilder cacheBuilder(newOp);
+
+    if (needsCheckpointing(forOp)) {
+      int64_t numIters = getConstantNumberOfIterations(forOp).value();
+      int64_t nInner = std::sqrt(numIters), nOuter = nInner;
+      int64_t trailingIters = numIters - nInner * nOuter;
+      bool hasTrailing = trailingIters > 0;
+
+      SetVector<Value> outsideRefs;
+      getUsedValuesDefinedAbove(op->getRegions(), outsideRefs);
+
+      SmallVector<Value> caches;
+
+      scf::ForOp newForOp = cast<scf::ForOp>(gutils->getNewFromOriginal(op));
+
+      Type ty = forOp.getLowerBound().getType();
+      auto outerFwd = cacheBuilder.create<scf::ForOp>(
+          op->getLoc(),
+          makeIntConstant(forOp.getLowerBound().getLoc(), cacheBuilder, 0, ty),
+          makeIntConstant(forOp.getUpperBound().getLoc(), cacheBuilder,
+                          nInner * (nOuter + hasTrailing), ty),
+          makeIntConstant(forOp.getStep().getLoc(), cacheBuilder, nInner, ty),
+          newForOp.getInitArgs());
+      preserveAttributesButCheckpointing(outerFwd, forOp);
+
+      cacheBuilder.setInsertionPointToStart(outerFwd.getBody());
+      auto nInnerCst = makeIntConstant(forOp.getUpperBound().getLoc(),
+                                       cacheBuilder, nInner, ty);
+
+      Value nInnerUB = nInnerCst;
+      if (trailingIters > 0) {
+        // if this is the last iteration, then the inner
+        // loop will only make trailingIters iterations
+        Location loc = forOp.getUpperBound().getLoc();
+        nInnerUB = cacheBuilder.create<arith::SelectOp>(
+            loc,
+            cacheBuilder.create<arith::CmpIOp>(
+                loc, arith::CmpIPredicate::eq, outerFwd.getInductionVar(),
+                makeIntConstant(loc, cacheBuilder, nInner * nOuter, ty)),
+            makeIntConstant(loc, cacheBuilder, trailingIters, ty), nInnerCst);
+      }
+
+      auto innerFwd = cacheBuilder.create<scf::ForOp>(
+          op->getLoc(),
+          makeIntConstant(forOp.getLowerBound().getLoc(), cacheBuilder, 0, ty),
+          nInnerUB,
+          makeIntConstant(forOp.getStep().getLoc(), cacheBuilder, 1, ty),
+          outerFwd.getBody()->getArguments().drop_front());
+      preserveAttributesButCheckpointing(innerFwd, forOp);
+
+      cacheBuilder.setInsertionPointToEnd(innerFwd.getBody());
+      IRMapping &mapping = gutils->originalToNewFn;
+
+      Location loc = forOp.getInductionVar().getLoc();
+      auto currentIV = cacheBuilder.create<arith::MulIOp>(
+          loc,
+          cacheBuilder.create<arith::AddIOp>(
+              loc,
+              cacheBuilder.create<arith::MulIOp>(
+                  loc, outerFwd.getInductionVar(), nInnerCst),
+              innerFwd.getInductionVar()),
+          newForOp.getStep());
+
+      for (auto [oldArg, newArg] :
+           llvm::zip_equal(forOp.getBody()->getArguments(),
+                           innerFwd.getBody()->getArguments()))
+        mapping.map(oldArg, newArg);
+      mapping.map(forOp.getInductionVar(), currentIV);
+
+      for (auto &it : *forOp.getBody())
+        cacheBuilder.clone(it, mapping);
+
+      cacheBuilder.setInsertionPointToEnd(outerFwd.getBody());
+      for (auto initArg : innerFwd.getInitArgs())
+        caches.push_back(gutils->initAndPushCache(initArg, cacheBuilder));
+
+      cacheBuilder.create<scf::YieldOp>(
+          forOp.getBody()->getTerminator()->getLoc(), innerFwd->getResults());
+
+      cacheBuilder.setInsertionPointAfter(outerFwd);
+
+      for (auto ref : outsideRefs)
+        caches.push_back(gutils->initAndPushCache(mapping.lookupOrDefault(ref),
+                                                  cacheBuilder));
+
+      gutils->replaceOrigOpWith(op, outerFwd.getResults());
+      gutils->erase(newForOp);
+      gutils->originalToNewFnOps[op] = outerFwd;
+
+      return caches;
+    }
+
     SmallVector<Value> caches;
 
     Value cacheLB = gutils->initAndPushCache(
@@ -689,13 +1059,110 @@ struct ForOpInterfaceReverse
   }
 };
 
+struct IfOpInterfaceReverse
+    : public ReverseAutoDiffOpInterface::ExternalModel<IfOpInterfaceReverse,
+                                                       scf::IfOp> {
+  LogicalResult createReverseModeAdjoint(Operation *op, OpBuilder &builder,
+                                         MGradientUtilsReverse *gutils,
+                                         SmallVector<Value> caches) const {
+    auto ifOp = cast<scf::IfOp>(op);
+    bool hasElse = ifOp.elseBlock() != nullptr;
+    Value cond = gutils->popCache(caches[0], builder);
+
+    SmallVector<bool> resultsActive(ifOp.getNumResults(), false);
+    for (int i = 0, e = resultsActive.size(); i < e; ++i) {
+      resultsActive[i] = !gutils->isConstantValue(ifOp.getResult(i));
+    }
+
+    SmallVector<Value> incomingGradients;
+    for (auto &&[active, res] :
+         llvm::zip_equal(resultsActive, ifOp.getResults())) {
+      if (active) {
+        incomingGradients.push_back(gutils->diffe(res, builder));
+        if (!gutils->isConstantValue(res))
+          gutils->zeroDiffe(res, builder);
+      }
+    }
+
+    auto revIf =
+        builder.create<scf::IfOp>(ifOp.getLoc(), TypeRange{}, cond, hasElse);
+    bool valid = true;
+    for (auto &&[oldReg, newReg] :
+         llvm::zip(op->getRegions(), revIf->getRegions())) {
+      for (auto &&[oBB, revBB] : llvm::zip(oldReg, newReg)) {
+        OpBuilder bodyBuilder(&revBB, revBB.end());
+        bodyBuilder.setInsertionPoint(revBB.getTerminator());
+
+        // All values defined in the body should have no use outside this block
+        // therefore we can set their diffe to zero upon entering the reverse
+        // block to simplify the work of the remove-unnecessary-enzyme-ops pass.
+        for (auto &it : oBB.getOperations()) {
+          for (auto res : it.getResults()) {
+            if (!gutils->isConstantValue(res)) {
+              gutils->zeroDiffe(res, bodyBuilder);
+            }
+          }
+        }
+
+        auto term = oBB.getTerminator();
+        // Align incomingGradients with their corresponding yield operands.
+        SmallVector<Value> activeTermOperands;
+        activeTermOperands.reserve(incomingGradients.size());
+        for (auto &&[resultActive, operand] :
+             llvm::zip_equal(resultsActive, term->getOperands())) {
+          if (resultActive)
+            activeTermOperands.push_back(operand);
+        }
+
+        for (auto &&[arg, operand] :
+             llvm::zip_equal(incomingGradients, activeTermOperands)) {
+          // Check activity of the argument separately from the result. If some
+          // branches yield inactive values while others yield active values,
+          // the result will be active, but this operand may still be inactive
+          // (and we cannot addToDiffe)
+          if (!gutils->isConstantValue(operand)) {
+            gutils->addToDiffe(operand, arg, bodyBuilder);
+          }
+        }
+
+        auto first = oBB.rbegin();
+        first++; // skip terminator
+
+        auto last = oBB.rend();
+
+        for (auto it = first; it != last; ++it) {
+          Operation *op = &*it;
+          valid &=
+              gutils->Logic.visitChild(op, bodyBuilder, gutils).succeeded();
+        }
+      }
+    }
+    return success(valid);
+  }
+
+  SmallVector<Value> cacheValues(Operation *op,
+                                 MGradientUtilsReverse *gutils) const {
+    auto ifOp = cast<scf::IfOp>(op);
+
+    Operation *newOp = gutils->getNewFromOriginal(op);
+    OpBuilder cacheBuilder(newOp);
+    Value cacheCond = gutils->initAndPushCache(
+        gutils->getNewFromOriginal(ifOp.getCondition()), cacheBuilder);
+    return SmallVector<Value>{cacheCond};
+  }
+
+  void createShadowValues(Operation *op, OpBuilder &builder,
+                          MGradientUtilsReverse *gutils) const {}
+};
 } // namespace
 
 void mlir::enzyme::registerSCFDialectAutoDiffInterface(
     DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *context, scf::SCFDialect *) {
     registerInterfaces(context);
+    scf::IfOp::attachInterface<IfOpInterfaceReverse>(*context);
     scf::ForOp::attachInterface<ForOpInterfaceReverse>(*context);
     scf::ForOp::attachInterface<ForOpEnzymeOpsRemover>(*context);
+    scf::ForOp::attachInterface<ForOpADDataFlow>(*context);
   });
 }

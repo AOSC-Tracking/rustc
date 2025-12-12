@@ -3158,8 +3158,9 @@ fn dirty_submodule() {
         .cargo("package --no-verify")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[WARNING] manifest has no description, license, license-file, documentation, homepage or repository.
-See https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info.
+[WARNING] manifest has no description, license, license-file, documentation, homepage or repository
+  |
+  = [NOTE] see https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info
 [ERROR] 2 files in the working directory contain changes that were not yet committed into git:
 
 .gitmodules
@@ -3179,8 +3180,9 @@ to proceed despite this and include the uncommitted changes, pass the `--allow-d
         .cargo("package --no-verify")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[WARNING] manifest has no description, license, license-file, documentation, homepage or repository.
-See https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info.
+[WARNING] manifest has no description, license, license-file, documentation, homepage or repository
+  |
+  = [NOTE] see https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info
 [ERROR] 1 files in the working directory contain changes that were not yet committed into git:
 
 src/lib.rs
@@ -3205,8 +3207,9 @@ to proceed despite this and include the uncommitted changes, pass the `--allow-d
         .cargo("package --no-verify")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[WARNING] manifest has no description, license, license-file, documentation, homepage or repository.
-See https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info.
+[WARNING] manifest has no description, license, license-file, documentation, homepage or repository
+  |
+  = [NOTE] see https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info
 [ERROR] 2 files in the working directory contain changes that were not yet committed into git:
 
 src/.gitmodules
@@ -3228,8 +3231,9 @@ to proceed despite this and include the uncommitted changes, pass the `--allow-d
         .cargo("package --no-verify")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[WARNING] manifest has no description, license, license-file, documentation, homepage or repository.
-See https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info.
+[WARNING] manifest has no description, license, license-file, documentation, homepage or repository
+  |
+  = [NOTE] see https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info
 [ERROR] 1 files in the working directory contain changes that were not yet committed into git:
 
 src/bar/new_file.rs
@@ -4091,6 +4095,12 @@ fn github_fastpath_error_message() {
         .with_status(101)
         .with_stderr_data(str![[r#"
 [UPDATING] git repository `https://github.com/rust-lang/bitflags.git`
+fatal: remote [ERROR] upload-pack: not our ref 11111b376b93484341c68fbca3ca110ae5cd2790
+[WARNING] spurious network error (3 tries remaining): process didn't exit successfully: `git fetch --no-tags --force --update-head-ok [..]
+fatal: remote [ERROR] upload-pack: not our ref 11111b376b93484341c68fbca3ca110ae5cd2790
+[WARNING] spurious network error (2 tries remaining): process didn't exit successfully: `git fetch --no-tags --force --update-head-ok [..]
+fatal: remote [ERROR] upload-pack: not our ref 11111b376b93484341c68fbca3ca110ae5cd2790
+[WARNING] spurious network error (1 try remaining): process didn't exit successfully: `git fetch --no-tags --force --update-head-ok [..]
 fatal: remote [ERROR] upload-pack: not our ref 11111b376b93484341c68fbca3ca110ae5cd2790
 [ERROR] failed to get `bitflags` as a dependency of package `foo v0.1.0 ([ROOT]/foo)`
 

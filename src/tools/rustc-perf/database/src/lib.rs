@@ -148,7 +148,7 @@ impl FromStr for CommitType {
         match ty {
             "try" => Ok(CommitType::Try),
             "master" => Ok(CommitType::Master),
-            _ => Err(format!("Wrong commit type {}", ty)),
+            _ => Err(format!("Wrong commit type {ty}")),
         }
     }
 }
@@ -199,7 +199,7 @@ impl Ord for Commit {
 
 /// The compilation profile (i.e., how the crate was built)
 #[derive(
-    Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
 )]
 pub enum Profile {
     /// A checked build (i.e., no codegen)
@@ -244,7 +244,7 @@ impl std::str::FromStr for Profile {
             "doc-json" => Profile::DocJson,
             "opt" => Profile::Opt,
             "clippy" => Profile::Clippy,
-            _ => return Err(format!("{} is not a profile", s)),
+            _ => return Err(format!("{s} is not a profile")),
         })
     }
 }
@@ -285,7 +285,7 @@ impl std::str::FromStr for Scenario {
                 if let Some(stripped) = s.strip_prefix("incr-patched: ") {
                     Scenario::IncrementalPatch(PatchName::from(stripped))
                 } else {
-                    return Err(format!("{} is not a scenario", s));
+                    return Err(format!("{s} is not a scenario"));
                 }
             }
         })
@@ -298,7 +298,7 @@ impl fmt::Display for Scenario {
             Scenario::Empty => write!(f, "full"),
             Scenario::IncrementalEmpty => write!(f, "incr-full"),
             Scenario::IncrementalFresh => write!(f, "incr-unchanged"),
-            Scenario::IncrementalPatch(name) => write!(f, "incr-patched: {}", name),
+            Scenario::IncrementalPatch(name) => write!(f, "incr-patched: {name}"),
         }
     }
 }
@@ -309,7 +309,7 @@ impl Scenario {
             Scenario::Empty => "full".to_string(),
             Scenario::IncrementalEmpty => "incr-full".to_string(),
             Scenario::IncrementalFresh => "incr-unchanged".to_string(),
-            Scenario::IncrementalPatch(name) => format!("incr-patched-{}", name),
+            Scenario::IncrementalPatch(name) => format!("incr-patched-{name}"),
         }
     }
 }
@@ -356,9 +356,7 @@ impl PartialOrd for Scenario {
 /// https://doc.rust-lang.org/nightly/rustc/platform-support.html
 ///
 /// Presently we only support x86_64
-#[derive(
-    Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Target {
     /// `x86_64-unknown-linux-gnu`
     X86_64UnknownLinuxGnu,
@@ -381,7 +379,7 @@ impl FromStr for Target {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s.to_ascii_lowercase().as_str() {
             "x86_64-unknown-linux-gnu" => Target::X86_64UnknownLinuxGnu,
-            _ => return Err(format!("{} is not a valid target", s)),
+            _ => return Err(format!("{s} is not a valid target")),
         })
     }
 }
@@ -393,9 +391,7 @@ impl fmt::Display for Target {
 }
 
 /// The codegen backend used for compilation.
-#[derive(
-    Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CodegenBackend {
     /// The default LLVM backend
     Llvm,
@@ -418,7 +414,7 @@ impl FromStr for CodegenBackend {
         Ok(match s.to_ascii_lowercase().as_str() {
             "llvm" => CodegenBackend::Llvm,
             "cranelift" => CodegenBackend::Cranelift,
-            _ => return Err(format!("{} is not a codegen backend", s)),
+            _ => return Err(format!("{s} is not a codegen backend")),
         })
     }
 }
@@ -442,7 +438,7 @@ impl fmt::Display for ArtifactId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ArtifactId::Commit(c) => write!(f, "{} ({})", c.sha, c.date),
-            ArtifactId::Tag(id) => write!(f, "{}", id),
+            ArtifactId::Tag(id) => write!(f, "{id}"),
         }
     }
 }
@@ -812,7 +808,10 @@ pub enum BenchmarkRequestStatus {
     WaitingForArtifacts,
     ArtifactsReady,
     InProgress,
-    Completed { completed_at: DateTime<Utc> },
+    Completed {
+        completed_at: DateTime<Utc>,
+        duration: Duration,
+    },
 }
 
 const BENCHMARK_REQUEST_STATUS_WAITING_FOR_ARTIFACTS_STR: &str = "waiting_for_artifacts";
@@ -821,7 +820,7 @@ const BENCHMARK_REQUEST_STATUS_IN_PROGRESS_STR: &str = "in_progress";
 const BENCHMARK_REQUEST_STATUS_COMPLETED_STR: &str = "completed";
 
 impl BenchmarkRequestStatus {
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::WaitingForArtifacts => BENCHMARK_REQUEST_STATUS_WAITING_FOR_ARTIFACTS_STR,
             Self::ArtifactsReady => BENCHMARK_REQUEST_STATUS_ARTIFACTS_READY_STR,
@@ -833,6 +832,7 @@ impl BenchmarkRequestStatus {
     pub(crate) fn from_str_and_completion_date(
         text: &str,
         completion_date: Option<DateTime<Utc>>,
+        duration_ms: Option<i32>,
     ) -> anyhow::Result<Self> {
         match text {
             BENCHMARK_REQUEST_STATUS_WAITING_FOR_ARTIFACTS_STR => Ok(Self::WaitingForArtifacts),
@@ -842,15 +842,11 @@ impl BenchmarkRequestStatus {
                 completed_at: completion_date.ok_or_else(|| {
                     anyhow!("No completion date for a completed BenchmarkRequestStatus")
                 })?,
+                duration: Duration::from_millis(duration_ms.ok_or_else(|| {
+                    anyhow!("No completion duration for a completed BenchmarkRequestStatus")
+                })? as u64),
             }),
             _ => Err(anyhow!("Unknown BenchmarkRequestStatus `{text}`")),
-        }
-    }
-
-    pub(crate) fn completed_at(&self) -> Option<DateTime<Utc>> {
-        match self {
-            Self::Completed { completed_at } => Some(*completed_at),
-            _ => None,
         }
     }
 }
@@ -896,6 +892,8 @@ impl fmt::Display for BenchmarkRequestType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BenchmarkRequest {
     commit_type: BenchmarkRequestType,
+    // When was the compiler artifact created
+    commit_date: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     status: BenchmarkRequestStatus,
     backends: String,
@@ -904,12 +902,13 @@ pub struct BenchmarkRequest {
 
 impl BenchmarkRequest {
     /// Create a release benchmark request that is in the `ArtifactsReady` status.
-    pub fn create_release(tag: &str, created_at: DateTime<Utc>) -> Self {
+    pub fn create_release(tag: &str, commit_date: DateTime<Utc>) -> Self {
         Self {
             commit_type: BenchmarkRequestType::Release {
                 tag: tag.to_string(),
             },
-            created_at,
+            commit_date: Some(commit_date),
+            created_at: Utc::now(),
             status: BenchmarkRequestStatus::ArtifactsReady,
             backends: String::new(),
             profiles: String::new(),
@@ -917,19 +916,15 @@ impl BenchmarkRequest {
     }
 
     /// Create a try request that is in the `WaitingForArtifacts` status.
-    pub fn create_try_without_artifacts(
-        pr: u32,
-        created_at: DateTime<Utc>,
-        backends: &str,
-        profiles: &str,
-    ) -> Self {
+    pub fn create_try_without_artifacts(pr: u32, backends: &str, profiles: &str) -> Self {
         Self {
             commit_type: BenchmarkRequestType::Try {
                 pr,
                 sha: None,
                 parent_sha: None,
             },
-            created_at,
+            commit_date: None,
+            created_at: Utc::now(),
             status: BenchmarkRequestStatus::WaitingForArtifacts,
             backends: backends.to_string(),
             profiles: profiles.to_string(),
@@ -937,14 +932,15 @@ impl BenchmarkRequest {
     }
 
     /// Create a master benchmark request that is in the `ArtifactsReady` status.
-    pub fn create_master(sha: &str, parent_sha: &str, pr: u32, created_at: DateTime<Utc>) -> Self {
+    pub fn create_master(sha: &str, parent_sha: &str, pr: u32, commit_date: DateTime<Utc>) -> Self {
         Self {
             commit_type: BenchmarkRequestType::Master {
                 pr,
                 sha: sha.to_string(),
                 parent_sha: parent_sha.to_string(),
             },
-            created_at,
+            commit_date: Some(commit_date),
+            created_at: Utc::now(),
             status: BenchmarkRequestStatus::ArtifactsReady,
             backends: String::new(),
             profiles: String::new(),
@@ -961,10 +957,10 @@ impl BenchmarkRequest {
         }
     }
 
-    pub fn pr(&self) -> Option<&u32> {
+    pub fn pr(&self) -> Option<u32> {
         match &self.commit_type {
             BenchmarkRequestType::Try { pr, .. } | BenchmarkRequestType::Master { pr, .. } => {
-                Some(pr)
+                Some(*pr)
             }
             BenchmarkRequestType::Release { .. } => None,
         }
@@ -984,6 +980,14 @@ impl BenchmarkRequest {
 
     pub fn created_at(&self) -> DateTime<Utc> {
         self.created_at
+    }
+
+    pub fn commit_date(&self) -> Option<DateTime<Utc>> {
+        self.commit_date
+    }
+
+    pub fn commit_type(&self) -> &BenchmarkRequestType {
+        &self.commit_type
     }
 
     pub fn is_master(&self) -> bool {
@@ -1026,15 +1030,20 @@ impl BenchmarkRequest {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("Invalid backend: {e}"))
     }
+
+    pub fn is_completed(&self) -> bool {
+        matches!(self.status, BenchmarkRequestStatus::Completed { .. })
+    }
+
+    pub fn is_in_progress(&self) -> bool {
+        matches!(self.status, BenchmarkRequestStatus::InProgress)
+    }
 }
 
 /// Cached information about benchmark requests in the DB
-/// FIXME: only store non-try requests here
 pub struct BenchmarkRequestIndex {
     /// Tags (SHA or release name) of all known benchmark requests
     all: HashSet<String>,
-    /// Tags (SHA or release name) of all benchmark requests in the completed status
-    completed: HashSet<String>,
 }
 
 impl BenchmarkRequestIndex {
@@ -1042,11 +1051,13 @@ impl BenchmarkRequestIndex {
     pub fn contains_tag(&self, tag: &str) -> bool {
         self.all.contains(tag)
     }
+}
 
-    /// Return tags of already completed benchmark requests.
-    pub fn completed_requests(&self) -> &HashSet<String> {
-        &self.completed
-    }
+/// Contains pending (ArtifactsReady or InProgress) benchmark requests, and a set of their parents
+/// that are already completed.
+pub struct PendingBenchmarkRequests {
+    pub requests: Vec<BenchmarkRequest>,
+    pub completed_parent_tags: HashSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1054,10 +1065,12 @@ pub enum BenchmarkJobStatus {
     Queued,
     InProgress {
         started_at: DateTime<Utc>,
+        collector_name: String,
     },
     Completed {
         started_at: DateTime<Utc>,
         completed_at: DateTime<Utc>,
+        collector_name: String,
         success: bool,
     },
 }
@@ -1089,8 +1102,18 @@ impl fmt::Display for BenchmarkJobStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct BenchmarkSet(u32);
+#[derive(Debug, Copy, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct BenchmarkSet(pub u32);
+
+impl BenchmarkSet {
+    pub fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    pub fn get_id(&self) -> u32 {
+        self.0
+    }
+}
 
 /// A single unit of work generated from a benchmark request. Split by profiles
 /// and backends
@@ -1100,6 +1123,7 @@ pub struct BenchmarkSet(u32);
 /// they are responsible for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BenchmarkJob {
+    id: u32,
     target: Target,
     backend: CodegenBackend,
     profile: Profile,
@@ -1107,5 +1131,162 @@ pub struct BenchmarkJob {
     benchmark_set: BenchmarkSet,
     created_at: DateTime<Utc>,
     status: BenchmarkJobStatus,
-    retry: u32,
+    deque_counter: u32,
+    kind: BenchmarkJobKind,
+}
+
+impl BenchmarkJob {
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    pub fn target(&self) -> Target {
+        self.target
+    }
+
+    pub fn backend(&self) -> CodegenBackend {
+        self.backend
+    }
+
+    pub fn profile(&self) -> Profile {
+        self.profile
+    }
+
+    pub fn request_tag(&self) -> &str {
+        &self.request_tag
+    }
+
+    pub fn benchmark_set(&self) -> BenchmarkSet {
+        self.benchmark_set
+    }
+
+    pub fn collector_name(&self) -> Option<&str> {
+        match &self.status {
+            BenchmarkJobStatus::Queued => None,
+            BenchmarkJobStatus::InProgress { collector_name, .. }
+            | BenchmarkJobStatus::Completed { collector_name, .. } => Some(collector_name),
+        }
+    }
+
+    /// How many times was the job already dequed?
+    pub fn deque_count(&self) -> u32 {
+        self.deque_counter
+    }
+
+    pub fn status(&self) -> &BenchmarkJobStatus {
+        &self.status
+    }
+
+    pub fn created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+
+    pub fn kind(&self) -> BenchmarkJobKind {
+        self.kind
+    }
+}
+
+/// Describes the final state of a job
+#[derive(Debug, Clone, PartialEq)]
+pub enum BenchmarkJobConclusion {
+    Failure,
+    Success,
+}
+
+impl BenchmarkJobConclusion {
+    pub fn as_str(&self) -> &str {
+        match self {
+            BenchmarkJobConclusion::Failure => BENCHMARK_JOB_STATUS_FAILURE_STR,
+            BenchmarkJobConclusion::Success => BENCHMARK_JOB_STATUS_SUCCESS_STR,
+        }
+    }
+}
+
+/// The configuration for a collector
+#[derive(Debug, PartialEq)]
+pub struct CollectorConfig {
+    name: String,
+    target: Target,
+    benchmark_set: BenchmarkSet,
+    is_active: bool,
+    last_heartbeat_at: DateTime<Utc>,
+    date_added: DateTime<Utc>,
+    /// The commit SHA of `rustc-perf` that the collector currently has checked out.
+    commit_sha: Option<String>,
+}
+
+impl CollectorConfig {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn target(&self) -> Target {
+        self.target
+    }
+
+    pub fn benchmark_set(&self) -> BenchmarkSet {
+        self.benchmark_set
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.is_active
+    }
+
+    pub fn last_heartbeat_at(&self) -> DateTime<Utc> {
+        self.last_heartbeat_at
+    }
+
+    pub fn date_added(&self) -> DateTime<Utc> {
+        self.date_added
+    }
+
+    pub fn commit_sha(&self) -> Option<&str> {
+        self.commit_sha.as_deref()
+    }
+}
+
+/// Mapping of a request to its parent along with all jobs
+#[derive(Debug, PartialEq)]
+pub struct InProgressRequestWithJobs {
+    /// In progress requests along with their associated jobs
+    pub request: (BenchmarkRequest, Vec<BenchmarkJob>),
+    /// Optionally the parent of the above request with _all_ their associated
+    /// jobs
+    pub parent: Option<(BenchmarkRequest, Vec<BenchmarkJob>)>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct BenchmarkRequestWithErrors {
+    pub request: BenchmarkRequest,
+    /// Benchmark (name) -> error
+    pub errors: HashMap<String, String>,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy, serde::Deserialize, serde::Serialize)]
+pub enum BenchmarkJobKind {
+    Runtime,
+    Compiletime,
+    Rustc,
+}
+
+impl fmt::Display for BenchmarkJobKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BenchmarkJobKind::Runtime => write!(f, "runtime"),
+            BenchmarkJobKind::Compiletime => write!(f, "compiletime"),
+            BenchmarkJobKind::Rustc => write!(f, "rustc"),
+        }
+    }
+}
+
+impl FromStr for BenchmarkJobKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_ascii_lowercase().as_str() {
+            "runtime" => BenchmarkJobKind::Runtime,
+            "compiletime" => BenchmarkJobKind::Compiletime,
+            "rustc" => BenchmarkJobKind::Rustc,
+            _ => return Err(format!("{s} is not a codegen backend")),
+        })
+    }
 }

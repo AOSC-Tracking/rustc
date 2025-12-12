@@ -16,6 +16,7 @@
 #include "Passes/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/PassManager.h"
@@ -26,8 +27,18 @@ using namespace mlir;
 using namespace mlir::enzyme;
 using namespace enzyme;
 
+namespace mlir {
+namespace enzyme {
+#define GEN_PASS_DEF_DIFFERENTIATEPASS
+#include "Passes/Passes.h.inc"
+} // namespace enzyme
+} // namespace mlir
+
 namespace {
-struct DifferentiatePass : public DifferentiatePassBase<DifferentiatePass> {
+struct DifferentiatePass
+    : public enzyme::impl::DifferentiatePassBase<DifferentiatePass> {
+  using DifferentiatePassBase::DifferentiatePassBase;
+
   MEnzymeLogic Logic;
 
   void runOnOperation() override;
@@ -327,9 +338,14 @@ struct DifferentiatePass : public DifferentiatePassBase<DifferentiatePass> {
       return failure();
 
     OpBuilder builder(CI);
-    auto dCI = builder.create<func::CallOp>(CI.getLoc(), newFunc.getName(),
-                                            newFunc.getResultTypes(), args);
-    CI.replaceAllUsesWith(dCI);
+    if (auto llvmNewFn = dyn_cast<LLVM::LLVMFuncOp>(newFunc.getOperation())) {
+      auto dCI = builder.create<LLVM::CallOp>(CI.getLoc(), llvmNewFn, args);
+      CI.replaceAllUsesWith(dCI);
+    } else {
+      auto dCI = builder.create<func::CallOp>(CI.getLoc(), newFunc.getName(),
+                                              newFunc.getResultTypes(), args);
+      CI.replaceAllUsesWith(dCI);
+    }
     CI->erase();
     return success();
   }
@@ -387,14 +403,6 @@ struct DifferentiatePass : public DifferentiatePassBase<DifferentiatePass> {
 };
 
 } // end anonymous namespace
-
-namespace mlir {
-namespace enzyme {
-std::unique_ptr<Pass> createDifferentiatePass() {
-  return std::make_unique<DifferentiatePass>();
-}
-} // namespace enzyme
-} // namespace mlir
 
 void DifferentiatePass::runOnOperation() {
   SymbolTableCollection symbolTable;

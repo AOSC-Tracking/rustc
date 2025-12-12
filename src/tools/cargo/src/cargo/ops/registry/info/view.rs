@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::Write;
 
 use crate::core::Shell;
-use crate::util::style::{ERROR, HEADER, LITERAL, NOP, WARN};
+use crate::util::style::{CONTEXT, ERROR, HEADER, LITERAL, NOP, WARN};
 use crate::{
     CargoResult, GlobalContext,
     core::{
@@ -26,7 +26,7 @@ pub(super) fn pretty_view(
     let header = HEADER;
     let error = ERROR;
     let warn = WARN;
-    let context = annotate_snippets::renderer::DEFAULT_CONTEXT_STYLE;
+    let context = CONTEXT;
 
     let mut shell = gctx.shell();
     let verbosity = shell.verbosity();
@@ -400,7 +400,7 @@ fn suggest_cargo_tree(package_id: PackageId, shell: &mut Shell) -> CargoResult<(
     let literal = LITERAL;
 
     shell.note(format_args!(
-        "to see how you depend on {name}, run `{literal}cargo tree --invert --package {name}@{version}{literal:#}`",
+        "to see how you depend on {name}, run `{literal}cargo tree --invert {name}@{version}{literal:#}`",
         name = package_id.name(),
         version = package_id.version(),
     ))

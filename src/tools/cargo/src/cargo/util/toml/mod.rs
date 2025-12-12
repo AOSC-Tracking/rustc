@@ -67,12 +67,11 @@ pub fn read_manifest(
     let mut errors = Default::default();
 
     let is_embedded = is_embedded(path);
-    let contents = read_toml_string(path, is_embedded, gctx)
-        .map_err(|err| ManifestError::new(err, path.into()))?;
-    let document =
-        parse_document(&contents).map_err(|e| emit_diagnostic(e.into(), &contents, path, gctx))?;
+    let contents = read_toml_string(path, is_embedded, gctx)?;
+    let document = parse_document(&contents)
+        .map_err(|e| emit_toml_diagnostic(e.into(), &contents, path, gctx))?;
     let original_toml = deserialize_toml(&document)
-        .map_err(|e| emit_diagnostic(e.into(), &contents, path, gctx))?;
+        .map_err(|e| emit_toml_diagnostic(e.into(), &contents, path, gctx))?;
 
     let mut manifest = (|| {
         let empty = Vec::new();
@@ -82,8 +81,7 @@ pub fn read_manifest(
             to_workspace_config(&original_toml, path, is_embedded, gctx, &mut warnings)?;
         if let WorkspaceConfig::Root(ws_root_config) = &workspace_config {
             let package_root = path.parent().unwrap();
-            gctx.ws_roots
-                .borrow_mut()
+            gctx.ws_roots()
                 .insert(package_root.to_owned(), ws_root_config.clone());
         }
         let normalized_toml = normalize_toml(
@@ -152,12 +150,13 @@ pub fn read_manifest(
 
 #[tracing::instrument(skip_all)]
 fn read_toml_string(path: &Path, is_embedded: bool, gctx: &GlobalContext) -> CargoResult<String> {
-    let mut contents = paths::read(path)?;
+    let mut contents = paths::read(path).map_err(|err| ManifestError::new(err, path.into()))?;
     if is_embedded {
         if !gctx.cli_unstable().script {
             anyhow::bail!("parsing `{}` requires `-Zscript`", path.display());
         }
-        contents = embedded::expand_manifest(&contents)?;
+        contents = embedded::expand_manifest(&contents)
+            .map_err(|e| emit_frontmatter_diagnostic(e, &contents, path, gctx))?;
     }
     Ok(contents)
 }
@@ -380,10 +379,7 @@ fn normalize_toml(
             warnings,
         )?;
         let original_toml_bin = if is_embedded {
-            let manifest_file_stem = manifest_file
-                .file_stem()
-                .expect("file name enforced previously");
-            let name = embedded::sanitize_name(manifest_file_stem.to_string_lossy().as_ref());
+            let name = package_name.as_ref().to_owned();
             let manifest_file_name = manifest_file
                 .file_name()
                 .expect("file name enforced previously");
@@ -448,7 +444,7 @@ fn normalize_toml(
             edition,
             &features,
             original_toml.dependencies.as_ref(),
-            None,
+            DepKind::Normal,
             &inherit,
             &workspace_root,
             package_root,
@@ -468,7 +464,7 @@ fn normalize_toml(
             edition,
             &features,
             original_toml.dev_dependencies(),
-            Some(DepKind::Development),
+            DepKind::Development,
             &inherit,
             &workspace_root,
             package_root,
@@ -488,7 +484,7 @@ fn normalize_toml(
             edition,
             &features,
             original_toml.build_dependencies(),
-            Some(DepKind::Build),
+            DepKind::Build,
             &inherit,
             &workspace_root,
             package_root,
@@ -501,7 +497,7 @@ fn normalize_toml(
                 edition,
                 &features,
                 platform.dependencies.as_ref(),
-                None,
+                DepKind::Normal,
                 &inherit,
                 &workspace_root,
                 package_root,
@@ -521,7 +517,7 @@ fn normalize_toml(
                 edition,
                 &features,
                 platform.dev_dependencies(),
-                Some(DepKind::Development),
+                DepKind::Development,
                 &inherit,
                 &workspace_root,
                 package_root,
@@ -541,7 +537,7 @@ fn normalize_toml(
                 edition,
                 &features,
                 platform.build_dependencies(),
-                Some(DepKind::Build),
+                DepKind::Build,
                 &inherit,
                 &workspace_root,
                 package_root,
@@ -874,7 +870,7 @@ fn normalize_dependencies<'a>(
     edition: Edition,
     features: &Features,
     orig_deps: Option<&BTreeMap<manifest::PackageName, manifest::InheritableDependency>>,
-    kind: Option<DepKind>,
+    kind: DepKind,
     inherit: &dyn Fn() -> CargoResult<&'a InheritableFields>,
     workspace_root: &dyn Fn() -> CargoResult<&'a Path>,
     package_root: &Path,
@@ -907,27 +903,27 @@ fn normalize_dependencies<'a>(
             if d.public.is_some() {
                 let with_public_feature = features.require(Feature::public_dependency()).is_ok();
                 let with_z_public = gctx.cli_unstable().public_dependency;
-                if matches!(kind, None) {
-                    if !with_public_feature && !with_z_public {
-                        d.public = None;
-                        warnings.push(format!(
-                            "ignoring `public` on dependency {name_in_toml}, pass `-Zpublic-dependency` to enable support for it"
-                        ))
+                match kind {
+                    DepKind::Normal => {
+                        if !with_public_feature && !with_z_public {
+                            d.public = None;
+                            warnings.push(format!(
+                                "ignoring `public` on dependency {name_in_toml}, pass `-Zpublic-dependency` to enable support for it"
+                            ));
+                        }
                     }
-                } else {
-                    let kind_name = match kind {
-                        Some(k) => k.kind_table(),
-                        None => "dependencies",
-                    };
-                    let hint = format!(
-                        "'public' specifier can only be used on regular dependencies, not {kind_name}",
-                    );
-                    if with_public_feature || with_z_public {
-                        bail!(hint)
-                    } else {
-                        // If public feature isn't enabled in nightly, we instead warn that.
-                        warnings.push(hint);
-                        d.public = None;
+                    DepKind::Development | DepKind::Build => {
+                        let kind_name = kind.kind_table();
+                        let hint = format!(
+                            "'public' specifier can only be used on regular dependencies, not {kind_name}",
+                        );
+                        if with_public_feature || with_z_public {
+                            bail!(hint)
+                        } else {
+                            // If public feature isn't enabled in nightly, we instead warn that.
+                            warnings.push(hint);
+                            d.public = None;
+                        }
                     }
                 }
             }
@@ -996,7 +992,7 @@ fn inheritable_from_path(
 
     // Let the borrow exit scope so that it can be picked up if there is a need to
     // read a manifest
-    if let Some(ws_root) = gctx.ws_roots.borrow().get(workspace_path_root) {
+    if let Some(ws_root) = gctx.ws_roots().get(workspace_path_root) {
         return Ok(ws_root.inheritable().clone());
     };
 
@@ -1004,9 +1000,7 @@ fn inheritable_from_path(
     let man = read_manifest(&workspace_path, source_id, gctx)?;
     match man.workspace_config() {
         WorkspaceConfig::Root(root) => {
-            gctx.ws_roots
-                .borrow_mut()
-                .insert(workspace_path, root.clone());
+            gctx.ws_roots().insert(workspace_path, root.clone());
             Ok(root.inheritable().clone())
         }
         _ => bail!(
@@ -1314,7 +1308,7 @@ pub fn to_real_manifest(
                 let edition_msrv = RustVersion::try_from(edition_msrv).unwrap();
                 if !edition_msrv.is_compatible_with(pkg_msrv.as_partial()) {
                     bail!(
-                        "rust-version {} is older than first version ({}) required by \
+                        "rust-version {} is imcompatible with the version ({}) required by \
                             the specified edition ({})",
                         pkg_msrv,
                         edition_msrv,
@@ -1380,70 +1374,90 @@ pub fn to_real_manifest(
     }
 
     if is_embedded {
-        let invalid_fields = [
-            ("`workspace`", original_toml.workspace.is_some()),
-            ("`lib`", original_toml.lib.is_some()),
-            ("`bin`", original_toml.bin.is_some()),
-            ("`example`", original_toml.example.is_some()),
-            ("`test`", original_toml.test.is_some()),
-            ("`bench`", original_toml.bench.is_some()),
-            (
-                "`package.workspace`",
-                original_toml
-                    .package()
-                    .map(|p| p.workspace.is_some())
-                    .unwrap_or(false),
-            ),
-            (
-                "`package.build`",
-                original_toml
-                    .package()
-                    .map(|p| p.build.is_some())
-                    .unwrap_or(false),
-            ),
-            (
-                "`package.links`",
-                original_toml
-                    .package()
-                    .map(|p| p.links.is_some())
-                    .unwrap_or(false),
-            ),
-            (
-                "`package.autolib`",
-                original_toml
-                    .package()
-                    .map(|p| p.autolib.is_some())
-                    .unwrap_or(false),
-            ),
-            (
-                "`package.autobins`",
-                original_toml
-                    .package()
-                    .map(|p| p.autobins.is_some())
-                    .unwrap_or(false),
-            ),
-            (
-                "`package.autoexamples`",
-                original_toml
-                    .package()
-                    .map(|p| p.autoexamples.is_some())
-                    .unwrap_or(false),
-            ),
-            (
-                "`package.autotests`",
-                original_toml
-                    .package()
-                    .map(|p| p.autotests.is_some())
-                    .unwrap_or(false),
-            ),
-            (
-                "`package.autobenches`",
-                original_toml
-                    .package()
-                    .map(|p| p.autobenches.is_some())
-                    .unwrap_or(false),
-            ),
+        let manifest::TomlManifest {
+            cargo_features: _,
+            package: _,
+            project: _,
+            badges: _,
+            features: _,
+            lib,
+            bin,
+            example,
+            test,
+            bench,
+            dependencies: _,
+            dev_dependencies: _,
+            dev_dependencies2: _,
+            build_dependencies,
+            build_dependencies2,
+            target: _,
+            lints: _,
+            hints: _,
+            workspace,
+            profile: _,
+            patch: _,
+            replace: _,
+            _unused_keys: _,
+        } = &original_toml;
+        let mut invalid_fields = vec![
+            ("`workspace`", workspace.is_some()),
+            ("`lib`", lib.is_some()),
+            ("`bin`", bin.is_some()),
+            ("`example`", example.is_some()),
+            ("`test`", test.is_some()),
+            ("`bench`", bench.is_some()),
+            ("`build-dependencies`", build_dependencies.is_some()),
+            ("`build_dependencies`", build_dependencies2.is_some()),
         ];
+        if let Some(package) = original_toml.package() {
+            let manifest::TomlPackage {
+                edition: _,
+                rust_version: _,
+                name: _,
+                version: _,
+                authors: _,
+                build,
+                metabuild,
+                default_target: _,
+                forced_target: _,
+                links,
+                exclude: _,
+                include: _,
+                publish: _,
+                workspace,
+                im_a_teapot: _,
+                autolib,
+                autobins,
+                autoexamples,
+                autotests,
+                autobenches,
+                default_run,
+                description: _,
+                homepage: _,
+                documentation: _,
+                readme: _,
+                keywords: _,
+                categories: _,
+                license: _,
+                license_file: _,
+                repository: _,
+                resolver: _,
+                metadata: _,
+                _invalid_cargo_features: _,
+            } = package.as_ref();
+            invalid_fields.extend([
+                ("`package.workspace`", workspace.is_some()),
+                ("`package.build`", build.is_some()),
+                ("`package.metabuild`", metabuild.is_some()),
+                ("`package.links`", links.is_some()),
+                ("`package.autolib`", autolib.is_some()),
+                ("`package.autobins`", autobins.is_some()),
+                ("`package.autoexamples`", autoexamples.is_some()),
+                ("`package.autotests`", autotests.is_some()),
+                ("`package.autobenches`", autobenches.is_some()),
+                ("`package.default-run`", default_run.is_some()),
+            ]);
+        }
         let invalid_fields = invalid_fields
             .into_iter()
             .filter_map(|(name, invalid)| invalid.then_some(name))
@@ -1747,8 +1761,8 @@ pub fn to_real_manifest(
 
     if summary.features().contains_key("default-features") {
         warnings.push(
-            "`default-features = [\"..\"]` was found in [features]. \
-                 Did you mean to use `default = [\"..\"]`?"
+            "`[features]` defines a feature named `default-features`
+note: only a feature named `default` will be enabled by default"
                 .to_string(),
         )
     }
@@ -2553,10 +2567,10 @@ pub fn validate_profile(
     }
 
     if let Some(panic) = &root.panic {
-        if panic != "unwind" && panic != "abort" {
+        if panic != "unwind" && panic != "abort" && panic != "immediate-abort" {
             bail!(
                 "`panic` setting of `{}` is not a valid setting, \
-                     must be `unwind` or `abort`",
+                     must be `unwind`, `abort`, or `immediate-abort`.",
                 panic
             );
         }
@@ -2605,6 +2619,15 @@ fn validate_profile_layer(
         match (
             features.require(Feature::trim_paths()),
             cli_unstable.trim_paths,
+        ) {
+            (Err(e), false) => return Err(e),
+            _ => {}
+        }
+    }
+    if profile.panic.as_deref() == Some("immediate-abort") {
+        match (
+            features.require(Feature::panic_immediate_abort()),
+            cli_unstable.panic_immediate_abort,
         ) {
             (Err(e), false) => return Err(e),
             _ => {}
@@ -2777,7 +2800,37 @@ fn lints_to_rustflags(lints: &manifest::TomlLints) -> CargoResult<Vec<String>> {
     Ok(rustflags)
 }
 
-fn emit_diagnostic(
+fn emit_frontmatter_diagnostic(
+    e: crate::util::frontmatter::FrontmatterError,
+    contents: &str,
+    manifest_file: &Path,
+    gctx: &GlobalContext,
+) -> anyhow::Error {
+    let primary_span = e.primary_span();
+
+    // Get the path to the manifest, relative to the cwd
+    let manifest_path = diff_paths(manifest_file, gctx.cwd())
+        .unwrap_or_else(|| manifest_file.to_path_buf())
+        .display()
+        .to_string();
+    let group = Group::with_title(Level::ERROR.primary_title(e.message())).element(
+        Snippet::source(contents)
+            .path(manifest_path)
+            .annotation(AnnotationKind::Primary.span(primary_span))
+            .annotations(
+                e.visible_spans()
+                    .iter()
+                    .map(|s| AnnotationKind::Visible.span(s.clone())),
+            ),
+    );
+
+    if let Err(err) = gctx.shell().print_report(&[group], true) {
+        return err.into();
+    }
+    return AlreadyPrintedError::new(e.into()).into();
+}
+
+fn emit_toml_diagnostic(
     e: toml::de::Error,
     contents: &str,
     manifest_file: &Path,

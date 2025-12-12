@@ -1,12 +1,17 @@
 use crate::pool::{Connection, ConnectionManager, ManagedConnection, Transaction};
 use crate::selector::CompileTestCase;
 use crate::{
-    ArtifactCollection, ArtifactId, ArtifactIdNumber, Benchmark, BenchmarkJobStatus,
-    BenchmarkRequest, BenchmarkRequestIndex, BenchmarkRequestStatus, BenchmarkRequestType,
-    CodegenBackend, CollectionId, Commit, CommitType, CompileBenchmark, Date, Index, Profile,
-    QueuedCommit, Scenario, Target, BENCHMARK_REQUEST_MASTER_STR, BENCHMARK_REQUEST_RELEASE_STR,
+    ArtifactCollection, ArtifactId, ArtifactIdNumber, Benchmark, BenchmarkJob,
+    BenchmarkJobConclusion, BenchmarkJobKind, BenchmarkJobStatus, BenchmarkRequest,
+    BenchmarkRequestIndex, BenchmarkRequestStatus, BenchmarkRequestType,
+    BenchmarkRequestWithErrors, BenchmarkSet, CodegenBackend, CollectionId, CollectorConfig,
+    Commit, CommitType, CompileBenchmark, Date, Index, PendingBenchmarkRequests, Profile,
+    QueuedCommit, Scenario, Target, BENCHMARK_JOB_STATUS_FAILURE_STR,
+    BENCHMARK_JOB_STATUS_IN_PROGRESS_STR, BENCHMARK_JOB_STATUS_QUEUED_STR,
+    BENCHMARK_JOB_STATUS_SUCCESS_STR, BENCHMARK_REQUEST_MASTER_STR, BENCHMARK_REQUEST_RELEASE_STR,
     BENCHMARK_REQUEST_STATUS_ARTIFACTS_READY_STR, BENCHMARK_REQUEST_STATUS_COMPLETED_STR,
-    BENCHMARK_REQUEST_STATUS_IN_PROGRESS_STR, BENCHMARK_REQUEST_TRY_STR,
+    BENCHMARK_REQUEST_STATUS_IN_PROGRESS_STR, BENCHMARK_REQUEST_STATUS_WAITING_FOR_ARTIFACTS_STR,
+    BENCHMARK_REQUEST_TRY_STR,
 };
 use anyhow::Context as _;
 use chrono::{DateTime, TimeZone, Utc};
@@ -17,8 +22,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tokio_postgres::GenericClient;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::Statement;
+use tokio_postgres::{GenericClient, Row};
 
 pub struct Postgres(String, std::sync::Once);
 
@@ -47,7 +53,7 @@ pub async fn make_client(db_url: &str) -> anyhow::Result<tokio_postgres::Client>
         };
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("database connection error: {}", e);
+                eprintln!("database connection error: {e}");
             }
         });
 
@@ -63,7 +69,7 @@ pub async fn make_client(db_url: &str) -> anyhow::Result<tokio_postgres::Client>
             };
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("database connection error: {}", e);
+                eprintln!("database connection error: {e}");
             }
         });
 
@@ -361,6 +367,59 @@ static MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS job_queue_request_tag_idx ON job_queue (request_tag);
     "#,
+    // The name is unique and not null in the collector config and is simpler
+    // to use as we do not expose the `collector_id` in the code
+    r#"
+    ALTER TABLE job_queue DROP CONSTRAINT IF EXISTS job_queue_collector;
+    ALTER TABLE job_queue ADD COLUMN collector_name TEXT;
+    ALTER TABLE job_queue
+        ADD CONSTRAINT job_queue_collector
+            FOREIGN KEY (collector_name)
+            REFERENCES collector_config(name)
+            ON DELETE CASCADE;
+    ALTER TABLE job_queue DROP COLUMN IF EXISTS collector_id;
+    CREATE INDEX IF NOT EXISTS job_queue_status_target_benchmark_set_idx ON job_queue (status, target, benchmark_set);
+    "#,
+    r#"
+    ALTER TABLE benchmark_request ADD COLUMN commit_date TIMESTAMPTZ NULL;
+    "#,
+    r#"
+    ALTER TABLE benchmark_request ADD COLUMN duration_ms INTEGER NULL;
+    "#,
+    r#"
+    ALTER TABLE collector_config ADD COLUMN commit_sha TEXT NULL;
+    "#,
+    r#"
+    CREATE TABLE error_new (
+        id      SERIAL PRIMARY KEY,
+        aid     INTEGER NOT NULL REFERENCES artifact(id) ON DELETE CASCADE ON UPDATE CASCADE,
+        message TEXT NOT NULL,
+        context TEXT NOT NULL,
+        job_id  INTEGER
+    );
+
+    INSERT INTO
+        error_new (aid, message, context)
+    SELECT
+        aid,
+        error,
+        benchmark
+    FROM
+        error;
+
+    DROP TABLE error;
+    ALTER TABLE error_new RENAME TO error;
+
+    CREATE INDEX error_artifact_idx ON error(aid);
+    "#,
+    // For completed requests we take the last N completed. As the total number
+    // of requests grows to make things fast we need an index on the completed_at
+    r#"
+    CREATE INDEX benchmark_request_completed_idx ON benchmark_request(completed_at);
+    "#,
+    r#"
+    ALTER TABLE job_queue ADD COLUMN kind TEXT NOT NULL DEFAULT 'compiletime';
+    "#,
 ];
 
 #[async_trait::async_trait]
@@ -444,6 +503,9 @@ pub struct CachedStatements {
     get_artifact_size: Statement,
     load_benchmark_request_index: Statement,
     get_compile_test_cases_with_measurements: Statement,
+    get_last_n_completed_requests_with_errors: Statement,
+    get_jobs_of_in_progress_benchmark_requests: Statement,
+    load_pending_benchmark_requests: Statement,
 }
 
 pub struct PostgresTransaction<'a> {
@@ -549,7 +611,7 @@ impl PostgresConnection {
                     .prepare("insert into rustc_compilation (aid, cid, crate, duration) VALUES ($1, $2, $3, $4)")
                     .await
                     .unwrap(),
-                get_error: conn.prepare("select benchmark, error from error where aid = $1").await.unwrap(),
+                get_error: conn.prepare("select context, message from error where aid = $1").await.unwrap(),
                 insert_pstat_series: conn.prepare("insert into pstat_series (crate, profile, scenario, backend, target, metric) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING RETURNING id").await.unwrap(),
                 select_pstat_series: conn.prepare("select id from pstat_series where crate = $1 and profile = $2 and scenario = $3 and backend = $4 and target = $5 and metric = $6").await.unwrap(),
                 collection_id: conn.prepare("insert into collection (perf_commit) VALUES ($1) returning id").await.unwrap(),
@@ -627,7 +689,7 @@ impl PostgresConnection {
                     where aid = $1
                 ").await.unwrap(),
                 load_benchmark_request_index: conn.prepare("
-                    SELECT tag, status
+                    SELECT tag
                     FROM benchmark_request
                     WHERE tag IS NOT NULL
                 ").await.unwrap(),
@@ -640,11 +702,82 @@ impl PostgresConnection {
                         WHERE aid = $1
                     )
                 ").await.unwrap(),
+                get_last_n_completed_requests_with_errors: conn.prepare(&format!("
+                    WITH completed AS (
+                        SELECT {BENCHMARK_REQUEST_COLUMNS}
+                        FROM benchmark_request
+                        WHERE status = $1
+                        -- Select last N completed requests
+                        ORDER BY completed_at DESC
+                        LIMIT $2
+                    ), artifacts AS (
+                        SELECT artifact.id, name
+                        FROM artifact
+                        -- Use right join to only return artifacts for selected requests
+                        RIGHT JOIN completed ON artifact.name = completed.tag
+                    ), errors AS (
+                        SELECT
+                            artifacts.name AS tag,
+                            error.context,
+                            error.message
+                        FROM error
+                        -- Use right join to only return errors for selected artifacts
+                        RIGHT JOIN artifacts ON error.aid = artifacts.id
+                    )
+                    -- Select request duplicated for each pair of (benchmark, error)
+                    SELECT
+                        completed.*,
+                        errors.context,
+                        errors.message
+                    FROM completed
+                    LEFT JOIN errors ON errors.tag = completed.tag
+                    -- Re-sort the requests, because the original order may be lost
+                    ORDER BY completed.completed_at DESC
+                ")).await.unwrap(),
+                get_jobs_of_in_progress_benchmark_requests: conn.prepare(&format!("
+                    -- Get in progress requests
+                    WITH in_progress AS (
+                        SELECT tag, parent_sha
+                        FROM benchmark_request
+                        WHERE status = '{BENCHMARK_REQUEST_STATUS_IN_PROGRESS_STR}' AND
+                              tag IS NOT NULL
+                    ),
+                    -- Get their parents
+                    parents AS (
+                        SELECT parent_sha AS tag
+                        FROM in_progress
+                        WHERE parent_sha is not NULL
+                    ),
+                    -- Concatenate them together (without duplicates)
+                    requests AS (
+                        SELECT tag FROM in_progress
+                        UNION
+                        SELECT tag FROM parents
+                    )
+                    -- Only get the jobs of in_progress requests
+                    SELECT * FROM job_queue INNER JOIN requests ON job_queue.request_tag = requests.tag
+                ")).await.unwrap(),
+                // Load pending benchmark requests, along with information whether their parent is
+                // completed or not
+                load_pending_benchmark_requests: conn.prepare(&format!("
+                    WITH pending AS (
+                        SELECT {BENCHMARK_REQUEST_COLUMNS}
+                        FROM benchmark_request AS req
+                        WHERE status IN ('{BENCHMARK_REQUEST_STATUS_ARTIFACTS_READY_STR}', '{BENCHMARK_REQUEST_STATUS_IN_PROGRESS_STR}')
+                    )
+                    SELECT (parent.status = '{BENCHMARK_REQUEST_STATUS_COMPLETED_STR}') AS parent_done, pending.*
+                    FROM pending
+                    LEFT JOIN benchmark_request as parent ON parent.tag = pending.parent_sha
+                ")).await.unwrap(),
             }),
             conn,
         }
     }
 }
+
+// `tag` should be kept as the first column
+const BENCHMARK_REQUEST_COLUMNS: &str =
+    "tag, parent_sha, pr, commit_type, status, created_at, completed_at, backends, profiles, commit_date, duration_ms";
 
 #[async_trait::async_trait]
 impl<P> Connection for P
@@ -694,7 +827,7 @@ where
                                     None => Date(Utc.with_ymd_and_hms(2001, 1, 1, 0, 0, 0).unwrap()),
                                 }
                             },
-                            r#type: CommitType::from_str(&row.get::<_, String>(3)).unwrap()
+                            r#type: CommitType::from_str(&row.get::<_, String>(3)).unwrap(),
                         },
                     )
                 })
@@ -1073,13 +1206,13 @@ where
             Some(aid) => aid.get::<_, i32>(0) as u32,
             None => {
                 self.conn()
-            .query_opt("insert into artifact (name, date, type) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING id", &[
-                &info.name,
-                &info.date,
-                &info.kind,
-            ])
-            .await
-            .unwrap();
+                    .query_opt("insert into artifact (name, date, type) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING id", &[
+                        &info.name,
+                        &info.date,
+                        &info.kind,
+                    ])
+                    .await
+                    .unwrap();
                 self.conn()
                     .query_one("select id from artifact where name = $1", &[&info.name])
                     .await
@@ -1091,11 +1224,22 @@ where
         ArtifactIdNumber(aid)
     }
 
-    async fn record_error(&self, artifact: ArtifactIdNumber, krate: &str, error: &str) {
+    async fn record_error(
+        &self,
+        artifact: ArtifactIdNumber,
+        context: &str,
+        message: &str,
+        job_id: Option<u32>,
+    ) {
         self.conn()
             .execute(
-                "insert into error (benchmark, aid, error) VALUES ($1, $2, $3)",
-                &[&krate, &(artifact.0 as i32), &error],
+                "insert into error (context, aid, message, job_id) VALUES ($1, $2, $3, $4)",
+                &[
+                    &context,
+                    &(artifact.0 as i32),
+                    &message,
+                    &job_id.map(|id| id as i32),
+                ],
             )
             .await
             .unwrap();
@@ -1441,12 +1585,19 @@ where
         // thanks to ON DELETE CASCADE.
         let info = aid.info();
         self.conn()
-            .execute("delete from artifact where name = $1", &[&info.name])
+            .execute("DELETE FROM artifact WHERE name = $1", &[&info.name])
             .await
             .unwrap();
         self.conn()
             .execute(
-                "delete from pull_request_build where bors_sha = $1",
+                "DELETE FROM pull_request_build WHERE bors_sha = $1",
+                &[&info.name],
+            )
+            .await
+            .unwrap();
+        self.conn()
+            .execute(
+                "DELETE FROM benchmark_request WHERE tag = $1",
                 &[&info.name],
             )
             .await
@@ -1468,19 +1619,21 @@ where
                     status,
                     created_at,
                     backends,
-                    profiles
+                    profiles,
+                    commit_date
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
             "#,
                 &[
                     &benchmark_request.tag(),
                     &benchmark_request.parent_sha(),
-                    &benchmark_request.pr().map(|it| *it as i32),
+                    &benchmark_request.pr().map(|it| it as i32),
                     &benchmark_request.commit_type,
-                    &benchmark_request.status,
+                    &benchmark_request.status.as_str(),
                     &benchmark_request.created_at,
                     &benchmark_request.backends,
                     &benchmark_request.profiles,
+                    &benchmark_request.commit_date,
                 ],
             )
             .await
@@ -1495,18 +1648,11 @@ where
             .await
             .context("Cannot load benchmark request index")?;
 
-        let mut all = HashSet::with_capacity(requests.len());
-        let mut completed = HashSet::with_capacity(requests.len());
-        for request in requests {
-            let tag = request.get::<_, String>(0);
-            let status = request.get::<_, &str>(1);
-
-            if status == BENCHMARK_REQUEST_STATUS_COMPLETED_STR {
-                completed.insert(tag.clone());
-            }
-            all.insert(tag);
-        }
-        Ok(BenchmarkRequestIndex { all, completed })
+        let all = requests
+            .into_iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect();
+        Ok(BenchmarkRequestIndex { all })
     }
 
     async fn update_benchmark_request_status(
@@ -1514,16 +1660,21 @@ where
         tag: &str,
         status: BenchmarkRequestStatus,
     ) -> anyhow::Result<()> {
+        // We cannot use this function to mark requests as complete, as
+        // we need to know if all jobs are complete first.
+        if matches!(status, BenchmarkRequestStatus::Completed { .. }) {
+            panic!("Please use `mark_benchmark_request_as_completed(...)` to complete benchmark_requests");
+        }
+
         let status_str = status.as_str();
-        let completed_at = status.completed_at();
         let modified_rows = self
             .conn()
             .execute(
                 r#"
                 UPDATE benchmark_request
-                SET status = $1, completed_at = $2
-                WHERE tag = $3;"#,
-                &[&status_str, &completed_at, &tag],
+                SET status = $1
+                WHERE tag = $2;"#,
+                &[&status_str, &tag],
             )
             .await
             .context("failed to update benchmark request status")?;
@@ -1541,6 +1692,7 @@ where
         pr: u32,
         sha: &str,
         parent_sha: &str,
+        commit_date: DateTime<Utc>,
     ) -> anyhow::Result<()> {
         self.conn()
             .execute(
@@ -1549,7 +1701,8 @@ where
             SET
                 tag = $1,
                 parent_sha = $2,
-                status = $3
+                status = $3,
+                commit_date = $6
             WHERE
                 pr = $4
                 AND commit_type = 'try'
@@ -1558,9 +1711,10 @@ where
                 &[
                     &sha,
                     &parent_sha,
-                    &BenchmarkRequestStatus::ArtifactsReady,
+                    &BENCHMARK_REQUEST_STATUS_ARTIFACTS_READY_STR,
                     &(pr as i32),
-                    &BenchmarkRequestStatus::WaitingForArtifacts,
+                    &BENCHMARK_REQUEST_STATUS_WAITING_FOR_ARTIFACTS_STR,
+                    &commit_date,
                 ],
             )
             .await
@@ -1569,98 +1723,44 @@ where
         Ok(())
     }
 
-    async fn load_pending_benchmark_requests(&self) -> anyhow::Result<Vec<BenchmarkRequest>> {
-        let query = format!(
-            r#"
-                SELECT
-                    tag,
-                    parent_sha,
-                    pr,
-                    commit_type,
-                    status,
-                    created_at,
-                    completed_at,
-                    backends,
-                    profiles
-                FROM benchmark_request
-                WHERE status IN('{BENCHMARK_REQUEST_STATUS_ARTIFACTS_READY_STR}', '{BENCHMARK_REQUEST_STATUS_IN_PROGRESS_STR}')"#
-        );
-
+    async fn load_pending_benchmark_requests(&self) -> anyhow::Result<PendingBenchmarkRequests> {
         let rows = self
             .conn()
-            .query(&query, &[])
+            .query(&self.statements().load_pending_benchmark_requests, &[])
             .await
             .context("Failed to get pending benchmark requests")?;
 
-        let requests = rows
-            .into_iter()
-            .map(|row| {
-                let tag = row.get::<_, Option<String>>(0);
-                let parent_sha = row.get::<_, Option<String>>(1);
-                let pr = row.get::<_, Option<i32>>(2);
-                let commit_type = row.get::<_, &str>(3);
-                let status = row.get::<_, &str>(4);
-                let created_at = row.get::<_, DateTime<Utc>>(5);
-                let completed_at = row.get::<_, Option<DateTime<Utc>>>(6);
-                let backends = row.get::<_, String>(7);
-                let profiles = row.get::<_, String>(8);
-
-                let pr = pr.map(|v| v as u32);
-
-                let status =
-                    BenchmarkRequestStatus::from_str_and_completion_date(status, completed_at)
-                        .expect("Invalid BenchmarkRequestStatus data in the database");
-
-                match commit_type {
-                    BENCHMARK_REQUEST_TRY_STR => BenchmarkRequest {
-                        commit_type: BenchmarkRequestType::Try {
-                            sha: tag,
-                            parent_sha,
-                            pr: pr.expect("Try commit in the DB without a PR"),
-                        },
-                        created_at,
-                        status,
-                        backends,
-                        profiles,
-                    },
-                    BENCHMARK_REQUEST_MASTER_STR => BenchmarkRequest {
-                        commit_type: BenchmarkRequestType::Master {
-                            sha: tag.expect("Master commit in the DB without a SHA"),
-                            parent_sha: parent_sha
-                                .expect("Master commit in the DB without a parent SHA"),
-                            pr: pr.expect("Master commit in the DB without a PR"),
-                        },
-                        created_at,
-                        status,
-                        backends,
-                        profiles,
-                    },
-                    BENCHMARK_REQUEST_RELEASE_STR => BenchmarkRequest {
-                        commit_type: BenchmarkRequestType::Release {
-                            tag: tag.expect("Release commit in the DB without a SHA"),
-                        },
-                        created_at,
-                        status,
-                        backends,
-                        profiles,
-                    },
-                    _ => panic!("Invalid `commit_type` for `BenchmarkRequest` {commit_type}",),
+        let mut completed_parent_tags = HashSet::new();
+        let mut requests = Vec::with_capacity(rows.len());
+        for row in rows {
+            let parent_done = row.get::<_, Option<bool>>(0);
+            let request = row_to_benchmark_request(&row, Some(1));
+            if let Some(true) = parent_done {
+                if let Some(parent) = request.parent_sha() {
+                    completed_parent_tags.insert(parent.to_string());
                 }
-            })
-            .collect();
-        Ok(requests)
+            }
+            requests.push(request);
+        }
+
+        Ok(PendingBenchmarkRequests {
+            requests,
+            completed_parent_tags,
+        })
     }
 
-    async fn enqueue_benchmark_job(
+    async fn enqueue_parent_benchmark_job(
         &self,
-        request_tag: &str,
-        target: &Target,
-        backend: &CodegenBackend,
-        profile: &Profile,
+        parent_sha: &str,
+        target: Target,
+        backend: CodegenBackend,
+        profile: Profile,
         benchmark_set: u32,
-    ) -> anyhow::Result<()> {
-        self.conn()
-            .execute(
+        kind: BenchmarkJobKind,
+    ) -> (bool, anyhow::Result<u32>) {
+        let row_result = self
+            .conn()
+            .query_one(
                 r#"
             INSERT INTO job_queue(
                 request_tag,
@@ -1668,10 +1768,74 @@ where
                 backend,
                 profile,
                 benchmark_set,
-                status
+                status,
+                kind
             )
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT DO NOTHING
+            RETURNING job_queue.id
+                "#,
+                &[
+                    &parent_sha,
+                    &target,
+                    &backend,
+                    &profile,
+                    &(benchmark_set as i32),
+                    &BENCHMARK_JOB_STATUS_QUEUED_STR,
+                    &kind,
+                ],
+            )
+            .await;
+
+        match row_result {
+            Ok(row) => (false, Ok(row.get::<_, i32>(0) as u32)),
+            Err(e) => {
+                if let Some(db_err) = e.as_db_error() {
+                    if db_err.code() == &SqlState::FOREIGN_KEY_VIOLATION {
+                        let constraint = db_err.constraint().unwrap_or("benchmark_tag constraint");
+                        let detail = db_err.detail().unwrap_or("");
+                        return (
+                            true,
+                            Err(anyhow::anyhow!(
+                                "Foreign key violation on {} for request_tag='{}'. {}",
+                                constraint,
+                                parent_sha,
+                                detail
+                            )),
+                        );
+                    }
+                }
+                (false, Err(e.into()))
+            }
+        }
+    }
+
+    async fn enqueue_benchmark_job(
+        &self,
+        request_tag: &str,
+        target: Target,
+        backend: CodegenBackend,
+        profile: Profile,
+        benchmark_set: u32,
+        kind: BenchmarkJobKind,
+    ) -> anyhow::Result<Option<u32>> {
+        // This will return zero rows if the job already exists
+        let rows = self
+            .conn()
+            .query(
+                r#"
+            INSERT INTO job_queue(
+                request_tag,
+                target,
+                backend,
+                profile,
+                benchmark_set,
+                status,
+                kind
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT DO NOTHING
+            RETURNING job_queue.id
                 "#,
                 &[
                     &request_tag,
@@ -1679,12 +1843,17 @@ where
                     &backend,
                     &profile,
                     &(benchmark_set as i32),
-                    &BenchmarkJobStatus::Queued,
+                    &BENCHMARK_JOB_STATUS_QUEUED_STR,
+                    &kind,
                 ],
             )
             .await
             .context("failed to insert benchmark_job")?;
-        Ok(())
+        if let Some(row) = rows.first() {
+            return Ok(Some(row.get::<_, i32>(0) as u32));
+        } else {
+            return Ok(None);
+        }
     }
 
     async fn get_compile_test_cases_with_measurements(
@@ -1710,6 +1879,527 @@ where
             })
             .collect())
     }
+
+    async fn add_collector_config(
+        &self,
+        collector_name: &str,
+        target: Target,
+        benchmark_set: u32,
+        is_active: bool,
+    ) -> anyhow::Result<CollectorConfig> {
+        let row = self
+            .conn()
+            .query_one(
+                "INSERT INTO collector_config(
+                     name,
+                     target,
+                     date_added,
+                     last_heartbeat_at,
+                     benchmark_set,
+                     is_active
+                 ) VALUES (
+                     $1,
+                     $2,
+                     NOW(),
+                     NOW(),
+                     $3,
+                     $4
+                 )
+                RETURNING
+                    last_heartbeat_at,
+                    date_added
+                ",
+                &[
+                    &collector_name,
+                    &target,
+                    &(benchmark_set as i32),
+                    &is_active,
+                ],
+            )
+            .await
+            .context("failed to create collector config")?;
+
+        let collector_config = CollectorConfig {
+            name: collector_name.into(),
+            target,
+            benchmark_set: BenchmarkSet(benchmark_set),
+            is_active,
+            last_heartbeat_at: row.get::<_, DateTime<Utc>>(0),
+            date_added: row.get::<_, DateTime<Utc>>(1),
+            commit_sha: None,
+        };
+        Ok(collector_config)
+    }
+
+    async fn start_collector(
+        &self,
+        collector_name: &str,
+        commit_sha: &str,
+    ) -> anyhow::Result<Option<CollectorConfig>> {
+        let row = self
+            .conn()
+            .query_opt(
+                "
+                UPDATE collector_config
+                SET
+                    last_heartbeat_at = NOW(),
+                    commit_sha = $2
+                WHERE
+                    name = $1 AND
+                    is_active = true
+                RETURNING
+                    target,
+                    benchmark_set,
+                    is_active,
+                    last_heartbeat_at,
+                    date_added",
+                &[&collector_name, &commit_sha],
+            )
+            .await?;
+
+        Ok(row
+            .map(|row| {
+                anyhow::Ok(CollectorConfig {
+                    name: collector_name.into(),
+                    target: Target::from_str(row.get::<_, &str>(0))
+                        .map_err(|e| anyhow::anyhow!(e))?,
+                    benchmark_set: BenchmarkSet(row.get::<_, i32>(1) as u32),
+                    is_active: row.get::<_, bool>(2),
+                    last_heartbeat_at: row.get::<_, DateTime<Utc>>(3),
+                    date_added: row.get::<_, DateTime<Utc>>(4),
+                    commit_sha: Some(commit_sha.to_string()),
+                })
+            })
+            .transpose()?)
+    }
+
+    async fn dequeue_benchmark_job(
+        &self,
+        collector_name: &str,
+        target: Target,
+        benchmark_set: BenchmarkSet,
+    ) -> anyhow::Result<Option<(BenchmarkJob, ArtifactId)>> {
+        // We take the oldest job from the job_queue matching the benchmark_set,
+        // target and status of 'queued' or 'in_progress'
+        // If a job was dequeued, we increment its retry (dequeue) count
+        let row_opt = self
+            .conn()
+            .query_opt(
+                "
+                WITH picked AS (
+                    SELECT
+                        id
+                    FROM
+                        job_queue
+                    WHERE
+                        -- Take queued or in-progress jobs
+                        (status = $1 OR status = $5)
+                        AND target = $2
+                        AND benchmark_set = $3
+                    ORDER BY
+                        -- Prefer in-progress jobs that have not been finished previously, so that
+                        -- we can finish them.
+                        CASE
+                            WHEN status = $5 THEN 0
+                            WHEN status = $1 THEN 1
+                            ELSE 2
+                        END,
+                        request_tag,
+                        created_at
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                ), updated AS (
+                    UPDATE
+                        job_queue
+                    SET
+                        collector_name = $4,
+                        started_at = NOW(),
+                        status = $5,
+                        retry = retry + 1
+                    FROM
+                        picked
+                    WHERE
+                        job_queue.id = picked.id
+                    RETURNING job_queue.*
+                )
+                SELECT
+                    updated.id,
+                    updated.backend,
+                    updated.profile,
+                    updated.request_tag,
+                    updated.created_at,
+                    updated.started_at,
+                    updated.retry,
+                    updated.kind,
+                    br.commit_type,
+                    br.commit_date
+                FROM updated
+                JOIN benchmark_request as br ON br.tag = updated.request_tag;",
+                &[
+                    &BENCHMARK_JOB_STATUS_QUEUED_STR,
+                    &target,
+                    &(benchmark_set.0 as i32),
+                    &collector_name,
+                    &BENCHMARK_JOB_STATUS_IN_PROGRESS_STR,
+                ],
+            )
+            .await?;
+
+        match row_opt {
+            None => Ok(None),
+            Some(row) => {
+                let job = BenchmarkJob {
+                    id: row.get::<_, i32>(0) as u32,
+                    target,
+                    backend: CodegenBackend::from_str(row.get::<_, &str>(1))
+                        .map_err(|e| anyhow::anyhow!(e))?,
+                    profile: Profile::from_str(row.get::<_, &str>(2))
+                        .map_err(|e| anyhow::anyhow!(e))?,
+                    request_tag: row.get::<_, String>(3),
+                    benchmark_set,
+                    created_at: row.get::<_, DateTime<Utc>>(4),
+                    // The job is now in an in_progress state
+                    status: BenchmarkJobStatus::InProgress {
+                        started_at: row.get::<_, DateTime<Utc>>(5),
+                        collector_name: collector_name.into(),
+                    },
+                    deque_counter: row.get::<_, i32>(6) as u32,
+                    kind: BenchmarkJobKind::from_str(row.get::<_, &str>(7))
+                        .map_err(|e| anyhow::anyhow!(e))?,
+                };
+                let commit_type = row.get::<_, &str>(8);
+                let commit_date = row.get::<_, Option<DateTime<Utc>>>(9);
+
+                let commit_date = Date(commit_date.ok_or_else(|| {
+                    anyhow::anyhow!("Dequeuing job for a benchmark request without commit date")
+                })?);
+                let artifact_id = match commit_type {
+                    BENCHMARK_REQUEST_TRY_STR => ArtifactId::Commit(Commit {
+                        sha: job.request_tag.clone(),
+                        date: commit_date,
+                        r#type: CommitType::Try,
+                    }),
+                    BENCHMARK_REQUEST_MASTER_STR => ArtifactId::Commit(Commit {
+                        sha: job.request_tag.clone(),
+                        date: commit_date,
+                        r#type: CommitType::Master,
+                    }),
+                    BENCHMARK_REQUEST_RELEASE_STR => ArtifactId::Tag(job.request_tag.clone()),
+                    _ => panic!(
+                        "Invalid commit type {commit_type} for benchmark request {}",
+                        job.request_tag
+                    ),
+                };
+
+                Ok(Some((job, artifact_id)))
+            }
+        }
+    }
+
+    async fn maybe_mark_benchmark_request_as_completed(&self, tag: &str) -> anyhow::Result<bool> {
+        // Find if the benchmark is completed and update it's status to completed
+        // in one SQL block
+        let row = self
+            .conn()
+            .query_opt(
+                "
+                UPDATE
+                    benchmark_request
+                SET
+                    status = $1,
+                    completed_at = NOW(),
+                    duration_ms = (
+                        SELECT (MAX(EXTRACT('epoch' FROM job_queue.completed_at)) -
+                                MIN(EXTRACT('epoch' FROM job_queue.started_at))) * 1000 AS duration_ms
+                        FROM
+                            job_queue
+                        WHERE job_queue.request_tag = $2
+                    )
+                WHERE
+                    benchmark_request.tag = $2
+                    AND benchmark_request.status != $1
+                    AND NOT EXISTS (
+                        SELECT
+                            1
+                        FROM
+                            job_queue
+                        WHERE
+                            job_queue.request_tag = benchmark_request.tag
+                            AND job_queue.status NOT IN ($3, $4)
+                    )
+                    AND (
+                        benchmark_request.parent_sha IS NULL
+                        OR NOT EXISTS (
+                            SELECT
+                                1
+                            FROM
+                                job_queue
+                            WHERE
+                                job_queue.request_tag = benchmark_request.parent_sha
+                                AND job_queue.status NOT IN ($3, $4)
+                       )
+                )
+                RETURNING
+                    benchmark_request.tag;
+                ",
+                &[
+                    &BENCHMARK_REQUEST_STATUS_COMPLETED_STR,
+                    &tag,
+                    &BENCHMARK_JOB_STATUS_SUCCESS_STR,
+                    &BENCHMARK_JOB_STATUS_FAILURE_STR,
+                ],
+            )
+            .await
+            .context("Failed to mark benchmark_request as completed")?;
+        // The affected tag is returned by the query thus we can use the row's
+        // presence to determine if the request was marked as completed
+        Ok(row.is_some())
+    }
+
+    async fn mark_benchmark_job_as_completed(
+        &self,
+        id: u32,
+        conclusion: BenchmarkJobConclusion,
+    ) -> anyhow::Result<()> {
+        self.conn()
+            .execute(
+                "
+                UPDATE
+                    job_queue
+                SET
+                    status = $1,
+                    completed_at = NOW()
+                WHERE
+                    id = $2",
+                &[&conclusion.as_str(), &(id as i32)],
+            )
+            .await
+            .context("Failed to mark benchmark job as completed")?;
+        Ok(())
+    }
+
+    async fn get_last_n_completed_benchmark_requests(
+        &self,
+        count: u64,
+    ) -> anyhow::Result<Vec<BenchmarkRequestWithErrors>> {
+        let rows = self
+            .conn()
+            .query(
+                &self.statements().get_last_n_completed_requests_with_errors,
+                &[&BENCHMARK_REQUEST_STATUS_COMPLETED_STR, &(count as i64)],
+            )
+            .await?;
+
+        // Iterate through the requests and aggregate their errors
+        // Make sure to keep their original order
+        let mut requests = vec![];
+        // tag -> errors
+        let mut errors: HashMap<String, HashMap<String, String>> = Default::default();
+
+        for row in rows {
+            let tag = row.get::<_, &str>(0);
+            let error_benchmark = row.get::<_, Option<String>>(11);
+            let error_content = row.get::<_, Option<String>>(12);
+
+            // We already saw this request, just add errors
+            if let Some(errors) = errors.get_mut(tag) {
+                if let Some(benchmark) = error_benchmark {
+                    errors.insert(benchmark, error_content.unwrap_or_default());
+                }
+            } else {
+                // We see this request for the first time
+                let request = row_to_benchmark_request(&row, None);
+                let request_errors = if let Some(benchmark) = error_benchmark {
+                    HashMap::from([(benchmark, error_content.unwrap_or_default())])
+                } else {
+                    HashMap::new()
+                };
+                errors.insert(tag.to_string(), request_errors);
+                requests.push(request);
+            }
+        }
+
+        Ok(requests
+            .into_iter()
+            .map(|request| {
+                let errors = errors.remove(request.tag().unwrap()).unwrap_or_default();
+                BenchmarkRequestWithErrors { request, errors }
+            })
+            .collect())
+    }
+
+    async fn get_jobs_of_in_progress_benchmark_requests(
+        &self,
+    ) -> anyhow::Result<HashMap<String, Vec<BenchmarkJob>>> {
+        let rows = self
+            .conn()
+            .query(
+                &self.statements().get_jobs_of_in_progress_benchmark_requests,
+                &[],
+            )
+            .await?;
+
+        let mut request_to_jobs: HashMap<String, Vec<BenchmarkJob>> = HashMap::new();
+        for row in rows {
+            let started_at = row.get::<_, Option<DateTime<Utc>>>(7);
+            let status = row.get::<_, &str>(9);
+            let collector_name = row.get::<_, Option<String>>(11);
+            let status = match status {
+                BENCHMARK_JOB_STATUS_QUEUED_STR => BenchmarkJobStatus::Queued,
+                BENCHMARK_JOB_STATUS_IN_PROGRESS_STR => BenchmarkJobStatus::InProgress {
+                    started_at: started_at.expect("started_at was null for an in progress job"),
+                    collector_name: collector_name
+                        .expect("Collector is missing for an in progress job"),
+                },
+                BENCHMARK_JOB_STATUS_FAILURE_STR | BENCHMARK_JOB_STATUS_SUCCESS_STR => {
+                    BenchmarkJobStatus::Completed {
+                        started_at: started_at.expect("started_at was null for a finished job"),
+                        completed_at: row.get::<_, DateTime<Utc>>(8),
+                        collector_name: collector_name
+                            .expect("Collector is missing for an in progress job"),
+                        success: status == BENCHMARK_JOB_STATUS_SUCCESS_STR,
+                    }
+                }
+                _ => panic!("Invalid job status {status}"),
+            };
+            let job = BenchmarkJob {
+                id: row.get::<_, i32>(0) as u32,
+                request_tag: row.get::<_, String>(1),
+                target: Target::from_str(row.get::<_, &str>(2)).map_err(|e| anyhow::anyhow!(e))?,
+                backend: CodegenBackend::from_str(row.get::<_, &str>(3))
+                    .map_err(|e| anyhow::anyhow!(e))?,
+                profile: Profile::from_str(row.get::<_, &str>(4))
+                    .map_err(|e| anyhow::anyhow!(e))?,
+                benchmark_set: BenchmarkSet(row.get::<_, i32>(5) as u32),
+                created_at: row.get::<_, DateTime<Utc>>(6),
+                status,
+                deque_counter: row.get::<_, i32>(10) as u32,
+                kind: BenchmarkJobKind::from_str(row.get::<_, &str>(12))
+                    .map_err(|e| anyhow::anyhow!(e))?,
+            };
+            request_to_jobs
+                .entry(job.request_tag.clone())
+                .or_default()
+                .push(job);
+        }
+        Ok(request_to_jobs)
+    }
+
+    async fn get_collector_configs(&self) -> anyhow::Result<Vec<CollectorConfig>> {
+        let rows = self
+            .conn()
+            .query(
+                "SELECT
+                    name,
+                    target,
+                    benchmark_set,
+                    is_active,
+                    last_heartbeat_at,
+                    date_added,
+                    commit_sha
+                FROM
+                    collector_config;",
+                &[],
+            )
+            .await?;
+
+        let configs = rows
+            .into_iter()
+            .map(|row| {
+                Ok(CollectorConfig {
+                    name: row.get::<_, String>(0),
+                    target: Target::from_str(row.get::<_, &str>(1))
+                        .map_err(|e| anyhow::anyhow!(e))?,
+                    benchmark_set: BenchmarkSet(row.get::<_, i32>(2) as u32),
+                    is_active: row.get::<_, bool>(3),
+                    last_heartbeat_at: row.get::<_, DateTime<Utc>>(4),
+                    date_added: row.get::<_, DateTime<Utc>>(5),
+                    commit_sha: row.get::<_, Option<String>>(6),
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        Ok(configs)
+    }
+
+    async fn update_collector_heartbeat(&self, collector_name: &str) -> anyhow::Result<()> {
+        self.conn()
+            .query(
+                r#"
+                UPDATE collector_config
+                SET last_heartbeat_at = NOW()
+                WHERE name = $1
+                "#,
+                &[&collector_name],
+            )
+            .await?;
+        Ok(())
+    }
+
+    fn supports_job_queue(&self) -> bool {
+        true
+    }
+}
+
+fn row_to_benchmark_request(row: &Row, row_offset: Option<usize>) -> BenchmarkRequest {
+    let row_offset = row_offset.unwrap_or(0);
+    let tag = row.get::<_, Option<String>>(row_offset);
+    let parent_sha = row.get::<_, Option<String>>(1 + row_offset);
+    let pr = row.get::<_, Option<i32>>(2 + row_offset);
+    let commit_type = row.get::<_, &str>(3 + row_offset);
+    let status = row.get::<_, &str>(4 + row_offset);
+    let created_at = row.get::<_, DateTime<Utc>>(5 + row_offset);
+    let completed_at = row.get::<_, Option<DateTime<Utc>>>(6 + row_offset);
+    let backends = row.get::<_, String>(7 + row_offset);
+    let profiles = row.get::<_, String>(8 + row_offset);
+    let commit_date = row.get::<_, Option<DateTime<Utc>>>(9 + row_offset);
+    let duration_ms = row.get::<_, Option<i32>>(10 + row_offset);
+
+    let pr = pr.map(|v| v as u32);
+
+    let status =
+        BenchmarkRequestStatus::from_str_and_completion_date(status, completed_at, duration_ms)
+            .unwrap_or_else(|e| {
+                panic!("Invalid BenchmarkRequestStatus data in the database for tag {tag:?}: {e:?}")
+            });
+
+    match commit_type {
+        BENCHMARK_REQUEST_TRY_STR => BenchmarkRequest {
+            commit_type: BenchmarkRequestType::Try {
+                sha: tag,
+                parent_sha,
+                pr: pr.expect("Try commit in the DB without a PR"),
+            },
+            commit_date,
+            created_at,
+            status,
+            backends,
+            profiles,
+        },
+        BENCHMARK_REQUEST_MASTER_STR => BenchmarkRequest {
+            commit_type: BenchmarkRequestType::Master {
+                sha: tag.expect("Master commit in the DB without a SHA"),
+                parent_sha: parent_sha.expect("Master commit in the DB without a parent SHA"),
+                pr: pr.expect("Master commit in the DB without a PR"),
+            },
+            commit_date,
+            created_at,
+            status,
+            backends,
+            profiles,
+        },
+        BENCHMARK_REQUEST_RELEASE_STR => BenchmarkRequest {
+            commit_type: BenchmarkRequestType::Release {
+                tag: tag.expect("Release commit in the DB without a SHA"),
+            },
+            commit_date,
+            created_at,
+            status,
+            backends,
+            profiles,
+        },
+        _ => panic!("Invalid `commit_type` for `BenchmarkRequest` {commit_type}",),
+    }
 }
 
 fn parse_artifact_id(ty: &str, sha: &str, date: Option<DateTime<Utc>>) -> ArtifactId {
@@ -1727,7 +2417,7 @@ fn parse_artifact_id(ty: &str, sha: &str, date: Option<DateTime<Utc>>) -> Artifa
             r#type: CommitType::Try,
         }),
         "release" => ArtifactId::Tag(sha.to_owned()),
-        _ => panic!("unknown artifact type: {:?}", ty),
+        _ => panic!("unknown artifact type: {ty:?}"),
     }
 }
 
@@ -1754,11 +2444,10 @@ macro_rules! impl_to_postgresql_via_to_string {
 }
 
 impl_to_postgresql_via_to_string!(BenchmarkRequestType);
-impl_to_postgresql_via_to_string!(BenchmarkRequestStatus);
 impl_to_postgresql_via_to_string!(Target);
 impl_to_postgresql_via_to_string!(CodegenBackend);
 impl_to_postgresql_via_to_string!(Profile);
-impl_to_postgresql_via_to_string!(BenchmarkJobStatus);
+impl_to_postgresql_via_to_string!(BenchmarkJobKind);
 
 #[cfg(test)]
 mod tests {

@@ -909,7 +909,7 @@ bool ActivityAnalyzer::isConstantInstruction(TypeResults const &TR,
   if (!I->mayWriteToMemory())
     noActiveWrite = true;
   else if (auto CI = dyn_cast<CallInst>(I)) {
-    if (AA.onlyReadsMemory(CI) || isReadOnly(CI)) {
+    if (AA.onlyReadsMemory(CI) || isReadOnlyOrThrow(CI)) {
       noActiveWrite = true;
     } else {
       StringRef funcName = getFuncNameFromCall(CI);
@@ -1961,7 +1961,10 @@ bool ActivityAnalyzer::isConstantValue(TypeResults const &TR, Value *Val) {
         if (CB->onlyAccessesInaccessibleMemory())
           AARes = ModRefInfo::NoModRef;
 
-        bool ReadOnly = isReadOnly(CB);
+        bool ReadOnly = isLocalReadOnlyOrThrow(CB);
+        if (CB->hasStructRetAttr() &&
+            getBaseObject(CB->getArgOperand(0)) == getBaseObject(Val))
+          ReadOnly = false;
 
         bool WriteOnly = isWriteOnly(CB);
 
@@ -2433,6 +2436,18 @@ bool ActivityAnalyzer::isInstructionInactiveFromOrigin(TypeResults const &TR,
       if (EnzymePrintActivity)
         llvm::errs() << " constant instruction as store operand is inactive "
                      << *inst << "\n";
+      return true;
+    }
+  }
+
+  if (auto RMW = dyn_cast<AtomicRMWInst>(inst)) {
+    // if either src or dst is inactive, there cannot be a transfer of active
+    // values and thus the store is inactive
+    if (isConstantValue(TR, RMW->getPointerOperand())) {
+      if (EnzymePrintActivity)
+        llvm::errs()
+            << " constant instruction as rmw pointer operand is inactive "
+            << *inst << "\n";
       return true;
     }
   }
@@ -3009,6 +3024,9 @@ bool ActivityAnalyzer::isValueInactiveFromUsers(TypeResults const &TR,
         mayCapture |= !NoCapture;
 
         bool ReadOnly = isReadOnly(call, idx);
+        if (!ReadOnly && isLocalReadOnlyOrThrow(call) && idx != 0 &&
+            call->hasStructRetAttr())
+          ReadOnly = true;
 
         mayWrite |= !ReadOnly;
 
@@ -3392,8 +3410,9 @@ bool ActivityAnalyzer::isValueActivelyStoredOrReturned(TypeResults const &TR,
 
     if (auto inst = dyn_cast<Instruction>(a)) {
       if (!inst->mayWriteToMemory() ||
-          (isa<CallInst>(inst) && (AA.onlyReadsMemory(cast<CallInst>(inst)) ||
-                                   isReadOnly(cast<CallInst>(inst))))) {
+          (isa<CallInst>(inst) &&
+           (AA.onlyReadsMemory(cast<CallInst>(inst)) ||
+            isLocalReadOnlyOrThrow(cast<CallInst>(inst))))) {
         // if not written to memory and returning a known constant, this
         // cannot be actively returned/stored
         if (inst->getParent()->getParent() == TR.getFunction() &&

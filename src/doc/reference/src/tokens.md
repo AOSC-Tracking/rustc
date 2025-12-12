@@ -469,7 +469,7 @@ c"\xC3\xA6";
 
 r[lex.token.str-c.edition2021]
 > [!EDITION-2021]
-> C string literals are accepted in the 2021 edition or later. In earlier additions the token `c""` is lexed as `c ""`.
+> C string literals are accepted in the 2021 edition or later. In earlier editions the token `c""` is lexed as `c ""`.
 
 r[lex.token.str-c-raw]
 #### Raw C string literals
@@ -501,7 +501,7 @@ literal) or `U+005C` (`\`) do not have any special meaning.
 
 r[lex.token.str-c-raw.edition2021]
 > [!EDITION-2021]
-> Raw C string literals are accepted in the 2021 edition or later. In earlier additions the token `cr""` is lexed as `cr ""`, and `cr#""#` is lexed as `cr #""#` (which is non-grammatical).
+> Raw C string literals are accepted in the 2021 edition or later. In earlier editions the token `cr""` is lexed as `cr ""`, and `cr#""#` is lexed as `cr #""#` (which is non-grammatical).
 
 #### Examples for C string and raw C string literals
 
@@ -624,18 +624,19 @@ r[lex.token.literal.int.tuple-field]
 
 r[lex.token.literal.int.tuple-field.syntax]
 ```grammar,lexer
-TUPLE_INDEX -> INTEGER_LITERAL
+TUPLE_INDEX -> DEC_LITERAL | BIN_LITERAL | OCT_LITERAL | HEX_LITERAL
 ```
 
 r[lex.token.literal.int.tuple-field.intro]
-A tuple index is used to refer to the fields of [tuples], [tuple structs], and
-[tuple variants].
+A tuple index is used to refer to the fields of [tuples], [tuple structs], and [tuple enum variants].
 
 r[lex.token.literal.int.tuple-field.eq]
 Tuple indices are compared with the literal token directly. Tuple indices
 start with `0` and each successive index increments the value by `1` as a
 decimal value. Thus, only decimal values will match, and the value must not
 have any extra `0` prefix characters.
+
+Tuple indices may not include any suffixes (such as `usize`).
 
 ```rust,compile_fail
 let example = ("dog", "cat", "horse");
@@ -644,10 +645,9 @@ let cat = example.1;
 // The following examples are invalid.
 let cat = example.01;  // ERROR no field named `01`
 let horse = example.0b10;  // ERROR no field named `0b10`
+let unicorn = example.0usize; // ERROR suffixes on a tuple index are invalid
+let underscore = example.0_0; // ERROR no field `0_0` on type `(&str, &str, &str)`
 ```
-
-> [!NOTE]
-> Tuple indices may include certain suffixes, but this is not intended to be valid, and may be removed in a future version. See <https://github.com/rust-lang/rust/issues/60210> for more information.
 
 r[lex.token.literal.float]
 #### Floating-point literals
@@ -791,7 +791,7 @@ It is an error to use the RESERVED_RAW_LIFETIME token `'r#_` in order to avoid c
 
 r[lex.token.life.raw.edition2021]
 > [!EDITION-2021]
-> Raw lifetimes are accepted in the 2021 edition or later. In earlier additions the token `'r#lt` is lexed as `'r # lt`.
+> Raw lifetimes are accepted in the 2021 edition or later. In earlier editions the token `'r#lt` is lexed as `'r # lt`.
 
 r[lex.token.punct]
 ## Punctuation
@@ -1073,7 +1073,7 @@ r[lex.token.reserved-guards.edition2024]
 [trait bounds]: trait-bounds.md
 [tuple index]: expressions/tuple-expr.md#tuple-indexing-expressions
 [tuple structs]: items/structs.md
-[tuple variants]: items/enumerations.md
+[tuple enum variants]: items/enumerations.md
 [tuples]: types/tuple.md
 [unary minus operator]: expressions/operator-expr.md#negation-operators
 [use declarations]: items/use-declarations.md

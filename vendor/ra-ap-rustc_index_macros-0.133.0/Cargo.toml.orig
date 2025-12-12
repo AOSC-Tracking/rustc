@@ -1,0 +1,21 @@
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+
+[dependencies.syn]
+features = ["full", "extra-traits"]
+version = "2.0.9"
+
+[features]
+nightly = []
+
+[lib]
+proc-macro = true
+
+[package]
+description = "\nAutomatically published version of the package `rustc_index_macros`\nin the rust-lang/rust repository from commit dfa22235d858086511bedc4acde9db1c045ffbac\n\nThe publishing script for this crate lives at:\nhttps://github.com/rust-analyzer/rustc-auto-publish\n"
+edition = "2024"
+license = "MIT / Apache-2.0"
+name = "ra-ap-rustc_index_macros"
+repository = "https://github.com/rust-lang/rust"
+version = "0.133.0"

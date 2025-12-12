@@ -1,3 +1,4 @@
+use annotate_snippets::Level;
 use anyhow::{Context as _, anyhow};
 use cargo::core::{CliUnstable, features};
 use cargo::util::context::TermConfig;
@@ -11,6 +12,7 @@ use std::fmt::Write;
 
 use super::commands;
 use super::list_commands;
+use super::third_party_subcommands;
 use super::user_defined_aliases;
 use crate::command_prelude::*;
 use crate::util::is_rustup;
@@ -317,26 +319,40 @@ To pass the arguments to the subcommand, remove `--`",
                 // a hard error.
                 if super::builtin_aliases_execs(cmd).is_none() {
                     if let Some(path) = super::find_external_subcommand(gctx, cmd) {
-                        gctx.shell().warn(format!(
-                        "\
-user-defined alias `{}` is shadowing an external subcommand found at: `{}`
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #10049 <https://github.com/rust-lang/cargo/issues/10049>.",
-                        cmd,
-                        path.display(),
-                    ))?;
+                        gctx.shell().print_report(
+                            &[
+                                Level::WARNING.secondary_title(format!(
+                                    "user-defined alias `{}` is shadowing an external subcommand found at `{}`",
+                                    cmd,
+                                    path.display()
+                                )).element(
+                                    Level::NOTE.message(
+                                        "this was previously accepted but will become a hard error in the future; \
+                                        see <https://github.com/rust-lang/cargo/issues/10049>"
+                                    )
+                                )
+                            ],
+                            false,
+                        )?;
                     }
                 }
                 if commands::run::is_manifest_command(cmd) {
                     if gctx.cli_unstable().script {
                         return Ok((args, GlobalArgs::default()));
                     } else {
-                        gctx.shell().warn(format_args!(
-                            "\
-user-defined alias `{cmd}` has the appearance of a manifest-command
-This was previously accepted but will be phased out when `-Zscript` is stabilized.
-For more information, see issue #12207 <https://github.com/rust-lang/cargo/issues/12207>."
-                        ))?;
+                        gctx.shell().print_report(
+                            &[
+                                Level::WARNING.secondary_title(
+                                    format!("user-defined alias `{cmd}` has the appearance of a manifest-command")
+                                ).element(
+                                    Level::NOTE.message(
+                                        "this was previously accepted but will be phased out when `-Zscript` is stabilized; \
+                                        see <https://github.com/rust-lang/cargo/issues/12207>"
+                                    )
+                                )
+                            ],
+                            false
+                        )?;
                     }
                 }
 
@@ -476,12 +492,20 @@ impl Exec {
             Self::Manifest(cmd) => {
                 let ext_path = super::find_external_subcommand(gctx, &cmd);
                 if !gctx.cli_unstable().script && ext_path.is_some() {
-                    gctx.shell().warn(format_args!(
-                        "\
-external subcommand `{cmd}` has the appearance of a manifest-command
-This was previously accepted but will be phased out when `-Zscript` is stabilized.
-For more information, see issue #12207 <https://github.com/rust-lang/cargo/issues/12207>.",
-                    ))?;
+                    gctx.shell().print_report(
+                        &[
+                            Level::WARNING.secondary_title(
+                                format!("external subcommand `{cmd}` has the appearance of a manifest-command")
+                            ).element(
+                                Level::NOTE.message(
+                                    "this was previously accepted but will be phased out when `-Zscript` is stabilized; \
+                                    see <https://github.com/rust-lang/cargo/issues/12207>"
+                                )
+                            )
+                        ],
+                        false
+                    )?;
+
                     Self::External(cmd).exec(gctx, subcommand_args)
                 } else {
                     let ext_args: Vec<OsString> = subcommand_args
@@ -703,7 +727,9 @@ See '<bright-cyan,bold>cargo help</> <cyan><<command>></>' for more information 
                 .into_iter()
                 .map(|t| clap_complete::CompletionCandidate::new(t))
                 .collect::<Vec<_>>();
-            candidates.extend(get_alias_candidates());
+            if let Ok(gctx) = new_gctx_for_completions() {
+                candidates.extend(get_command_candidates(&gctx));
+            }
             candidates
         }))
         .subcommands(commands::builtin())
@@ -726,33 +752,31 @@ fn get_toolchains_from_rustup() -> Vec<String> {
     stdout.lines().map(|line| format!("+{}", line)).collect()
 }
 
-fn get_alias_candidates() -> Vec<clap_complete::CompletionCandidate> {
-    if let Ok(gctx) = new_gctx_for_completions() {
-        let alias_map = user_defined_aliases(&gctx);
-        return alias_map
-            .iter()
-            .map(|(alias, cmd_info)| {
-                let help_text = match cmd_info {
-                    CommandInfo::Alias { target } => {
-                        let cmd_str = target
-                            .iter()
-                            .map(String::as_str)
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        format!("alias for {}", cmd_str)
-                    }
-                    CommandInfo::BuiltIn { .. } => {
-                        unreachable!("BuiltIn command shouldn't appear in alias map")
-                    }
-                    CommandInfo::External { .. } => {
-                        unreachable!("External command shouldn't appear in alias map")
-                    }
-                };
-                clap_complete::CompletionCandidate::new(alias.clone()).help(Some(help_text.into()))
-            })
-            .collect();
-    }
-    Vec::new()
+fn get_command_candidates(gctx: &GlobalContext) -> Vec<clap_complete::CompletionCandidate> {
+    let mut commands = user_defined_aliases(gctx);
+    commands.extend(third_party_subcommands(gctx));
+    commands
+        .iter()
+        .map(|(name, cmd_info)| {
+            let help_text = match cmd_info {
+                CommandInfo::Alias { target } => {
+                    let cmd_str = target
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    format!("alias for {}", cmd_str)
+                }
+                CommandInfo::BuiltIn { .. } => {
+                    unreachable!("BuiltIn command shouldn't appear in alias map")
+                }
+                CommandInfo::External { path } => {
+                    format!("from {}", path.display())
+                }
+            };
+            clap_complete::CompletionCandidate::new(name.clone()).help(Some(help_text.into()))
+        })
+        .collect()
 }
 
 #[test]

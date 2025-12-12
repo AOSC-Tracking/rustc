@@ -294,7 +294,8 @@ f1 = 1
     let output = read_output(gctx);
     let expected = str![[r#"
 [WARNING] `[ROOT]/.cargo/config` is deprecated in favor of `config.toml`
-[NOTE] if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
+  |
+  = [HELP] if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
 
 "#]];
     assert_e2e().eq(&output, expected);
@@ -314,7 +315,8 @@ f1 = 1
     p.cargo("-vV")
         .with_stderr_data(str![[r#"
 [WARNING] `[ROOT]/home/.cargo/config` is deprecated in favor of `config.toml`
-[NOTE] if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
+  |
+  = [HELP] if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
 
 "#]])
         .run();
@@ -1363,10 +1365,10 @@ Caused by:
   failed to load TOML configuration from `[ROOT]/.cargo/config.toml`
 
 Caused by:
-  failed to parse key `foo`
+  failed to parse config at `foo[0]`
 
 Caused by:
-  expected string but found integer in list
+  expected string but found integer at index 0
 "#]],
     );
 }
@@ -1647,7 +1649,19 @@ target-dir = ''
 
 #[cargo_test]
 fn cargo_target_empty_env() {
-    let project = project().build();
+    let project = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                authors = []
+                version = "0.0.0"
+                build = "build.rs"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
 
     project.cargo("check")
         .env("CARGO_TARGET_DIR", "")

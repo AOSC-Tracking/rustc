@@ -332,6 +332,7 @@ pub mod comparison {
         pub profile: String,
         pub scenario: String,
         pub backend: String,
+        pub target: String,
         pub comparison: StatComparison,
     }
 
@@ -388,6 +389,85 @@ pub mod status {
         pub finished_runs: Vec<FinishedRun>,
         pub current: Option<CurrentState>,
         pub missing: Vec<(Commit, MissingReason)>,
+    }
+}
+
+pub mod status_new {
+    use chrono::{DateTime, Utc};
+    use hashbrown::HashMap;
+    use serde::Serialize;
+
+    #[derive(Serialize, Debug)]
+    pub enum BenchmarkRequestStatus {
+        Queued,
+        InProgress,
+        Completed,
+    }
+
+    #[derive(Serialize, Debug)]
+    pub enum BenchmarkRequestType {
+        Release,
+        Master,
+        Try,
+    }
+
+    #[derive(Serialize, Debug)]
+    #[serde(rename_all = "camelCase")]
+    pub struct BenchmarkRequest {
+        pub tag: String,
+        pub pr: Option<u32>,
+        pub status: BenchmarkRequestStatus,
+        pub request_type: BenchmarkRequestType,
+        pub created_at: DateTime<Utc>,
+        pub completed_at: Option<DateTime<Utc>>,
+        // If true, then `completed_at` is only an estimation of when will the request complete
+        pub end_estimated: bool,
+        pub duration_s: Option<u64>,
+        pub errors: HashMap<String, String>,
+    }
+
+    #[derive(Serialize, Copy, Clone, Debug)]
+    pub enum BenchmarkJobStatus {
+        Queued,
+        InProgress,
+        Success,
+        Failed,
+    }
+
+    #[derive(Serialize, Debug)]
+    #[serde(rename_all = "camelCase")]
+    pub struct BenchmarkJob {
+        pub request_tag: String,
+        pub target: String,
+        pub backend: String,
+        pub profile: String,
+        pub benchmark_set: u32,
+        pub created_at: DateTime<Utc>,
+        pub started_at: Option<DateTime<Utc>>,
+        pub completed_at: Option<DateTime<Utc>>,
+        pub status: BenchmarkJobStatus,
+        pub deque_counter: u32,
+    }
+
+    #[derive(Serialize, Debug)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Collector {
+        pub name: String,
+        pub target: String,
+        pub benchmark_set: u32,
+        pub is_active: bool,
+        pub last_heartbeat_at: DateTime<Utc>,
+        pub date_added: DateTime<Utc>,
+        pub jobs: Vec<BenchmarkJob>,
+    }
+
+    #[derive(Serialize, Debug)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Response {
+        /// The current queue, starting from the queued request that will be benchmarked at the
+        /// latest time, then the `in_progress` requests, and then the `completed` requests.
+        pub requests: Vec<BenchmarkRequest>,
+        pub collectors: Vec<Collector>,
     }
 }
 
@@ -570,6 +650,12 @@ pub mod github {
         pub head_commit: HeadCommit,
         pub before: String,
         pub commits: Vec<Commit>,
+        pub repository: Repository,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct Repository {
+        pub default_branch: String,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

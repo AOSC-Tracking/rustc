@@ -209,8 +209,9 @@ fn publish_with_replacement() {
         .replace_crates_io(crates_io.index_url())
         .with_stderr_data(str![[r#"
 [UPDATING] crates.io index
-[WARNING] manifest has no documentation, homepage or repository.
-See https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info.
+[WARNING] manifest has no documentation, homepage or repository
+  |
+  = [NOTE] see https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info
 [PACKAGING] foo v0.0.1 ([ROOT]/foo)
 [UPDATING] `alternative` index
 [PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
@@ -222,8 +223,8 @@ See https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [UPLOADING] foo v0.0.1 ([ROOT]/foo)
 [UPLOADED] foo v0.0.1 to registry `crates-io`
-[NOTE] waiting for foo v0.0.1 to be available at registry `crates-io`.
-You may press ctrl-c to skip waiting; the crate should be available shortly.
+[NOTE] waiting for foo v0.0.1 to be available at registry `crates-io`
+[HELP] you may press ctrl-c to skip waiting; the crate should be available shortly
 [PUBLISHED] foo v0.0.1 at registry `crates-io`
 
 "#]])
