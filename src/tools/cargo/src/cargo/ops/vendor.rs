@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 pub struct VendorOptions<'a> {
@@ -291,14 +291,37 @@ fn sync(
                     .tempdir_in(vendor_dir)?;
                 let unpacked_src =
                     registry.unpack_package_in(id, staging_dir.path(), &vendor_this)?;
-                if let Err(e) = fs::rename(&unpacked_src, &dst) {
-                    // This fallback is mainly for Windows 10 versions earlier than 1607.
-                    // The destination of `fs::rename` can't be a directory in older versions.
-                    // Can be removed once the minimal supported Windows version gets bumped.
+
+                let rename_result = if gctx
+                    .get_env_os("__CARGO_TEST_VENDOR_FALLBACK_CP_SOURCES")
+                    .is_some()
+                {
+                    Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        "simulated rename error for testing",
+                    ))
+                } else {
+                    fs::rename(&unpacked_src, &dst)
+                };
+
+                if let Err(e) = rename_result {
+                    // This fallback is worked for sometimes `fs::rename` failed in a specific situation, such as:
+                    // - In Windows 10 versions earlier than 1607, the destination of `fs::rename` can't be a directory in older versions.
+                    // - `from` and `to` are on separate filesystems.
+                    // - AntiVirus or our system indexer are doing stuf simultaneously.
+                    // - Any other reasons documented in std::fs::rename.
                     tracing::warn!("failed to `mv {unpacked_src:?} {dst:?}`: {e}");
                     let paths: Vec<_> = walkdir(&unpacked_src).map(|e| e.into_path()).collect();
-                    cp_sources(pkg, src, &paths, &dst, &mut file_cksums, &mut tmp_buf, gctx)
-                        .with_context(|| format!("failed to copy vendored sources for {id}"))?;
+                    cp_sources(
+                        pkg,
+                        &unpacked_src,
+                        &paths,
+                        &dst,
+                        &mut file_cksums,
+                        &mut tmp_buf,
+                        gctx,
+                    )
+                    .with_context(|| format!("failed to copy vendored sources for {id}"))?;
                 } else {
                     compute_file_cksums(&dst)?;
                 }
@@ -488,8 +511,8 @@ fn prepare_for_vendor(
     let mut warnings = Default::default();
     let mut errors = Default::default();
     let manifest = crate::util::toml::to_real_manifest(
-        contents.to_owned(),
-        document.clone(),
+        contents.map(|c| c.to_owned()),
+        document.cloned(),
         original_toml,
         normalized_toml,
         features,
@@ -615,17 +638,29 @@ fn copy_and_checksum<T: Read>(
 /// Filters files we want to vendor.
 ///
 /// `relative` is a path relative to the package root.
+
 fn vendor_this(relative: &Path) -> bool {
+    // Skip git config files as they're not relevant to builds most of
+    // the time and if we respect them (e.g. in git) then it'll
+    // probably mess with the checksums when a vendor dir is checked
+    // into someone else's source control
+    for component in relative.components() {
+        if let Some(name) = component.as_os_str().to_str() {
+            if name == ".git" {
+                return false;
+            }
+        }
+    }
+
+    if let Some(file_name) = relative.file_name().and_then(|s| s.to_str()) {
+        if matches!(file_name, ".gitattributes" | ".gitignore") {
+            return false;
+        }
+    }
+
+    // Temporary Cargo files
     match relative.to_str() {
-        // Skip git config files as they're not relevant to builds most of
-        // the time and if we respect them (e.g.  in git) then it'll
-        // probably mess with the checksums when a vendor dir is checked
-        // into someone else's source control
-        Some(".gitattributes" | ".gitignore" | ".git") => false,
-
-        // Temporary Cargo files
         Some(".cargo-ok") => false,
-
         _ => true,
     }
 }

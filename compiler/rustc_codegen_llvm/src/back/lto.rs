@@ -26,7 +26,7 @@ use crate::back::write::{
 };
 use crate::errors::{LlvmError, LtoBitcodeFromRlib};
 use crate::llvm::{self, build_string};
-use crate::{LlvmCodegenBackend, ModuleLlvm, SimpleCx};
+use crate::{LlvmCodegenBackend, ModuleLlvm};
 
 /// We keep track of the computed LTO cache keys from the previous
 /// session to determine which CGUs we can reuse.
@@ -76,6 +76,9 @@ fn prepare_lto(
     // __llvm_profile_runtime, therefore we won't know until link time if this symbol
     // should have default visibility.
     symbols_below_threshold.push(c"__llvm_profile_counter_bias".to_owned());
+
+    // LTO seems to discard this otherwise under certain circumstances.
+    symbols_below_threshold.push(c"rust_eh_personality".to_owned());
 
     // If we're performing LTO for the entire crate graph, then for each of our
     // upstream dependencies, find the corresponding rlib and load the bitcode
@@ -525,31 +528,33 @@ fn thin_lto(
     }
 }
 
-fn enable_autodiff_settings(ad: &[config::AutoDiff]) {
+pub(crate) fn enable_autodiff_settings(ad: &[config::AutoDiff]) {
+    let mut enzyme = llvm::EnzymeWrapper::get_instance();
+
     for val in ad {
         // We intentionally don't use a wildcard, to not forget handling anything new.
         match val {
             config::AutoDiff::PrintPerf => {
-                llvm::set_print_perf(true);
+                enzyme.set_print_perf(true);
             }
             config::AutoDiff::PrintAA => {
-                llvm::set_print_activity(true);
+                enzyme.set_print_activity(true);
             }
             config::AutoDiff::PrintTA => {
-                llvm::set_print_type(true);
+                enzyme.set_print_type(true);
             }
             config::AutoDiff::PrintTAFn(fun) => {
-                llvm::set_print_type(true); // Enable general type printing
-                llvm::set_print_type_fun(&fun); // Set specific function to analyze
+                enzyme.set_print_type(true); // Enable general type printing
+                enzyme.set_print_type_fun(&fun); // Set specific function to analyze
             }
             config::AutoDiff::Inline => {
-                llvm::set_inline(true);
+                enzyme.set_inline(true);
             }
             config::AutoDiff::LooseTypes => {
-                llvm::set_loose_types(true);
+                enzyme.set_loose_types(true);
             }
             config::AutoDiff::PrintSteps => {
-                llvm::set_print(true);
+                enzyme.set_print(true);
             }
             // We handle this in the PassWrapper.cpp
             config::AutoDiff::PrintPasses => {}
@@ -568,9 +573,9 @@ fn enable_autodiff_settings(ad: &[config::AutoDiff]) {
         }
     }
     // This helps with handling enums for now.
-    llvm::set_strict_aliasing(false);
+    enzyme.set_strict_aliasing(false);
     // FIXME(ZuseZ4): Test this, since it was added a long time ago.
-    llvm::set_rust_rules(true);
+    enzyme.set_rust_rules(true);
 }
 
 pub(crate) fn run_pass_manager(
@@ -598,25 +603,14 @@ pub(crate) fn run_pass_manager(
     // We then run the llvm_optimize function a second time, to optimize the code which we generated
     // in the enzyme differentiation pass.
     let enable_ad = config.autodiff.contains(&config::AutoDiff::Enable);
-    let enable_gpu = config.offload.contains(&config::Offload::Enable);
     let stage = if thin {
         write::AutodiffStage::PreAD
     } else {
         if enable_ad { write::AutodiffStage::DuringAD } else { write::AutodiffStage::PostAD }
     };
 
-    if enable_ad {
-        enable_autodiff_settings(&config.autodiff);
-    }
-
     unsafe {
         write::llvm_optimize(cgcx, dcx, module, None, config, opt_level, opt_stage, stage);
-    }
-
-    if enable_gpu && !thin {
-        let cx =
-            SimpleCx::new(module.module_llvm.llmod(), &module.module_llvm.llcx, cgcx.pointer_size);
-        crate::builder::gpu_offload::handle_gpu_code(cgcx, &cx);
     }
 
     if cfg!(feature = "llvm_enzyme") && enable_ad && !thin {

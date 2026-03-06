@@ -373,6 +373,7 @@ fn migrate_manifests(
             MaybePackage::Package(package) => package.manifest().original_toml(),
             MaybePackage::Virtual(manifest) => manifest.original_toml(),
         };
+
         if Edition::Edition2024 <= prepare_for_edition {
             let root = document.as_table_mut();
 
@@ -459,8 +460,12 @@ fn rename_dep_fields_2024(parent: &mut dyn toml_edit::TableLike, dep_kind: &str)
 fn remove_ignored_default_features_2024(
     parent: &mut dyn toml_edit::TableLike,
     dep_kind: &str,
-    ws_original_toml: &TomlManifest,
+    ws_original_toml: Option<&TomlManifest>,
 ) -> usize {
+    let Some(ws_original_toml) = ws_original_toml else {
+        return 0;
+    };
+
     let mut fixes = 0;
     for (name_in_toml, target) in parent
         .get_mut(dep_kind)
@@ -678,9 +683,10 @@ to prevent this issue from happening.
 /// Returns `None` if `fix` is not being run (not in proxy mode). Returns
 /// `Some(...)` if in `fix` proxy mode
 pub fn fix_get_proxy_lock_addr() -> Option<String> {
-    // ALLOWED: For the internal mechanism of `cargo fix` only.
-    // Shouldn't be set directly by anyone.
-    #[allow(clippy::disallowed_methods)]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "internal only, no reason for config support"
+    )]
     env::var(FIX_ENV_INTERNAL).ok()
 }
 
@@ -1238,23 +1244,26 @@ impl FixArgs {
         }
 
         let file = file.ok_or_else(|| anyhow::anyhow!("could not find .rs file in rustc args"))?;
-        // ALLOWED: For the internal mechanism of `cargo fix` only.
-        // Shouldn't be set directly by anyone.
-        #[allow(clippy::disallowed_methods)]
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "internal only, no reason for config support"
+        )]
         let idioms = env::var(IDIOMS_ENV_INTERNAL).is_ok();
 
-        // ALLOWED: For the internal mechanism of `cargo fix` only.
-        // Shouldn't be set directly by anyone.
-        #[allow(clippy::disallowed_methods)]
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "internal only, no reason for config support"
+        )]
         let prepare_for_edition = env::var(EDITION_ENV_INTERNAL).ok().map(|v| {
             let enabled_edition = enabled_edition.unwrap_or(Edition::Edition2015);
             let mode = EditionFixMode::from_str(&v);
             mode.next_edition(enabled_edition)
         });
 
-        // ALLOWED: For the internal mechanism of `cargo fix` only.
-        // Shouldn't be set directly by anyone.
-        #[allow(clippy::disallowed_methods)]
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "internal only, no reason for config support"
+        )]
         let sysroot = env::var_os(SYSROOT_INTERNAL).map(PathBuf::from);
 
         Ok(FixArgs {

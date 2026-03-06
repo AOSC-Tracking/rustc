@@ -1,3 +1,0 @@
-# Summary
-
-- [Print](print.md)

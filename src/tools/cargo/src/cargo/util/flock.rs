@@ -418,7 +418,13 @@ fn acquire(
     if try_acquire(path, lock_try)? {
         return Ok(());
     }
-    let msg = format!("waiting for file lock on {}", msg);
+
+    let msg = if gctx.extra_verbose() {
+        format!("waiting for file lock on {} ({})", msg, path.display())
+    } else {
+        format!("waiting for file lock on {}", msg)
+    };
+
     gctx.shell()
         .status_with_color("Blocking", &msg, &style::NOTE)?;
 
@@ -427,7 +433,7 @@ fn acquire(
 }
 
 #[cfg(all(target_os = "linux", not(target_env = "musl")))]
-fn is_on_nfs_mount(path: &Path) -> bool {
+pub fn is_on_nfs_mount(path: &Path) -> bool {
     use std::ffi::CString;
     use std::mem;
     use std::os::unix::prelude::*;
@@ -445,7 +451,7 @@ fn is_on_nfs_mount(path: &Path) -> bool {
 }
 
 #[cfg(any(not(target_os = "linux"), target_env = "musl"))]
-fn is_on_nfs_mount(_path: &Path) -> bool {
+pub fn is_on_nfs_mount(_path: &Path) -> bool {
     false
 }
 

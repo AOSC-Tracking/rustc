@@ -1319,6 +1319,59 @@ to proceed despite this and include the uncommitted changes, pass the `--allow-d
     );
 }
 
+/// Regression test for https://github.com/rust-lang/cargo/issues/16478
+#[cargo_test]
+fn dirty_untracked_file_when_packaged_from_workspace_member() {
+    let (p, repo) = git::new_repo("foo", |p| {
+        p.file(
+            "Cargo.toml",
+            r#"
+                [workspace]
+                members = ["inner"]
+                resolver = "2"
+            "#,
+        )
+        .file(
+            "inner/Cargo.toml",
+            r#"
+                [package]
+                name = "inner"
+                edition = "2021"
+            "#,
+        )
+        .file("inner/src/lib.rs", "")
+    });
+    git::commit(&repo);
+
+    p.change_file("inner/untracked", "untracked");
+
+    p.cargo("package --list --no-metadata")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] 1 files in the working directory contain changes that were not yet committed into git:
+
+inner/untracked
+
+to proceed despite this and include the uncommitted changes, pass the `--allow-dirty` flag
+
+"#]])
+        .run();
+
+    // Running from workspace member directory should also detect the untracked file.
+    p.cargo("package --list --no-metadata")
+        .cwd("inner")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] 1 files in the working directory contain changes that were not yet committed into git:
+
+untracked
+
+to proceed despite this and include the uncommitted changes, pass the `--allow-dirty` flag
+
+"#]])
+        .run();
+}
+
 #[cargo_test]
 fn dirty_file_outside_pkg_root_considered_dirty() {
     if !symlink_supported() {
@@ -2949,10 +3002,7 @@ src/lib.rs
         .run();
 }
 
-#[cargo_test(
-    nightly,
-    reason = "temporarily due to flakiness: https://rust-lang.zulipchat.com/#narrow/channel/246057-t-cargo/topic/reserved_windows_name.20test.20failing/with/543085230"
-)]
+#[cargo_test]
 #[cfg(windows)]
 fn reserved_windows_name() {
     // If we are running on a version of Windows that allows these reserved filenames,
@@ -3162,12 +3212,16 @@ fn reproducible_output() {
     let f = File::open(&p.root().join("target/package/foo-0.0.1.crate")).unwrap();
     let decoder = GzDecoder::new(f);
     let mut archive = Archive::new(decoder);
+
+    // Hardcoded value be removed once alexcrichton/tar-rs#420 is merged and released.
+    // See also rust-lang/cargo#16237
+    const DETERMINISTIC_TIMESTAMP: u64 = 1153704088;
     for ent in archive.entries().unwrap() {
         let ent = ent.unwrap();
         println!("checking {:?}", ent.path());
         let header = ent.header();
         assert_eq!(header.mode().unwrap(), 0o644);
-        assert!(header.mtime().unwrap() != 0);
+        assert!(header.mtime().unwrap() == DETERMINISTIC_TIMESTAMP);
         assert_eq!(header.username().unwrap().unwrap(), "");
         assert_eq!(header.groupname().unwrap().unwrap(), "");
     }
@@ -6792,6 +6846,16 @@ The registry `alternative` is not listed in the `package.publish` value in Cargo
 
 "#]])
         .run();
+
+    p.cargo("package --registry alternative --list")
+        .with_stdout_data(str![[r#"
+Cargo.lock
+Cargo.toml
+Cargo.toml.orig
+src/main.rs
+
+"#]])
+        .run();
 }
 
 #[cargo_test]
@@ -7734,4 +7798,100 @@ Caused by:
 
 "#]])
         .run();
+}
+
+#[cargo_test]
+fn publish_to_crates_io_warns() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                description = "foo"
+                edition = "2015"
+            "#,
+        )
+        .file("src/main.rs", "fn main() {}")
+        .build();
+
+    p.cargo(&format!("publish --dry-run"))
+        .with_stderr_data(str![[r#"
+[UPDATING] crates.io index
+[WARNING] manifest has no license, license-file, documentation, homepage or repository
+  |
+  = [NOTE] see https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info
+[PACKAGING] foo v0.1.0 ([ROOT]/foo)
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[VERIFYING] foo v0.1.0 ([ROOT]/foo)
+[COMPILING] foo v0.1.0 ([ROOT]/foo/target/package/foo-0.1.0)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[UPLOADING] foo v0.1.0 ([ROOT]/foo)
+[WARNING] aborting upload due to dry run
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn publish_to_alt_registry_warns() {
+    let _alt_reg = registry::RegistryBuilder::new().alternative().build();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                description = "foo"
+                edition = "2015"
+                publish = ["alternative"]
+            "#,
+        )
+        .file("src/main.rs", "fn main() {}")
+        .build();
+
+    p.cargo("publish --dry-run --registry alternative")
+        .with_stderr_data(str![[r#"
+[UPDATING] `alternative` index
+[PACKAGING] foo v0.1.0 ([ROOT]/foo)
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[VERIFYING] foo v0.1.0 ([ROOT]/foo)
+[COMPILING] foo v0.1.0 ([ROOT]/foo/target/package/foo-0.1.0)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[UPLOADING] foo v0.1.0 ([ROOT]/foo)
+[WARNING] aborting upload due to dry run
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn package_dir_not_excluded_from_backups() {
+    // This test documents the current behavior where target directory is NOT excluded from backups.
+    // After the fix, this test will be updated to verify that CACHEDIR.TAG exists.
+    let p = project().file("src/lib.rs", "").build();
+
+    p.cargo("package --allow-dirty")
+        .with_stderr_data(str![[r#"
+[WARNING] manifest has no description, license, license-file, documentation, homepage or repository
+  |
+  = [NOTE] see https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info
+[PACKAGING] foo v0.0.1 ([ROOT]/foo)
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[VERIFYING] foo v0.0.1 ([ROOT]/foo)
+[COMPILING] foo v0.0.1 ([ROOT]/foo/target/package/foo-0.0.1)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+
+    // Verify CACHEDIR.TAG exists in target (which excludes target/ and all subdirectories)
+    let cachedir_tag = p.root().join("target/CACHEDIR.TAG");
+    assert!(
+        cachedir_tag.exists(),
+        "CACHEDIR.TAG should exist in target directory to exclude it from backups"
+    );
 }

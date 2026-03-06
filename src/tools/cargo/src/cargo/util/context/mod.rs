@@ -20,6 +20,10 @@
 //! - [`StringList`]: Get a value that is either a list or a whitespace split
 //!   string.
 //!
+//! # Config schemas
+//!
+//! Configuration schemas are defined in the [`schema`] module.
+//!
 //! ## Config deserialization
 //!
 //! Cargo uses a two-layer deserialization approach:
@@ -57,9 +61,7 @@
 //! read the environment variable due to ambiguity. (See `ConfigMapAccess` for
 //! more details.)
 
-use crate::util::cache_lock::{CacheLock, CacheLockMode, CacheLocker};
 use std::borrow::Cow;
-use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -82,11 +84,14 @@ use crate::ops::RegistryCredentialConfig;
 use crate::sources::CRATES_IO_INDEX;
 use crate::sources::CRATES_IO_REGISTRY;
 use crate::util::OnceExt as _;
+use crate::util::cache_lock::{CacheLock, CacheLockMode, CacheLocker};
 use crate::util::errors::CargoResult;
 use crate::util::network::http::configure_http_handle;
 use crate::util::network::http::http_handle;
+use crate::util::restricted_names::is_glob_pattern;
 use crate::util::{CanonicalUrl, closest_msg, internal};
 use crate::util::{Filesystem, IntoUrl, IntoUrlWithBase, Rustc};
+
 use annotate_snippets::Level;
 use anyhow::{Context as _, anyhow, bail, format_err};
 use cargo_credential::Secret;
@@ -96,7 +101,6 @@ use curl::easy::Easy;
 use itertools::Itertools;
 use serde::Deserialize;
 use serde::de::IntoDeserializer as _;
-use serde_untagged::UntaggedEnumVisitor;
 use time::OffsetDateTime;
 use toml_edit::Item;
 use url::Url;
@@ -113,14 +117,24 @@ pub use value::{Definition, OptValue, Value};
 mod key;
 pub use key::ConfigKey;
 
+mod config_value;
+pub use config_value::ConfigValue;
+use config_value::is_nonmergeable_list;
+
 mod path;
-pub use path::{ConfigRelativePath, PathAndArgs};
+pub use path::BracketType;
+pub use path::ConfigRelativePath;
+pub use path::PathAndArgs;
+pub use path::ResolveTemplateError;
 
 mod target;
 pub use target::{TargetCfgConfig, TargetConfig};
 
 mod environment;
 use environment::Env;
+
+mod schema;
+pub use schema::*;
 
 use super::auth::RegistryConfig;
 
@@ -148,15 +162,36 @@ macro_rules! get_value_typed {
     };
 }
 
+pub const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
+    "paths",
+    "alias",
+    "build",
+    "credential-alias",
+    "doc",
+    "env",
+    "future-incompat-report",
+    "cache",
+    "cargo-new",
+    "http",
+    "install",
+    "net",
+    "patch",
+    "profile",
+    "resolver",
+    "registries",
+    "registry",
+    "source",
+    "target",
+    "term",
+];
+
 /// Indicates why a config value is being loaded.
 #[derive(Clone, Copy, Debug)]
 enum WhyLoad {
     /// Loaded due to a request from the global cli arg `--config`
     ///
-    /// Indirect configs loaded via [`config-include`] are also seen as from cli args,
+    /// Indirect configs loaded via [`ConfigInclude`] are also seen as from cli args,
     /// if the initial config is being loaded from cli.
-    ///
-    /// [`config-include`]: https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#config-include
     Cli,
     /// Loaded due to config file discovery.
     FileDiscovery,
@@ -700,7 +735,8 @@ impl GlobalContext {
                     .to_string(),
             ),
             ("{workspace-path-hash}", {
-                let real_path = std::fs::canonicalize(workspace_manifest_path)?;
+                let real_path = std::fs::canonicalize(workspace_manifest_path)
+                    .unwrap_or_else(|_err| workspace_manifest_path.to_owned());
                 let hash = crate::util::hex::short_hash(&real_path);
                 format!("{}{}{}", &hash[0..2], std::path::MAIN_SEPARATOR, &hash[2..])
             }),
@@ -981,24 +1017,10 @@ impl GlobalContext {
         self.get::<OptValue<String>>(key)
     }
 
-    /// Get a config value that is expected to be a path.
-    ///
-    /// This returns a relative path if the value does not contain any
-    /// directory separators. See `ConfigRelativePath::resolve_program` for
-    /// more details.
-    pub fn get_path(&self, key: &str) -> CargoResult<OptValue<PathBuf>> {
-        self.get::<OptValue<ConfigRelativePath>>(key).map(|v| {
-            v.map(|v| Value {
-                val: v.val.resolve_program(self),
-                definition: v.definition,
-            })
-        })
-    }
-
     fn string_to_path(&self, value: &str, definition: &Definition) -> PathBuf {
         let is_path = value.contains('/') || (cfg!(windows) && value.contains('\\'));
         if is_path {
-            definition.root(self).join(value)
+            definition.root(self.cwd()).join(value)
         } else {
             // A pathless name.
             PathBuf::from(value)
@@ -1013,32 +1035,51 @@ impl GlobalContext {
             return Ok(());
         };
 
-        if is_nonmergable_list(&key) {
-            output.clear();
+        let env_def = Definition::Environment(key.as_env_key().to_string());
+
+        if is_nonmergeable_list(&key) {
+            assert!(
+                output
+                    .windows(2)
+                    .all(|cvs| cvs[0].definition() == cvs[1].definition()),
+                "non-mergeable list must have only one definition: {output:?}",
+            );
+
+            // Keep existing config if higher priority than env (e.g., --config CLI),
+            // otherwise clear for env
+            if output
+                .first()
+                .map(|o| o.definition() > &env_def)
+                .unwrap_or_default()
+            {
+                return Ok(());
+            } else {
+                output.clear();
+            }
         }
 
-        let def = Definition::Environment(key.as_env_key().to_string());
         if self.cli_unstable().advanced_env && env_val.starts_with('[') && env_val.ends_with(']') {
             // Parse an environment string as a TOML array.
             let toml_v = env_val.parse::<toml::Value>().map_err(|e| {
-                ConfigError::new(format!("could not parse TOML list: {}", e), def.clone())
+                ConfigError::new(format!("could not parse TOML list: {}", e), env_def.clone())
             })?;
             let values = toml_v.as_array().expect("env var was not array");
             for value in values {
-                // TODO: support other types.
+                // Until we figure out how to deal with it through `-Zadvanced-env`,
+                // complex array types are unsupported.
                 let s = value.as_str().ok_or_else(|| {
                     ConfigError::new(
                         format!("expected string, found {}", value.type_str()),
-                        def.clone(),
+                        env_def.clone(),
                     )
                 })?;
-                output.push(CV::String(s.to_string(), def.clone()))
+                output.push(CV::String(s.to_string(), env_def.clone()))
             }
         } else {
             output.extend(
                 env_val
                     .split_whitespace()
-                    .map(|s| CV::String(s.to_string(), def.clone())),
+                    .map(|s| CV::String(s.to_string(), env_def.clone())),
             );
         }
         output.sort_by(|a, b| a.definition().cmp(b.definition()));
@@ -1099,19 +1140,7 @@ impl GlobalContext {
             self.merge_cli_args()?;
         }
 
-        // Load the unstable flags from config file here first, as the config
-        // file itself may enable inclusion of other configs. In that case, we
-        // want to re-load configs with includes enabled:
         self.load_unstable_flags_from_config()?;
-        if self.unstable_flags.config_include {
-            // If the config was already loaded (like when fetching the
-            // `[alias]` table), it was loaded with includes disabled because
-            // the `unstable_flags` hadn't been set up, yet. Any values
-            // fetched before this step will not process includes, but that
-            // should be fine (`[alias]` is one of the only things loaded
-            // before configure). This can be removed when stabilized.
-            self.reload_rooted_at(self.cwd.clone())?;
-        }
 
         // Ignore errors in the configuration files. We don't want basic
         // commands like `cargo version` to error out due to config file
@@ -1158,6 +1187,9 @@ impl GlobalContext {
                 .unwrap_or(false);
         let cli_target_dir = target_dir.as_ref().map(|dir| Filesystem::new(dir.clone()));
         self.target_dir = cli_target_dir;
+
+        self.shell()
+            .set_unstable_flags_rustc_unicode(self.unstable_flags.rustc_unicode)?;
 
         Ok(())
     }
@@ -1235,9 +1267,7 @@ impl GlobalContext {
         let home = self.home_path.clone().into_path_unlocked();
         self.walk_tree(&self.cwd, &home, |path| {
             let mut cv = self._load_file(path, &mut seen, false, WhyLoad::FileDiscovery)?;
-            if self.cli_unstable().config_include {
-                self.load_unmerged_include(&mut cv, &mut seen, &mut result)?;
-            }
+            self.load_unmerged_include(&mut cv, &mut seen, &mut result)?;
             result.push(cv);
             Ok(())
         })
@@ -1255,11 +1285,19 @@ impl GlobalContext {
         output: &mut Vec<CV>,
     ) -> CargoResult<()> {
         let includes = self.include_paths(cv, false)?;
-        for (path, abs_path, def) in includes {
+        for include in includes {
+            let Some(abs_path) = include.resolve_path(self) else {
+                continue;
+            };
+
             let mut cv = self
                 ._load_file(&abs_path, seen, false, WhyLoad::FileDiscovery)
                 .with_context(|| {
-                    format!("failed to load config include `{}` from `{}`", path, def)
+                    format!(
+                        "failed to load config include `{}` from `{}`",
+                        include.path.display(),
+                        include.def
+                    )
                 })?;
             self.load_unmerged_include(&mut cv, seen, output)?;
             output.push(cv);
@@ -1269,9 +1307,9 @@ impl GlobalContext {
 
     /// Start a config file discovery from a path and merges all config values found.
     fn load_values_from(&self, path: &Path) -> CargoResult<HashMap<String, ConfigValue>> {
-        // This definition path is ignored, this is just a temporary container
-        // representing the entire file.
-        let mut cfg = CV::Table(HashMap::new(), Definition::Path(PathBuf::from(".")));
+        // The root config value container isn't from any external source,
+        // so its definition should be built-in.
+        let mut cfg = CV::Table(HashMap::new(), Definition::BuiltIn);
         let home = self.home_path.clone().into_path_unlocked();
 
         self.walk_tree(path, &home, |path| {
@@ -1300,11 +1338,9 @@ impl GlobalContext {
     ///
     /// This is actual implementation of loading a config value from a path.
     ///
-    /// * `includes` determines whether to load configs from [`config-include`].
+    /// * `includes` determines whether to load configs from [`ConfigInclude`].
     /// * `seen` is used to check for cyclic includes.
     /// * `why_load` tells why a config is being loaded.
-    ///
-    /// [`config-include`]: https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#config-include
     fn _load_file(
         &self,
         path: &Path,
@@ -1356,17 +1392,22 @@ impl GlobalContext {
     ) -> CargoResult<CV> {
         // Get the list of files to load.
         let includes = self.include_paths(&mut value, true)?;
-        // Check unstable.
-        if !self.cli_unstable().config_include {
-            return Ok(value);
-        }
+
         // Accumulate all values here.
         let mut root = CV::Table(HashMap::new(), value.definition().clone());
-        for (path, abs_path, def) in includes {
+        for include in includes {
+            let Some(abs_path) = include.resolve_path(self) else {
+                continue;
+            };
+
             self._load_file(&abs_path, seen, true, why_load)
                 .and_then(|include| root.merge(include, true))
                 .with_context(|| {
-                    format!("failed to load config include `{}` from `{}`", path, def)
+                    format!(
+                        "failed to load config include `{}` from `{}`",
+                        include.path.display(),
+                        include.def
+                    )
                 })?;
         }
         root.merge(value, true)?;
@@ -1374,46 +1415,55 @@ impl GlobalContext {
     }
 
     /// Converts the `include` config value to a list of absolute paths.
-    fn include_paths(
-        &self,
-        cv: &mut CV,
-        remove: bool,
-    ) -> CargoResult<Vec<(String, PathBuf, Definition)>> {
-        let abs = |path: &str, def: &Definition| -> (String, PathBuf, Definition) {
-            let abs_path = match def {
-                Definition::Path(p) | Definition::Cli(Some(p)) => p.parent().unwrap().join(&path),
-                Definition::Environment(_) | Definition::Cli(None) | Definition::BuiltIn => {
-                    self.cwd().join(&path)
-                }
-            };
-            (path.to_string(), abs_path, def.clone())
-        };
+    fn include_paths(&self, cv: &mut CV, remove: bool) -> CargoResult<Vec<ConfigInclude>> {
         let CV::Table(table, _def) = cv else {
             unreachable!()
         };
-        let owned;
         let include = if remove {
-            owned = table.remove("include");
-            owned.as_ref()
+            table.remove("include").map(Cow::Owned)
         } else {
-            table.get("include")
+            table.get("include").map(Cow::Borrowed)
         };
-        let includes = match include {
-            Some(CV::String(s, def)) => {
-                vec![abs(s, def)]
-            }
+        let includes = match include.map(|c| c.into_owned()) {
             Some(CV::List(list, _def)) => list
-                .iter()
-                .map(|cv| match cv {
-                    CV::String(s, def) => Ok(abs(s, def)),
+                .into_iter()
+                .enumerate()
+                .map(|(idx, cv)| match cv {
+                    CV::String(s, def) => Ok(ConfigInclude::new(s, def)),
+                    CV::Table(mut table, def) => {
+                        // Extract `include.path`
+                        let s = match table.remove("path") {
+                            Some(CV::String(s, _)) => s,
+                            Some(other) => bail!(
+                                "expected a string, but found {} at `include[{idx}].path` in `{def}`",
+                                other.desc()
+                            ),
+                            None => bail!("missing field `path` at `include[{idx}]` in `{def}`"),
+                        };
+
+                        // Extract optional `include.optional` field
+                        let optional = match table.remove("optional") {
+                            Some(CV::Boolean(b, _)) => b,
+                            Some(other) => bail!(
+                                "expected a boolean, but found {} at `include[{idx}].optional` in `{def}`",
+                                other.desc()
+                            ),
+                            None => false,
+                        };
+
+                        let mut include = ConfigInclude::new(s, def);
+                        include.optional = optional;
+                        Ok(include)
+                    }
                     other => bail!(
-                        "`include` expected a string or list of strings, but found {} in list",
-                        other.desc()
+                        "expected a string or table, but found {} at `include[{idx}]` in {}",
+                        other.desc(),
+                        other.definition(),
                     ),
                 })
                 .collect::<CargoResult<Vec<_>>>()?,
             Some(other) => bail!(
-                "`include` expected a string or list, but found {} in `{}`",
+                "expected a list of strings or a list of tables, but found {} at `include` in `{}",
                 other.desc(),
                 other.definition()
             ),
@@ -1422,12 +1472,34 @@ impl GlobalContext {
             }
         };
 
-        for (path, abs_path, def) in &includes {
-            if abs_path.extension() != Some(OsStr::new("toml")) {
+        for include in &includes {
+            if include.path.extension() != Some(OsStr::new("toml")) {
                 bail!(
                     "expected a config include path ending with `.toml`, \
-                     but found `{path}` from `{def}`",
+                     but found `{}` from `{}`",
+                    include.path.display(),
+                    include.def,
                 )
+            }
+
+            if let Some(path) = include.path.to_str() {
+                // Ignore non UTF-8 bytes as glob and template syntax are for textual config.
+                if is_glob_pattern(path) {
+                    bail!(
+                        "expected a config include path without glob patterns, \
+                         but found `{}` from `{}`",
+                        include.path.display(),
+                        include.def,
+                    )
+                }
+                if path.contains(&['{', '}']) {
+                    bail!(
+                        "expected a config include path without template braces, \
+                         but found `{}` from `{}`",
+                        include.path.display(),
+                        include.def,
+                    )
+                }
             }
         }
 
@@ -1445,14 +1517,10 @@ impl GlobalContext {
             let arg_as_path = self.cwd.join(arg);
             let tmp_table = if !arg.is_empty() && arg_as_path.exists() {
                 // --config path_to_file
-                let str_path = arg_as_path
-                    .to_str()
-                    .ok_or_else(|| {
-                        anyhow::format_err!("config path {:?} is not utf-8", arg_as_path)
+                self._load_file(&arg_as_path, &mut seen, true, WhyLoad::Cli)
+                    .with_context(|| {
+                        format!("failed to load config from `{}`", arg_as_path.display())
                     })?
-                    .to_string();
-                self._load_file(&self.cwd().join(&str_path), &mut seen, true, WhyLoad::Cli)
-                    .with_context(|| format!("failed to load config from `{}`", str_path))?
             } else {
                 let doc = toml_dotted_keys(arg)?;
                 let doc: toml::Value = toml::Value::deserialize(doc.into_deserializer())
@@ -1513,24 +1581,18 @@ impl GlobalContext {
 
     /// Add config arguments passed on the command line.
     fn merge_cli_args(&mut self) -> CargoResult<()> {
-        let CV::Table(loaded_map, _def) = self.cli_args_as_table()? else {
-            unreachable!()
-        };
-        let values = self.values_mut()?;
-        for (key, value) in loaded_map.into_iter() {
-            match values.entry(key) {
-                Vacant(entry) => {
-                    entry.insert(value);
-                }
-                Occupied(mut entry) => entry.get_mut().merge(value, true).with_context(|| {
-                    format!(
-                        "failed to merge --config key `{}` into `{}`",
-                        entry.key(),
-                        entry.get().definition(),
-                    )
-                })?,
-            };
-        }
+        let cv_from_cli = self.cli_args_as_table()?;
+        assert!(cv_from_cli.is_table(), "cv from CLI must be a table");
+
+        let root_cv = mem::take(self.values_mut()?);
+        // The root config value container isn't from any external source,
+        // so its definition should be built-in.
+        let mut root_cv = CV::Table(root_cv, Definition::BuiltIn);
+        root_cv.merge(cv_from_cli, true)?;
+
+        // Put it back to gctx
+        mem::swap(self.values_mut()?, root_cv.table_mut("<root>")?.0);
+
         Ok(())
     }
 
@@ -1598,13 +1660,17 @@ impl GlobalContext {
             if let Some(path) = self.get_file_path(&config_root, "config", true)? {
                 walk(&path)?;
             }
-            seen_dir.insert(config_root);
+
+            let canonical_root = config_root.canonicalize().unwrap_or(config_root);
+            seen_dir.insert(canonical_root);
         }
+
+        let canonical_home = home.canonicalize().unwrap_or(home.to_path_buf());
 
         // Once we're done, also be sure to walk the home directory even if it's not
         // in our history to be sure we pick up that standard location for
         // information.
-        if !seen_dir.contains(home) {
+        if !seen_dir.contains(&canonical_home) && !seen_dir.contains(home) {
             if let Some(path) = self.get_file_path(home, "config", true)? {
                 walk(&path)?;
             }
@@ -1646,7 +1712,7 @@ impl GlobalContext {
         // This handles relative file: URLs, relative to the config definition.
         let base = index
             .definition
-            .root(self)
+            .root(self.cwd())
             .join("truncated-by-url_with_base");
         // Parse val to check it is a URL, not a relative path without a protocol.
         let _parsed = index.val.into_url()?;
@@ -1677,16 +1743,13 @@ impl GlobalContext {
         let mut value = self.load_file(&credentials)?;
         // Backwards compatibility for old `.cargo/credentials` layout.
         {
-            let CV::Table(ref mut value_map, ref def) = value else {
-                unreachable!();
-            };
+            let (value_map, def) = value.table_mut("<root>")?;
 
             if let Some(token) = value_map.remove("token") {
-                if let Vacant(entry) = value_map.entry("registry".into()) {
+                value_map.entry("registry".into()).or_insert_with(|| {
                     let map = HashMap::from([("token".into(), token)]);
-                    let table = CV::Table(map, def.clone());
-                    entry.insert(table);
-                }
+                    CV::Table(map, def.clone())
+                });
             }
         }
 
@@ -1892,7 +1955,7 @@ impl GlobalContext {
                     .into_iter()
                     .filter_map(|(k, v)| {
                         if v.is_force() || self.get_env_os(&k).is_none() {
-                            Some((k, v.resolve(self).to_os_string()))
+                            Some((k, v.resolve(self.cwd()).to_os_string()))
                         } else {
                             None
                         }
@@ -2063,280 +2126,6 @@ impl GlobalContext {
     }
 }
 
-#[derive(Debug)]
-enum KeyOrIdx {
-    Key(String),
-    Idx(usize),
-}
-
-/// Similar to [`toml::Value`] but includes the source location where it is defined.
-#[derive(Eq, PartialEq, Clone)]
-pub enum ConfigValue {
-    Integer(i64, Definition),
-    String(String, Definition),
-    List(Vec<ConfigValue>, Definition),
-    Table(HashMap<String, ConfigValue>, Definition),
-    Boolean(bool, Definition),
-}
-
-impl fmt::Debug for ConfigValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CV::Integer(i, def) => write!(f, "{} (from {})", i, def),
-            CV::Boolean(b, def) => write!(f, "{} (from {})", b, def),
-            CV::String(s, def) => write!(f, "{} (from {})", s, def),
-            CV::List(list, def) => {
-                write!(f, "[")?;
-                for (i, item) in list.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{item:?}")?;
-                }
-                write!(f, "] (from {})", def)
-            }
-            CV::Table(table, _) => write!(f, "{:?}", table),
-        }
-    }
-}
-
-impl ConfigValue {
-    fn from_toml(def: Definition, toml: toml::Value) -> CargoResult<ConfigValue> {
-        let mut error_path = Vec::new();
-        Self::from_toml_inner(def, toml, &mut error_path).with_context(|| {
-            let mut it = error_path.iter().rev().peekable();
-            let mut key_path = String::with_capacity(error_path.len() * 3);
-            while let Some(k) = it.next() {
-                match k {
-                    KeyOrIdx::Key(s) => key_path.push_str(&key::escape_key_part(&s)),
-                    KeyOrIdx::Idx(i) => key_path.push_str(&format!("[{i}]")),
-                }
-                if matches!(it.peek(), Some(KeyOrIdx::Key(_))) {
-                    key_path.push('.');
-                }
-            }
-            format!("failed to parse config at `{key_path}`")
-        })
-    }
-
-    fn from_toml_inner(
-        def: Definition,
-        toml: toml::Value,
-        path: &mut Vec<KeyOrIdx>,
-    ) -> CargoResult<ConfigValue> {
-        match toml {
-            toml::Value::String(val) => Ok(CV::String(val, def)),
-            toml::Value::Boolean(b) => Ok(CV::Boolean(b, def)),
-            toml::Value::Integer(i) => Ok(CV::Integer(i, def)),
-            toml::Value::Array(val) => Ok(CV::List(
-                val.into_iter()
-                    .enumerate()
-                    .map(|(i, toml)| match toml {
-                        toml::Value::String(val) => Ok(CV::String(val, def.clone())),
-                        v => {
-                            path.push(KeyOrIdx::Idx(i));
-                            bail!("expected string but found {} at index {i}", v.type_str())
-                        }
-                    })
-                    .collect::<CargoResult<_>>()?,
-                def,
-            )),
-            toml::Value::Table(val) => Ok(CV::Table(
-                val.into_iter()
-                    .map(
-                        |(key, value)| match CV::from_toml_inner(def.clone(), value, path) {
-                            Ok(value) => Ok((key, value)),
-                            Err(e) => {
-                                path.push(KeyOrIdx::Key(key));
-                                Err(e)
-                            }
-                        },
-                    )
-                    .collect::<CargoResult<_>>()?,
-                def,
-            )),
-            v => bail!("unsupported TOML configuration type `{}`", v.type_str()),
-        }
-    }
-
-    fn into_toml(self) -> toml::Value {
-        match self {
-            CV::Boolean(s, _) => toml::Value::Boolean(s),
-            CV::String(s, _) => toml::Value::String(s),
-            CV::Integer(i, _) => toml::Value::Integer(i),
-            CV::List(l, _) => toml::Value::Array(l.into_iter().map(|cv| cv.into_toml()).collect()),
-            CV::Table(l, _) => {
-                toml::Value::Table(l.into_iter().map(|(k, v)| (k, v.into_toml())).collect())
-            }
-        }
-    }
-
-    /// Merge the given value into self.
-    ///
-    /// If `force` is true, primitive (non-container) types will override existing values
-    /// of equal priority. For arrays, incoming values of equal priority will be placed later.
-    ///
-    /// Container types (tables and arrays) are merged with existing values.
-    ///
-    /// Container and non-container types cannot be mixed.
-    fn merge(&mut self, from: ConfigValue, force: bool) -> CargoResult<()> {
-        self.merge_helper(from, force, &mut ConfigKey::new())
-    }
-
-    fn merge_helper(
-        &mut self,
-        from: ConfigValue,
-        force: bool,
-        parts: &mut ConfigKey,
-    ) -> CargoResult<()> {
-        let is_higher_priority = from.definition().is_higher_priority(self.definition());
-        match (self, from) {
-            (&mut CV::List(ref mut old, _), CV::List(ref mut new, _)) => {
-                if is_nonmergable_list(&parts) {
-                    // Use whichever list is higher priority.
-                    if force || is_higher_priority {
-                        mem::swap(new, old);
-                    }
-                } else {
-                    // Merge the lists together.
-                    if force {
-                        old.append(new);
-                    } else {
-                        new.append(old);
-                        mem::swap(new, old);
-                    }
-                }
-                old.sort_by(|a, b| a.definition().cmp(b.definition()));
-            }
-            (&mut CV::Table(ref mut old, _), CV::Table(ref mut new, _)) => {
-                for (key, value) in mem::take(new) {
-                    match old.entry(key.clone()) {
-                        Occupied(mut entry) => {
-                            let new_def = value.definition().clone();
-                            let entry = entry.get_mut();
-                            parts.push(&key);
-                            entry.merge_helper(value, force, parts).with_context(|| {
-                                format!(
-                                    "failed to merge key `{}` between \
-                                     {} and {}",
-                                    key,
-                                    entry.definition(),
-                                    new_def,
-                                )
-                            })?;
-                        }
-                        Vacant(entry) => {
-                            entry.insert(value);
-                        }
-                    };
-                }
-            }
-            // Allow switching types except for tables or arrays.
-            (expected @ &mut CV::List(_, _), found)
-            | (expected @ &mut CV::Table(_, _), found)
-            | (expected, found @ CV::List(_, _))
-            | (expected, found @ CV::Table(_, _)) => {
-                return Err(anyhow!(
-                    "failed to merge config value from `{}` into `{}`: expected {}, but found {}",
-                    found.definition(),
-                    expected.definition(),
-                    expected.desc(),
-                    found.desc()
-                ));
-            }
-            (old, mut new) => {
-                if force || is_higher_priority {
-                    mem::swap(old, &mut new);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn i64(&self, key: &str) -> CargoResult<(i64, &Definition)> {
-        match self {
-            CV::Integer(i, def) => Ok((*i, def)),
-            _ => self.expected("integer", key),
-        }
-    }
-
-    pub fn string(&self, key: &str) -> CargoResult<(&str, &Definition)> {
-        match self {
-            CV::String(s, def) => Ok((s, def)),
-            _ => self.expected("string", key),
-        }
-    }
-
-    pub fn table(&self, key: &str) -> CargoResult<(&HashMap<String, ConfigValue>, &Definition)> {
-        match self {
-            CV::Table(table, def) => Ok((table, def)),
-            _ => self.expected("table", key),
-        }
-    }
-
-    pub fn string_list(&self, key: &str) -> CargoResult<Vec<(String, Definition)>> {
-        match self {
-            CV::List(list, _) => list
-                .iter()
-                .map(|cv| match cv {
-                    CV::String(s, def) => Ok((s.clone(), def.clone())),
-                    _ => self.expected("string", key),
-                })
-                .collect::<CargoResult<_>>(),
-            _ => self.expected("list", key),
-        }
-    }
-
-    pub fn boolean(&self, key: &str) -> CargoResult<(bool, &Definition)> {
-        match self {
-            CV::Boolean(b, def) => Ok((*b, def)),
-            _ => self.expected("bool", key),
-        }
-    }
-
-    pub fn desc(&self) -> &'static str {
-        match *self {
-            CV::Table(..) => "table",
-            CV::List(..) => "array",
-            CV::String(..) => "string",
-            CV::Boolean(..) => "boolean",
-            CV::Integer(..) => "integer",
-        }
-    }
-
-    pub fn definition(&self) -> &Definition {
-        match self {
-            CV::Boolean(_, def)
-            | CV::Integer(_, def)
-            | CV::String(_, def)
-            | CV::List(_, def)
-            | CV::Table(_, def) => def,
-        }
-    }
-
-    fn expected<T>(&self, wanted: &str, key: &str) -> CargoResult<T> {
-        bail!(
-            "expected a {}, but found a {} for `{}` in {}",
-            wanted,
-            self.desc(),
-            key,
-            self.definition()
-        )
-    }
-}
-
-/// List of which configuration lists cannot be merged.
-/// Instead of merging, these the higher priority list replaces the lower priority list.
-fn is_nonmergable_list(key: &ConfigKey) -> bool {
-    key.matches("registry.credential-provider")
-        || key.matches("registries.*.credential-provider")
-        || key.matches("target.*.runner")
-        || key.matches("host.runner")
-        || key.matches("credential-alias.*")
-        || key.matches("doc.browser")
-}
-
 pub fn homedir(cwd: &Path) -> Option<PathBuf> {
     ::home::cargo_home_with_cwd(cwd).ok()
 }
@@ -2483,431 +2272,66 @@ pub fn save_credentials(
     }
 
     #[cfg(not(unix))]
-    #[allow(unused)]
-    fn set_permissions(file: &File, mode: u32) -> CargoResult<()> {
+    fn set_permissions(_file: &File, _mode: u32) -> CargoResult<()> {
         Ok(())
     }
 }
 
-#[derive(Debug, Default, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-pub struct CargoHttpConfig {
-    pub proxy: Option<String>,
-    pub low_speed_limit: Option<u32>,
-    pub timeout: Option<u64>,
-    pub cainfo: Option<ConfigRelativePath>,
-    pub proxy_cainfo: Option<ConfigRelativePath>,
-    pub check_revoke: Option<bool>,
-    pub user_agent: Option<String>,
-    pub debug: Option<bool>,
-    pub multiplexing: Option<bool>,
-    pub ssl_version: Option<SslVersionConfig>,
-}
-
-#[derive(Debug, Default, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-pub struct CargoFutureIncompatConfig {
-    frequency: Option<CargoFutureIncompatFrequencyConfig>,
-}
-
-#[derive(Debug, Default, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-pub enum CargoFutureIncompatFrequencyConfig {
-    #[default]
-    Always,
-    Never,
-}
-
-impl CargoFutureIncompatConfig {
-    pub fn should_display_message(&self) -> bool {
-        use CargoFutureIncompatFrequencyConfig::*;
-
-        let frequency = self.frequency.as_ref().unwrap_or(&Always);
-        match frequency {
-            Always => true,
-            Never => false,
-        }
-    }
-}
-
-/// Configuration for `ssl-version` in `http` section
-/// There are two ways to configure:
+/// Represents a config-include value in the configuration.
 ///
-/// ```text
-/// [http]
-/// ssl-version = "tlsv1.3"
-/// ```
-///
-/// ```text
-/// [http]
-/// ssl-version.min = "tlsv1.2"
-/// ssl-version.max = "tlsv1.3"
-/// ```
-#[derive(Clone, Debug, PartialEq)]
-pub enum SslVersionConfig {
-    Single(String),
-    Range(SslVersionConfigRange),
+/// This intentionally doesn't derive serde deserialization
+/// to avoid any misuse of `GlobalContext::get::<ConfigInclude>()`,
+/// which might lead to wrong config loading order.
+struct ConfigInclude {
+    /// Path to a config-include configuration file.
+    /// Could be either relative or absolute.
+    path: PathBuf,
+    def: Definition,
+    /// Whether this include is optional (missing files are silently ignored)
+    optional: bool,
 }
 
-impl<'de> Deserialize<'de> for SslVersionConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        UntaggedEnumVisitor::new()
-            .string(|single| Ok(SslVersionConfig::Single(single.to_owned())))
-            .map(|map| map.deserialize().map(SslVersionConfig::Range))
-            .deserialize(deserializer)
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-pub struct SslVersionConfigRange {
-    pub min: Option<String>,
-    pub max: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct CargoNetConfig {
-    pub retry: Option<u32>,
-    pub offline: Option<bool>,
-    pub git_fetch_with_cli: Option<bool>,
-    pub ssh: Option<CargoSshConfig>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct CargoSshConfig {
-    pub known_hosts: Option<Vec<Value<String>>>,
-}
-
-/// Configuration for `jobs` in `build` section. There are two
-/// ways to configure: An integer or a simple string expression.
-///
-/// ```toml
-/// [build]
-/// jobs = 1
-/// ```
-///
-/// ```toml
-/// [build]
-/// jobs = "default" # Currently only support "default".
-/// ```
-#[derive(Debug, Clone)]
-pub enum JobsConfig {
-    Integer(i32),
-    String(String),
-}
-
-impl<'de> Deserialize<'de> for JobsConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        UntaggedEnumVisitor::new()
-            .i32(|int| Ok(JobsConfig::Integer(int)))
-            .string(|string| Ok(JobsConfig::String(string.to_owned())))
-            .deserialize(deserializer)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct CargoBuildConfig {
-    // deprecated, but preserved for compatibility
-    pub pipelining: Option<bool>,
-    pub dep_info_basedir: Option<ConfigRelativePath>,
-    pub target_dir: Option<ConfigRelativePath>,
-    pub build_dir: Option<ConfigRelativePath>,
-    pub incremental: Option<bool>,
-    pub target: Option<BuildTargetConfig>,
-    pub jobs: Option<JobsConfig>,
-    pub rustflags: Option<StringList>,
-    pub rustdocflags: Option<StringList>,
-    pub rustc_wrapper: Option<ConfigRelativePath>,
-    pub rustc_workspace_wrapper: Option<ConfigRelativePath>,
-    pub rustc: Option<ConfigRelativePath>,
-    pub rustdoc: Option<ConfigRelativePath>,
-    // deprecated alias for artifact-dir
-    pub out_dir: Option<ConfigRelativePath>,
-    pub artifact_dir: Option<ConfigRelativePath>,
-    pub warnings: Option<WarningHandling>,
-    /// Unstable feature `-Zsbom`.
-    pub sbom: Option<bool>,
-    /// Unstable feature `-Zbuild-analysis`.
-    pub analysis: Option<CargoBuildAnalysis>,
-}
-
-/// Metrics collection for build analysis.
-#[derive(Debug, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub struct CargoBuildAnalysis {
-    pub enabled: bool,
-}
-
-/// Whether warnings should warn, be allowed, or cause an error.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum WarningHandling {
-    #[default]
-    /// Output warnings.
-    Warn,
-    /// Allow warnings (do not output them).
-    Allow,
-    /// Error if  warnings are emitted.
-    Deny,
-}
-
-/// Configuration for `build.target`.
-///
-/// Accepts in the following forms:
-///
-/// ```toml
-/// target = "a"
-/// target = ["a"]
-/// target = ["a", "b"]
-/// ```
-#[derive(Debug, Deserialize)]
-#[serde(transparent)]
-pub struct BuildTargetConfig {
-    inner: Value<BuildTargetConfigInner>,
-}
-
-#[derive(Debug)]
-enum BuildTargetConfigInner {
-    One(String),
-    Many(Vec<String>),
-}
-
-impl<'de> Deserialize<'de> for BuildTargetConfigInner {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        UntaggedEnumVisitor::new()
-            .string(|one| Ok(BuildTargetConfigInner::One(one.to_owned())))
-            .seq(|many| many.deserialize().map(BuildTargetConfigInner::Many))
-            .deserialize(deserializer)
-    }
-}
-
-impl BuildTargetConfig {
-    /// Gets values of `build.target` as a list of strings.
-    pub fn values(&self, gctx: &GlobalContext) -> CargoResult<Vec<String>> {
-        let map = |s: &String| {
-            if s.ends_with(".json") {
-                // Path to a target specification file (in JSON).
-                // <https://doc.rust-lang.org/rustc/targets/custom.html>
-                self.inner
-                    .definition
-                    .root(gctx)
-                    .join(s)
-                    .to_str()
-                    .expect("must be utf-8 in toml")
-                    .to_string()
-            } else {
-                // A string. Probably a target triple.
-                s.to_string()
-            }
-        };
-        let values = match &self.inner.val {
-            BuildTargetConfigInner::One(s) => vec![map(s)],
-            BuildTargetConfigInner::Many(v) => v.iter().map(map).collect(),
-        };
-        Ok(values)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct CargoResolverConfig {
-    pub incompatible_rust_versions: Option<IncompatibleRustVersions>,
-    pub feature_unification: Option<FeatureUnification>,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum IncompatibleRustVersions {
-    Allow,
-    Fallback,
-}
-
-#[derive(Copy, Clone, Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum FeatureUnification {
-    Package,
-    Selected,
-    Workspace,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub struct TermConfig {
-    pub verbose: Option<bool>,
-    pub quiet: Option<bool>,
-    pub color: Option<String>,
-    pub hyperlinks: Option<bool>,
-    pub unicode: Option<bool>,
-    #[serde(default)]
-    #[serde(deserialize_with = "progress_or_string")]
-    pub progress: Option<ProgressConfig>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct ProgressConfig {
-    #[serde(default)]
-    pub when: ProgressWhen,
-    pub width: Option<usize>,
-    /// Communicate progress status with a terminal
-    pub term_integration: Option<bool>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ProgressWhen {
-    #[default]
-    Auto,
-    Never,
-    Always,
-}
-
-fn progress_or_string<'de, D>(deserializer: D) -> Result<Option<ProgressConfig>, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-{
-    struct ProgressVisitor;
-
-    impl<'de> serde::de::Visitor<'de> for ProgressVisitor {
-        type Value = Option<ProgressConfig>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("a string (\"auto\" or \"never\") or a table")
-        }
-
-        fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            match s {
-                "auto" => Ok(Some(ProgressConfig {
-                    when: ProgressWhen::Auto,
-                    width: None,
-                    term_integration: None,
-                })),
-                "never" => Ok(Some(ProgressConfig {
-                    when: ProgressWhen::Never,
-                    width: None,
-                    term_integration: None,
-                })),
-                "always" => Err(E::custom("\"always\" progress requires a `width` key")),
-                _ => Err(E::unknown_variant(s, &["auto", "never"])),
-            }
-        }
-
-        fn visit_none<E>(self) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(None)
-        }
-
-        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-        where
-            D: serde::de::Deserializer<'de>,
-        {
-            let pc = ProgressConfig::deserialize(deserializer)?;
-            if let ProgressConfig {
-                when: ProgressWhen::Always,
-                width: None,
-                ..
-            } = pc
-            {
-                return Err(serde::de::Error::custom(
-                    "\"always\" progress requires a `width` key",
-                ));
-            }
-            Ok(Some(pc))
+impl ConfigInclude {
+    fn new(p: impl Into<PathBuf>, def: Definition) -> Self {
+        Self {
+            path: p.into(),
+            def,
+            optional: false,
         }
     }
 
-    deserializer.deserialize_option(ProgressVisitor)
-}
-
-#[derive(Debug)]
-enum EnvConfigValueInner {
-    Simple(String),
-    WithOptions {
-        value: String,
-        force: bool,
-        relative: bool,
-    },
-}
-
-impl<'de> Deserialize<'de> for EnvConfigValueInner {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct WithOptions {
-            value: String,
-            #[serde(default)]
-            force: bool,
-            #[serde(default)]
-            relative: bool,
+    /// Resolves the absolute path for this include.
+    ///
+    /// For file based include,
+    /// it is relative to parent directory of the config file includes it.
+    /// For example, if `.cargo/config.toml has a `include = "foo.toml"`,
+    /// Cargo will load `.cargo/foo.toml`.
+    ///
+    /// For CLI based include (e.g., `--config 'include = "foo.toml"'`),
+    /// it is relative to the current working directory.
+    ///
+    /// Returns `None` if this is an optional include and the file doesn't exist.
+    /// Otherwise returns `Some(PathBuf)` with the absolute path.
+    fn resolve_path(&self, gctx: &GlobalContext) -> Option<PathBuf> {
+        let abs_path = match &self.def {
+            Definition::Path(p) | Definition::Cli(Some(p)) => p.parent().unwrap(),
+            Definition::Environment(_) | Definition::Cli(None) | Definition::BuiltIn => gctx.cwd(),
         }
+        .join(&self.path);
 
-        UntaggedEnumVisitor::new()
-            .string(|simple| Ok(EnvConfigValueInner::Simple(simple.to_owned())))
-            .map(|map| {
-                let with_options: WithOptions = map.deserialize()?;
-                Ok(EnvConfigValueInner::WithOptions {
-                    value: with_options.value,
-                    force: with_options.force,
-                    relative: with_options.relative,
-                })
-            })
-            .deserialize(deserializer)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(transparent)]
-pub struct EnvConfigValue {
-    inner: Value<EnvConfigValueInner>,
-}
-
-impl EnvConfigValue {
-    pub fn is_force(&self) -> bool {
-        match self.inner.val {
-            EnvConfigValueInner::Simple(_) => false,
-            EnvConfigValueInner::WithOptions { force, .. } => force,
-        }
-    }
-
-    pub fn resolve<'a>(&'a self, gctx: &GlobalContext) -> Cow<'a, OsStr> {
-        match self.inner.val {
-            EnvConfigValueInner::Simple(ref s) => Cow::Borrowed(OsStr::new(s.as_str())),
-            EnvConfigValueInner::WithOptions {
-                ref value,
-                relative,
-                ..
-            } => {
-                if relative {
-                    let p = self.inner.definition.root(gctx).join(&value);
-                    Cow::Owned(p.into_os_string())
-                } else {
-                    Cow::Borrowed(OsStr::new(value.as_str()))
-                }
-            }
+        if self.optional && !abs_path.exists() {
+            tracing::info!(
+                "skipping optional include `{}` in `{}`:  file not found at `{}`",
+                self.path.display(),
+                self.def,
+                abs_path.display(),
+            );
+            None
+        } else {
+            Some(abs_path)
         }
     }
 }
-
-pub type EnvConfig = HashMap<String, EnvConfigValue>;
 
 fn parse_document(toml: &str, _file: &Path, _gctx: &GlobalContext) -> CargoResult<toml::Table> {
     // At the moment, no compatibility checks are needed.

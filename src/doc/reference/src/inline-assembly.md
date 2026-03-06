@@ -49,14 +49,18 @@ r[asm.syntax]
 The following grammar specifies the arguments that can be passed to the `asm!`, `global_asm!` and `naked_asm!` macros.
 
 ```grammar,assembly
-@root AsmArgs -> FormatString (`,` FormatString)* (`,` AsmOperand)* `,`?
+@root AsmArgs -> AsmAttrFormatString (`,` AsmAttrFormatString)* (`,` AsmAttrOperand)* `,`?
 
 FormatString -> STRING_LITERAL | RAW_STRING_LITERAL | MacroInvocation
+
+AsmAttrFormatString -> (OuterAttribute)* FormatString
 
 AsmOperand ->
       ClobberAbi
     | AsmOptions
     | RegOperand
+
+AsmAttrOperand -> (OuterAttribute)* AsmOperand
 
 ClobberAbi -> `clobber_abi` `(` Abi (`,` Abi)* `,`? `)`
 
@@ -265,6 +269,44 @@ Further constraints on the directives used by inline assembly are indicated by [
 
 [format-syntax]: std::fmt#syntax
 [rfc-2795]: https://github.com/rust-lang/rfcs/pull/2795
+
+r[asm.attributes]
+## Attributes
+
+r[asm.attributes.supported-attributes]
+Only the [`cfg`] and [`cfg_attr`] attributes are accepted semantically on inline assembly template strings and operands. Other attributes are parsed but rejected when the assembly macro is expanded.
+
+```rust
+# fn main() {}
+# #[cfg(target_arch = "x86_64")]
+core::arch::global_asm!(
+    #[cfg(not(panic = "abort"))]
+    ".cfi_startproc",
+    // ...
+    "ret",
+    #[cfg(not(panic = "abort"))]
+    ".cfi_endproc",
+);
+```
+
+> [!NOTE]
+> In `rustc`, the assembly macros implement handling of these attributes separately from the normal system that handles similar attributes in the language. This accounts for the limited kinds of attributes supported and may give rise to subtle differences in behavior.
+
+r[asm.attributes.starts-with-template]
+Syntactically there must be at least one template string before the first operand.
+
+```rust,compile_fail
+// This is rejected because `a = out(reg) x` does not parse as a
+// template string.
+core::arch::asm!(
+    #[cfg(false)]
+    a = out(reg) x, // ERROR.
+    "",
+);
+```
+
+[`cfg`]: conditional-compilation.md#the-cfg-attribute
+[`cfg_attr`]: conditional-compilation.md#the-cfg_attr-attribute
 
 r[asm.operand-type]
 ## Operand type
@@ -1184,7 +1226,7 @@ let _: () = unsafe {
 
 r[asm.options.supported-options.nostack]
 - `nostack`: The assembly code does not push data to the stack, or write to the stack red-zone (if supported by the target).
-  If this option is *not* used then the stack pointer is guaranteed to be suitably aligned (according to the target ABI) for a function call.
+  If this option is *not* used then the stack pointer is guaranteed by the compiler at the start of the assembly code to be suitably aligned (according to the target ABI) for a function call.
 
 <!-- no_run: Test has undefined behavior at runtime -->
 ```rust,no_run

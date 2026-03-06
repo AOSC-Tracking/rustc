@@ -1,5 +1,0 @@
-[book]
-title = "empty_theme"
-
-[output.html]
-theme = "./theme"

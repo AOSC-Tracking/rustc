@@ -1,7 +1,7 @@
 use clippy_config::Conf;
 use clippy_config::types::InherentImplLintScope;
 use clippy_utils::diagnostics::span_lint_and_then;
-use clippy_utils::fulfill_or_allowed;
+use clippy_utils::{fulfill_or_allowed, is_cfg_test, is_in_cfg_test};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_hir::def_id::{LocalDefId, LocalModDefId};
 use rustc_hir::{Item, ItemKind, Node};
@@ -100,7 +100,22 @@ impl<'tcx> LateLintPass<'tcx> for MultipleInherentImpl {
                     },
                     InherentImplLintScope::Crate => Criterion::Crate,
                 };
-                match type_map.entry((impl_ty, criterion)) {
+                let is_test = is_cfg_test(cx.tcx, hir_id) || is_in_cfg_test(cx.tcx, hir_id);
+                let predicates = {
+                    // Gets the predicates (bounds) for the given impl block,
+                    // sorted for consistent comparison to allow distinguishing between impl blocks
+                    // with different generic bounds.
+                    let mut predicates = cx
+                        .tcx
+                        .predicates_of(impl_id)
+                        .predicates
+                        .iter()
+                        .map(|(clause, _)| *clause)
+                        .collect::<Vec<_>>();
+                    predicates.sort_by_key(|c| format!("{c:?}"));
+                    predicates
+                };
+                match type_map.entry((impl_ty, predicates, criterion, is_test)) {
                     Entry::Vacant(e) => {
                         // Store the id for the first impl block of this type. The span is retrieved lazily.
                         e.insert(IdOrSpan::Id(impl_id));
@@ -151,15 +166,12 @@ impl<'tcx> LateLintPass<'tcx> for MultipleInherentImpl {
 fn get_impl_span(cx: &LateContext<'_>, id: LocalDefId) -> Option<Span> {
     let id = cx.tcx.local_def_id_to_hir_id(id);
     if let Node::Item(&Item {
-        kind: ItemKind::Impl(impl_item),
+        kind: ItemKind::Impl(_),
         span,
         ..
     }) = cx.tcx.hir_node(id)
     {
-        (!span.from_expansion()
-            && impl_item.generics.params.is_empty()
-            && !fulfill_or_allowed(cx, MULTIPLE_INHERENT_IMPL, [id]))
-        .then_some(span)
+        (!span.from_expansion() && !fulfill_or_allowed(cx, MULTIPLE_INHERENT_IMPL, [id])).then_some(span)
     } else {
         None
     }

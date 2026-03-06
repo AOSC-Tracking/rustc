@@ -18,6 +18,7 @@ use anyhow::bail;
 use cargo_util::ProcessBuilder;
 use cargo_util::Sha256;
 use cargo_util::paths;
+use serde::Serialize;
 
 use crate::CARGO_ENV;
 use crate::CargoResult;
@@ -502,11 +503,19 @@ fn make_absolute_path(
     build_root: &Path,
     path: PathBuf,
 ) -> PathBuf {
-    match ty {
-        DepInfoPathType::PackageRootRelative => pkg_root.join(path),
-        // N.B. path might be absolute here in which case the join will have no effect
-        DepInfoPathType::BuildRootRelative => build_root.join(path),
+    let relative_to = match ty {
+        DepInfoPathType::PackageRootRelative => pkg_root,
+        // N.B. path might be absolute here in which case the join below will have no effect
+        DepInfoPathType::BuildRootRelative => build_root,
+    };
+
+    if path.as_os_str().is_empty() {
+        // Joining with an empty path causes Rust to add a trailing path separator. On Windows, this
+        // would add an invalid trailing backslash to the .d file.
+        return relative_to.to_path_buf();
     }
+
+    relative_to.join(path)
 }
 
 /// Some algorithms are here to ensure compatibility with possible rustc outputs.
@@ -657,6 +666,25 @@ impl fmt::Display for Checksum {
             self.algo,
             str::from_utf8(&checksum[0..(hash_len * 2)]).unwrap_or_default()
         )
+    }
+}
+
+impl Serialize for Checksum {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Checksum {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
     }
 }
 

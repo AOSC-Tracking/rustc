@@ -56,6 +56,7 @@ mod iter_with_drain;
 mod iterator_step_by_zero;
 mod join_absolute_paths;
 mod lib;
+mod lines_filter_map_ok;
 mod manual_c_str_literals;
 mod manual_contains;
 mod manual_inspect;
@@ -93,6 +94,7 @@ mod or_fun_call;
 mod or_then_unwrap;
 mod path_buf_push_overwrite;
 mod path_ends_with_ext;
+mod ptr_offset_by_literal;
 mod ptr_offset_with_cast;
 mod range_zip_with_len;
 mod read_line_without_trim;
@@ -137,7 +139,6 @@ mod unnecessary_option_map_or_else;
 mod unnecessary_result_map_or_else;
 mod unnecessary_sort_by;
 mod unnecessary_to_owned;
-mod unused_enumerate_index;
 mod unwrap_expect_used;
 mod useless_asref;
 mod useless_nonzero_new_unchecked;
@@ -888,7 +889,7 @@ declare_clippy_lint! {
     /// ```
     #[clippy::version = "pre 1.29.0"]
     pub SEARCH_IS_SOME,
-    complexity,
+    nursery,
     "using an iterator or string search followed by `is_some()` or `is_none()`, which is more succinctly expressed as a call to `any()` or `contains()` (with negation in case of `is_none()`)"
 }
 
@@ -1083,7 +1084,7 @@ declare_clippy_lint! {
     ///
     /// ### Why is this bad?
     /// In versions of the compiler before Rust 1.82.0, this bypasses the specialized
-    /// implementation of`ToString` and instead goes through the more expensive string
+    /// implementation of `ToString` and instead goes through the more expensive string
     /// formatting facilities.
     ///
     /// ### Example
@@ -1726,6 +1727,40 @@ declare_clippy_lint! {
     pub ZST_OFFSET,
     correctness,
     "Check for offset calculations on raw pointers to zero-sized types"
+}
+
+declare_clippy_lint! {
+    /// ### What it does
+    /// Checks for usage of the `offset` pointer method with an integer
+    /// literal.
+    ///
+    /// ### Why is this bad?
+    /// The `add` and `sub` methods more accurately express the intent.
+    ///
+    /// ### Example
+    /// ```no_run
+    /// let vec = vec![b'a', b'b', b'c'];
+    /// let ptr = vec.as_ptr();
+    ///
+    /// unsafe {
+    ///     ptr.offset(-8);
+    /// }
+    /// ```
+    ///
+    /// Could be written:
+    ///
+    /// ```no_run
+    /// let vec = vec![b'a', b'b', b'c'];
+    /// let ptr = vec.as_ptr();
+    ///
+    /// unsafe {
+    ///     ptr.sub(8);
+    /// }
+    /// ```
+    #[clippy::version = "1.92.0"]
+    pub PTR_OFFSET_BY_LITERAL,
+    pedantic,
+    "unneeded pointer offset"
 }
 
 declare_clippy_lint! {
@@ -4635,7 +4670,7 @@ declare_clippy_lint! {
     /// let x = vec![String::new()];
     /// let _ = x.iter().map(|x| x.len());
     /// ```
-    #[clippy::version = "1.90.0"]
+    #[clippy::version = "1.92.0"]
     pub REDUNDANT_ITER_CLONED,
     perf,
     "detects redundant calls to `Iterator::cloned`"
@@ -4659,10 +4694,59 @@ declare_clippy_lint! {
     /// let x: Option<u32> = Some(4);
     /// let y = x.unwrap_or_else(|| 2 * k);
     /// ```
-    #[clippy::version = "1.88.0"]
+    #[clippy::version = "1.92.0"]
     pub UNNECESSARY_OPTION_MAP_OR_ELSE,
     suspicious,
     "making no use of the \"map closure\" when calling `.map_or_else(|| 2 * k, |n| n)`"
+}
+
+declare_clippy_lint! {
+    /// ### What it does
+    /// Checks for usage of `lines.filter_map(Result::ok)` or `lines.flat_map(Result::ok)`
+    /// when `lines` has type `std::io::Lines`.
+    ///
+    /// ### Why is this bad?
+    /// `Lines` instances might produce a never-ending stream of `Err`, in which case
+    /// `filter_map(Result::ok)` will enter an infinite loop while waiting for an
+    /// `Ok` variant. Calling `next()` once is sufficient to enter the infinite loop,
+    /// even in the absence of explicit loops in the user code.
+    ///
+    /// This situation can arise when working with user-provided paths. On some platforms,
+    /// `std::fs::File::open(path)` might return `Ok(fs)` even when `path` is a directory,
+    /// but any later attempt to read from `fs` will return an error.
+    ///
+    /// ### Known problems
+    /// This lint suggests replacing `filter_map()` or `flat_map()` applied to a `Lines`
+    /// instance in all cases. There are two cases where the suggestion might not be
+    /// appropriate or necessary:
+    ///
+    /// - If the `Lines` instance can never produce any error, or if an error is produced
+    ///   only once just before terminating the iterator, using `map_while()` is not
+    ///   necessary but will not do any harm.
+    /// - If the `Lines` instance can produce intermittent errors then recover and produce
+    ///   successful results, using `map_while()` would stop at the first error.
+    ///
+    /// ### Example
+    /// ```no_run
+    /// # use std::{fs::File, io::{self, BufRead, BufReader}};
+    /// # let _ = || -> io::Result<()> {
+    /// let mut lines = BufReader::new(File::open("some-path")?).lines().filter_map(Result::ok);
+    /// // If "some-path" points to a directory, the next statement never terminates:
+    /// let first_line: Option<String> = lines.next();
+    /// # Ok(()) };
+    /// ```
+    /// Use instead:
+    /// ```no_run
+    /// # use std::{fs::File, io::{self, BufRead, BufReader}};
+    /// # let _ = || -> io::Result<()> {
+    /// let mut lines = BufReader::new(File::open("some-path")?).lines().map_while(Result::ok);
+    /// let first_line: Option<String> = lines.next();
+    /// # Ok(()) };
+    /// ```
+    #[clippy::version = "1.70.0"]
+    pub LINES_FILTER_MAP_OK,
+    suspicious,
+    "filtering `std::io::Lines` with `filter_map()`, `flat_map()`, or `flatten()` might cause an infinite loop"
 }
 
 #[expect(clippy::struct_excessive_bools)]
@@ -4754,6 +4838,7 @@ impl_lint_pass!(Methods => [
     UNINIT_ASSUMED_INIT,
     MANUAL_SATURATING_ARITHMETIC,
     ZST_OFFSET,
+    PTR_OFFSET_BY_LITERAL,
     PTR_OFFSET_WITH_CAST,
     FILETYPE_IS_FILE,
     OPTION_AS_REF_DEREF,
@@ -4847,6 +4932,7 @@ impl_lint_pass!(Methods => [
     IP_CONSTANT,
     REDUNDANT_ITER_CLONED,
     UNNECESSARY_OPTION_MAP_OR_ELSE,
+    LINES_FILTER_MAP_OK,
 ]);
 
 /// Extracts a method call name, args, and `Span` of the method name.
@@ -4854,8 +4940,8 @@ impl_lint_pass!(Methods => [
 /// come from expansion.
 pub fn method_call<'tcx>(recv: &'tcx Expr<'tcx>) -> Option<(Symbol, &'tcx Expr<'tcx>, &'tcx [Expr<'tcx>], Span, Span)> {
     if let ExprKind::MethodCall(path, receiver, args, call_span) = recv.kind
-        && !args.iter().any(|e| e.span.from_expansion())
-        && !receiver.span.from_expansion()
+        && !args.iter().any(|e| e.range_span().unwrap_or(e.span).from_expansion())
+        && !receiver.range_span().unwrap_or(receiver.span).from_expansion()
     {
         Some((path.ident.name, receiver, args, path.ident.span, call_span))
     } else {
@@ -4975,7 +5061,6 @@ impl Methods {
                     zst_offset::check(cx, expr, recv);
                 },
                 (sym::all, [arg]) => {
-                    unused_enumerate_index::check(cx, expr, recv, arg);
                     needless_character_iteration::check(cx, expr, recv, arg, true);
                     match method_call(recv) {
                         Some((sym::cloned, recv2, [], _, _)) => {
@@ -5005,7 +5090,6 @@ impl Methods {
                     }
                 },
                 (sym::any, [arg]) => {
-                    unused_enumerate_index::check(cx, expr, recv, arg);
                     needless_character_iteration::check(cx, expr, recv, arg, false);
                     match method_call(recv) {
                         Some((sym::cloned, recv2, [], _, _)) => iter_overeager_cloned::check(
@@ -5050,7 +5134,11 @@ impl Methods {
                 (sym::bytes, []) => unbuffered_bytes::check(cx, expr, recv),
                 (sym::cloned, []) => {
                     cloned_instead_of_copied::check(cx, expr, recv, span, self.msrv);
-                    option_as_ref_cloned::check(cx, recv, span);
+                    if let Some((method @ (sym::as_ref | sym::as_mut), as_ref_recv, [], as_ref_ident_span, _)) =
+                        method_call(recv)
+                    {
+                        option_as_ref_cloned::check(cx, span, method, as_ref_recv, as_ref_ident_span);
+                    }
                 },
                 (sym::collect, []) if cx.ty_based_def(expr).opt_parent(cx).is_diag_item(cx, sym::Iterator) => {
                     needless_collect::check(cx, span, expr, recv, call_span);
@@ -5115,7 +5203,7 @@ impl Methods {
                 },
                 (sym::expect, [_]) => {
                     match method_call(recv) {
-                        Some((sym::ok, recv, [], _, _)) => ok_expect::check(cx, expr, recv),
+                        Some((sym::ok, recv_inner, [], _, _)) => ok_expect::check(cx, expr, recv, recv_inner),
                         Some((sym::err, recv, [], err_span, _)) => {
                             err_expect::check(cx, expr, recv, span, err_span, self.msrv);
                         },
@@ -5161,52 +5249,61 @@ impl Methods {
                     }
                 },
                 (sym::filter_map, [arg]) => {
-                    unused_enumerate_index::check(cx, expr, recv, arg);
-                    unnecessary_filter_map::check(cx, expr, arg, name);
+                    unnecessary_filter_map::check(cx, expr, arg, call_span, unnecessary_filter_map::Kind::FilterMap);
                     filter_map_bool_then::check(cx, expr, arg, call_span);
                     filter_map_identity::check(cx, expr, arg, span);
-                },
-                (sym::find_map, [arg]) => {
-                    unused_enumerate_index::check(cx, expr, recv, arg);
-                    unnecessary_filter_map::check(cx, expr, arg, name);
-                },
-                (sym::flat_map, [arg]) => {
-                    unused_enumerate_index::check(cx, expr, recv, arg);
-                    flat_map_identity::check(cx, expr, arg, span);
-                    flat_map_option::check(cx, expr, arg, span);
-                },
-                (sym::flatten, []) => match method_call(recv) {
-                    Some((sym::map, recv, [map_arg], map_span, _)) => {
-                        map_flatten::check(cx, expr, recv, map_arg, map_span);
-                    },
-                    Some((sym::cloned, recv2, [], _, _)) => iter_overeager_cloned::check(
+                    lines_filter_map_ok::check_filter_or_flat_map(
                         cx,
                         expr,
                         recv,
-                        recv2,
-                        iter_overeager_cloned::Op::LaterCloned,
-                        true,
-                    ),
-                    _ => {},
+                        "filter_map",
+                        arg,
+                        call_span,
+                        self.msrv,
+                    );
                 },
-                (sym::fold, [init, acc]) => {
-                    manual_try_fold::check(cx, expr, init, acc, call_span, self.msrv);
-                    unnecessary_fold::check(cx, expr, init, acc, span);
+                (sym::find_map, [arg]) => {
+                    unnecessary_filter_map::check(cx, expr, arg, call_span, unnecessary_filter_map::Kind::FindMap);
                 },
-                (sym::for_each, [arg]) => {
-                    unused_enumerate_index::check(cx, expr, recv, arg);
+                (sym::flat_map, [arg]) => {
+                    flat_map_identity::check(cx, expr, arg, span);
+                    flat_map_option::check(cx, expr, arg, span);
+                    lines_filter_map_ok::check_filter_or_flat_map(
+                        cx, expr, recv, "flat_map", arg, call_span, self.msrv,
+                    );
+                },
+                (sym::flatten, []) => {
                     match method_call(recv) {
-                        Some((sym::inspect, _, [_], span2, _)) => inspect_for_each::check(cx, expr, span2),
+                        Some((sym::map, recv, [map_arg], map_span, _)) => {
+                            map_flatten::check(cx, expr, recv, map_arg, map_span);
+                        },
                         Some((sym::cloned, recv2, [], _, _)) => iter_overeager_cloned::check(
                             cx,
                             expr,
                             recv,
                             recv2,
-                            iter_overeager_cloned::Op::NeedlessMove(arg),
-                            false,
+                            iter_overeager_cloned::Op::LaterCloned,
+                            true,
                         ),
                         _ => {},
                     }
+                    lines_filter_map_ok::check_flatten(cx, expr, recv, call_span, self.msrv);
+                },
+                (sym::fold, [init, acc]) => {
+                    manual_try_fold::check(cx, expr, init, acc, call_span, self.msrv);
+                    unnecessary_fold::check(cx, expr, init, acc, span);
+                },
+                (sym::for_each, [arg]) => match method_call(recv) {
+                    Some((sym::inspect, _, [_], span2, _)) => inspect_for_each::check(cx, expr, span2),
+                    Some((sym::cloned, recv2, [], _, _)) => iter_overeager_cloned::check(
+                        cx,
+                        expr,
+                        recv,
+                        recv2,
+                        iter_overeager_cloned::Op::NeedlessMove(arg),
+                        false,
+                    ),
+                    _ => {},
                 },
                 (sym::get, [arg]) => {
                     get_first::check(cx, expr, recv, arg);
@@ -5267,7 +5364,6 @@ impl Methods {
                 },
                 (name @ (sym::map | sym::map_err), [m_arg]) => {
                     if name == sym::map {
-                        unused_enumerate_index::check(cx, expr, recv, m_arg);
                         map_clone::check(cx, expr, recv, m_arg, self.msrv);
                         map_with_unused_argument_over_ranges::check(cx, expr, recv, m_arg, self.msrv, span);
                         manual_is_variant_and::check_map(cx, expr);
@@ -5366,6 +5462,7 @@ impl Methods {
                     zst_offset::check(cx, expr, recv);
 
                     ptr_offset_with_cast::check(cx, name, expr, recv, arg, self.msrv);
+                    ptr_offset_by_literal::check(cx, expr, self.msrv);
                 },
                 (sym::ok_or_else, [arg]) => {
                     unnecessary_lazy_eval::check(cx, expr, recv, arg, "ok_or");
@@ -5507,14 +5604,7 @@ impl Methods {
                 (sym::unwrap_or, [u_arg]) => {
                     match method_call(recv) {
                         Some((arith @ (sym::checked_add | sym::checked_sub | sym::checked_mul), lhs, [rhs], _, _)) => {
-                            manual_saturating_arithmetic::check(
-                                cx,
-                                expr,
-                                lhs,
-                                rhs,
-                                u_arg,
-                                &arith.as_str()[const { "checked_".len() }..],
-                            );
+                            manual_saturating_arithmetic::check_unwrap_or(cx, expr, lhs, rhs, u_arg, arith);
                         },
                         Some((sym::map, m_recv, [m_arg], span, _)) => {
                             option_map_unwrap_or::check(cx, expr, m_recv, m_arg, recv, u_arg, span, self.msrv);
@@ -5535,6 +5625,9 @@ impl Methods {
                 },
                 (sym::unwrap_or_default, []) => {
                     match method_call(recv) {
+                        Some((sym::checked_sub, lhs, [rhs], _, _)) => {
+                            manual_saturating_arithmetic::check_sub_unwrap_or_default(cx, expr, lhs, rhs);
+                        },
                         Some((sym::map, m_recv, [arg], span, _)) => {
                             manual_is_variant_and::check(cx, expr, m_recv, arg, span, self.msrv);
                         },

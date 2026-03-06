@@ -117,8 +117,18 @@ This prevents one style from shadowing another.
 
 For example, the [`cfg` attribute] and the [`cfg` macro] are two different entities with the same name in the macro namespace, but they can still be used in their respective context.
 
-r[names.namespaces.sub-namespaces.use-shadow]
-It is still an error for a [`use` import] to shadow another macro, regardless of their sub-namespaces.
+<!-- ignore: requires external crates -->
+> [!NOTE]
+> `use` imports still cannot create duplicate bindings of the same name in a module or block, regardless of sub-namespace.
+>
+> ```rust,ignore
+> #[macro_export]
+> macro_rules! mymac {
+>     () => {};
+> }
+>
+> use myattr::mymac; // error[E0252]: the name `mymac` is defined multiple times.
+> ```
 
 [`cfg` attribute]: ../conditional-compilation.md#the-cfg-attribute
 [`cfg` macro]: ../conditional-compilation.md#the-cfg-macro
@@ -134,10 +144,10 @@ It is still an error for a [`use` import] to shadow another macro, regardless of
 [Associated const declarations]: ../items/associated-items.md#associated-constants
 [Associated function declarations]: ../items/associated-items.md#associated-functions-and-methods
 [Associated type declarations]: ../items/associated-items.md#associated-types
-[Attribute macros]: ../procedural-macros.md#attribute-macros
+[Attribute macros]: ../procedural-macros.md#the-proc_macro_attribute-attribute
 [attributes]: ../attributes.md
 [bang-style macros]: ../macros.md
-[Block labels]: ../expressions/loop-expr.md#labelled-block-expressions
+[Block labels]: expr.loop.block-labels
 [boolean]: ../types/boolean.md
 [Built-in attributes]: ../attributes.md#built-in-attributes-index
 [closure parameters]: ../expressions/closure-expr.md
@@ -153,7 +163,7 @@ It is still an error for a [`use` import] to shadow another macro, regardless of
 [field expression]: ../expressions/field-expr.md
 [Function declarations]: ../items/functions.md
 [function parameters]: ../items/functions.md#function-parameters
-[Function-like procedural macros]: ../procedural-macros.md#function-like-procedural-macros
+[Function-like procedural macros]: ../procedural-macros.md#the-proc_macro-attribute
 [Generic const parameters]: ../items/generics.md#const-generics
 [Generic lifetime parameters]: ../items/generics.md
 [Generic type parameters]: ../items/generics.md

@@ -1,4 +1,3 @@
-{{#include attributes-redirect.html}}
 r[attributes]
 # Attributes
 
@@ -23,9 +22,44 @@ to name, convention, language, and compiler version. Attributes are modeled
 on Attributes in [ECMA-335], with the syntax coming from [ECMA-334] \(C#).
 
 r[attributes.inner]
-_Inner attributes_, written with a bang (`!`) after the hash (`#`), apply to the
-item that the attribute is declared within. _Outer attributes_, written without
-the bang after the hash, apply to the thing that follows the attribute.
+_Inner attributes_, written with a bang (`!`) after the hash (`#`), apply to the form that the attribute is declared within.
+
+> [!EXAMPLE]
+> ```rust
+> // General metadata applied to the enclosing module or crate.
+> #![crate_type = "lib"]
+>
+> // Inner attribute applies to the entire function.
+> fn some_unused_variables() {
+>   #![allow(unused_variables)]
+>
+>   let x = ();
+>   let y = ();
+>   let z = ();
+> }
+> ```
+
+r[attributes.outer]
+_Outer attributes_, written without the bang after the hash, apply to the form that follows the attribute.
+
+> [!EXAMPLE]
+> ```rust
+> // A function marked as a unit test
+> #[test]
+> fn test_foo() {
+>     /* ... */
+> }
+>
+> // A conditionally-compiled module
+> #[cfg(target_os = "linux")]
+> mod bar {
+>     /* ... */
+> }
+>
+> // A lint attribute used to suppress a warning/error
+> #[allow(non_camel_case_types)]
+> type int8_t = i8;
+> ```
 
 r[attributes.input]
 The attribute consists of a path to the attribute, followed by an optional
@@ -56,7 +90,7 @@ Attributes can be classified into the following kinds:
 * [Tool attributes](#tool-attributes)
 
 r[attributes.allowed-position]
-Attributes may be applied to many things in the language:
+Attributes may be applied to many forms in the language:
 
 * All [item declarations] accept outer attributes while [external blocks],
   [functions], [implementations], and [modules] accept inner attributes.
@@ -73,38 +107,7 @@ Attributes may be applied to many things in the language:
 * [Function][functions], [closure] and [function pointer]
   parameters accept outer attributes. This includes attributes on variadic parameters
   denoted with `...` in function pointers and [external blocks][variadic functions].
-
-Some examples of attributes:
-
-```rust
-// General metadata applied to the enclosing module or crate.
-#![crate_type = "lib"]
-
-// A function marked as a unit test
-#[test]
-fn test_foo() {
-    /* ... */
-}
-
-// A conditionally-compiled module
-#[cfg(target_os = "linux")]
-mod bar {
-    /* ... */
-}
-
-// A lint attribute used to suppress a warning/error
-#[allow(non_camel_case_types)]
-type int8_t = i8;
-
-// Inner attribute applies to the entire function.
-fn some_unused_variables() {
-  #![allow(unused_variables)]
-
-  let x = ();
-  let y = ();
-  let z = ();
-}
-```
+* [Inline assembly] template strings and operands accept outer attributes. Only certain attributes are accepted semantically; for details, see [asm.attributes.supported-attributes].
 
 r[attributes.meta]
 ## Meta item attribute syntax
@@ -196,7 +199,7 @@ r[attributes.activity]
 
 r[attributes.activity.intro]
 An attribute is either active or inert. During attribute processing, *active
-attributes* remove themselves from the thing they are on while *inert attributes*
+attributes* remove themselves from the form they are on while *inert attributes*
 stay on.
 
 The [`cfg`] and [`cfg_attr`] attributes are active.
@@ -232,7 +235,7 @@ pub fn f() {}
 ```
 
 > [!NOTE]
-> `rustc` currently recognizes the tools "clippy", "rustfmt", "diagnostic", "miri" and "rust_analyzer".
+> `rustc` currently recognizes the tools "clippy", "rustfmt", "diagnostic", "miri", and "rust_analyzer".
 
 r[attributes.builtin]
 ## Built-in attributes index
@@ -295,7 +298,7 @@ The following is an index of all built-in attributes.
   - [`no_builtins`] --- Disables use of certain built-in functions.
   - [`target_feature`] --- Configure platform-specific code generation.
   - [`track_caller`] --- Pass the parent call location to `std::panic::Location::caller()`.
-  - [`instruction_set`] --- Specify the instruction set used to generate a functions code
+  - [`instruction_set`] --- Specify the instruction set used to generate a function's code.
 
 - Documentation
   - `doc` --- Specifies documentation. See [The Rustdoc Book] for more
@@ -359,7 +362,7 @@ The following is an index of all built-in attributes.
 [`link_ordinal`]: items/external-blocks.md#the-link_ordinal-attribute
 [`link_section`]: abi.md#the-link_section-attribute
 [`link`]: items/external-blocks.md#the-link-attribute
-[`macro_export`]: macros-by-example.md#path-based-scope
+[`macro_export`]: macros-by-example.md#the-macro_export-attribute
 [`macro_use`]: macros-by-example.md#the-macro_use-attribute
 [`must_use`]: attributes/diagnostics.md#the-must_use-attribute
 [`naked`]: attributes/codegen.md#the-naked-attribute
@@ -372,9 +375,9 @@ The following is an index of all built-in attributes.
 [`non_exhaustive`]: attributes/type_system.md#the-non_exhaustive-attribute
 [`panic_handler`]: panic.md#the-panic_handler-attribute
 [`path`]: items/modules.md#the-path-attribute
-[`proc_macro_attribute`]: procedural-macros.md#attribute-macros
+[`proc_macro_attribute`]: procedural-macros.md#the-proc_macro_attribute-attribute
 [`proc_macro_derive`]: macro.proc.derive
-[`proc_macro`]: procedural-macros.md#function-like-procedural-macros
+[`proc_macro`]: procedural-macros.md#the-proc_macro-attribute
 [`recursion_limit`]: attributes/limits.md#the-recursion_limit-attribute
 [`repr`]: type-layout.md#representations
 [`should_panic`]: attributes/testing.md#the-should_panic-attribute
@@ -385,7 +388,7 @@ The following is an index of all built-in attributes.
 [`used`]: abi.md#the-used-attribute
 [`warn`]: attributes/diagnostics.md#lint-check-attributes
 [`windows_subsystem`]: runtime.md#the-windows_subsystem-attribute
-[attribute macros]: procedural-macros.md#attribute-macros
+[attribute macros]: procedural-macros.md#the-proc_macro_attribute-attribute
 [block expressions]: expressions/block-expr.md
 [built-in attributes]: #built-in-attributes-index
 [derive macro helper attributes]: procedural-macros.md#derive-macro-helper-attributes
@@ -407,3 +410,4 @@ The following is an index of all built-in attributes.
 [variadic functions]: items/external-blocks.html#variadic-functions
 [`diagnostic::on_unimplemented`]: attributes/diagnostics.md#the-diagnosticon_unimplemented-attribute
 [`diagnostic::do_not_recommend`]: attributes/diagnostics.md#the-diagnosticdo_not_recommend-attribute
+[Inline assembly]: inline-assembly.md

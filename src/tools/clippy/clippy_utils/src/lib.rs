@@ -5,7 +5,7 @@
 #![feature(rustc_private)]
 #![feature(assert_matches)]
 #![feature(unwrap_infallible)]
-#![feature(array_windows)]
+#![cfg_attr(bootstrap, feature(array_windows))]
 #![recursion_limit = "512"]
 #![allow(
     clippy::missing_errors_doc,
@@ -50,6 +50,7 @@ extern crate rustc_span;
 extern crate rustc_trait_selection;
 
 pub mod ast_utils;
+#[deny(missing_docs)]
 pub mod attrs;
 mod check_proc_macro;
 pub mod comparisons;
@@ -89,13 +90,13 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use itertools::Itertools;
 use rustc_abi::Integer;
 use rustc_ast::ast::{self, LitKind, RangeLimits};
-use rustc_ast::join_path_syms;
+use rustc_ast::{LitIntType, join_path_syms};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::indexmap;
 use rustc_data_structures::packed::Pu128;
 use rustc_data_structures::unhash::UnindexMap;
 use rustc_hir::LangItem::{OptionNone, OptionSome, ResultErr, ResultOk};
-use rustc_hir::attrs::AttributeKind;
+use rustc_hir::attrs::{AttributeKind, CfgEntry};
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId, LocalModDefId};
 use rustc_hir::definitions::{DefPath, DefPathData};
@@ -131,9 +132,12 @@ use crate::ast_utils::unordered_over;
 use crate::consts::{ConstEvalCtxt, Constant};
 use crate::higher::Range;
 use crate::msrvs::Msrv;
-use crate::res::{MaybeDef, MaybeResPath};
+use crate::res::{MaybeDef, MaybeQPath, MaybeResPath};
 use crate::ty::{adt_and_variant_of_res, can_partially_move_ty, expr_sig, is_copy, is_recursively_primitive_type};
 use crate::visitors::for_each_expr_without_closures;
+
+/// Methods on `Vec` that also exists on slices.
+pub const VEC_METHODS_SHADOWING_SLICE_METHODS: [Symbol; 3] = [sym::as_ptr, sym::is_empty, sym::len];
 
 #[macro_export]
 macro_rules! extract_msrv_attr {
@@ -300,6 +304,22 @@ pub fn is_lang_item_or_ctor(cx: &LateContext<'_>, did: DefId, item: LangItem) ->
     cx.tcx.lang_items().get(item) == Some(did)
 }
 
+/// Checks is `expr` is `None`
+pub fn is_none_expr(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
+    expr.res(cx).ctor_parent(cx).is_lang_item(cx, OptionNone)
+}
+
+/// If `expr` is `Some(inner)`, returns `inner`
+pub fn as_some_expr<'tcx>(cx: &LateContext<'_>, expr: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
+    if let ExprKind::Call(e, [arg]) = expr.kind
+        && e.res(cx).ctor_parent(cx).is_lang_item(cx, OptionSome)
+    {
+        Some(arg)
+    } else {
+        None
+    }
+}
+
 /// Checks if `expr` is an empty block or an empty tuple.
 pub fn is_unit_expr(expr: &Expr<'_>) -> bool {
     matches!(
@@ -318,6 +338,25 @@ pub fn is_unit_expr(expr: &Expr<'_>) -> bool {
 /// Checks if given pattern is a wildcard (`_`)
 pub fn is_wild(pat: &Pat<'_>) -> bool {
     matches!(pat.kind, PatKind::Wild)
+}
+
+/// If `pat` is:
+/// - `Some(inner)`, returns `inner`
+///    - it will _usually_ contain just one element, but could have two, given patterns like
+///      `Some(inner, ..)` or `Some(.., inner)`
+/// - `Some`, returns `[]`
+/// - otherwise, returns `None`
+pub fn as_some_pattern<'a, 'hir>(cx: &LateContext<'_>, pat: &'a Pat<'hir>) -> Option<&'a [Pat<'hir>]> {
+    if let PatKind::TupleStruct(ref qpath, inner, _) = pat.kind
+        && cx
+            .qpath_res(qpath, pat.hir_id)
+            .ctor_parent(cx)
+            .is_lang_item(cx, OptionSome)
+    {
+        Some(inner)
+    } else {
+        None
+    }
 }
 
 /// Checks if the `pat` is `None`.
@@ -342,7 +381,7 @@ pub fn is_ty_alias(qpath: &QPath<'_>) -> bool {
     match *qpath {
         QPath::Resolved(_, path) => matches!(path.res, Res::Def(DefKind::TyAlias | DefKind::AssocTy, ..)),
         QPath::TypeRelative(ty, _) if let TyKind::Path(qpath) = ty.kind => is_ty_alias(&qpath),
-        _ => false,
+        QPath::TypeRelative(..) => false,
     }
 }
 
@@ -361,7 +400,6 @@ pub fn last_path_segment<'tcx>(path: &QPath<'tcx>) -> &'tcx PathSegment<'tcx> {
     match *path {
         QPath::Resolved(_, path) => path.segments.last().expect("A path must have at least one segment"),
         QPath::TypeRelative(_, seg) => seg,
-        QPath::LangItem(..) => panic!("last_path_segment: lang item has no path segments"),
     }
 }
 
@@ -783,7 +821,7 @@ pub fn capture_local_usage(cx: &LateContext<'_>, e: &Expr<'_>) -> CaptureKind {
             ByRef::No if !is_copy(cx, cx.typeck_results().node_type(id)) => {
                 capture = CaptureKind::Value;
             },
-            ByRef::Yes(Mutability::Mut) if capture != CaptureKind::Value => {
+            ByRef::Yes(_, Mutability::Mut) if capture != CaptureKind::Value => {
                 capture = CaptureKind::Ref(Mutability::Mut);
             },
             _ => (),
@@ -1282,7 +1320,7 @@ pub fn is_else_clause_in_let_else(tcx: TyCtxt<'_>, expr: &Expr<'_>) -> bool {
 /// If the given `Expr` is not some kind of range, the function returns `false`.
 pub fn is_range_full(cx: &LateContext<'_>, expr: &Expr<'_>, container_path: Option<&Path<'_>>) -> bool {
     let ty = cx.typeck_results().expr_ty(expr);
-    if let Some(Range { start, end, limits }) = Range::hir(expr) {
+    if let Some(Range { start, end, limits, .. }) = Range::hir(cx, expr) {
         let start_is_none_or_min = start.is_none_or(|start| {
             if let rustc_ty::Adt(_, subst) = ty.kind()
                 && let bnd_ty = subst.type_at(0)
@@ -1344,6 +1382,17 @@ pub fn is_integer_literal(expr: &Expr<'_>, value: u128) -> bool {
     {
         return v == value;
     }
+    false
+}
+
+/// Checks whether the given expression is an untyped integer literal.
+pub fn is_integer_literal_untyped(expr: &Expr<'_>) -> bool {
+    if let ExprKind::Lit(spanned) = expr.kind
+        && let LitKind::Int(_, suffix) = spanned.node
+    {
+        return suffix == LitIntType::Unsuffixed;
+    }
+
     false
 }
 
@@ -1463,7 +1512,7 @@ pub fn is_refutable(cx: &LateContext<'_>, pat: &Pat<'_>) -> bool {
         PatKind::Missing => unreachable!(),
         PatKind::Wild | PatKind::Never => false, // If `!` typechecked then the type is empty, so not refutable.
         PatKind::Binding(_, _, _, pat) => pat.is_some_and(|pat| is_refutable(cx, pat)),
-        PatKind::Box(pat) | PatKind::Ref(pat, _) => is_refutable(cx, pat),
+        PatKind::Box(pat) | PatKind::Ref(pat, _, _) => is_refutable(cx, pat),
         PatKind::Expr(PatExpr {
             kind: PatExprKind::Path(qpath),
             hir_id,
@@ -1613,7 +1662,7 @@ pub fn is_lint_allowed(cx: &LateContext<'_>, lint: &'static Lint, id: HirId) -> 
 }
 
 pub fn strip_pat_refs<'hir>(mut pat: &'hir Pat<'hir>) -> &'hir Pat<'hir> {
-    while let PatKind::Ref(subpat, _) = pat.kind {
+    while let PatKind::Ref(subpat, _, _) = pat.kind {
         pat = subpat;
     }
     pat
@@ -1831,7 +1880,7 @@ pub fn is_expr_identity_of_pat(cx: &LateContext<'_>, pat: &Pat<'_>, expr: &Expr<
         .typeck_results()
         .pat_binding_modes()
         .get(pat.hir_id)
-        .is_some_and(|mode| matches!(mode.0, ByRef::Yes(_)))
+        .is_some_and(|mode| matches!(mode.0, ByRef::Yes(..)))
     {
         // If the parameter is `(x, y)` of type `&(T, T)`, or `[x, y]` of type `&[T; 2]`, then
         // due to match ergonomics, the inner patterns become references. Don't consider this
@@ -2158,7 +2207,7 @@ where
 /// references removed.
 pub fn peel_hir_pat_refs<'a>(pat: &'a Pat<'a>) -> (&'a Pat<'a>, usize) {
     fn peel<'a>(pat: &'a Pat<'a>, count: usize) -> (&'a Pat<'a>, usize) {
-        if let PatKind::Ref(pat, _) = pat.kind {
+        if let PatKind::Ref(pat, _, _) = pat.kind {
             peel(pat, count + 1)
         } else {
             (pat, count)
@@ -2363,17 +2412,15 @@ pub fn is_test_function(tcx: TyCtxt<'_>, fn_def_id: LocalDefId) -> bool {
 /// This only checks directly applied attributes, to see if a node is inside a `#[cfg(test)]` parent
 /// use [`is_in_cfg_test`]
 pub fn is_cfg_test(tcx: TyCtxt<'_>, id: HirId) -> bool {
-    tcx.hir_attrs(id).iter().any(|attr| {
-        if attr.has_name(sym::cfg_trace)
-            && let Some(items) = attr.meta_item_list()
-            && let [item] = &*items
-            && item.has_name(sym::test)
-        {
-            true
-        } else {
-            false
-        }
-    })
+    if let Some(cfgs) = find_attr!(tcx.hir_attrs(id), AttributeKind::CfgTrace(cfgs) => cfgs)
+        && cfgs
+            .iter()
+            .any(|(cfg, _)| matches!(cfg, CfgEntry::NameValue { name: sym::test, .. }))
+    {
+        true
+    } else {
+        false
+    }
 }
 
 /// Checks if any parent node of `HirId` has `#[cfg(test)]` attribute applied
@@ -2388,11 +2435,12 @@ pub fn is_in_test(tcx: TyCtxt<'_>, hir_id: HirId) -> bool {
 
 /// Checks if the item of any of its parents has `#[cfg(...)]` attribute applied.
 pub fn inherits_cfg(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
-    tcx.has_attr(def_id, sym::cfg_trace)
-        || tcx
-            .hir_parent_iter(tcx.local_def_id_to_hir_id(def_id))
-            .flat_map(|(parent_id, _)| tcx.hir_attrs(parent_id))
-            .any(|attr| attr.has_name(sym::cfg_trace))
+    find_attr!(tcx.get_all_attrs(def_id), AttributeKind::CfgTrace(..))
+        || find_attr!(
+            tcx.hir_parent_iter(tcx.local_def_id_to_hir_id(def_id))
+                .flat_map(|(parent_id, _)| tcx.hir_attrs(parent_id)),
+            AttributeKind::CfgTrace(..)
+        )
 }
 
 /// Walks up the HIR tree from the given expression in an attempt to find where the value is
@@ -2452,7 +2500,7 @@ pub enum DefinedTy<'tcx> {
     /// in the context of its definition site. We also track the `def_id` of its
     /// definition site.
     ///
-    /// WARNING: As the `ty` in in the scope of the definition, not of the function
+    /// WARNING: As the `ty` is in the scope of the definition, not of the function
     /// using it, you must be very careful with how you use it. Using it in the wrong
     /// scope easily results in ICEs.
     Mir {
@@ -2681,7 +2729,6 @@ pub fn expr_use_ctxt<'tcx>(cx: &LateContext<'tcx>, e: &Expr<'tcx>) -> ExprUseCtx
             moved_before_use,
             same_ctxt,
         },
-        Some(ControlFlow::Break(_)) => unreachable!("type of node is ControlFlow<!>"),
         None => ExprUseCtxt {
             node: Node::Crate(cx.tcx.hir_root_module()),
             child_id: HirId::INVALID,
@@ -2783,11 +2830,7 @@ pub fn pat_and_expr_can_be_question_mark<'a, 'hir>(
     pat: &'a Pat<'hir>,
     else_body: &Expr<'_>,
 ) -> Option<&'a Pat<'hir>> {
-    if let PatKind::TupleStruct(pat_path, [inner_pat], _) = pat.kind
-        && cx
-            .qpath_res(&pat_path, pat.hir_id)
-            .ctor_parent(cx)
-            .is_lang_item(cx, OptionSome)
+    if let Some([inner_pat]) = as_some_pattern(cx, pat)
         && !is_refutable(cx, inner_pat)
         && let else_body = peel_blocks(else_body)
         && let ExprKind::Ret(Some(ret_val)) = else_body.kind

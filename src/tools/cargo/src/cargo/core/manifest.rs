@@ -17,7 +17,7 @@ use url::Url;
 use crate::core::compiler::rustdoc::RustdocScrapeExamples;
 use crate::core::compiler::{CompileKind, CrateType};
 use crate::core::resolver::ResolveBehavior;
-use crate::core::{Dependency, PackageId, PackageIdSpec, SourceId, Summary};
+use crate::core::{Dependency, PackageId, PackageIdSpec, Patch, SourceId, Summary};
 use crate::core::{Edition, Feature, Features, WorkspaceConfig};
 use crate::util::errors::*;
 use crate::util::interning::InternedString;
@@ -62,9 +62,9 @@ impl EitherManifest {
 #[derive(Clone, Debug)]
 pub struct Manifest {
     // alternate forms of manifests:
-    contents: Rc<String>,
-    document: Rc<toml::Spanned<toml::de::DeTable<'static>>>,
-    original_toml: Rc<TomlManifest>,
+    contents: Option<Rc<String>>,
+    document: Option<Rc<toml::Spanned<toml::de::DeTable<'static>>>>,
+    original_toml: Option<Rc<TomlManifest>>,
     normalized_toml: Rc<TomlManifest>,
     summary: Summary,
 
@@ -80,7 +80,7 @@ pub struct Manifest {
     custom_metadata: Option<toml::Value>,
     publish: Option<Vec<String>>,
     replace: Vec<(PackageIdSpec, Dependency)>,
-    patch: HashMap<Url, Vec<Dependency>>,
+    patch: HashMap<Url, Vec<Patch>>,
     workspace: WorkspaceConfig,
     unstable_features: Features,
     edition: Edition,
@@ -109,14 +109,14 @@ pub struct Warnings(Vec<DelayedWarning>);
 #[derive(Clone, Debug)]
 pub struct VirtualManifest {
     // alternate forms of manifests:
-    contents: Rc<String>,
-    document: Rc<toml::Spanned<toml::de::DeTable<'static>>>,
-    original_toml: Rc<TomlManifest>,
+    contents: Option<Rc<String>>,
+    document: Option<Rc<toml::Spanned<toml::de::DeTable<'static>>>>,
+    original_toml: Option<Rc<TomlManifest>>,
     normalized_toml: Rc<TomlManifest>,
 
     // this form of manifest:
     replace: Vec<(PackageIdSpec, Dependency)>,
-    patch: HashMap<Url, Vec<Dependency>>,
+    patch: HashMap<Url, Vec<Patch>>,
     workspace: WorkspaceConfig,
     warnings: Warnings,
     features: Features,
@@ -496,9 +496,9 @@ compact_debug! {
 
 impl Manifest {
     pub fn new(
-        contents: Rc<String>,
-        document: Rc<toml::Spanned<toml::de::DeTable<'static>>>,
-        original_toml: Rc<TomlManifest>,
+        contents: Option<Rc<String>>,
+        document: Option<Rc<toml::Spanned<toml::de::DeTable<'static>>>>,
+        original_toml: Option<Rc<TomlManifest>>,
         normalized_toml: Rc<TomlManifest>,
         summary: Summary,
 
@@ -512,7 +512,7 @@ impl Manifest {
         custom_metadata: Option<toml::Value>,
         publish: Option<Vec<String>>,
         replace: Vec<(PackageIdSpec, Dependency)>,
-        patch: HashMap<Url, Vec<Dependency>>,
+        patch: HashMap<Url, Vec<Patch>>,
         workspace: WorkspaceConfig,
         unstable_features: Features,
         edition: Edition,
@@ -559,8 +559,8 @@ impl Manifest {
     }
 
     /// The raw contents of the original TOML
-    pub fn contents(&self) -> &str {
-        self.contents.as_str()
+    pub fn contents(&self) -> Option<&str> {
+        self.contents.as_deref().map(|c| c.as_str())
     }
     /// See [`Manifest::normalized_toml`] for what "normalized" means
     pub fn to_normalized_contents(&self) -> CargoResult<String> {
@@ -568,12 +568,12 @@ impl Manifest {
         Ok(format!("{}\n{}", MANIFEST_PREAMBLE, toml))
     }
     /// Collection of spans for the original TOML
-    pub fn document(&self) -> &toml::Spanned<toml::de::DeTable<'static>> {
-        &self.document
+    pub fn document(&self) -> Option<&toml::Spanned<toml::de::DeTable<'static>>> {
+        self.document.as_deref()
     }
     /// The [`TomlManifest`] as parsed from [`Manifest::document`]
-    pub fn original_toml(&self) -> &TomlManifest {
-        &self.original_toml
+    pub fn original_toml(&self) -> Option<&TomlManifest> {
+        self.original_toml.as_deref()
     }
     /// The [`TomlManifest`] with all fields expanded
     ///
@@ -640,7 +640,7 @@ impl Manifest {
     pub fn replace(&self) -> &[(PackageIdSpec, Dependency)] {
         &self.replace
     }
-    pub fn patch(&self) -> &HashMap<Url, Vec<Dependency>> {
+    pub fn patch(&self) -> &HashMap<Url, Vec<Patch>> {
         &self.patch
     }
     pub fn links(&self) -> Option<&str> {
@@ -744,12 +744,12 @@ impl Manifest {
 
 impl VirtualManifest {
     pub fn new(
-        contents: Rc<String>,
-        document: Rc<toml::Spanned<toml::de::DeTable<'static>>>,
-        original_toml: Rc<TomlManifest>,
+        contents: Option<Rc<String>>,
+        document: Option<Rc<toml::Spanned<toml::de::DeTable<'static>>>>,
+        original_toml: Option<Rc<TomlManifest>>,
         normalized_toml: Rc<TomlManifest>,
         replace: Vec<(PackageIdSpec, Dependency)>,
-        patch: HashMap<Url, Vec<Dependency>>,
+        patch: HashMap<Url, Vec<Patch>>,
         workspace: WorkspaceConfig,
         features: Features,
         resolve_behavior: Option<ResolveBehavior>,
@@ -769,16 +769,16 @@ impl VirtualManifest {
     }
 
     /// The raw contents of the original TOML
-    pub fn contents(&self) -> &str {
-        self.contents.as_str()
+    pub fn contents(&self) -> Option<&str> {
+        self.contents.as_deref().map(|c| c.as_str())
     }
     /// Collection of spans for the original TOML
-    pub fn document(&self) -> &toml::Spanned<toml::de::DeTable<'static>> {
-        &self.document
+    pub fn document(&self) -> Option<&toml::Spanned<toml::de::DeTable<'static>>> {
+        self.document.as_deref()
     }
     /// The [`TomlManifest`] as parsed from [`VirtualManifest::document`]
-    pub fn original_toml(&self) -> &TomlManifest {
-        &self.original_toml
+    pub fn original_toml(&self) -> Option<&TomlManifest> {
+        self.original_toml.as_deref()
     }
     /// The [`TomlManifest`] with all fields expanded
     pub fn normalized_toml(&self) -> &TomlManifest {
@@ -789,7 +789,7 @@ impl VirtualManifest {
         &self.replace
     }
 
-    pub fn patch(&self) -> &HashMap<Url, Vec<Dependency>> {
+    pub fn patch(&self) -> &HashMap<Url, Vec<Patch>> {
         &self.patch
     }
 

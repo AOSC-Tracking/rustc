@@ -2708,7 +2708,7 @@ fn calc_bin_artifact_fingerprint() {
 [DIRTY] bar v0.5.0 ([ROOT]/foo/bar): the file `bar/src/main.rs` has changed ([..])
 [COMPILING] bar v0.5.0 ([ROOT]/foo/bar)
 [RUNNING] `rustc --crate-name bar [..]`
-[DIRTY] foo v0.1.0 ([ROOT]/foo): the dependency bar was rebuilt
+[DIRTY] foo v0.1.0 ([ROOT]/foo): the dependency `bar` was rebuilt
 [CHECKING] foo v0.1.0 ([ROOT]/foo)
 [RUNNING] `rustc --crate-name foo [..]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -3393,4 +3393,200 @@ staticlib present: true
 
 "#]],
     );
+}
+
+#[cargo_test]
+fn artifact_dep_target_does_not_propagate_to_deps_of_build_script() {
+    if cross_compile_disabled() {
+        return;
+    }
+    let bindeps_target = cross_compile::alternate();
+    let native_target = cross_compile::native();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            &r#"
+            [package]
+            name = "foo"
+            version = "0.0.1"
+            edition = "2015"
+            resolver = "2"
+
+            [dependencies.artifact]
+            path = "artifact"
+            artifact = "bin"
+            target = "$TARGET"
+        "#
+            .replace("$TARGET", bindeps_target),
+        )
+        .file(
+            "src/main.rs",
+            r#"
+            fn main() {
+                let _b = include_bytes!(env!("CARGO_BIN_FILE_ARTIFACT"));
+            }
+        "#,
+        )
+        .file(
+            "artifact/Cargo.toml",
+            r#"
+            [package]
+            name = "artifact"
+            version = "0.0.1"
+            edition = "2015"
+
+            [build-dependencies]
+            builder = { path = "../builder" }
+            "#,
+        )
+        .file("artifact/src/main.rs", "fn main() { }")
+        .file(
+            "artifact/build.rs",
+            r#"
+            extern crate builder;
+            fn main() {
+                let _ = builder::add(1, 2);
+            }
+            "#,
+        )
+        .file(
+            "builder/Cargo.toml",
+            &r#"
+            [package]
+            name = "builder"
+            version = "0.0.1"
+            edition = "2015"
+
+            [target.'$TARGET'.dependencies]
+            arch = { path = "../arch" }
+            "#
+            .replace("$TARGET", native_target),
+        )
+        .file(
+            "builder/src/lib.rs",
+            r#"
+            extern crate arch;
+            pub fn add(a: i32, b: i32) -> i32 { arch::add(a, b) }
+            "#,
+        )
+        .file(
+            "arch/Cargo.toml",
+            r#"
+            [package]
+            name = "arch"
+            version = "0.0.1"
+            edition = "2015"
+            "#,
+        )
+        .file(
+            "arch/src/lib.rs",
+            r#"pub fn add(a: i32, b: i32) -> i32 { a + b }"#,
+        )
+        .build();
+    p.cargo("test -Z bindeps")
+        .with_stderr_data(str![[r#"
+[LOCKING] 3 packages to latest compatible versions
+[COMPILING] arch v0.0.1 ([ROOT]/foo/arch)
+[COMPILING] builder v0.0.1 ([ROOT]/foo/builder)
+[COMPILING] artifact v0.0.1 ([ROOT]/foo/artifact)
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] unittests src/main.rs (target/debug/deps/foo-[HASH][EXE])
+
+"#]])
+        .masquerade_as_nightly_cargo(&["bindeps"])
+        .run();
+}
+
+#[cargo_test]
+fn artifact_dep_target_does_not_propagate_to_proc_macro() {
+    if cross_compile_disabled() {
+        return;
+    }
+    let bindeps_target = cross_compile::alternate();
+    let native_target = cross_compile::native();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            &r#"
+            [package]
+            name = "foo"
+            version = "0.0.1"
+            edition = "2015"
+            resolver = "2"
+
+            [dependencies.artifact]
+            path = "artifact"
+            artifact = "bin"
+            target = "$TARGET"
+        "#
+            .replace("$TARGET", bindeps_target),
+        )
+        .file(
+            "src/main.rs",
+            r#"
+            fn main() {
+                let _b = include_bytes!(env!("CARGO_BIN_FILE_ARTIFACT"));
+            }
+        "#,
+        )
+        .file(
+            "artifact/Cargo.toml",
+            r#"
+            [package]
+            name = "artifact"
+            version = "0.0.1"
+            edition = "2015"
+
+            [dependencies]
+            macro = { path = "../macro" }
+            "#,
+        )
+        .file("artifact/src/main.rs", "fn main() { }")
+        .file(
+            "macro/Cargo.toml",
+            &r#"
+            [package]
+            name = "macro"
+            version = "0.0.1"
+            edition = "2015"
+
+            [lib]
+            proc-macro = true
+
+            [target.'$TARGET'.dependencies]
+            arch = { path = "../arch" }
+            "#
+            .replace("$TARGET", native_target),
+        )
+        .file("macro/src/lib.rs", "")
+        .file(
+            "arch/Cargo.toml",
+            r#"
+            [package]
+            name = "arch"
+            version = "0.0.1"
+            edition = "2015"
+            "#,
+        )
+        .file(
+            "arch/src/lib.rs",
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }",
+        )
+        .build();
+    p.cargo("test -Z bindeps")
+        .with_stderr_data(str![[r#"
+[LOCKING] 3 packages to latest compatible versions
+[COMPILING] arch v0.0.1 ([ROOT]/foo/arch)
+[COMPILING] macro v0.0.1 ([ROOT]/foo/macro)
+[COMPILING] artifact v0.0.1 ([ROOT]/foo/artifact)
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] unittests src/main.rs (target/debug/deps/foo-[HASH][EXE])
+
+"#]])
+        .masquerade_as_nightly_cargo(&["bindeps"])
+        .run();
 }

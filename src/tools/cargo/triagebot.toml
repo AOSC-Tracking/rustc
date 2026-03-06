@@ -30,12 +30,19 @@ label = "O-windows"
 # Documentation at: https://forge.rust-lang.org/triagebot/transfer.html
 [transfer]
 
-# Prevents mentions in commits to avoid users being spammed
-[no-mentions]
-
 # Enable `@rustbot note` functionality
 # Documentation at: https://forge.rust-lang.org/triagebot/note.html
 [note]
+
+# Enable comments linking to triagebot range-diff when a PR is rebased
+# onto a different base commit
+# Documentation at: https://forge.rust-lang.org/triagebot/range-diff.html
+[range-diff]
+
+# Adds at the end of a review body a link to view the changes that happened
+# since the review
+# Documentation at: https://forge.rust-lang.org/triagebot/review-changes-since.html
+[review-changes-since]
 
 [merge-conflicts]
 remove = []
@@ -51,7 +58,6 @@ warn_non_default_branch = true
 
 [assign.owners]
 "*" = ["@ehuss", "@epage", "@weihanglo"]
-
 
 [review-submitted]
 reviewed_label = "S-waiting-on-author"
@@ -238,8 +244,7 @@ trigger_files = [
 
 [autolabel."A-timings"]
 trigger_files = [
-    "src/cargo/core/compiler/timings.js",
-    "src/cargo/core/compiler/timings.rs",
+    "src/cargo/core/compiler/timings/",
     "src/cargo/util/cpu.rs",
 ]
 
@@ -335,7 +340,7 @@ trigger_files = ["src/bin/cargo/commands/read_manifest.rs", "src/cargo/ops/cargo
 trigger_files = ["src/bin/cargo/commands/remove.rs", "src/cargo/ops/cargo_remove.rs"]
 
 [autolabel."Command-report"]
-trigger_files = ["src/bin/cargo/commands/report.rs"]
+trigger_files = ["src/bin/cargo/commands/report.rs", "src/cargo/ops/cargo_report/"]
 
 [autolabel."Command-run"]
 trigger_files = ["src/bin/cargo/commands/run.rs", "src/cargo/ops/cargo_run.rs"]

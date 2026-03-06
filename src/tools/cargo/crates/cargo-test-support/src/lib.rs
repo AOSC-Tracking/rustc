@@ -1423,6 +1423,13 @@ pub trait TestEnvCommandExt: Sized {
             .env("__CARGO_TEST_DISABLE_GLOBAL_KNOWN_HOST", "1")
             // Set retry sleep to 1 millisecond.
             .env("__CARGO_TEST_FIXED_RETRY_SLEEP_MS", "1")
+            // Setting this to a large number helps avoid problems with long
+            // paths getting trimmed in snapshot tests.
+            //
+            // When updating this value, keep in mind that the `CARGO_TARGET_DIR`
+            // that gets set when Cargo's tests get run in `rust-lang/rust` can
+            // easily cause path lengths to exceed 200 characters.
+            .env("__CARGO_TEST_TTY_WIDTH_DO_NOT_USE_THIS", "400")
             // Incremental generates a huge amount of data per test, which we
             // don't particularly need. Tests that specifically need to check
             // the incremental behavior should turn this back on.
@@ -1734,4 +1741,22 @@ pub fn assert_deps_contains(project: &Project, fingerprint: &str, expected: &[(u
             }
         }
     })
+}
+
+#[track_caller]
+pub fn assert_deterministic_mtime(path: impl AsRef<Path>) {
+    // Hardcoded value be removed once alexcrichton/tar-rs#420 is merged and released.
+    // See also rust-lang/cargo#16237
+    const DETERMINISTIC_TIMESTAMP: u64 = 1153704088;
+
+    let path = path.as_ref();
+    let mtime = path.metadata().unwrap().modified().unwrap();
+    let timestamp = mtime
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert_eq!(
+        timestamp, DETERMINISTIC_TIMESTAMP,
+        "expected deterministic mtime for {path:?}, got {timestamp}"
+    );
 }

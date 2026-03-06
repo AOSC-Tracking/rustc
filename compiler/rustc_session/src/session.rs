@@ -1,12 +1,11 @@
 use std::any::Any;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::{env, io};
 
 use rand::{RngCore, rng};
-use rustc_ast::NodeId;
 use rustc_data_structures::base_n::{CASE_INSENSITIVE, ToBaseN};
 use rustc_data_structures::flock;
 use rustc_data_structures::fx::{FxHashMap, FxIndexSet};
@@ -14,25 +13,23 @@ use rustc_data_structures::profiling::{SelfProfiler, SelfProfilerRef};
 use rustc_data_structures::sync::{DynSend, DynSync, Lock, MappedReadGuard, ReadGuard, RwLock};
 use rustc_errors::annotate_snippet_emitter_writer::AnnotateSnippetEmitter;
 use rustc_errors::codes::*;
-use rustc_errors::emitter::{
-    DynEmitter, HumanEmitter, HumanReadableErrorType, OutputTheme, stderr_destination,
-};
+use rustc_errors::emitter::{DynEmitter, HumanReadableErrorType, OutputTheme, stderr_destination};
 use rustc_errors::json::JsonEmitter;
 use rustc_errors::timings::TimingSectionHandler;
 use rustc_errors::translation::Translator;
 use rustc_errors::{
     Diag, DiagCtxt, DiagCtxtHandle, DiagMessage, Diagnostic, ErrorGuaranteed, FatalAbort,
-    LintEmitter, TerminalUrl, fallback_fluent_bundle,
+    TerminalUrl, fallback_fluent_bundle,
 };
 use rustc_hir::limit::Limit;
 use rustc_macros::HashStable_Generic;
 pub use rustc_span::def_id::StableCrateId;
 use rustc_span::edition::Edition;
 use rustc_span::source_map::{FilePathMapping, SourceMap};
-use rustc_span::{FileNameDisplayPreference, RealFileName, Span, Symbol};
+use rustc_span::{RealFileName, Span, Symbol};
 use rustc_target::asm::InlineAsmArch;
 use rustc_target::spec::{
-    CodeModel, DebuginfoKind, PanicStrategy, RelocModel, RelroLevel, SanitizerSet,
+    Arch, CodeModel, DebuginfoKind, Os, PanicStrategy, RelocModel, RelroLevel, SanitizerSet,
     SmallDataThresholdSupport, SplitDebuginfo, StackProtector, SymbolVisibility, Target,
     TargetTuple, TlsModel, apple,
 };
@@ -41,8 +38,7 @@ use crate::code_stats::CodeStats;
 pub use crate::code_stats::{DataTypeKind, FieldInfo, FieldKind, SizeKind, VariantInfo};
 use crate::config::{
     self, CoverageLevel, CoverageOptions, CrateType, DebugInfo, ErrorOutputType, FunctionReturn,
-    Input, InstrumentCoverage, OptLevel, OutFileName, OutputType, RemapPathScopeComponents,
-    SwitchWithOptPath,
+    Input, InstrumentCoverage, OptLevel, OutFileName, OutputType, SwitchWithOptPath,
 };
 use crate::filesearch::FileSearch;
 use crate::lint::LintId;
@@ -160,20 +156,6 @@ pub struct Session {
     pub invocation_temp: Option<String>,
 }
 
-impl LintEmitter for &'_ Session {
-    type Id = NodeId;
-
-    fn emit_node_span_lint(
-        self,
-        lint: &'static rustc_lint_defs::Lint,
-        node_id: Self::Id,
-        span: impl Into<rustc_errors::MultiSpan>,
-        decorator: impl for<'a> rustc_errors::LintDiagnostic<'a, ()> + DynSend + 'static,
-    ) {
-        self.psess.buffer_lint(lint, span, node_id, decorator);
-    }
-}
-
 #[derive(Clone, Copy)]
 pub enum CodegenUnits {
     /// Specified by the user. In this case we try fairly hard to produce the
@@ -207,7 +189,11 @@ impl Session {
     }
 
     pub fn local_crate_source_file(&self) -> Option<RealFileName> {
-        Some(self.source_map().path_mapping().to_real_filename(self.io.input.opt_path()?))
+        Some(
+            self.source_map()
+                .path_mapping()
+                .to_real_filename(self.source_map().working_dir(), self.io.input.opt_path()?),
+        )
     }
 
     fn check_miri_unleashed_features(&self) -> Option<ErrorGuaranteed> {
@@ -323,7 +309,7 @@ impl Session {
     }
 
     pub fn is_sanitizer_cfi_enabled(&self) -> bool {
-        self.opts.unstable_opts.sanitizer.contains(SanitizerSet::CFI)
+        self.sanitizers().contains(SanitizerSet::CFI)
     }
 
     pub fn is_sanitizer_cfi_canonical_jump_tables_disabled(&self) -> bool {
@@ -347,7 +333,7 @@ impl Session {
     }
 
     pub fn is_sanitizer_kcfi_enabled(&self) -> bool {
-        self.opts.unstable_opts.sanitizer.contains(SanitizerSet::KCFI)
+        self.sanitizers().contains(SanitizerSet::KCFI)
     }
 
     pub fn is_split_lto_unit_enabled(&self) -> bool {
@@ -382,7 +368,7 @@ impl Session {
     }
 
     pub fn is_wasi_reactor(&self) -> bool {
-        self.target.options.os == "wasi"
+        self.target.options.os == Os::Wasi
             && matches!(
                 self.opts.unstable_opts.wasi_exec_model,
                 Some(config::WasiExecModel::Reactor)
@@ -527,7 +513,7 @@ impl Session {
         // AddressSanitizer and KernelAddressSanitizer uses lifetimes to detect use after scope bugs.
         // MemorySanitizer uses lifetimes to detect use of uninitialized stack variables.
         // HWAddressSanitizer will use lifetimes to detect use after scope bugs in the future.
-        || self.opts.unstable_opts.sanitizer.intersects(SanitizerSet::ADDRESS | SanitizerSet::KERNELADDRESS | SanitizerSet::MEMORY | SanitizerSet::HWADDRESS)
+        || self.sanitizers().intersects(SanitizerSet::ADDRESS | SanitizerSet::KERNELADDRESS | SanitizerSet::MEMORY | SanitizerSet::HWADDRESS)
     }
 
     pub fn diagnostic_width(&self) -> usize {
@@ -594,14 +580,6 @@ impl Session {
 
     /// Calculates the flavor of LTO to use for this compilation.
     pub fn lto(&self) -> config::Lto {
-        // Autodiff currently requires fat-lto to have access to the llvm-ir of all (indirectly) used functions and types.
-        // fat-lto is the easiest solution to this requirement, but quite expensive.
-        // FIXME(autodiff): Make autodiff also work with embed-bc instead of fat-lto.
-        // Don't apply fat-lto to proc-macro crates as they cannot use fat-lto without -Zdylib-lto
-        if self.opts.autodiff_enabled() && !self.opts.crate_types.contains(&CrateType::ProcMacro) {
-            return config::Lto::Fat;
-        }
-
         // If our target has codegen requirements ignore the command line
         if self.target.requires_lto {
             return config::Lto::Fat;
@@ -869,21 +847,6 @@ impl Session {
         self.opts.cg.link_dead_code.unwrap_or(false)
     }
 
-    pub fn filename_display_preference(
-        &self,
-        scope: RemapPathScopeComponents,
-    ) -> FileNameDisplayPreference {
-        assert!(
-            scope.bits().count_ones() == 1,
-            "one and only one scope should be passed to `Session::filename_display_preference`"
-        );
-        if self.opts.unstable_opts.remap_path_scope.contains(scope) {
-            FileNameDisplayPreference::Remapped
-        } else {
-            FileNameDisplayPreference::Local
-        }
-    }
-
     /// Get the deployment target on Apple platforms based on the standard environment variables,
     /// or fall back to the minimum version supported by `rustc`.
     ///
@@ -922,6 +885,10 @@ impl Session {
             min
         }
     }
+
+    pub fn sanitizers(&self) -> SanitizerSet {
+        return self.opts.unstable_opts.sanitizer | self.target.options.default_sanitizers;
+    }
 }
 
 // JUSTIFICATION: part of session construction
@@ -950,32 +917,26 @@ fn default_emitter(
     let source_map = if sopts.unstable_opts.link_only { None } else { Some(source_map) };
 
     match sopts.error_format {
-        config::ErrorOutputType::HumanReadable { kind, color_config } => {
-            let short = kind.short();
-
-            if let HumanReadableErrorType::AnnotateSnippet = kind {
+        config::ErrorOutputType::HumanReadable { kind, color_config } => match kind {
+            HumanReadableErrorType { short, unicode } => {
                 let emitter =
-                    AnnotateSnippetEmitter::new(source_map, translator, short, macro_backtrace);
-                Box::new(emitter.ui_testing(sopts.unstable_opts.ui_testing))
-            } else {
-                let emitter = HumanEmitter::new(stderr_destination(color_config), translator)
-                    .sm(source_map)
-                    .short_message(short)
-                    .diagnostic_width(sopts.diagnostic_width)
-                    .macro_backtrace(macro_backtrace)
-                    .track_diagnostics(track_diagnostics)
-                    .terminal_url(terminal_url)
-                    .theme(if let HumanReadableErrorType::Unicode = kind {
-                        OutputTheme::Unicode
-                    } else {
-                        OutputTheme::Ascii
-                    })
-                    .ignored_directories_in_source_blocks(
-                        sopts.unstable_opts.ignore_directory_in_diagnostics_source_blocks.clone(),
-                    );
+                    AnnotateSnippetEmitter::new(stderr_destination(color_config), translator)
+                        .sm(source_map)
+                        .short_message(short)
+                        .diagnostic_width(sopts.diagnostic_width)
+                        .macro_backtrace(macro_backtrace)
+                        .track_diagnostics(track_diagnostics)
+                        .terminal_url(terminal_url)
+                        .theme(if unicode { OutputTheme::Unicode } else { OutputTheme::Ascii })
+                        .ignored_directories_in_source_blocks(
+                            sopts
+                                .unstable_opts
+                                .ignore_directory_in_diagnostics_source_blocks
+                                .clone(),
+                        );
                 Box::new(emitter.ui_testing(sopts.unstable_opts.ui_testing))
             }
-        }
+        },
         config::ErrorOutputType::Json { pretty, json_rendered, color_config } => Box::new(
             JsonEmitter::new(
                 Box::new(io::BufWriter::new(io::stderr())),
@@ -1095,7 +1056,7 @@ pub fn build_session(
         _ => CtfeBacktrace::Disabled,
     });
 
-    let asm_arch = if target.allow_asm { InlineAsmArch::from_str(&target.arch).ok() } else { None };
+    let asm_arch = if target.allow_asm { InlineAsmArch::from_arch(&target.arch) } else { None };
     let target_filesearch =
         filesearch::FileSearch::new(&sopts.search_paths, &target_tlib_path, &target);
     let host_filesearch = filesearch::FileSearch::new(&sopts.search_paths, &host_tlib_path, &host);
@@ -1185,7 +1146,7 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
     let mut unsupported_sanitizers = sess.opts.unstable_opts.sanitizer - supported_sanitizers;
     // Niche: if `fixed-x18`, or effectively switching on `reserved-x18` flag, is enabled
     // we should allow Shadow Call Stack sanitizer.
-    if sess.opts.unstable_opts.fixed_x18 && sess.target.arch == "aarch64" {
+    if sess.opts.unstable_opts.fixed_x18 && sess.target.arch == Arch::AArch64 {
         unsupported_sanitizers -= SanitizerSet::SHADOWCALLSTACK;
     }
     match unsupported_sanitizers.into_iter().count() {
@@ -1296,7 +1257,7 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
         }
     }
 
-    if sess.opts.unstable_opts.branch_protection.is_some() && sess.target.arch != "aarch64" {
+    if sess.opts.unstable_opts.branch_protection.is_some() && sess.target.arch != Arch::AArch64 {
         sess.dcx().emit_err(errors::BranchProtectionRequiresAArch64);
     }
 
@@ -1340,13 +1301,13 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
     }
 
     if sess.opts.unstable_opts.function_return != FunctionReturn::default() {
-        if sess.target.arch != "x86" && sess.target.arch != "x86_64" {
+        if !matches!(sess.target.arch, Arch::X86 | Arch::X86_64) {
             sess.dcx().emit_err(errors::FunctionReturnRequiresX86OrX8664);
         }
     }
 
     if sess.opts.unstable_opts.indirect_branch_cs_prefix {
-        if sess.target.arch != "x86" && sess.target.arch != "x86_64" {
+        if !matches!(sess.target.arch, Arch::X86 | Arch::X86_64) {
             sess.dcx().emit_err(errors::IndirectBranchCsPrefixRequiresX86OrX8664);
         }
     }
@@ -1355,12 +1316,12 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
         if regparm > 3 {
             sess.dcx().emit_err(errors::UnsupportedRegparm { regparm });
         }
-        if sess.target.arch != "x86" {
+        if sess.target.arch != Arch::X86 {
             sess.dcx().emit_err(errors::UnsupportedRegparmArch);
         }
     }
     if sess.opts.unstable_opts.reg_struct_return {
-        if sess.target.arch != "x86" {
+        if sess.target.arch != Arch::X86 {
             sess.dcx().emit_err(errors::UnsupportedRegStructReturnArch);
         }
     }
@@ -1382,7 +1343,7 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
     }
 
     if sess.opts.cg.soft_float {
-        if sess.target.arch == "arm" {
+        if sess.target.arch == Arch::Arm {
             sess.dcx().emit_warn(errors::SoftFloatDeprecated);
         } else {
             // All `use_softfp` does is the equivalent of `-mfloat-abi` in GCC/clang, which only exists on ARM targets.
@@ -1482,18 +1443,13 @@ fn mk_emitter(output: ErrorOutputType) -> Box<DynEmitter> {
     let translator =
         Translator::with_fallback_bundle(vec![rustc_errors::DEFAULT_LOCALE_RESOURCE], false);
     let emitter: Box<DynEmitter> = match output {
-        config::ErrorOutputType::HumanReadable { kind, color_config } => {
-            let short = kind.short();
-            Box::new(
-                HumanEmitter::new(stderr_destination(color_config), translator)
-                    .theme(if let HumanReadableErrorType::Unicode = kind {
-                        OutputTheme::Unicode
-                    } else {
-                        OutputTheme::Ascii
-                    })
+        config::ErrorOutputType::HumanReadable { kind, color_config } => match kind {
+            HumanReadableErrorType { short, unicode } => Box::new(
+                AnnotateSnippetEmitter::new(stderr_destination(color_config), translator)
+                    .theme(if unicode { OutputTheme::Unicode } else { OutputTheme::Ascii })
                     .short_message(short),
-            )
-        }
+            ),
+        },
         config::ErrorOutputType::Json { pretty, json_rendered, color_config } => {
             Box::new(JsonEmitter::new(
                 Box::new(io::BufWriter::new(io::stderr())),
@@ -1506,47 +1462,4 @@ fn mk_emitter(output: ErrorOutputType) -> Box<DynEmitter> {
         }
     };
     emitter
-}
-
-pub trait RemapFileNameExt {
-    type Output<'a>
-    where
-        Self: 'a;
-
-    /// Returns a possibly remapped filename based on the passed scope and remap cli options.
-    ///
-    /// One and only one scope should be passed to this method, it will panic otherwise.
-    fn for_scope(&self, sess: &Session, scope: RemapPathScopeComponents) -> Self::Output<'_>;
-}
-
-impl RemapFileNameExt for rustc_span::FileName {
-    type Output<'a> = rustc_span::FileNameDisplay<'a>;
-
-    fn for_scope(&self, sess: &Session, scope: RemapPathScopeComponents) -> Self::Output<'_> {
-        assert!(
-            scope.bits().count_ones() == 1,
-            "one and only one scope should be passed to for_scope"
-        );
-        if sess.opts.unstable_opts.remap_path_scope.contains(scope) {
-            self.prefer_remapped_unconditionally()
-        } else {
-            self.prefer_local()
-        }
-    }
-}
-
-impl RemapFileNameExt for rustc_span::RealFileName {
-    type Output<'a> = &'a Path;
-
-    fn for_scope(&self, sess: &Session, scope: RemapPathScopeComponents) -> Self::Output<'_> {
-        assert!(
-            scope.bits().count_ones() == 1,
-            "one and only one scope should be passed to for_scope"
-        );
-        if sess.opts.unstable_opts.remap_path_scope.contains(scope) {
-            self.remapped_path_if_available()
-        } else {
-            self.local_path_if_available()
-        }
-    }
 }

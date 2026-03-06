@@ -161,11 +161,10 @@ fn create_package(
     }
 
     let filename = pkg.package_id().tarball_name();
-    let dir = ws.build_dir().join("package");
-    let mut dst = {
-        let tmp = format!(".{}", filename);
-        dir.open_rw_exclusive_create(&tmp, gctx, "package scratch space")?
-    };
+    let build_dir = ws.build_dir();
+    paths::create_dir_all_excluded_from_backups_atomic(build_dir.as_path_unlocked())?;
+    let dir = build_dir.join("package").join("tmp-crate");
+    let dst = dir.open_rw_exclusive_create(&filename, gctx, "package scratch space")?;
 
     // Package up and test a temporary tarball and only move it to the final
     // location if it actually passes all our tests. Any previously existing
@@ -177,14 +176,10 @@ fn create_package(
     let uncompressed_size = tar(ws, opts, pkg, local_reg, ar_files, dst.file(), &filename)
         .context("failed to prepare local package for uploading")?;
 
-    dst.seek(SeekFrom::Start(0))?;
-    let dst_path = dst.parent().join(&filename);
-    dst.rename(&dst_path)?;
-
     let dst_metadata = dst
         .file()
         .metadata()
-        .with_context(|| format!("could not learn metadata for: `{}`", dst_path.display()))?;
+        .with_context(|| format!("could not learn metadata for: `{}`", dst.path().display()))?;
     let compressed_size = dst_metadata.len();
 
     let uncompressed = HumanBytes(uncompressed_size);
@@ -218,22 +213,17 @@ pub fn package(ws: &Workspace<'_>, opts: &PackageOpts<'_>) -> CargoResult<Vec<Fi
 
     let packaged = do_package(ws, opts, pkgs)?;
 
+    // Uplifting artifacts
     let mut result = Vec::new();
     let target_dir = ws.target_dir();
-    let build_dir = ws.build_dir();
-    if target_dir == build_dir {
-        result.extend(packaged.into_iter().map(|(_, _, src)| src));
-    } else {
-        // Uplifting artifacts
-        let artifact_dir = target_dir.join("package");
-        for (pkg, _, src) in packaged {
-            let filename = pkg.package_id().tarball_name();
-            let dst =
-                artifact_dir.open_rw_exclusive_create(filename, ws.gctx(), "uplifted package")?;
-            src.file().seek(SeekFrom::Start(0))?;
-            std::io::copy(&mut src.file(), &mut dst.file())?;
-            result.push(dst);
-        }
+    paths::create_dir_all_excluded_from_backups_atomic(target_dir.as_path_unlocked())?;
+    let artifact_dir = target_dir.join("package");
+    for (pkg, _, src) in packaged {
+        let filename = pkg.package_id().tarball_name();
+        let dst = artifact_dir.open_rw_exclusive_create(filename, ws.gctx(), "uplifted package")?;
+        src.file().seek(SeekFrom::Start(0))?;
+        std::io::copy(&mut src.file(), &mut dst.file())?;
+        result.push(dst);
     }
 
     Ok(result)
@@ -278,23 +268,22 @@ fn do_package<'a>(
     let deps = local_deps(pkgs.iter().map(|(p, f)| ((*p).clone(), f.clone())));
     let just_pkgs: Vec<_> = pkgs.iter().map(|p| p.0).collect();
 
-    let mut local_reg = {
-        // The publish registry doesn't matter unless there are local dependencies that will be
-        // resolved,
-        // so only try to get one if we need it. If they explicitly passed a
-        // registry on the CLI, we check it no matter what.
-        let sid = if (deps.has_dependencies() && (opts.include_lockfile || opts.verify))
-            || opts.reg_or_index.is_some()
-        {
-            let sid = get_registry(ws.gctx(), &just_pkgs, opts.reg_or_index.clone())?;
-            debug!("packaging for registry {}", sid);
-            Some(sid)
-        } else {
-            None
-        };
+    // The publish registry doesn't matter unless there are local dependencies that will be
+    // resolved,
+    // so only try to get one if we need it.
+    //
+    // If they explicitly passed a registry on the CLI, we check it no matter what to verify
+    // `package.publish`.
+    let needs_local_reg = deps.has_dependencies() && (opts.include_lockfile || opts.verify);
+    let verify_registry_allow_list = opts.reg_or_index.is_some();
+    let mut local_reg = if !opts.list && (needs_local_reg || verify_registry_allow_list) {
+        let sid = get_registry(ws.gctx(), &just_pkgs, opts.reg_or_index.clone())?;
+        debug!("packaging for registry {}", sid);
         let reg_dir = ws.build_dir().join("package").join("tmp-registry");
-        sid.map(|sid| TmpRegistry::new(ws.gctx(), reg_dir, sid))
-            .transpose()?
+        let local_reg = TmpRegistry::new(ws.gctx(), reg_dir, sid)?;
+        Some(local_reg)
+    } else {
+        None
     };
 
     // Packages need to be created in dependency order, because dependencies must
@@ -483,7 +472,7 @@ fn prepare_archive(
     src.load()?;
 
     if opts.check_metadata {
-        check_metadata(pkg, gctx)?;
+        check_metadata(pkg, opts.reg_or_index.as_ref(), gctx)?;
     }
 
     if !pkg.manifest().exclude().is_empty() && !pkg.manifest().include().is_empty() {
@@ -808,7 +797,11 @@ fn build_lock(
 
 // Checks that the package has some piece of metadata that a human can
 // use to tell what the package is about.
-fn check_metadata(pkg: &Package, gctx: &GlobalContext) -> CargoResult<()> {
+fn check_metadata(
+    pkg: &Package,
+    reg_or_index: Option<&RegistryOrIndex>,
+    gctx: &GlobalContext,
+) -> CargoResult<()> {
     let md = pkg.manifest().metadata();
 
     let mut missing = vec![];
@@ -829,20 +822,29 @@ fn check_metadata(pkg: &Package, gctx: &GlobalContext) -> CargoResult<()> {
     );
 
     if !missing.is_empty() {
-        let mut things = missing[..missing.len() - 1].join(", ");
-        // `things` will be empty if and only if its length is 1 (i.e., the only case
-        // to have no `or`).
-        if !things.is_empty() {
-            things.push_str(" or ");
-        }
-        things.push_str(missing.last().unwrap());
+        // Only warn if publishing to crates.io based on resolved registry
+        let should_warn = match reg_or_index {
+            Some(RegistryOrIndex::Registry(reg_name)) => reg_name == CRATES_IO_REGISTRY,
+            None => true,                             // Default is crates.io
+            Some(RegistryOrIndex::Index(_)) => false, // Custom index, not crates.io
+        };
 
-        gctx.shell().print_report(&[
-            Level::WARNING.secondary_title(format!("manifest has no {things}"))
-                .element(Level::NOTE.message("see https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info"))
-         ],
-             false
-        )?
+        if should_warn {
+            let mut things = missing[..missing.len() - 1].join(", ");
+            // `things` will be empty if and only if its length is 1 (i.e., the only case
+            // to have no `or`).
+            if !things.is_empty() {
+                things.push_str(" or ");
+            }
+            things.push_str(missing.last().unwrap());
+
+            gctx.shell().print_report(&[
+                Level::WARNING.secondary_title(format!("manifest has no {things}"))
+                    .element(Level::NOTE.message("see https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info"))
+             ],
+                 false
+            )?
+        }
     }
 
     Ok(())
@@ -917,8 +919,12 @@ fn tar(
                 header.set_entry_type(EntryType::file());
                 header.set_mode(0o644);
                 header.set_size(contents.len() as u64);
-                // use something nonzero to avoid rust-lang/cargo#9512
-                header.set_mtime(1);
+                // We need to have the same DETERMINISTIC_TIMESTAMP for generated files
+                // https://github.com/alexcrichton/tar-rs/blob/d0261f1f6cc959ba0758e7236b3fd81e90dd1dc6/src/header.rs#L18-L24
+                // Unfortunately tar-rs doesn't expose that so we hardcode the timestamp here.
+                // Hardcoded value be removed once alexcrichton/tar-rs#420 is merged and released.
+                // See also rust-lang/cargo#16237
+                header.set_mtime(1153704088);
                 header.set_cksum();
                 ar.append_data(&mut header, &ar_path, contents.as_bytes())
                     .with_context(|| format!("could not archive source file `{}`", rel_str))?;
@@ -1212,6 +1218,7 @@ impl<'a> TmpRegistry<'a> {
             yanked: None,
             links: new_crate.links.map(|x| x.into()),
             rust_version: None,
+            pubtime: None,
             v: Some(2),
         })?;
 

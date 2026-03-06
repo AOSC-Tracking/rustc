@@ -1129,6 +1129,11 @@ TEST_F(TokenAnnotatorTest, UnderstandsOverloadedOperators) {
   ASSERT_EQ(Tokens.size(), 7u) << Tokens;
   // Not TT_FunctionDeclarationName.
   EXPECT_TOKEN(Tokens[3], tok::kw_operator, TT_Unknown);
+
+  Tokens = annotate("SomeAPI::operator()();");
+  ASSERT_EQ(Tokens.size(), 9u) << Tokens;
+  // Not TT_FunctionDeclarationName.
+  EXPECT_TOKEN(Tokens[2], tok::kw_operator, TT_Unknown);
 }
 
 TEST_F(TokenAnnotatorTest, OverloadedOperatorInTemplate) {
@@ -1348,6 +1353,14 @@ TEST_F(TokenAnnotatorTest, UnderstandsRequiresClausesAndConcepts) {
   EXPECT_TOKEN(Tokens[21], tok::r_brace, TT_Unknown);
   EXPECT_EQ(Tokens[21]->MatchingParen, Tokens[15]);
   EXPECT_TRUE(Tokens[21]->ClosesRequiresClause);
+
+  Tokens = annotate("template <typename Foo>\n"
+                    "void Fun(const Foo &F)\n"
+                    "  requires requires(Foo F) {\n"
+                    "    { F.Bar() } -> std::same_as<int>;\n"
+                    "  };");
+  ASSERT_EQ(Tokens.size(), 38u) << Tokens;
+  EXPECT_TOKEN(Tokens[19], tok::l_brace, TT_RequiresExpressionLBrace);
 
   Tokens =
       annotate("template <class A, class B> concept C ="
@@ -2235,6 +2248,12 @@ TEST_F(TokenAnnotatorTest, UnderstandsLambdas) {
   EXPECT_TOKEN(Tokens[3], tok::l_square, TT_LambdaLSquare);
   EXPECT_TOKEN(Tokens[5], tok::l_paren, TT_LambdaDefinitionLParen);
   EXPECT_TOKEN(Tokens[10], tok::l_square, TT_ArraySubscriptLSquare);
+
+  Tokens = annotate("foo = bar * [] { return 2; }();");
+  ASSERT_EQ(Tokens.size(), 15u) << Tokens;
+  EXPECT_TOKEN(Tokens[3], tok::star, TT_BinaryOperator);
+  EXPECT_TOKEN(Tokens[4], tok::l_square, TT_LambdaLSquare);
+  EXPECT_TOKEN(Tokens[6], tok::l_brace, TT_LambdaLBrace);
 }
 
 TEST_F(TokenAnnotatorTest, UnderstandsFunctionAnnotations) {

@@ -1,4 +1,0 @@
-# Strikethrough
-
-~~strikethrough example~~
-

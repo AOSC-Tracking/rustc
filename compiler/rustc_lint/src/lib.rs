@@ -21,15 +21,12 @@
 
 // tidy-alphabetical-start
 #![allow(internal_features)]
-#![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![doc(rust_logo)]
-#![feature(array_windows)]
+#![cfg_attr(bootstrap, feature(array_windows))]
 #![feature(assert_matches)]
 #![feature(box_patterns)]
 #![feature(if_let_guard)]
 #![feature(iter_order_by)]
 #![feature(rustc_attrs)]
-#![feature(rustdoc_internals)]
 #![feature(try_blocks)]
 // tidy-alphabetical-end
 
@@ -48,8 +45,11 @@ mod errors;
 mod expect;
 mod for_loops_over_fallibles;
 mod foreign_modules;
+mod function_cast_as_integer;
+mod gpukernel_abi;
 mod if_let_rescope;
 mod impl_trait_overcaptures;
+mod interior_mutable_consts;
 mod internal;
 mod invalid_from_utf8;
 mod late;
@@ -92,8 +92,11 @@ use deref_into_dyn_supertrait::*;
 use drop_forget_useless::*;
 use enum_intrinsics_non_enums::EnumIntrinsicsNonEnums;
 use for_loops_over_fallibles::*;
+use function_cast_as_integer::*;
+use gpukernel_abi::*;
 use if_let_rescope::IfLetRescope;
 use impl_trait_overcaptures::ImplTraitOvercaptures;
+use interior_mutable_consts::*;
 use internal::*;
 use invalid_from_utf8::*;
 use let_underscore::*;
@@ -128,7 +131,7 @@ use unused::*;
 #[rustfmt::skip]
 pub use builtin::{MissingDoc, SoftLints};
 pub use context::{CheckLintNameResult, EarlyContext, LateContext, LintContext, LintStore};
-pub use early::diagnostics::decorate_builtin_lint;
+pub use early::diagnostics::{decorate_attribute_lint, decorate_builtin_lint};
 pub use early::{EarlyCheckNode, check_ast_node};
 pub use late::{check_crate, late_lint_mod, unerased_lint_store};
 pub use levels::LintLevelsBuilder;
@@ -195,6 +198,7 @@ late_lint_methods!(
             DerefIntoDynSupertrait: DerefIntoDynSupertrait,
             DropForgetUseless: DropForgetUseless,
             ImproperCTypesLint: ImproperCTypesLint,
+            ImproperGpuKernelLint: ImproperGpuKernelLint,
             InvalidFromUtf8: InvalidFromUtf8,
             VariantSizeDifferences: VariantSizeDifferences,
             PathStatements: PathStatements,
@@ -240,10 +244,12 @@ late_lint_methods!(
             AsyncClosureUsage: AsyncClosureUsage,
             AsyncFnInTrait: AsyncFnInTrait,
             NonLocalDefinitions: NonLocalDefinitions::default(),
+            InteriorMutableConsts: InteriorMutableConsts,
             ImplTraitOvercaptures: ImplTraitOvercaptures,
             IfLetRescope: IfLetRescope::default(),
             StaticMutRefs: StaticMutRefs,
             UnqualifiedLocalImports: UnqualifiedLocalImports,
+            FunctionCastsAsInteger: FunctionCastsAsInteger,
             CheckTransmutes: CheckTransmutes,
             LifetimeSyntax: LifetimeSyntax,
         ]
@@ -288,6 +294,7 @@ fn register_builtins(store: &mut LintStore) {
         "unused",
         UNUSED_IMPORTS,
         UNUSED_VARIABLES,
+        UNUSED_VISIBILITIES,
         UNUSED_ASSIGNMENTS,
         DEAD_CODE,
         UNUSED_MUT,
@@ -362,6 +369,10 @@ fn register_builtins(store: &mut LintStore) {
     store.register_renamed("static_mut_ref", "static_mut_refs");
     store.register_renamed("temporary_cstring_as_ptr", "dangling_pointers_from_temporaries");
     store.register_renamed("elided_named_lifetimes", "mismatched_lifetime_syntaxes");
+    store.register_renamed(
+        "repr_transparent_external_private_fields",
+        "repr_transparent_non_zst_fields",
+    );
 
     // These were moved to tool lints, but rustc still sees them when compiling normally, before
     // tool lints are registered, so `check_tool_name_for_backwards_compat` doesn't work. Use

@@ -1,12 +1,14 @@
 //! Types and impls for [`Unit`].
 
+use serde::Deserialize;
+use serde::Serialize;
+
 use crate::core::Package;
 use crate::core::compiler::unit_dependencies::IsArtifact;
 use crate::core::compiler::{CompileKind, CompileMode, CompileTarget, CrateType};
 use crate::core::manifest::{Target, TargetKind};
 use crate::core::profiles::Profile;
 use crate::util::GlobalContext;
-use crate::util::hex::short_hash;
 use crate::util::interning::InternedString;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
@@ -16,6 +18,22 @@ use std::ops::Deref;
 use std::rc::Rc;
 
 use super::BuildOutput;
+
+/// Stable identifier for referencing a [`Unit`].
+///
+/// This is an index into the unit graph, assigned when units are registered.
+/// It provides a compact way to reference units.
+#[derive(
+    Serialize, Deserialize, Debug, Default, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord,
+)]
+#[serde(transparent)]
+pub struct UnitIndex(pub u64);
+
+impl fmt::Display for UnitIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// All information needed to define a unit.
 ///
@@ -150,15 +168,6 @@ impl UnitInner {
     /// Returns whether or not warnings should be displayed for this unit.
     pub fn show_warnings(&self, gctx: &GlobalContext) -> bool {
         self.is_local() || gctx.extra_verbose()
-    }
-}
-
-impl Unit {
-    /// Gets the unique key for [`-Zbuild-plan`].
-    ///
-    /// [`-Zbuild-plan`]: https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#build-plan
-    pub fn buildkey(&self) -> String {
-        format!("{}-{}", self.pkg.name(), short_hash(self))
     }
 }
 

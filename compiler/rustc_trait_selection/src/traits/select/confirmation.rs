@@ -249,7 +249,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             Some(LangItem::PointeeSized) => {
                 bug!("`PointeeSized` is removing during lowering");
             }
-            Some(LangItem::Copy | LangItem::Clone) => self.copy_clone_conditions(self_ty),
+            Some(LangItem::Copy | LangItem::Clone | LangItem::TrivialClone) => {
+                self.copy_clone_conditions(self_ty)
+            }
             Some(LangItem::FusedIterator) => {
                 if self.coroutine_is_gen(self_ty) {
                     ty::Binder::dummy(vec![])
@@ -363,8 +365,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
 
         debug!(?src, ?dst);
         let mut transmute_env = rustc_transmute::TransmuteTypeEnv::new(self.infcx.tcx);
-        let maybe_transmutable =
-            transmute_env.is_transmutable(rustc_transmute::Types { dst, src }, assume);
+        let maybe_transmutable = transmute_env.is_transmutable(src, dst, assume);
 
         let fully_flattened = match maybe_transmutable {
             Answer::No(_) => Err(SelectionError::Unimplemented)?,

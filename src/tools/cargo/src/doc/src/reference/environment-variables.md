@@ -255,7 +255,8 @@ corresponding environment variable is set to the empty string, `""`.
   file extension, such as `.exe`.
 * `OUT_DIR` --- If the package has a build script, this is set to the folder
   where the build script should place its output. See below for more information.
-  (Only set during compilation.)
+  (Only set during compilation.) Cargo does not guarantee that this directory
+  is empty, and it is not cleaned between builds.
 * `CARGO_BIN_EXE_<name>` --- The absolute path to a binary target's executable.
   This is only set when building an [integration test] or benchmark. This may
   be used with the [`env` macro] to find the executable to run for testing
@@ -363,10 +364,13 @@ let out_dir = env::var("OUT_DIR").unwrap();
   > Note that different [target triples][Target Triple] have different sets of `cfg` values,
   > hence variables present in one target triple might not be available in the other.
   >
-  > Some cfg values like `debug_assertions` and `test` are not available.
+  > Some cfg values like `test` are not available.
 * `OUT_DIR` --- the folder in which all output and intermediate artifacts should
   be placed. This folder is inside the build directory for the package being built,
-  and it is unique for the package in question.
+  and it is unique for the package in question. Cargo does not clean or reset this
+  directory between builds, and its contents may persist across rebuilds. Build
+  scripts should not assume that `OUT_DIR` is empty, and are responsible for
+  managing or cleaning up any files they create.
 * `TARGET` --- the target triple that is being compiled for. Native code should be
   compiled for this triple. See the [Target Triple] description for more information.
 * `HOST` --- the host triple of the Rust compiler.
@@ -377,13 +381,14 @@ let out_dir = env::var("OUT_DIR").unwrap();
   not need to run `make -j`, and instead can set the `MAKEFLAGS` env var to the
   content of `CARGO_MAKEFLAGS` to activate the use of Cargo's GNU Make compatible
   [jobserver] for sub-make invocations.
-* `OPT_LEVEL`, `DEBUG` --- values of the corresponding variables for the profile currently being built.
+* `DEBUG` --- `true` if any [`debug`] information will be generated and `false` otherwise.
+* `OPT_LEVEL` --- values of the corresponding [`opt-level`] variable for the profile currently being built.
 * `PROFILE` --- `release` for release builds, `debug` for other builds. This is
   determined based on if the [profile] inherits from the [`dev`] or
   [`release`] profile. Using this environment variable is not recommended.
   Using other environment variables like `OPT_LEVEL` provide a more correct
   view of the actual settings being used.
-* `DEP_<name>_<key>` --- For more information about this set of environment variables,
+* `DEP_<links>_<key>` --- For more information about this set of environment variables,
   see build script documentation about [`links`][links].
 * `RUSTC`, `RUSTDOC` --- the compiler and documentation generator that Cargo has
   resolved to use, passed to the build script so it might use it as well.
@@ -422,6 +427,25 @@ let out_dir = env::var("OUT_DIR").unwrap();
 [profile]: profiles.md
 [`dev`]: profiles.md#dev
 [`release`]: profiles.md#release
+[`debug`]: profiles.md#debug
+[`opt-level`]: profiles.md#opt-level
+
+## Environment variables Cargo sets for `cargo test`
+
+Cargo sets several environment variables when tests are run.
+You can retrieve the values when the tests are run:
+
+```rust,ignore
+use std::env;
+let out_dir = env::var("CARGO_BIN_EXE_foo").unwrap();
+```
+
+* `CARGO_BIN_EXE_<name>` --- The absolute path to a binary target's executable.
+  This is only set when running an [integration test] or benchmark.
+  The `<name>` is the name of the binary target, exactly as-is. For
+  example, `CARGO_BIN_EXE_my-program` for a binary named `my-program`.
+  Binaries are automatically built when the test is built, unless the binary
+  has required features that are not enabled.
 
 ## Environment variables Cargo sets for 3rd party subcommands
 

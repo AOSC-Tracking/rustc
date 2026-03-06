@@ -35,7 +35,6 @@ use super::{BuildRunner, Job, Unit, Work, fingerprint, get_dynamic_search_path};
 use crate::core::compiler::CompileMode;
 use crate::core::compiler::artifact;
 use crate::core::compiler::build_runner::UnitHash;
-use crate::core::compiler::fingerprint::DirtyReason;
 use crate::core::compiler::job_queue::JobState;
 use crate::core::{PackageId, Target, profiles::ProfileRoot};
 use crate::util::errors::CargoResult;
@@ -340,8 +339,6 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
     let script_dir = build_runner.files().build_script_dir(build_script_unit);
     let script_out_dir = build_runner.files().build_script_out_dir(unit);
     let script_run_dir = build_runner.files().build_script_run_dir(unit);
-    let build_plan = bcx.build_config.build_plan;
-    let invocation_name = unit.buildkey();
 
     if let Some(deps) = unit.pkg.manifest().metabuild() {
         prepare_metabuild(build_runner, build_script_unit, deps)?;
@@ -380,7 +377,7 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
         .inherit_jobserver(&build_runner.jobserver);
 
     // Find all artifact dependencies and make their file and containing directory discoverable using environment variables.
-    for (var, value) in artifact::get_env(build_runner, dependencies)? {
+    for (var, value) in artifact::get_env(build_runner, unit, dependencies)? {
         cmd.env(&var, value);
     }
 
@@ -407,9 +404,19 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
         "feature",
         unit.features.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
     );
+    // Manually inject debug_assertions based on the profile setting.
+    // The cfg query from rustc doesn't include profile settings and would always be true,
+    // so we override it with the actual profile setting.
+    if unit.profile.debug_assertions {
+        cfg_map.insert("debug_assertions", Vec::new());
+    }
     for cfg in bcx.target_data.cfg(unit.kind) {
         match *cfg {
             Cfg::Name(ref n) => {
+                // Skip debug_assertions from rustc query; we use the profile setting instead
+                if n.as_str() == "debug_assertions" {
+                    continue;
+                }
                 cfg_map.insert(n.as_str(), Vec::new());
             }
             Cfg::KeyPair(ref k, ref v) => {
@@ -419,11 +426,6 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
         }
     }
     for (k, v) in cfg_map {
-        if k == "debug_assertions" {
-            // This cfg is always true and misleading, so avoid setting it.
-            // That is because Cargo queries rustc without any profile settings.
-            continue;
-        }
         // FIXME: We should handle raw-idents somehow instead of predenting they
         // don't exist here
         let k = format!("CARGO_CFG_{}", super::envify(k));
@@ -449,6 +451,8 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
         cmd.display_env_vars();
     }
 
+    let any_build_script_metadata = bcx.gctx.cli_unstable().any_build_script_metadata;
+
     // Gather the set of native dependencies that this package has along with
     // some other variables to close over.
     //
@@ -459,8 +463,16 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
         .filter_map(|dep| {
             if dep.unit.mode.is_run_custom_build() {
                 let dep_metadata = build_runner.get_run_build_script_metadata(&dep.unit);
+
+                let dep_name = dep.dep_name.unwrap_or(dep.unit.pkg.name());
+
                 Some((
-                    dep.unit.pkg.manifest().links().unwrap().to_string(),
+                    dep_name,
+                    dep.unit
+                        .pkg
+                        .manifest()
+                        .links()
+                        .map(|links| links.to_string()),
                     dep.unit.pkg.package_id(),
                     dep_metadata,
                 ))
@@ -476,7 +488,7 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
     let output_file = script_run_dir.join("output");
     let err_file = script_run_dir.join("stderr");
     let root_output_file = script_run_dir.join("root-output");
-    let host_target_root = build_runner.files().host_dest().to_path_buf();
+    let host_target_root = build_runner.files().host_dest().map(|v| v.to_path_buf());
     let all = (
         id,
         library_name.clone(),
@@ -527,9 +539,9 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
         // along to this custom build command. We're also careful to augment our
         // dynamic library search path in case the build script depended on any
         // native dynamic libraries.
-        if !build_plan {
+        {
             let build_script_outputs = build_script_outputs.lock().unwrap();
-            for (name, dep_id, dep_metadata) in lib_deps {
+            for (name, links, dep_id, dep_metadata) in lib_deps {
                 let script_output = build_script_outputs.get(dep_metadata).ok_or_else(|| {
                     internal(format!(
                         "failed to locate build state for env vars: {}/{}",
@@ -538,25 +550,30 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
                 })?;
                 let data = &script_output.metadata;
                 for (key, value) in data.iter() {
-                    cmd.env(
-                        &format!("DEP_{}_{}", super::envify(&name), super::envify(key)),
-                        value,
-                    );
+                    if let Some(ref links) = links {
+                        cmd.env(
+                            &format!("DEP_{}_{}", super::envify(&links), super::envify(key)),
+                            value,
+                        );
+                    }
+                    if any_build_script_metadata {
+                        cmd.env(
+                            &format!("CARGO_DEP_{}_{}", super::envify(&name), super::envify(key)),
+                            value,
+                        );
+                    }
                 }
             }
-            if let Some(build_scripts) = build_scripts {
+            if let Some(build_scripts) = build_scripts
+                && let Some(ref host_target_root) = host_target_root
+            {
                 super::add_plugin_deps(
                     &mut cmd,
                     &build_script_outputs,
                     &build_scripts,
-                    &host_target_root,
+                    host_target_root,
                 )?;
             }
-        }
-
-        if build_plan {
-            state.build_plan(invocation_name, cmd.clone(), Arc::new(Vec::new()));
-            return Ok(());
         }
 
         // And now finally, run the build command itself!
@@ -597,10 +614,7 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
                 // If we're opting into backtraces, mention that build dependencies' backtraces can
                 // be improved by requesting debuginfo to be built, if we're not building with
                 // debuginfo already.
-                //
-                // ALLOWED: Other tools like `rustc` might read it directly
-                // through `std::env`. We should make their behavior consistent.
-                #[allow(clippy::disallowed_methods)]
+                #[expect(clippy::disallowed_methods, reason = "consistency with rustc")]
                 if let Ok(show_backtraces) = std::env::var("RUST_BACKTRACE") {
                     if !built_with_debuginfo && show_backtraces != "0" {
                         build_error_context.push_str(&format!(
@@ -706,11 +720,7 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
         Ok(())
     });
 
-    let mut job = if build_runner.bcx.build_config.build_plan {
-        Job::new_dirty(Work::noop(), DirtyReason::FreshBuild)
-    } else {
-        fingerprint::prepare_target(build_runner, unit, false)?
-    };
+    let mut job = fingerprint::prepare_target(build_runner, unit, false)?;
     if job.freshness().is_dirty() {
         job.before(dirty);
     } else {
@@ -1054,10 +1064,10 @@ impl BuildOutput {
                                 None => return false,
                                 Some(n) => n,
                             };
-                            // ALLOWED: the process of rustc bootstrapping reads this through
-                            // `std::env`. We should make the behavior consistent. Also, we
-                            // don't advertise this for bypassing nightly.
-                            #[allow(clippy::disallowed_methods)]
+                            #[expect(
+                                clippy::disallowed_methods,
+                                reason = "consistency with rustc, not specified behavior"
+                            )]
                             std::env::var("RUSTC_BOOTSTRAP")
                                 .map_or(false, |var| var.split(',').any(|s| s == name))
                         };

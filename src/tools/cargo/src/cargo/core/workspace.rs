@@ -17,23 +17,28 @@ use crate::core::registry::PackageRegistry;
 use crate::core::resolver::ResolveBehavior;
 use crate::core::resolver::features::CliFeatures;
 use crate::core::{
-    Dependency, Edition, FeatureValue, PackageId, PackageIdSpec, PackageIdSpecQuery,
+    Dependency, Edition, FeatureValue, PackageId, PackageIdSpec, PackageIdSpecQuery, Patch,
+    PatchLocation,
 };
 use crate::core::{EitherManifest, Package, SourceId, VirtualManifest};
+use crate::lints::analyze_cargo_lints_table;
+use crate::lints::rules::blanket_hint_mostly_unused;
+use crate::lints::rules::check_im_a_teapot;
+use crate::lints::rules::implicit_minimum_version_req;
 use crate::ops;
+use crate::ops::lockfile::LOCKFILE_NAME;
 use crate::sources::{CRATES_IO_INDEX, CRATES_IO_REGISTRY, PathSource, SourceConfigMap};
-use crate::util::context::FeatureUnification;
+use crate::util::context;
+use crate::util::context::{FeatureUnification, Value};
 use crate::util::edit_distance;
 use crate::util::errors::{CargoResult, ManifestError};
 use crate::util::interning::InternedString;
-use crate::util::lints::{
-    analyze_cargo_lints_table, blanket_hint_mostly_unused, check_im_a_teapot,
-};
 use crate::util::toml::{InheritableFields, read_manifest};
 use crate::util::{
     Filesystem, GlobalContext, IntoUrl, context::CargoResolverConfig, context::ConfigRelativePath,
     context::IncompatibleRustVersions,
 };
+
 use cargo_util::paths;
 use cargo_util::paths::normalize_path;
 use cargo_util_schemas::manifest;
@@ -122,6 +127,8 @@ pub struct Workspace<'gctx> {
     resolve_honors_rust_version: bool,
     /// The feature unification mode used when building packages.
     resolve_feature_unification: FeatureUnification,
+    /// Latest publish time allowed for packages
+    resolve_publish_time: Option<jiff::Timestamp>,
     /// Workspace-level custom metadata
     custom_metadata: Option<toml::Value>,
 
@@ -259,6 +266,7 @@ impl<'gctx> Workspace<'gctx> {
             resolve_behavior: ResolveBehavior::V1,
             resolve_honors_rust_version: false,
             resolve_feature_unification: FeatureUnification::Selected,
+            resolve_publish_time: None,
             custom_metadata: None,
             local_overlays: HashMap::new(),
         }
@@ -347,6 +355,49 @@ impl<'gctx> Workspace<'gctx> {
                 .shell()
                 .warn("ignoring `resolver.feature-unification` without `-Zfeature-unification`")?;
         };
+
+        if let Some(lockfile_path) = config.lockfile_path {
+            if self.gctx().cli_unstable().lockfile_path {
+                // Reserve the ability to add templates in the future.
+                let replacements: [(&str, &str); 0] = [];
+                let path = lockfile_path
+                    .resolve_templated_path(self.gctx(), replacements)
+                    .map_err(|e| match e {
+                        context::ResolveTemplateError::UnexpectedVariable {
+                            variable,
+                            raw_template,
+                        } => {
+                            anyhow!(
+                                "unexpected variable `{variable}` in resolver.lockfile-path `{raw_template}`"
+                            )
+                        }
+                        context::ResolveTemplateError::UnexpectedBracket { bracket_type, raw_template } => {
+                            let (btype, literal) = match bracket_type {
+                                context::BracketType::Opening => ("opening", "{"),
+                                context::BracketType::Closing => ("closing", "}"),
+                            };
+
+                            anyhow!(
+                                "unexpected {btype} bracket `{literal}` in build.build-dir path `{raw_template}`"
+                            )
+                        }
+                    })?;
+                if !path.ends_with(LOCKFILE_NAME) {
+                    bail!("the `resolver.lockfile-path` must be a path to a {LOCKFILE_NAME} file");
+                }
+                if path.is_dir() {
+                    bail!(
+                        "`resolver.lockfile-path` `{}` is a directory but expected a file",
+                        path.display()
+                    );
+                }
+                self.requested_lockfile_path = Some(path);
+            } else {
+                self.gctx().shell().warn(
+                    "ignoring `resolver.lockfile-path`, pass `-Zlockfile-path` to enable it",
+                )?;
+            }
+        }
 
         Ok(())
     }
@@ -478,9 +529,9 @@ impl<'gctx> Workspace<'gctx> {
         }
     }
 
-    fn config_patch(&self) -> CargoResult<HashMap<Url, Vec<Dependency>>> {
+    fn config_patch(&self) -> CargoResult<HashMap<Url, Vec<Patch>>> {
         let config_patch: Option<
-            BTreeMap<String, BTreeMap<String, TomlDependency<ConfigRelativePath>>>,
+            BTreeMap<String, BTreeMap<String, Value<TomlDependency<ConfigRelativePath>>>>,
         > = self.gctx.get("patch")?;
 
         let source = SourceId::for_manifest_path(self.root_manifest())?;
@@ -502,19 +553,18 @@ impl<'gctx> Workspace<'gctx> {
             patch.insert(
                 url,
                 deps.iter()
-                    .map(|(name, dep)| {
-                        crate::util::toml::to_dependency(
-                            dep,
+                    .map(|(name, dependency_cv)| {
+                        crate::util::toml::config_patch_to_dependency(
+                            &dependency_cv.val,
                             name,
                             source,
                             self.gctx,
                             &mut warnings,
-                            /* platform */ None,
-                            // NOTE: Since we use ConfigRelativePath, this root isn't used as
-                            // any relative paths are resolved before they'd be joined with root.
-                            Path::new("unused-relative-path"),
-                            /* kind */ None,
                         )
+                        .map(|dep| Patch {
+                            dep,
+                            loc: PatchLocation::Config(dependency_cv.definition.clone()),
+                        })
                     })
                     .collect::<CargoResult<Vec<_>>>()?,
             );
@@ -532,7 +582,7 @@ impl<'gctx> Workspace<'gctx> {
     /// Returns the root `[patch]` section of this workspace.
     ///
     /// This may be from a virtual crate or an actual crate.
-    pub fn root_patch(&self) -> CargoResult<HashMap<Url, Vec<Dependency>>> {
+    pub fn root_patch(&self) -> CargoResult<HashMap<Url, Vec<Patch>>> {
         let from_manifest = match self.root_maybe() {
             MaybePackage::Package(p) => p.manifest().patch(),
             MaybePackage::Virtual(vm) => vm.patch(),
@@ -557,7 +607,7 @@ impl<'gctx> Workspace<'gctx> {
                 for dep_from_config in &mut *deps_from_config {
                     if let Some(i) = from_manifest_pruned.iter().position(|dep_from_manifest| {
                         // XXX: should this also take into account version numbers?
-                        dep_from_config.name_in_toml() == dep_from_manifest.name_in_toml()
+                        dep_from_config.dep.name_in_toml() == dep_from_manifest.dep.name_in_toml()
                     }) {
                         from_manifest_pruned.swap_remove(i);
                     }
@@ -685,6 +735,7 @@ impl<'gctx> Workspace<'gctx> {
         }
     }
 
+    // NOTE: may be removed once the deprecated `--lockfile-path` CLI flag is removed
     pub fn set_requested_lockfile_path(&mut self, path: Option<PathBuf>) {
         self.requested_lockfile_path = path;
     }
@@ -715,6 +766,14 @@ impl<'gctx> Workspace<'gctx> {
 
     pub fn resolve_feature_unification(&self) -> FeatureUnification {
         self.resolve_feature_unification
+    }
+
+    pub fn set_resolve_publish_time(&mut self, publish_time: jiff::Timestamp) {
+        self.resolve_publish_time = Some(publish_time);
+    }
+
+    pub fn resolve_publish_time(&self) -> Option<jiff::Timestamp> {
+        self.resolve_publish_time
     }
 
     pub fn custom_metadata(&self) -> Option<&toml::Value> {
@@ -1257,7 +1316,6 @@ impl<'gctx> Workspace<'gctx> {
     }
 
     pub fn emit_pkg_lints(&self, pkg: &Package, path: &Path) -> CargoResult<()> {
-        let mut error_count = 0;
         let toml_lints = pkg
             .manifest()
             .normalized_toml()
@@ -1270,35 +1328,44 @@ impl<'gctx> Workspace<'gctx> {
             .cloned()
             .unwrap_or(manifest::TomlToolLints::default());
 
-        let ws_contents = self.root_maybe().contents();
-
-        let ws_document = self.root_maybe().document();
-
         if self.gctx.cli_unstable().cargo_lints {
+            let mut verify_error_count = 0;
+
             analyze_cargo_lints_table(
-                pkg,
+                pkg.into(),
                 &path,
                 &cargo_lints,
-                ws_contents,
-                ws_document,
-                self.root_manifest(),
+                &mut verify_error_count,
                 self.gctx,
             )?;
-            check_im_a_teapot(pkg, &path, &cargo_lints, &mut error_count, self.gctx)?;
+
+            if verify_error_count > 0 {
+                let plural = if verify_error_count == 1 { "" } else { "s" };
+                bail!("encountered {verify_error_count} error{plural} while verifying lints")
+            }
+
+            let mut run_error_count = 0;
+
+            check_im_a_teapot(pkg, &path, &cargo_lints, &mut run_error_count, self.gctx)?;
+            implicit_minimum_version_req(
+                pkg.into(),
+                &path,
+                &cargo_lints,
+                &mut run_error_count,
+                self.gctx,
+            )?;
+
+            if run_error_count > 0 {
+                let plural = if run_error_count == 1 { "" } else { "s" };
+                bail!("encountered {run_error_count} error{plural} while running lints")
+            }
         }
 
-        if error_count > 0 {
-            Err(crate::util::errors::AlreadyPrintedError::new(anyhow!(
-                "encountered {error_count} errors(s) while running lints"
-            ))
-            .into())
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 
     pub fn emit_ws_lints(&self) -> CargoResult<()> {
-        let mut error_count = 0;
+        let mut run_error_count = 0;
 
         let cargo_lints = match self.root_maybe() {
             MaybePackage::Package(pkg) => {
@@ -1322,27 +1389,46 @@ impl<'gctx> Workspace<'gctx> {
         .unwrap_or(manifest::TomlToolLints::default());
 
         if self.gctx.cli_unstable().cargo_lints {
-            // Calls to lint functions go in here
+            let mut verify_error_count = 0;
+
+            analyze_cargo_lints_table(
+                self.root_maybe().into(),
+                self.root_manifest(),
+                &cargo_lints,
+                &mut verify_error_count,
+                self.gctx,
+            )?;
+
+            if verify_error_count > 0 {
+                let plural = if verify_error_count == 1 { "" } else { "s" };
+                bail!("encountered {verify_error_count} error{plural} while verifying lints")
+            }
+
+            implicit_minimum_version_req(
+                self.root_maybe().into(),
+                self.root_manifest(),
+                &cargo_lints,
+                &mut run_error_count,
+                self.gctx,
+            )?;
         }
 
         // This is a short term hack to allow `blanket_hint_mostly_unused`
         // to run without requiring `-Zcargo-lints`, which should hopefully
-        // improve the testing expierience while we are collecting feedback
+        // improve the testing experience while we are collecting feedback
         if self.gctx.cli_unstable().profile_hint_mostly_unused {
             blanket_hint_mostly_unused(
                 self.root_maybe(),
                 self.root_manifest(),
                 &cargo_lints,
-                &mut error_count,
+                &mut run_error_count,
                 self.gctx,
             )?;
         }
 
-        if error_count > 0 {
-            Err(crate::util::errors::AlreadyPrintedError::new(anyhow!(
-                "encountered {error_count} errors(s) while running lints"
-            ))
-            .into())
+        if run_error_count > 0 {
+            let plural = if run_error_count == 1 { "" } else { "s" };
+            bail!("encountered {run_error_count} error{plural} while running lints")
         } else {
             Ok(())
         }
@@ -1945,14 +2031,14 @@ impl MaybePackage {
         }
     }
 
-    pub fn contents(&self) -> &str {
+    pub fn contents(&self) -> Option<&str> {
         match self {
             MaybePackage::Package(p) => p.manifest().contents(),
             MaybePackage::Virtual(v) => v.contents(),
         }
     }
 
-    pub fn document(&self) -> &toml::Spanned<toml::de::DeTable<'static>> {
+    pub fn document(&self) -> Option<&toml::Spanned<toml::de::DeTable<'static>>> {
         match self {
             MaybePackage::Package(p) => p.manifest().document(),
             MaybePackage::Virtual(v) => v.document(),
@@ -2019,8 +2105,48 @@ impl WorkspaceRootConfig {
         !explicit_member && excluded
     }
 
+    /// Checks if the path is explicitly listed as a workspace member.
+    ///
+    /// Returns `true` ONLY if:
+    /// - The path is the workspace root manifest itself, or
+    /// - The path matches one of the explicit `members` patterns
+    ///
+    /// NOTE: This does NOT check for implicit path dependency membership.
+    /// A `false` return does NOT mean the package is definitely not a member -
+    /// it could still be a member via path dependencies. Callers should fallback
+    /// to full workspace loading when this returns `false`.
+    fn is_explicitly_listed_member(&self, manifest_path: &Path) -> bool {
+        let root_manifest = self.root_dir.join("Cargo.toml");
+        if manifest_path == root_manifest {
+            return true;
+        }
+        match self.members {
+            Some(ref members) => {
+                // Use members_paths to properly expand glob patterns
+                let Ok(expanded_members) = self.members_paths(members) else {
+                    return false;
+                };
+                // Normalize the manifest path for comparison
+                let normalized_manifest = paths::normalize_path(manifest_path);
+                expanded_members.iter().any(|(member_path, _)| {
+                    // Normalize the member path as glob expansion may leave ".." components
+                    let normalized_member = paths::normalize_path(member_path);
+                    // Compare the manifest's parent directory with the member path exactly
+                    // instead of using starts_with to avoid matching nested directories
+                    normalized_manifest.parent() == Some(normalized_member.as_path())
+                })
+            }
+            None => false,
+        }
+    }
+
     fn has_members_list(&self) -> bool {
         self.members.is_some()
+    }
+
+    /// Returns true if this workspace config has default-members defined.
+    fn has_default_members(&self) -> bool {
+        self.default_members.is_some()
     }
 
     /// Returns expanded paths along with the glob that they were expanded from.
@@ -2115,6 +2241,66 @@ pub fn find_workspace_root(
             .workspace_config()
             .get_ws_root(self_path, manifest_path))
     })
+}
+
+/// Finds the workspace root for a manifest, with minimal verification.
+///
+/// This is similar to `find_workspace_root`, but additionally verifies that the
+/// package and workspace agree on each other:
+/// - If the package has an explicit `package.workspace` pointer, it is trusted
+/// - Otherwise, the workspace must include the package in its `members` list
+pub fn find_workspace_root_with_membership_check(
+    manifest_path: &Path,
+    gctx: &GlobalContext,
+) -> CargoResult<Option<PathBuf>> {
+    let source_id = SourceId::for_manifest_path(manifest_path)?;
+    let current_manifest = read_manifest(manifest_path, source_id, gctx)?;
+
+    match current_manifest.workspace_config() {
+        WorkspaceConfig::Root(root_config) => {
+            // This manifest is a workspace root itself
+            // If default-members are defined, fall back to full loading for proper validation
+            if root_config.has_default_members() {
+                Ok(None)
+            } else {
+                Ok(Some(manifest_path.to_path_buf()))
+            }
+        }
+        WorkspaceConfig::Member {
+            root: Some(path_to_root),
+        } => {
+            // Has explicit `package.workspace` pointer - verify the workspace agrees
+            let ws_manifest_path = read_root_pointer(manifest_path, path_to_root);
+            let ws_source_id = SourceId::for_manifest_path(&ws_manifest_path)?;
+            let ws_manifest = read_manifest(&ws_manifest_path, ws_source_id, gctx)?;
+
+            // Verify the workspace includes this package in its members
+            if let WorkspaceConfig::Root(ref root_config) = *ws_manifest.workspace_config() {
+                if root_config.is_explicitly_listed_member(manifest_path)
+                    && !root_config.is_excluded(manifest_path)
+                {
+                    return Ok(Some(ws_manifest_path));
+                }
+            }
+            // Workspace doesn't agree with the pointer - not a valid workspace root
+            Ok(None)
+        }
+        WorkspaceConfig::Member { root: None } => {
+            // No explicit pointer, walk up with membership validation
+            find_workspace_root_with_loader(manifest_path, gctx, |candidate_manifest_path| {
+                let source_id = SourceId::for_manifest_path(candidate_manifest_path)?;
+                let manifest = read_manifest(candidate_manifest_path, source_id, gctx)?;
+                if let WorkspaceConfig::Root(ref root_config) = *manifest.workspace_config() {
+                    if root_config.is_explicitly_listed_member(manifest_path)
+                        && !root_config.is_excluded(manifest_path)
+                    {
+                        return Ok(Some(candidate_manifest_path.to_path_buf()));
+                    }
+                }
+                Ok(None)
+            })
+        }
+    }
 }
 
 /// Finds the path of the root of the workspace.

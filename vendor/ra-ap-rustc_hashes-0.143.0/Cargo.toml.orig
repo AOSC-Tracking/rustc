@@ -1,0 +1,10 @@
+[dependencies.rustc-stable-hash]
+version = "0.1.0"
+
+[package]
+description = "\nAutomatically published version of the package `rustc_hashes`\nin the rust-lang/rust repository from commit 61cc47e367d7be91e13bcd01e4e96e0e233d4f6d\n\nThe publishing script for this crate lives at:\nhttps://github.com/rust-analyzer/rustc-auto-publish\n"
+edition = "2024"
+license = "MIT / Apache-2.0"
+name = "ra-ap-rustc_hashes"
+repository = "https://github.com/rust-lang/rust"
+version = "0.143.0"

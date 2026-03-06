@@ -1,1 +1,0 @@
-- [Footnotes](footnotes.md)

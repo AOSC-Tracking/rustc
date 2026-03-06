@@ -1,0 +1,18 @@
+[dependencies]
+rustc-literal-escaper = "0.0.5"
+
+[dependencies.rustc_lexer]
+package = "ra-ap-rustc_lexer"
+version = "0.143.0"
+
+[package]
+description = "\nAutomatically published version of the package `rustc_parse_format`\nin the rust-lang/rust repository from commit 61cc47e367d7be91e13bcd01e4e96e0e233d4f6d\n\nThe publishing script for this crate lives at:\nhttps://github.com/rust-analyzer/rustc-auto-publish\n"
+edition = "2024"
+license = "MIT / Apache-2.0"
+name = "ra-ap-rustc_parse_format"
+repository = "https://github.com/rust-lang/rust"
+version = "0.143.0"
+[target."cfg(target_pointer_width = \"64\")".dev-dependencies.rustc_index]
+default-features = false
+package = "ra-ap-rustc_index"
+version = "0.143.0"

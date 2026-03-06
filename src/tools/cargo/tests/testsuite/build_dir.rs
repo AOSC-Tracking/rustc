@@ -29,7 +29,7 @@ fn binary_with_debug() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout build")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -46,6 +46,7 @@ fn binary_with_debug() {
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/invoked.timestamp
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo[..][EXE]
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo[..].d
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/.lock
 
 "#]]);
 
@@ -74,7 +75,7 @@ fn binary_with_release() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout build --release")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build --release")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -100,6 +101,7 @@ fn binary_with_release() {
 [ROOT]/foo/build-dir/release/build/foo/[HASH]/fingerprint/invoked.timestamp
 [ROOT]/foo/build-dir/release/build/foo/[HASH]/deps/foo[..][EXE]
 [ROOT]/foo/build-dir/release/build/foo/[HASH]/deps/foo[..].d
+[ROOT]/foo/build-dir/release/build/foo/[HASH]/.lock
 
 "#]]);
 
@@ -178,7 +180,7 @@ fn libs() {
             )
             .build();
 
-        p.cargo("-Zbuild-dir-new-layout build")
+        p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
             .masquerade_as_nightly_cargo(&["new build-dir layout"])
             .enable_mac_dsym()
             .run();
@@ -194,7 +196,7 @@ fn should_default_to_target() {
         .file("src/main.rs", r#"fn main() { println!("Hello, World!") }"#)
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout build")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -211,6 +213,7 @@ fn should_default_to_target() {
 [ROOT]/foo/target/debug/build/foo/[HASH]/deps/foo[..].d
 [ROOT]/foo/target/debug/foo[EXE]
 [ROOT]/foo/target/debug/foo.d
+[ROOT]/foo/target/debug/build/foo/[HASH]/.lock
 
 "#]]);
 }
@@ -221,7 +224,7 @@ fn should_respect_env_var() {
         .file("src/main.rs", r#"fn main() { println!("Hello, World!") }"#)
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout build")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .env("CARGO_BUILD_BUILD_DIR", "build-dir")
         .enable_mac_dsym()
@@ -237,6 +240,7 @@ fn should_respect_env_var() {
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/invoked.timestamp
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo[..][EXE]
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo[..].d
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/.lock
 
 "#]]);
 }
@@ -267,7 +271,7 @@ fn build_script_should_output_to_build_dir() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout build")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -288,14 +292,17 @@ fn build_script_should_output_to_build_dir() {
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/dep-build-script-build-script-build
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/build-script-build-script-build
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/build-script-build-script-build.json
-[ROOT]/foo/build-dir/debug/build/foo/[HASH]/build-script/build_script_build[..].d
-[ROOT]/foo/build-dir/debug/build/foo/[HASH]/build-script/build_script_build[..][EXE]
-[ROOT]/foo/build-dir/debug/build/foo/[HASH]/build-script/build-script-build[EXE]
-[ROOT]/foo/build-dir/debug/build/foo/[HASH]/build-script-execution/out/foo.txt
-[ROOT]/foo/build-dir/debug/build/foo/[HASH]/build-script-execution/invoked.timestamp
-[ROOT]/foo/build-dir/debug/build/foo/[HASH]/build-script-execution/output
-[ROOT]/foo/build-dir/debug/build/foo/[HASH]/build-script-execution/root-output
-[ROOT]/foo/build-dir/debug/build/foo/[HASH]/build-script-execution/stderr
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/build_script_build[..].d
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/build_script_build[..][EXE]
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/build-script-build[EXE]
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/build-script/out/foo.txt
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/build-script/invoked.timestamp
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/build-script/output
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/build-script/root-output
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/build-script/stderr
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/.lock
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/.lock
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/.lock
 
 "#]]);
 }
@@ -327,7 +334,7 @@ fn cargo_tmpdir_should_output_to_build_dir() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout test")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking test")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -336,10 +343,10 @@ fn cargo_tmpdir_should_output_to_build_dir() {
 [ROOT]/foo/build-dir/CACHEDIR.TAG
 [ROOT]/foo/build-dir/debug/.cargo-lock
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo-[HASH].d
-[ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo-[HASH].d
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo.d
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo[..].d
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo-[HASH][EXE]
-[ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo-[HASH][EXE]
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo[EXE]
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo[..][EXE]
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/invoked.timestamp
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/dep-test-bin-foo
@@ -353,6 +360,9 @@ fn cargo_tmpdir_should_output_to_build_dir() {
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/dep-bin-foo
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/bin-foo
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/bin-foo.json
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/.lock
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/.lock
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/.lock
 [ROOT]/foo/build-dir/tmp/foo.txt
 [ROOT]/foo/build-dir/.rustc_info.json
 
@@ -383,7 +393,7 @@ fn examples_should_output_to_build_dir_and_uplift_to_target_dir() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout build --examples")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build --examples")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -396,10 +406,13 @@ fn examples_should_output_to_build_dir_and_uplift_to_target_dir() {
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/example-foo
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/example-foo.json
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/invoked.timestamp
-[ROOT]/foo/build-dir/debug/examples/foo[..][EXE]
-[ROOT]/foo/build-dir/debug/examples/foo[..].d
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo[..][EXE]
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo[..].d
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/.lock
 
 "#]]);
+
+    assert!(!p.root().join("build-dir/debug/examples").exists());
 
     p.root()
         .join("target-dir")
@@ -427,7 +440,7 @@ fn benches_should_output_to_build_dir() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout build --bench=foo")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build --bench=foo")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -447,6 +460,8 @@ fn benches_should_output_to_build_dir() {
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/dep-bin-foo
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/bin-foo
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/bin-foo.json
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/.lock
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/.lock
 [ROOT]/foo/build-dir/.rustc_info.json
 
 "#]]);
@@ -475,7 +490,7 @@ fn cargo_doc_should_output_to_target_dir() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout doc")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking doc")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -500,7 +515,7 @@ fn cargo_package_should_build_in_build_dir_and_output_to_target_dir() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout package")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking package")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -518,13 +533,15 @@ fn cargo_package_should_build_in_build_dir_and_output_to_target_dir() {
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/invoked.timestamp
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo[..][EXE]
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo[..].d
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/.lock
 [ROOT]/foo/build-dir/debug/foo[EXE]
 [ROOT]/foo/build-dir/debug/foo.d
 [ROOT]/foo/build-dir/package/foo-0.0.1/Cargo.lock
 [ROOT]/foo/build-dir/package/foo-0.0.1/Cargo.toml
 [ROOT]/foo/build-dir/package/foo-0.0.1/Cargo.toml.orig
 [ROOT]/foo/build-dir/package/foo-0.0.1/src/main.rs
-[ROOT]/foo/build-dir/package/foo-0.0.1.crate
+[ROOT]/foo/build-dir/CACHEDIR.TAG
+[ROOT]/foo/build-dir/package/tmp-crate/foo-0.0.1.crate
 
 "#]]);
 
@@ -532,6 +549,7 @@ fn cargo_package_should_build_in_build_dir_and_output_to_target_dir() {
         .join("target-dir")
         .assert_build_dir_layout(str![[r#"
 [ROOT]/foo/target-dir/package/foo-0.0.1.crate
+[ROOT]/foo/target-dir/CACHEDIR.TAG
 
 "#]]);
 }
@@ -552,7 +570,7 @@ fn cargo_publish_should_only_touch_build_dir() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout publish")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking publish")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .replace_crates_io(registry.index_url())
         .enable_mac_dsym()
@@ -581,7 +599,7 @@ fn cargo_clean_should_clean_the_target_dir_and_build_dir() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout build")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -596,6 +614,7 @@ fn cargo_clean_should_clean_the_target_dir_and_build_dir() {
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/invoked.timestamp
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo[..][EXE]
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo[..].d
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/.lock
 
 "#]]);
 
@@ -609,7 +628,7 @@ fn cargo_clean_should_clean_the_target_dir_and_build_dir() {
 
 "#]]);
 
-    p.cargo("-Zbuild-dir-new-layout clean")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking clean")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -650,7 +669,7 @@ fn cargo_clean_should_remove_correct_files() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout build")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -672,10 +691,12 @@ fn cargo_clean_should_remove_correct_files() {
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/bin-foo.json
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/dep-bin-foo
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/invoked.timestamp
+[ROOT]/foo/build-dir/debug/build/bar/[HASH]/.lock
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/.lock
 
 "#]]);
 
-    p.cargo("-Zbuild-dir-new-layout clean -p bar")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking clean -p bar")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -690,6 +711,7 @@ fn cargo_clean_should_remove_correct_files() {
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/bin-foo.json
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/dep-bin-foo
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/invoked.timestamp
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/.lock
 
 "#]]);
 }
@@ -708,7 +730,7 @@ fn timings_report_should_output_to_target_dir() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout build --timings")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build --timings")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -733,7 +755,7 @@ fn future_incompat_should_output_to_build_dir() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout build")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .arg("--future-incompat-report")
         .env("RUSTFLAGS", "-Zfuture-incompat-test")
@@ -756,7 +778,7 @@ fn template_should_error_for_invalid_variables() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout build")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .with_status(101)
@@ -782,7 +804,7 @@ fn template_should_suggest_nearest_variable() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout build")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .with_status(101)
         .with_stderr_data(str![[r#"
@@ -808,7 +830,7 @@ fn template_workspace_root() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout build")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -825,6 +847,7 @@ fn template_workspace_root() {
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/fingerprint/invoked.timestamp
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo[..][EXE]
 [ROOT]/foo/build-dir/debug/build/foo/[HASH]/deps/foo[..].d
+[ROOT]/foo/build-dir/debug/build/foo/[HASH]/.lock
 
 "#]]);
 
@@ -853,7 +876,7 @@ fn template_cargo_cache_home() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout build")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -872,6 +895,7 @@ fn template_cargo_cache_home() {
 [ROOT]/home/.cargo/build-dir/debug/build/foo/[HASH]/fingerprint/invoked.timestamp
 [ROOT]/home/.cargo/build-dir/debug/build/foo/[HASH]/deps/foo[..][EXE]
 [ROOT]/home/.cargo/build-dir/debug/build/foo/[HASH]/deps/foo[..].d
+[ROOT]/home/.cargo/build-dir/debug/build/foo/[HASH]/.lock
 
 "#]]);
 
@@ -910,7 +934,7 @@ fn template_workspace_path_hash() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout build")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -933,6 +957,7 @@ fn template_workspace_path_hash() {
 [ROOT]/foo/foo/[HASH]/build-dir/debug/build/foo/[HASH]/fingerprint/invoked.timestamp
 [ROOT]/foo/foo/[HASH]/build-dir/debug/build/foo/[HASH]/deps/foo[..][EXE]
 [ROOT]/foo/foo/[HASH]/build-dir/debug/build/foo/[HASH]/deps/foo[..].d
+[ROOT]/foo/foo/[HASH]/build-dir/debug/build/foo/[HASH]/.lock
 
 "#]]);
 
@@ -980,7 +1005,7 @@ fn template_workspace_path_hash_should_handle_symlink() {
         .build();
 
     // Build from the non-symlinked directory
-    p.cargo("-Zbuild-dir-new-layout check")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking check")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .run();
@@ -1000,12 +1025,12 @@ fn template_workspace_path_hash_should_handle_symlink() {
 [ROOT]/foo/foo/[HASH]/build-dir/debug/build/foo/[HASH]/fingerprint/lib-foo.json
 [ROOT]/foo/foo/[HASH]/build-dir/debug/build/foo/[HASH]/deps/foo-[HASH].d
 [ROOT]/foo/foo/[HASH]/build-dir/debug/build/foo/[HASH]/deps/libfoo-[HASH].rmeta
+[ROOT]/foo/foo/[HASH]/build-dir/debug/build/foo/[HASH]/.lock
 
 "#]]);
 
     p.root().join("target").assert_build_dir_layout(str![[r#"
 [ROOT]/foo/target/CACHEDIR.TAG
-[ROOT]/foo/target/debug/.cargo-lock
 
 "#]]);
 
@@ -1019,7 +1044,7 @@ fn template_workspace_path_hash_should_handle_symlink() {
     foo_dir.rm_rf();
 
     // Run cargo from the symlinked dir
-    p.cargo("-Zbuild-dir-new-layout check")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking check")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .enable_mac_dsym()
         .cwd(&symlinked_dir)
@@ -1039,12 +1064,12 @@ fn template_workspace_path_hash_should_handle_symlink() {
 [ROOT]/foo/foo/[HASH]/build-dir/debug/build/foo/[HASH]/fingerprint/lib-foo.json
 [ROOT]/foo/foo/[HASH]/build-dir/debug/build/foo/[HASH]/deps/foo-[HASH].d
 [ROOT]/foo/foo/[HASH]/build-dir/debug/build/foo/[HASH]/deps/libfoo-[HASH].rmeta
+[ROOT]/foo/foo/[HASH]/build-dir/debug/build/foo/[HASH]/.lock
 
 "#]]);
 
     p.root().join("target").assert_build_dir_layout(str![[r#"
 [ROOT]/foo/target/CACHEDIR.TAG
-[ROOT]/foo/target/debug/.cargo-lock
 
 "#]]);
 
@@ -1065,7 +1090,7 @@ fn template_should_handle_reject_unmatched_brackets() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout build")
+    p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
         .masquerade_as_nightly_cargo(&["new build-dir layout"])
         .with_status(101)
         .with_stderr_data(str![[r#"

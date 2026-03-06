@@ -26,10 +26,16 @@ When no packages are selected, all packages and all dependencies in the
 workspace are cleaned.
 
 {{#options}}
+
 {{#option "`-p` _spec_..." "`--package` _spec_..." }}
 Clean only the specified packages. This flag may be specified
 multiple times. See {{man "cargo-pkgid" 1}} for the SPEC format.
 {{/option}}
+
+{{#option "`--workspace`" }}
+Clean artifacts of the workspace members. 
+{{/option}}
+
 {{/options}}
 
 ### Clean Options
@@ -73,7 +79,6 @@ Remove all artifacts in the directory with the given profile name.
 
 {{> options-locked }}
 
-{{> options-lockfile-path }}
 {{/options}}
 
 {{> section-options-common }}

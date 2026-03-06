@@ -1,5 +1,6 @@
 use annotate_snippets::{AnnotationKind, Group, Level, Snippet};
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,6 @@ use cargo_util_schemas::manifest::{
 };
 use cargo_util_schemas::manifest::{RustVersion, StringOrBool};
 use itertools::Itertools;
-use lazycell::LazyCell;
 use pathdiff::diff_paths;
 use url::Url;
 
@@ -25,15 +25,21 @@ use crate::core::compiler::{CompileKind, CompileTarget};
 use crate::core::dependency::{Artifact, ArtifactTarget, DepKind};
 use crate::core::manifest::{ManifestMetadata, TargetSourcePath};
 use crate::core::resolver::ResolveBehavior;
-use crate::core::{CliUnstable, FeatureValue, find_workspace_root, resolve_relative_path};
+use crate::core::{
+    CliUnstable, FeatureValue, Patch, PatchLocation, find_workspace_root, resolve_relative_path,
+};
 use crate::core::{Dependency, Manifest, Package, PackageId, Summary, Target};
 use crate::core::{Edition, EitherManifest, Feature, Features, VirtualManifest, Workspace};
 use crate::core::{GitReference, PackageIdSpec, SourceId, WorkspaceConfig, WorkspaceRootConfig};
+use crate::lints::get_key_value_span;
+use crate::lints::rel_cwd_manifest_path;
 use crate::sources::{CRATES_IO_INDEX, CRATES_IO_REGISTRY};
 use crate::util::errors::{CargoResult, ManifestError};
 use crate::util::interning::InternedString;
-use crate::util::lints::{get_key_value_span, rel_cwd_manifest_path};
-use crate::util::{self, GlobalContext, IntoUrl, OptVersionReq, context::ConfigRelativePath};
+use crate::util::{
+    self, GlobalContext, IntoUrl, OnceExt, OptVersionReq, context::ConfigRelativePath,
+    context::TOP_LEVEL_CONFIG_KEYS,
+};
 
 mod embedded;
 mod targets;
@@ -97,8 +103,8 @@ pub fn read_manifest(
 
         if normalized_toml.package().is_some() {
             to_real_manifest(
-                contents,
-                document,
+                Some(contents),
+                Some(document),
                 original_toml,
                 normalized_toml,
                 features,
@@ -114,8 +120,8 @@ pub fn read_manifest(
         } else if normalized_toml.workspace.is_some() {
             assert!(!is_embedded);
             to_virtual_manifest(
-                contents,
-                document,
+                Some(contents),
+                Some(document),
                 original_toml,
                 normalized_toml,
                 features,
@@ -299,7 +305,7 @@ fn normalize_toml(
 ) -> CargoResult<manifest::TomlManifest> {
     let package_root = manifest_file.parent().unwrap();
 
-    let inherit_cell: LazyCell<InheritableFields> = LazyCell::new();
+    let inherit_cell: OnceCell<InheritableFields> = OnceCell::new();
     let inherit = || {
         inherit_cell
             .try_borrow_with(|| load_inheritable_fields(gctx, manifest_file, &workspace_config))
@@ -1261,8 +1267,8 @@ fn deprecated_ws_default_features(
 
 #[tracing::instrument(skip_all)]
 pub fn to_real_manifest(
-    contents: String,
-    document: toml::Spanned<toml::de::DeTable<'static>>,
+    contents: Option<String>,
+    document: Option<toml::Spanned<toml::de::DeTable<'static>>>,
     original_toml: manifest::TomlManifest,
     normalized_toml: manifest::TomlManifest,
     features: Features,
@@ -1308,7 +1314,7 @@ pub fn to_real_manifest(
                 let edition_msrv = RustVersion::try_from(edition_msrv).unwrap();
                 if !edition_msrv.is_compatible_with(pkg_msrv.as_partial()) {
                     bail!(
-                        "rust-version {} is imcompatible with the version ({}) required by \
+                        "rust-version {} is incompatible with the version ({}) required by \
                             the specified edition ({})",
                         pkg_msrv,
                         edition_msrv,
@@ -1578,7 +1584,7 @@ pub fn to_real_manifest(
         gctx,
         warnings,
         platform: None,
-        root: package_root,
+        file: manifest_file,
     };
     gather_dependencies(
         &mut manifest_ctx,
@@ -1749,8 +1755,8 @@ pub fn to_real_manifest(
                 missing_dep_diagnostic(
                     missing_dep,
                     &original_toml,
-                    &document,
-                    &contents,
+                    document.as_ref(),
+                    contents.as_deref(),
                     manifest_file,
                     gctx,
                 )?;
@@ -1811,9 +1817,9 @@ note: only a feature named `default` will be enabled by default"
     let default_run = normalized_package.default_run.clone();
     let metabuild = normalized_package.metabuild.clone().map(|sov| sov.0);
     let manifest = Manifest::new(
-        Rc::new(contents),
-        Rc::new(document),
-        Rc::new(original_toml),
+        contents.map(Rc::new),
+        document.map(Rc::new),
+        Some(Rc::new(original_toml)),
         Rc::new(normalized_toml),
         summary,
         default_kind,
@@ -1862,7 +1868,9 @@ note: only a feature named `default` will be enabled by default"
                 .to_owned(),
         );
     }
-    warn_on_unused(&manifest.original_toml()._unused_keys, warnings);
+    if let Some(original_toml) = manifest.original_toml() {
+        warn_on_unused(&original_toml._unused_keys, warnings);
+    }
 
     manifest.feature_gate()?;
 
@@ -1872,15 +1880,13 @@ note: only a feature named `default` will be enabled by default"
 fn missing_dep_diagnostic(
     missing_dep: &MissingDependencyError,
     orig_toml: &TomlManifest,
-    document: &toml::Spanned<toml::de::DeTable<'static>>,
-    contents: &str,
+    document: Option<&toml::Spanned<toml::de::DeTable<'static>>>,
+    contents: Option<&str>,
     manifest_file: &Path,
     gctx: &GlobalContext,
 ) -> CargoResult<()> {
     let dep_name = missing_dep.dep_name;
     let manifest_path = rel_cwd_manifest_path(manifest_file, gctx);
-    let feature_span =
-        get_key_value_span(&document, &["features", missing_dep.feature.as_str()]).unwrap();
 
     let title = format!(
         "feature `{}` includes `{}`, but `{}` is not a dependency",
@@ -1892,57 +1898,67 @@ fn missing_dep_diagnostic(
         &dep_name
     );
     let group = Group::with_title(Level::ERROR.primary_title(&title));
-    let snippet = Snippet::source(contents)
-        .path(manifest_path)
-        .annotation(AnnotationKind::Primary.span(feature_span.value));
-    let group = if missing_dep.weak_optional {
-        let mut orig_deps = vec![
-            (
-                orig_toml.dependencies.as_ref(),
-                vec![DepKind::Normal.kind_table()],
-            ),
-            (
-                orig_toml.build_dependencies.as_ref(),
-                vec![DepKind::Build.kind_table()],
-            ),
-        ];
-        for (name, platform) in orig_toml.target.iter().flatten() {
-            orig_deps.push((
-                platform.dependencies.as_ref(),
-                vec!["target", name, DepKind::Normal.kind_table()],
-            ));
-            orig_deps.push((
-                platform.build_dependencies.as_ref(),
-                vec!["target", name, DepKind::Normal.kind_table()],
-            ));
-        }
+    let group =
+        if let Some(contents) = contents
+            && let Some(document) = document
+        {
+            let feature_span =
+                get_key_value_span(&document, &["features", missing_dep.feature.as_str()]).unwrap();
 
-        if let Some((_, toml_path)) = orig_deps.iter().find(|(deps, _)| {
-            if let Some(deps) = deps {
-                deps.keys().any(|p| *p.as_str() == *dep_name)
+            let snippet = Snippet::source(contents)
+                .path(manifest_path)
+                .annotation(AnnotationKind::Primary.span(feature_span.value));
+
+            if missing_dep.weak_optional {
+                let mut orig_deps = vec![
+                    (
+                        orig_toml.dependencies.as_ref(),
+                        vec![DepKind::Normal.kind_table()],
+                    ),
+                    (
+                        orig_toml.build_dependencies.as_ref(),
+                        vec![DepKind::Build.kind_table()],
+                    ),
+                ];
+                for (name, platform) in orig_toml.target.iter().flatten() {
+                    orig_deps.push((
+                        platform.dependencies.as_ref(),
+                        vec!["target", name, DepKind::Normal.kind_table()],
+                    ));
+                    orig_deps.push((
+                        platform.build_dependencies.as_ref(),
+                        vec!["target", name, DepKind::Normal.kind_table()],
+                    ));
+                }
+
+                if let Some((_, toml_path)) = orig_deps.iter().find(|(deps, _)| {
+                    if let Some(deps) = deps {
+                        deps.keys().any(|p| *p.as_str() == *dep_name)
+                    } else {
+                        false
+                    }
+                }) {
+                    let toml_path = toml_path
+                        .iter()
+                        .map(|s| *s)
+                        .chain(std::iter::once(dep_name.as_str()))
+                        .collect::<Vec<_>>();
+                    let dep_span = get_key_value_span(&document, &toml_path).unwrap();
+
+                    group
+                        .element(snippet.annotation(
+                            AnnotationKind::Context.span(dep_span.key).label(info_label),
+                        ))
+                        .element(Level::HELP.message(help))
+                } else {
+                    group.element(snippet)
+                }
             } else {
-                false
+                group.element(snippet)
             }
-        }) {
-            let toml_path = toml_path
-                .iter()
-                .map(|s| *s)
-                .chain(std::iter::once(dep_name.as_str()))
-                .collect::<Vec<_>>();
-            let dep_span = get_key_value_span(&document, &toml_path).unwrap();
-
-            group
-                .element(
-                    snippet
-                        .annotation(AnnotationKind::Context.span(dep_span.key).label(info_label)),
-                )
-                .element(Level::HELP.message(help))
         } else {
-            group.element(snippet)
-        }
-    } else {
-        group.element(snippet)
-    };
+            group
+        };
 
     if let Err(err) = gctx.shell().print_report(&[group], true) {
         return Err(err.into());
@@ -1951,8 +1967,8 @@ fn missing_dep_diagnostic(
 }
 
 fn to_virtual_manifest(
-    contents: String,
-    document: toml::Spanned<toml::de::DeTable<'static>>,
+    contents: Option<String>,
+    document: Option<toml::Spanned<toml::de::DeTable<'static>>>,
     original_toml: manifest::TomlManifest,
     normalized_toml: manifest::TomlManifest,
     features: Features,
@@ -1963,8 +1979,6 @@ fn to_virtual_manifest(
     warnings: &mut Vec<String>,
     _errors: &mut Vec<String>,
 ) -> CargoResult<VirtualManifest> {
-    let root = manifest_file.parent().unwrap();
-
     let mut deps = Vec::new();
     let (replace, patch) = {
         let mut manifest_ctx = ManifestContext {
@@ -1973,7 +1987,7 @@ fn to_virtual_manifest(
             gctx,
             warnings,
             platform: None,
-            root,
+            file: manifest_file,
         };
         (
             replace(&normalized_toml, &mut manifest_ctx)?,
@@ -1993,9 +2007,9 @@ fn to_virtual_manifest(
         bail!("virtual manifests must be configured with [workspace]");
     }
     let manifest = VirtualManifest::new(
-        Rc::new(contents),
-        Rc::new(document),
-        Rc::new(original_toml),
+        contents.map(Rc::new),
+        document.map(Rc::new),
+        Some(Rc::new(original_toml)),
         Rc::new(normalized_toml),
         replace,
         patch,
@@ -2004,7 +2018,9 @@ fn to_virtual_manifest(
         resolve_behavior,
     );
 
-    warn_on_unused(&manifest.original_toml()._unused_keys, warnings);
+    if let Some(original_toml) = manifest.original_toml() {
+        warn_on_unused(&original_toml._unused_keys, warnings);
+    }
 
     Ok(manifest)
 }
@@ -2041,7 +2057,7 @@ struct ManifestContext<'a, 'b> {
     gctx: &'b GlobalContext,
     warnings: &'a mut Vec<String>,
     platform: Option<Platform>,
-    root: &'a Path,
+    file: &'a Path,
 }
 
 #[tracing::instrument(skip_all)]
@@ -2111,9 +2127,9 @@ fn replace(
 }
 
 fn patch(
-    me: &manifest::TomlManifest,
+    me: &TomlManifest,
     manifest_ctx: &mut ManifestContext<'_, '_>,
-) -> CargoResult<HashMap<Url, Vec<Dependency>>> {
+) -> CargoResult<HashMap<Url, Vec<Patch>>> {
     let mut patch = HashMap::new();
     for (toml_url, deps) in me.patch.iter().flatten() {
         let url = match &toml_url[..] {
@@ -2144,7 +2160,10 @@ fn patch(
                         dep.unused_keys(),
                         &mut manifest_ctx.warnings,
                     );
-                    dep_to_dependency(dep, name, manifest_ctx, None)
+
+                    let dep = dep_to_dependency(dep, name, manifest_ctx, None)?;
+                    let loc = PatchLocation::Manifest(manifest_ctx.file.to_path_buf());
+                    Ok(Patch { dep, loc })
                 })
                 .collect::<CargoResult<Vec<_>>>()?,
         );
@@ -2152,59 +2171,40 @@ fn patch(
     Ok(patch)
 }
 
-pub(crate) fn to_dependency<P: ResolveToPath + Clone>(
-    dep: &manifest::TomlDependency<P>,
+/// Transforms a `patch` entry from Cargo config to a [`Dependency`].
+pub(crate) fn config_patch_to_dependency<P: ResolveToPath + Clone>(
+    config_patch: &manifest::TomlDependency<P>,
     name: &str,
     source_id: SourceId,
     gctx: &GlobalContext,
     warnings: &mut Vec<String>,
-    platform: Option<Platform>,
-    root: &Path,
-    kind: Option<DepKind>,
 ) -> CargoResult<Dependency> {
-    dep_to_dependency(
-        dep,
-        name,
-        &mut ManifestContext {
-            deps: &mut Vec::new(),
-            source_id,
-            gctx,
-            warnings,
-            platform,
-            root,
-        },
-        kind,
-    )
+    let manifest_ctx = &mut ManifestContext {
+        deps: &mut Vec::new(),
+        source_id,
+        gctx,
+        warnings,
+        platform: None,
+        // config path doesn't have manifest file path, and doesn't use it.
+        file: Path::new("unused"),
+    };
+    dep_to_dependency(config_patch, name, manifest_ctx, None)
 }
 
 fn dep_to_dependency<P: ResolveToPath + Clone>(
     orig: &manifest::TomlDependency<P>,
-    name: &str,
-    manifest_ctx: &mut ManifestContext<'_, '_>,
-    kind: Option<DepKind>,
-) -> CargoResult<Dependency> {
-    match *orig {
-        manifest::TomlDependency::Simple(ref version) => detailed_dep_to_dependency(
-            &manifest::TomlDetailedDependency::<P> {
-                version: Some(version.clone()),
-                ..Default::default()
-            },
-            name,
-            manifest_ctx,
-            kind,
-        ),
-        manifest::TomlDependency::Detailed(ref details) => {
-            detailed_dep_to_dependency(details, name, manifest_ctx, kind)
-        }
-    }
-}
-
-fn detailed_dep_to_dependency<P: ResolveToPath + Clone>(
-    orig: &manifest::TomlDetailedDependency<P>,
     name_in_toml: &str,
     manifest_ctx: &mut ManifestContext<'_, '_>,
     kind: Option<DepKind>,
 ) -> CargoResult<Dependency> {
+    let orig = match orig {
+        manifest::TomlDependency::Simple(version) => &manifest::TomlDetailedDependency::<P> {
+            version: Some(version.clone()),
+            ..Default::default()
+        },
+        manifest::TomlDependency::Detailed(details) => details,
+    };
+
     if orig.version.is_none() && orig.path.is_none() && orig.git.is_none() {
         anyhow::bail!(
             "dependency ({name_in_toml}) specified without \
@@ -2411,7 +2411,7 @@ fn to_dependency_source_id<P: ResolveToPath + Clone>(
             // always end up hashing to the same value no matter where it's
             // built from.
             if manifest_ctx.source_id.is_path() {
-                let path = manifest_ctx.root.join(path);
+                let path = manifest_ctx.file.parent().unwrap().join(path);
                 let path = paths::normalize_path(&path);
                 SourceId::for_path(&path)
             } else {
@@ -2885,11 +2885,18 @@ fn deprecated_underscore<T>(
 }
 
 fn warn_on_unused(unused: &BTreeSet<String>, warnings: &mut Vec<String>) {
+    use std::fmt::Write as _;
+
     for key in unused {
-        warnings.push(format!("unused manifest key: {}", key));
-        if key == "profiles.debug" {
-            warnings.push("use `[profile.dev]` to configure debug builds".to_string());
+        let mut message = format!("unused manifest key: {}", key);
+        if TOP_LEVEL_CONFIG_KEYS.iter().any(|c| c == key) {
+            write!(
+                &mut message,
+                "\nhelp: {key} is a valid .cargo/config.toml key"
+            )
+            .unwrap();
         }
+        warnings.push(message);
     }
 }
 
@@ -2927,8 +2934,8 @@ pub fn prepare_for_publish(
     let mut errors = Default::default();
     let gctx = ws.gctx();
     let manifest = to_real_manifest(
-        contents.to_owned(),
-        document.clone(),
+        contents.map(|c| c.to_owned()),
+        document.cloned(),
         original_toml,
         normalized_toml,
         features,

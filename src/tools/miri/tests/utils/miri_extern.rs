@@ -119,6 +119,11 @@ extern "Rust" {
     /// Miri-provided extern function to deallocate memory.
     pub fn miri_dealloc(ptr: *mut u8, size: usize, align: usize);
 
+    /// Add the allocation that this pointer points to to the "tracked" allocations.
+    /// This is equivalent to `-Zmiri-track-allic-id=<id>`, but also works if the ID is
+    /// only known at runtime.
+    pub fn miri_track_alloc(ptr: *const u8);
+
     /// Convert a path from the host Miri runs on to the target Miri interprets.
     /// Performs conversion of path separators as needed.
     ///
@@ -150,4 +155,7 @@ extern "Rust" {
 
     /// Blocks the current execution if the argument is false
     pub fn miri_genmc_assume(condition: bool);
+
+    /// Indicate to Miri that this thread is busy-waiting in a spin loop.
+    pub fn miri_spin_loop();
 }

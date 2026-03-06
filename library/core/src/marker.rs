@@ -14,6 +14,7 @@ pub use self::variance::{
     PhantomInvariant, PhantomInvariantLifetime, Variance, variance,
 };
 use crate::cell::UnsafeCell;
+use crate::clone::TrivialClone;
 use crate::cmp;
 use crate::fmt::Debug;
 use crate::hash::{Hash, Hasher};
@@ -162,7 +163,7 @@ pub trait Sized: MetaSized {
 }
 
 /// Types with a size that can be determined from pointer metadata.
-#[unstable(feature = "sized_hierarchy", issue = "none")]
+#[unstable(feature = "sized_hierarchy", issue = "144404")]
 #[lang = "meta_sized"]
 #[diagnostic::on_unimplemented(
     message = "the size for values of type `{Self}` cannot be known",
@@ -180,7 +181,7 @@ pub trait MetaSized: PointeeSized {
 }
 
 /// Types that may or may not have a size.
-#[unstable(feature = "sized_hierarchy", issue = "none")]
+#[unstable(feature = "sized_hierarchy", issue = "144404")]
 #[lang = "pointee_sized"]
 #[diagnostic::on_unimplemented(
     message = "values of type `{Self}` may or may not have a size",
@@ -454,12 +455,8 @@ marker_impls! {
 /// [impls]: #implementors
 #[stable(feature = "rust1", since = "1.0.0")]
 #[lang = "copy"]
-// FIXME(matthewjasper) This allows copying a type that doesn't implement
-// `Copy` because of unsatisfied lifetime bounds (copying `A<'_>` when only
-// `A<'static>: Copy` and `A<'_>: Clone`).
-// We have this attribute here for now only because there are quite a few
-// existing specializations on `Copy` that already exist in the standard
-// library, and there's no way to safely have this behavior right now.
+// This is unsound, but required by `hashbrown`
+// FIXME(joboet): change `hashbrown` to use `TrivialClone`
 #[rustc_unsafe_specialization_marker]
 #[rustc_diagnostic_item = "Copy"]
 pub trait Copy: Clone {
@@ -469,7 +466,7 @@ pub trait Copy: Clone {
 /// Derive macro generating an impl of the trait `Copy`.
 #[rustc_builtin_macro]
 #[stable(feature = "builtin_macro_prelude", since = "1.38.0")]
-#[allow_internal_unstable(core_intrinsics, derive_clone_copy)]
+#[allow_internal_unstable(core_intrinsics, derive_clone_copy_internals)]
 pub macro Copy($item:item) {
     /* compiler built-in */
 }
@@ -860,6 +857,10 @@ impl<T: PointeeSized> Clone for PhantomData<T> {
         Self
     }
 }
+
+#[doc(hidden)]
+#[unstable(feature = "trivial_clone", issue = "none")]
+unsafe impl<T: PointeeSized> TrivialClone for PhantomData<T> {}
 
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_const_unstable(feature = "const_default", issue = "143894")]

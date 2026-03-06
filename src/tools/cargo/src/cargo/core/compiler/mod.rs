@@ -8,7 +8,7 @@
 //! caching the output artifact of a build.
 //!
 //! However, it hasn't yet exposed a clear definition of each phase or session,
-//! like what rustc has done[^1]. Also, no one knows if Cargo really needs that.
+//! like what rustc has done. Also, no one knows if Cargo really needs that.
 //! To be pragmatic, here we list a handful of items you may want to learn:
 //!
 //! * [`BuildContext`] is a static context containing all information you need
@@ -26,15 +26,11 @@
 //! * [`Unit`] contains sufficient information to build something, usually
 //!   turning into a compiler invocation in a later phase.
 //!
-//! [^1]: Maybe [`-Zbuild-plan`](https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#build-plan)
-//!   was designed to serve that purpose but still [in flux](https://github.com/rust-lang/cargo/issues/7614).
-//!
 //! [`ops::cargo_compile::compile`]: crate::ops::compile
 
 pub mod artifact;
 mod build_config;
 pub(crate) mod build_context;
-mod build_plan;
 pub(crate) mod build_runner;
 mod compilation;
 mod compile_kind;
@@ -45,17 +41,19 @@ pub mod future_incompat;
 pub(crate) mod job_queue;
 pub(crate) mod layout;
 mod links;
+mod locking;
 mod lto;
 mod output_depinfo;
 mod output_sbom;
 pub mod rustdoc;
 pub mod standard_lib;
-mod timings;
+pub mod timings;
 mod unit;
 pub mod unit_dependencies;
 pub mod unit_graph;
 
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -70,16 +68,16 @@ use annotate_snippets::{AnnotationKind, Group, Level, Renderer, Snippet};
 use anyhow::{Context as _, Error};
 use cargo_platform::{Cfg, Platform};
 use itertools::Itertools;
-use lazycell::LazyCell;
 use regex::Regex;
 use tracing::{debug, instrument, trace};
 
 pub use self::build_config::UserIntent;
-pub use self::build_config::{BuildConfig, CompileMode, MessageFormat, TimingOutput};
-pub use self::build_context::{
-    BuildContext, FileFlavor, FileType, RustDocFingerprint, RustcTargetData, TargetInfo,
-};
-use self::build_plan::BuildPlan;
+pub use self::build_config::{BuildConfig, CompileMode, MessageFormat};
+pub use self::build_context::BuildContext;
+pub use self::build_context::FileFlavor;
+pub use self::build_context::FileType;
+pub use self::build_context::RustcTargetData;
+pub use self::build_context::TargetInfo;
 pub use self::build_runner::{BuildRunner, Metadata, UnitHash};
 pub use self::compilation::{Compilation, Doctest, UnitOutput};
 pub use self::compile_kind::{CompileKind, CompileKindFallback, CompileTarget};
@@ -87,6 +85,7 @@ pub use self::crate_type::CrateType;
 pub use self::custom_build::LinkArgTarget;
 pub use self::custom_build::{BuildOutput, BuildScriptOutputs, BuildScripts, LibraryPath};
 pub(crate) use self::fingerprint::DirtyReason;
+pub use self::fingerprint::RustdocFingerprint;
 pub use self::job_queue::Freshness;
 use self::job_queue::{Job, JobQueue, JobState, Work};
 pub(crate) use self::layout::Layout;
@@ -94,24 +93,29 @@ pub use self::lto::Lto;
 use self::output_depinfo::output_depinfo;
 use self::output_sbom::build_sbom;
 use self::unit_graph::UnitDep;
+
 use crate::core::compiler::future_incompat::FutureIncompatReport;
+use crate::core::compiler::locking::LockKey;
 use crate::core::compiler::timings::SectionTiming;
-pub use crate::core::compiler::unit::{Unit, UnitInterner};
+pub use crate::core::compiler::unit::Unit;
+pub use crate::core::compiler::unit::UnitIndex;
+pub use crate::core::compiler::unit::UnitInterner;
 use crate::core::manifest::TargetSourcePath;
 use crate::core::profiles::{PanicStrategy, Profile, StripInner};
 use crate::core::{Feature, PackageId, Target, Verbosity};
+use crate::lints::get_key_value;
+use crate::util::OnceExt;
 use crate::util::context::WarningHandling;
 use crate::util::errors::{CargoResult, VerboseError};
 use crate::util::interning::InternedString;
-use crate::util::lints::get_key_value;
 use crate::util::machine_message::{self, Message};
 use crate::util::{add_path_args, internal, path_args};
+
 use cargo_util::{ProcessBuilder, ProcessError, paths};
 use cargo_util_schemas::manifest::TomlDebugInfo;
 use cargo_util_schemas::manifest::TomlTrimPaths;
 use cargo_util_schemas::manifest::TomlTrimPathsValue;
 use rustfix::diagnostics::Applicability;
-pub(crate) use timings::CompilationSection;
 
 const RUSTDOC_CRATE_VERSION_FLAG: &str = "--crate-version";
 
@@ -173,20 +177,24 @@ impl Executor for DefaultExecutor {
 /// Note that **no actual work is executed as part of this**, that's all done
 /// next as part of [`JobQueue::execute`] function which will run everything
 /// in order with proper parallelism.
-#[tracing::instrument(skip(build_runner, jobs, plan, exec))]
+#[tracing::instrument(skip(build_runner, jobs, exec))]
 fn compile<'gctx>(
     build_runner: &mut BuildRunner<'_, 'gctx>,
     jobs: &mut JobQueue<'gctx>,
-    plan: &mut BuildPlan,
     unit: &Unit,
     exec: &Arc<dyn Executor>,
     force_rebuild: bool,
 ) -> CargoResult<()> {
     let bcx = build_runner.bcx;
-    let build_plan = bcx.build_config.build_plan;
     if !build_runner.compiled.insert(unit.clone()) {
         return Ok(());
     }
+
+    let lock = if build_runner.bcx.gctx.cli_unstable().fine_grain_locking {
+        Some(build_runner.lock_manager.lock_shared(build_runner, unit)?)
+    } else {
+        None
+    };
 
     // If we are in `--compile-time-deps` and the given unit is not a compile time
     // dependency, skip compiling the unit and jumps to dependencies, which still
@@ -201,11 +209,6 @@ fn compile<'gctx>(
         } else if unit.mode.is_doc_test() {
             // We run these targets later, so this is just a no-op for now.
             Job::new_fresh()
-        } else if build_plan {
-            Job::new_dirty(
-                rustc(build_runner, unit, &exec.clone())?,
-                DirtyReason::FreshBuild,
-            )
         } else {
             let force = exec.force_rebuild(unit) || force_rebuild;
             let mut job = fingerprint::prepare_target(build_runner, unit, force)?;
@@ -234,6 +237,23 @@ fn compile<'gctx>(
                 work.then(link_targets(build_runner, unit, true)?)
             });
 
+            // If -Zfine-grain-locking is enabled, we wrap the job with an upgrade to exclusive
+            // lock before starting, then downgrade to a shared lock after the job is finished.
+            if build_runner.bcx.gctx.cli_unstable().fine_grain_locking && job.freshness().is_dirty()
+            {
+                if let Some(lock) = lock {
+                    // Here we unlock the current shared lock to avoid deadlocking with other cargo
+                    // processes. Then we configure our compile job to take an exclusive lock
+                    // before starting. Once we are done compiling (including both rmeta and rlib)
+                    // we downgrade to a shared lock to allow other cargo's to read the build unit.
+                    // We will hold this shared lock for the remainder of compilation to prevent
+                    // other cargo from re-compiling while we are still using the unit.
+                    build_runner.lock_manager.unlock(&lock)?;
+                    job.before(prebuild_lock_exclusive(lock.clone()));
+                    job.after(downgrade_lock_to_shared(lock));
+                }
+            }
+
             job
         };
         jobs.enqueue(build_runner, unit, job)?;
@@ -242,10 +262,7 @@ fn compile<'gctx>(
     // Be sure to compile all dependencies of this target as well.
     let deps = Vec::from(build_runner.unit_deps(unit)); // Create vec due to mutable borrow.
     for dep in deps {
-        compile(build_runner, jobs, plan, &dep.unit, exec, false)?;
-    }
-    if build_plan {
-        plan.add(build_runner, unit)?;
+        compile(build_runner, jobs, &dep.unit, exec, false)?;
     }
 
     Ok(())
@@ -279,10 +296,8 @@ fn rustc(
     exec: &Arc<dyn Executor>,
 ) -> CargoResult<Work> {
     let mut rustc = prepare_rustc(build_runner, unit)?;
-    let build_plan = build_runner.bcx.build_config.build_plan;
 
     let name = unit.pkg.name();
-    let buildkey = unit.buildkey();
 
     let outputs = build_runner.outputs(unit)?;
     let root = build_runner.files().out_dir(unit);
@@ -314,7 +329,7 @@ fn rustc(
     exec.init(build_runner, unit);
     let exec = exec.clone();
 
-    let root_output = build_runner.files().host_dest().to_path_buf();
+    let root_output = build_runner.files().host_dest().map(|v| v.to_path_buf());
     let build_dir = build_runner.bcx.ws.build_dir().into_path_unlocked();
     let pkg_root = unit.pkg.root().to_path_buf();
     let cwd = rustc
@@ -368,17 +383,17 @@ fn rustc(
         // previous build scripts, we include them in the rustc invocation.
         if let Some(build_scripts) = build_scripts {
             let script_outputs = build_script_outputs.lock().unwrap();
-            if !build_plan {
-                add_native_deps(
-                    &mut rustc,
-                    &script_outputs,
-                    &build_scripts,
-                    pass_l_flag,
-                    &target,
-                    current_id,
-                    mode,
-                )?;
-                add_plugin_deps(&mut rustc, &script_outputs, &build_scripts, &root_output)?;
+            add_native_deps(
+                &mut rustc,
+                &script_outputs,
+                &build_scripts,
+                pass_l_flag,
+                &target,
+                current_id,
+                mode,
+            )?;
+            if let Some(ref root_output) = root_output {
+                add_plugin_deps(&mut rustc, &script_outputs, &build_scripts, root_output)?;
             }
             add_custom_flags(&mut rustc, &script_outputs, script_metadatas)?;
         }
@@ -410,71 +425,67 @@ fn rustc(
 
         state.running(&rustc);
         let timestamp = paths::set_invocation_time(&fingerprint_dir)?;
-        if build_plan {
-            state.build_plan(buildkey, rustc.clone(), outputs.clone());
-        } else {
-            for file in sbom_files {
-                tracing::debug!("writing sbom to {}", file.display());
-                let outfile = BufWriter::new(paths::create(&file)?);
-                serde_json::to_writer(outfile, &sbom)?;
-            }
-
-            let result = exec
-                .exec(
-                    &rustc,
-                    package_id,
-                    &target,
-                    mode,
-                    &mut |line| on_stdout_line(state, line, package_id, &target),
-                    &mut |line| {
-                        on_stderr_line(
-                            state,
-                            line,
-                            package_id,
-                            &manifest,
-                            &target,
-                            &mut output_options,
-                        )
-                    },
-                )
-                .map_err(|e| {
-                    if output_options.errors_seen == 0 {
-                        // If we didn't expect an error, do not require --verbose to fail.
-                        // This is intended to debug
-                        // https://github.com/rust-lang/crater/issues/733, where we are seeing
-                        // Cargo exit unsuccessfully while seeming to not show any errors.
-                        e
-                    } else {
-                        verbose_if_simple_exit_code(e)
-                    }
-                })
-                .with_context(|| {
-                    // adapted from rustc_errors/src/lib.rs
-                    let warnings = match output_options.warnings_seen {
-                        0 => String::new(),
-                        1 => "; 1 warning emitted".to_string(),
-                        count => format!("; {} warnings emitted", count),
-                    };
-                    let errors = match output_options.errors_seen {
-                        0 => String::new(),
-                        1 => " due to 1 previous error".to_string(),
-                        count => format!(" due to {} previous errors", count),
-                    };
-                    let name = descriptive_pkg_name(&name, &target, &mode);
-                    format!("could not compile {name}{errors}{warnings}")
-                });
-
-            if let Err(e) = result {
-                if let Some(diagnostic) = failed_scrape_diagnostic {
-                    state.warning(diagnostic);
-                }
-
-                return Err(e);
-            }
-
-            // Exec should never return with success *and* generate an error.
-            debug_assert_eq!(output_options.errors_seen, 0);
+        for file in sbom_files {
+            tracing::debug!("writing sbom to {}", file.display());
+            let outfile = BufWriter::new(paths::create(&file)?);
+            serde_json::to_writer(outfile, &sbom)?;
         }
+
+        let result = exec
+            .exec(
+                &rustc,
+                package_id,
+                &target,
+                mode,
+                &mut |line| on_stdout_line(state, line, package_id, &target),
+                &mut |line| {
+                    on_stderr_line(
+                        state,
+                        line,
+                        package_id,
+                        &manifest,
+                        &target,
+                        &mut output_options,
+                    )
+                },
+            )
+            .map_err(|e| {
+                if output_options.errors_seen == 0 {
+                    // If we didn't expect an error, do not require --verbose to fail.
+                    // This is intended to debug
+                    // https://github.com/rust-lang/crater/issues/733, where we are seeing
+                    // Cargo exit unsuccessfully while seeming to not show any errors.
+                    e
+                } else {
+                    verbose_if_simple_exit_code(e)
+                }
+            })
+            .with_context(|| {
+                // adapted from rustc_errors/src/lib.rs
+                let warnings = match output_options.warnings_seen {
+                    0 => String::new(),
+                    1 => "; 1 warning emitted".to_string(),
+                    count => format!("; {} warnings emitted", count),
+                };
+                let errors = match output_options.errors_seen {
+                    0 => String::new(),
+                    1 => " due to 1 previous error".to_string(),
+                    count => format!(" due to {} previous errors", count),
+                };
+                let name = descriptive_pkg_name(&name, &target, &mode);
+                format!("could not compile {name}{errors}{warnings}")
+            });
+
+        if let Err(e) = result {
+            if let Some(diagnostic) = failed_scrape_diagnostic {
+                state.warning(diagnostic);
+            }
+
+            return Err(e);
+        }
+
+        // Exec should never return with success *and* generate an error.
+        debug_assert_eq!(output_options.errors_seen, 0);
 
         if rustc_dep_info_loc.exists() {
             fingerprint::translate_dep_info(
@@ -497,6 +508,25 @@ fn rustc(
             // This mtime shift allows Cargo to detect if a source file was
             // modified in the middle of the build.
             paths::set_file_time_no_err(dep_info_loc, timestamp);
+        }
+
+        // This mtime shift for .rmeta is a workaround as rustc incremental build
+        // since rust-lang/rust#114669 (1.90.0) skips unnecessary rmeta generation.
+        //
+        // The situation is like this:
+        //
+        // 1. When build script execution's external dependendies
+        //    (rerun-if-changed, rerun-if-env-changed) got updated,
+        //    the execution unit reran and got a newer mtime.
+        // 2. rustc type-checked the associated crate, though with incremental
+        //    compilation, no rmeta regeneration. Its `.rmeta` stays old.
+        // 3. Run `cargo check` again. Cargo found build script execution had
+        //    a new mtime than existing crate rmeta, so re-checking the crate.
+        //    However the check is a no-op (input has no change), so stuck.
+        if mode.is_check() {
+            for output in outputs.iter() {
+                paths::set_file_time_no_err(&output.path, timestamp);
+            }
         }
 
         Ok(())
@@ -583,6 +613,20 @@ fn verbose_if_simple_exit_code(err: Error) -> Error {
         Some(n) if cargo_util::is_simple_exit_code(n) => VerboseError::new(err).into(),
         _ => err,
     }
+}
+
+fn prebuild_lock_exclusive(lock: LockKey) -> Work {
+    Work::new(move |state| {
+        state.lock_exclusive(&lock)?;
+        Ok(())
+    })
+}
+
+fn downgrade_lock_to_shared(lock: LockKey) -> Work {
+    Work::new(move |state| {
+        state.downgrade_to_shared(&lock)?;
+        Ok(())
+    })
 }
 
 /// Link the compiled target (often of form `foo-{metadata_hash}`) to the
@@ -776,8 +820,11 @@ fn prepare_rustc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResult
 
     if is_primary {
         base.env("CARGO_PRIMARY_PACKAGE", "1");
-        let file_list = std::env::join_paths(build_runner.sbom_output_files(unit)?)?;
-        base.env("CARGO_SBOM_PATH", file_list);
+        let file_list = build_runner.sbom_output_files(unit)?;
+        if !file_list.is_empty() {
+            let file_list = std::env::join_paths(file_list)?;
+            base.env("CARGO_SBOM_PATH", file_list);
+        }
     }
 
     if unit.target.is_test() || unit.target.is_bench() {
@@ -831,8 +878,13 @@ fn prepare_rustdoc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
     if build_runner.bcx.gctx.cli_unstable().rustdoc_depinfo {
         // toolchain-shared-resources is required for keeping the shared styling resources
         // invocation-specific is required for keeping the original rustdoc emission
-        let mut arg =
-            OsString::from("--emit=toolchain-shared-resources,invocation-specific,dep-info=");
+        let mut arg = if build_runner.bcx.gctx.cli_unstable().rustdoc_mergeable_info {
+            // toolchain resources are written at the end, at the same time as merging
+            OsString::from("--emit=invocation-specific,dep-info=")
+        } else {
+            // if not using mergeable CCI, everything is written every time
+            OsString::from("--emit=toolchain-shared-resources,invocation-specific,dep-info=")
+        };
         arg.push(rustdoc_dep_info_loc(build_runner, unit));
         rustdoc.arg(arg);
 
@@ -841,6 +893,19 @@ fn prepare_rustdoc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
         }
 
         rustdoc.arg("-Zunstable-options");
+    } else if build_runner.bcx.gctx.cli_unstable().rustdoc_mergeable_info {
+        // toolchain resources are written at the end, at the same time as merging
+        rustdoc.arg("--emit=invocation-specific");
+        rustdoc.arg("-Zunstable-options");
+    }
+
+    if build_runner.bcx.gctx.cli_unstable().rustdoc_mergeable_info {
+        // write out mergeable data to be imported
+        rustdoc.arg("--merge=none");
+        let mut arg = OsString::from("--parts-out-dir=");
+        // `-Zrustdoc-mergeable-info` always uses the new layout.
+        arg.push(build_runner.files().deps_dir_new_layout(unit));
+        rustdoc.arg(arg);
     }
 
     if let Some(trim_paths) = unit.profile.trim_paths.as_ref() {
@@ -1109,7 +1174,7 @@ fn add_allow_features(build_runner: &BuildRunner<'_, '_>, cmd: &mut ProcessBuild
 /// [`--error-format`]: https://doc.rust-lang.org/nightly/rustc/command-line-arguments.html#--error-format-control-how-errors-are-produced
 fn add_error_format_and_color(build_runner: &BuildRunner<'_, '_>, cmd: &mut ProcessBuilder) {
     let enable_timings = build_runner.bcx.gctx.cli_unstable().section_timings
-        && !build_runner.bcx.build_config.timing_outputs.is_empty();
+        && (build_runner.bcx.build_config.timing_report || build_runner.bcx.logger.is_some());
     if enable_timings {
         cmd.arg("-Zunstable-options");
     }
@@ -1117,11 +1182,14 @@ fn add_error_format_and_color(build_runner: &BuildRunner<'_, '_>, cmd: &mut Proc
     cmd.arg("--error-format=json");
     let mut json = String::from("--json=diagnostic-rendered-ansi,artifacts,future-incompat");
 
-    match build_runner.bcx.build_config.message_format {
-        MessageFormat::Short | MessageFormat::Json { short: true, .. } => {
-            json.push_str(",diagnostic-short");
-        }
-        _ => {}
+    if let MessageFormat::Short | MessageFormat::Json { short: true, .. } =
+        build_runner.bcx.build_config.message_format
+    {
+        json.push_str(",diagnostic-short");
+    } else if build_runner.bcx.gctx.shell().err_unicode()
+        && build_runner.bcx.gctx.cli_unstable().rustc_unicode
+    {
+        json.push_str(",diagnostic-unicode");
     }
 
     if enable_timings {
@@ -1412,27 +1480,6 @@ fn build_base_args(
             .env("RUSTC_BOOTSTRAP", "1");
     }
 
-    // Add `CARGO_BIN_EXE_` environment variables for building tests.
-    if unit.target.is_test() || unit.target.is_bench() {
-        for bin_target in unit
-            .pkg
-            .manifest()
-            .targets()
-            .iter()
-            .filter(|target| target.is_bin())
-        {
-            let exe_path = build_runner.files().bin_link_for_target(
-                bin_target,
-                unit.kind,
-                build_runner.bcx,
-            )?;
-            let name = bin_target
-                .binary_filename()
-                .unwrap_or(bin_target.name().to_string());
-            let key = format!("CARGO_BIN_EXE_{}", name);
-            cmd.env(&key, exe_path);
-        }
-    }
     Ok(())
 }
 
@@ -1672,37 +1719,9 @@ fn build_deps_args(
     unit: &Unit,
 ) -> CargoResult<()> {
     let bcx = build_runner.bcx;
-    if build_runner.bcx.gctx.cli_unstable().build_dir_new_layout {
-        let mut map = BTreeMap::new();
 
-        // Recursively add all depenendency args to rustc process
-        add_dep_arg(&mut map, build_runner, unit);
-
-        let paths = map.into_iter().map(|(_, path)| path).sorted_unstable();
-
-        for path in paths {
-            cmd.arg("-L").arg(&{
-                let mut deps = OsString::from("dependency=");
-                deps.push(path);
-                deps
-            });
-        }
-    } else {
-        cmd.arg("-L").arg(&{
-            let mut deps = OsString::from("dependency=");
-            deps.push(build_runner.files().deps_dir(unit));
-            deps
-        });
-    }
-
-    // Be sure that the host path is also listed. This'll ensure that proc macro
-    // dependencies are correctly found (for reexported macros).
-    if !unit.kind.is_host() {
-        cmd.arg("-L").arg(&{
-            let mut deps = OsString::from("dependency=");
-            deps.push(build_runner.files().host_deps(unit));
-            deps
-        });
+    for arg in lib_search_paths(build_runner, unit)? {
+        cmd.arg(arg);
     }
 
     let deps = build_runner.unit_deps(unit);
@@ -1764,7 +1783,7 @@ fn build_deps_args(
         cmd.arg(arg);
     }
 
-    for (var, env) in artifact::get_env(build_runner, deps)? {
+    for (var, env) in artifact::get_env(build_runner, unit, deps)? {
         cmd.env(&var, env);
     }
 
@@ -1817,6 +1836,42 @@ fn add_custom_flags(
     }
 
     Ok(())
+}
+
+/// Generate a list of `-L` arguments
+pub fn lib_search_paths(
+    build_runner: &BuildRunner<'_, '_>,
+    unit: &Unit,
+) -> CargoResult<Vec<OsString>> {
+    let mut lib_search_paths = Vec::new();
+    if build_runner.bcx.gctx.cli_unstable().build_dir_new_layout {
+        let mut map = BTreeMap::new();
+
+        // Recursively add all dependency args to rustc process
+        add_dep_arg(&mut map, build_runner, unit);
+
+        let paths = map.into_iter().map(|(_, path)| path).sorted_unstable();
+
+        for path in paths {
+            let mut deps = OsString::from("dependency=");
+            deps.push(path);
+            lib_search_paths.extend(["-L".into(), deps]);
+        }
+    } else {
+        let mut deps = OsString::from("dependency=");
+        deps.push(build_runner.files().deps_dir(unit));
+        lib_search_paths.extend(["-L".into(), deps]);
+    }
+
+    // Be sure that the host path is also listed. This'll ensure that proc macro
+    // dependencies are correctly found (for reexported macros).
+    if !unit.kind.is_host() {
+        let mut deps = OsString::from("dependency=");
+        deps.push(build_runner.files().host_deps(unit));
+        lib_search_paths.extend(["-L".into(), deps]);
+    }
+
+    Ok(lib_search_paths)
 }
 
 /// Generates a list of `--extern` arguments.
@@ -1920,7 +1975,7 @@ struct OutputOptions {
     /// is fresh. The file is created lazily so that in the normal case, lots
     /// of empty files are not created. If this is None, the output will not
     /// be cached (such as when replaying cached messages).
-    cache_cell: Option<(PathBuf, LazyCell<File>)>,
+    cache_cell: Option<(PathBuf, OnceCell<File>)>,
     /// If `true`, display any diagnostics.
     /// Other types of JSON messages are processed regardless
     /// of the value of this flag.
@@ -1940,7 +1995,7 @@ impl OutputOptions {
         let path = build_runner.files().message_cache_path(unit);
         // Remove old cache, ignore ENOENT, which is the common case.
         drop(fs::remove_file(&path));
-        let cache_cell = Some((path, LazyCell::new()));
+        let cache_cell = Some((path, OnceCell::new()));
         let show_diagnostics =
             build_runner.bcx.gctx.warning_handling().unwrap_or_default() != WarningHandling::Allow;
         OutputOptions {
@@ -1962,9 +2017,9 @@ struct ManifestErrorContext {
     /// The path to the manifest.
     path: PathBuf,
     /// The locations of various spans within the manifest.
-    spans: toml::Spanned<toml::de::DeTable<'static>>,
+    spans: Option<toml::Spanned<toml::de::DeTable<'static>>>,
     /// The raw manifest contents.
-    contents: String,
+    contents: Option<String>,
     /// A lookup for all the unambiguous renamings, mapping from the original package
     /// name to the renamed one.
     rename_table: HashMap<InternedString, InternedString>,
@@ -2079,6 +2134,7 @@ fn on_stderr_line_inner(
         static PRIV_DEP_REGEX: LazyLock<Regex> =
             LazyLock::new(|| Regex::new("from private dependency '([A-Za-z0-9-_]+)'").unwrap());
         if let Some(crate_name) = PRIV_DEP_REGEX.captures(diag).and_then(|m| m.get(1))
+            && let Some(ref contents) = manifest.contents
             && let Some(span) = manifest.find_crate_span(crate_name.as_str())
         {
             let rel_path = pathdiff::diff_paths(&manifest.path, &manifest.cwd)
@@ -2090,7 +2146,7 @@ fn on_stderr_line_inner(
                 crate_name.as_str()
             )))
             .element(
-                Snippet::source(&manifest.contents)
+                Snippet::source(contents)
                     .path(rel_path)
                     .annotation(AnnotationKind::Context.span(span)),
             )];
@@ -2185,12 +2241,14 @@ fn on_stderr_line_inner(
                     count_diagnostic(&msg.level, options);
                     if msg
                         .code
+                        .as_ref()
                         .is_some_and(|c| c.code == "exported_private_dependencies")
                         && options.format != MessageFormat::Short
                     {
                         add_pub_in_priv_diagnostic(&mut rendered);
                     }
-                    state.emit_diag(&msg.level, rendered, machine_applicable)?;
+                    let lint = msg.code.is_some();
+                    state.emit_diag(&msg.level, rendered, lint, machine_applicable)?;
                 }
                 return Ok(true);
             }
@@ -2326,8 +2384,8 @@ impl ManifestErrorContext {
         let bcx = build_runner.bcx;
         ManifestErrorContext {
             path: unit.pkg.manifest_path().to_owned(),
-            spans: unit.pkg.manifest().document().clone(),
-            contents: unit.pkg.manifest().contents().to_owned(),
+            spans: unit.pkg.manifest().document().cloned(),
+            contents: unit.pkg.manifest().contents().map(String::from),
             requested_kinds: bcx.target_data.requested_kinds().to_owned(),
             host_name: bcx.rustc().host,
             rename_table,
@@ -2368,9 +2426,13 @@ impl ManifestErrorContext {
     /// baz = { path = "../bar", package = "bar" }
     /// ```
     fn find_crate_span(&self, unrenamed: &str) -> Option<Range<usize>> {
+        let Some(ref spans) = self.spans else {
+            return None;
+        };
+
         let orig_name = self.rename_table.get(unrenamed)?.as_str();
 
-        if let Some((k, v)) = get_key_value(&self.spans, &["dependencies", orig_name]) {
+        if let Some((k, v)) = get_key_value(&spans, &["dependencies", orig_name]) {
             // We make some effort to find the unrenamed text: in
             //
             // ```
@@ -2390,8 +2452,7 @@ impl ManifestErrorContext {
         // [target.x86_64-unknown-linux-gnu.dependencies] or
         // [target.'cfg(something)'.dependencies]. We filter out target tables
         // that don't match a requested target or a requested cfg.
-        if let Some(target) = self
-            .spans
+        if let Some(target) = spans
             .as_ref()
             .get("target")
             .and_then(|t| t.as_ref().as_table())

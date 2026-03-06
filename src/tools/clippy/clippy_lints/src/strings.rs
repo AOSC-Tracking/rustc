@@ -1,12 +1,12 @@
 use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg, span_lint_and_then};
 use clippy_utils::res::{MaybeDef, MaybeQPath};
-use clippy_utils::source::{snippet, snippet_with_applicability};
+use clippy_utils::source::{snippet, snippet_with_applicability, snippet_with_context};
 use clippy_utils::{
     SpanlessEq, get_expr_use_or_unification_node, get_parent_expr, is_lint_allowed, method_calls, peel_blocks, sym,
 };
 use rustc_errors::Applicability;
 use rustc_hir::def_id::DefId;
-use rustc_hir::{BinOpKind, BorrowKind, Expr, ExprKind, LangItem, Node, QPath};
+use rustc_hir::{BinOpKind, BorrowKind, Expr, ExprKind, LangItem, Node};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::ty;
 use rustc_session::declare_lint_pass;
@@ -266,12 +266,14 @@ impl<'tcx> LateLintPass<'tcx> for StringLitAsBytes {
             && expressions[0].1.is_empty()
 
             // Check for slicer
-            && let ExprKind::Struct(QPath::LangItem(LangItem::Range, ..), _, _) = right.kind
+            && let ExprKind::Struct(&qpath, _, _) = right.kind
+            && cx.tcx.qpath_is_lang_item(qpath, LangItem::Range)
         {
             let mut applicability = Applicability::MachineApplicable;
             let string_expression = &expressions[0].0;
 
             let snippet_app = snippet_with_applicability(cx, string_expression.span, "..", &mut applicability);
+            let (right_snip, _) = snippet_with_context(cx, right.span, e.span.ctxt(), "..", &mut applicability);
 
             span_lint_and_sugg(
                 cx,
@@ -279,7 +281,7 @@ impl<'tcx> LateLintPass<'tcx> for StringLitAsBytes {
                 e.span,
                 "calling a slice of `as_bytes()` with `from_utf8` should be not necessary",
                 "try",
-                format!("Some(&{snippet_app}[{}])", snippet(cx, right.span, "..")),
+                format!("Some(&{snippet_app}[{right_snip}])"),
                 applicability,
             );
         }
@@ -403,7 +405,8 @@ impl<'tcx> LateLintPass<'tcx> for StrToString {
                 "`to_string()` called on a `&str`",
                 |diag| {
                     let mut applicability = Applicability::MachineApplicable;
-                    let snippet = snippet_with_applicability(cx, self_arg.span, "..", &mut applicability);
+                    let (snippet, _) =
+                        snippet_with_context(cx, self_arg.span, expr.span.ctxt(), "..", &mut applicability);
                     diag.span_suggestion(expr.span, "try", format!("{snippet}.to_owned()"), applicability);
                 },
             );

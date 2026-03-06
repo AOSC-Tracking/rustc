@@ -5,6 +5,7 @@ use cargo_test_support::str;
 
 mod blanket_hint_mostly_unused;
 mod error;
+mod implicit_minimum_version_req;
 mod inherited;
 mod unknown_lints;
 mod warning;
@@ -83,6 +84,7 @@ test_dummy_unstable = { level = "forbid", priority = -1 }
   | ^^^^^^^^^^^^^^^^^^
   |
   = [NOTE] `cargo::im_a_teapot` is set to `forbid` in `[lints]`
+[ERROR] encountered 1 error while running lints
 
 "#]])
         .run();
@@ -125,6 +127,7 @@ workspace = true
    | ^^^^^^^^^^^^^^^^^^
    |
    = [NOTE] `cargo::im_a_teapot` is set to `forbid` in `[lints]`
+[ERROR] encountered 1 error while running lints
 
 "#]])
         .run();
@@ -136,6 +139,8 @@ fn dont_always_inherit_workspace_lints() {
         .file(
             "Cargo.toml",
             r#"
+cargo-features = ["test-dummy-unstable"]
+
 [workspace]
 members = ["foo"]
 
@@ -254,7 +259,7 @@ im_a_teapot = "warn"
   | ^^^^^^^^^^^ this is behind `test-dummy-unstable`, which is not enabled
   |
   = [HELP] consider adding `cargo-features = ["test-dummy-unstable"]` to the top of the manifest
-[ERROR] encountered 1 errors(s) while verifying lints
+[ERROR] encountered 1 error while verifying lints
 
 "#]])
         .run();
@@ -301,11 +306,6 @@ workspace = true
   | ^^^^^^^^^^^ this is behind `test-dummy-unstable`, which is not enabled
   |
   = [HELP] consider adding `cargo-features = ["test-dummy-unstable"]` to the top of the manifest
-[NOTE] `cargo::im_a_teapot` was inherited
- --> foo/Cargo.toml:9:1
-  |
-9 | workspace = true
-  | ----------------
 [ERROR] use of unstable lint `test_dummy_unstable`
  --> Cargo.toml:7:1
   |
@@ -313,12 +313,97 @@ workspace = true
   | ^^^^^^^^^^^^^^^^^^^ this is behind `test-dummy-unstable`, which is not enabled
   |
   = [HELP] consider adding `cargo-features = ["test-dummy-unstable"]` to the top of the manifest
-[NOTE] `cargo::test_dummy_unstable` was inherited
- --> foo/Cargo.toml:9:1
+[ERROR] encountered 2 errors while verifying lints
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn check_feature_gated_workspace_not_inherited() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+[workspace]
+members = ["foo"]
+
+[workspace.lints.cargo]
+im_a_teapot = { level = "warn", priority = 10 }
+test_dummy_unstable = { level = "forbid", priority = -1 }
+            "#,
+        )
+        .file(
+            "foo/Cargo.toml",
+            r#"
+[package]
+name = "foo"
+version = "0.0.1"
+edition = "2015"
+authors = []
+            "#,
+        )
+        .file("foo/src/lib.rs", "")
+        .build();
+
+    p.cargo("check -Zcargo-lints")
+        .masquerade_as_nightly_cargo(&["cargo-lints"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] use of unstable lint `im_a_teapot`
+ --> Cargo.toml:6:1
   |
-9 | workspace = true
-  | ----------------
-[ERROR] encountered 2 errors(s) while verifying lints
+6 | im_a_teapot = { level = "warn", priority = 10 }
+  | ^^^^^^^^^^^ this is behind `test-dummy-unstable`, which is not enabled
+  |
+  = [HELP] consider adding `cargo-features = ["test-dummy-unstable"]` to the top of the manifest
+[ERROR] use of unstable lint `test_dummy_unstable`
+ --> Cargo.toml:7:1
+  |
+7 | test_dummy_unstable = { level = "forbid", priority = -1 }
+  | ^^^^^^^^^^^^^^^^^^^ this is behind `test-dummy-unstable`, which is not enabled
+  |
+  = [HELP] consider adding `cargo-features = ["test-dummy-unstable"]` to the top of the manifest
+[ERROR] encountered 2 errors while verifying lints
+
+"#]])
+        .run();
+}
+
+#[cargo_test(nightly, reason = "-Zrustc-unicode is unstable")]
+fn unicode_report() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+cargo-features = ["test-dummy-unstable"]
+
+[package]
+name = "foo"
+version = "0.0.1"
+edition = "2015"
+authors = []
+im-a-teapot = true
+
+[lints.cargo]
+im_a_teapot = { level = "warn", priority = 10 }
+"#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("check -Zcargo-lints -Zrustc-unicode")
+        .masquerade_as_nightly_cargo(&["cargo-lints", "rustc-unicode", "test-dummy-unstable"])
+        .with_stderr_data(str![[r#"
+[WARNING] `im_a_teapot` is specified
+  ╭▸ Cargo.toml:9:1
+  │
+9 │ im-a-teapot = true
+  │ ━━━━━━━━━━━━━━━━━━
+  │
+  ╰ [NOTE] `cargo::im_a_teapot` is set to `warn` in `[lints]`
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
         .run();

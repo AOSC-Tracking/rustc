@@ -127,6 +127,7 @@ use std::str::FromStr;
 use anyhow::{Error, bail};
 use cargo_util::ProcessBuilder;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::GlobalContext;
 use crate::core::resolver::ResolveBehavior;
@@ -843,6 +844,7 @@ unstable_cli_options!(
     // All other unstable features.
     // Please keep this list lexicographically ordered.
     advanced_env: bool,
+    any_build_script_metadata: bool = ("Allow any build script to specify env vars via cargo::metadata=key=value"),
     asymmetric_token: bool = ("Allows authenticating with asymmetric tokens"),
     avoid_dev_deps: bool = ("Avoid installing dev-dependencies if possible"),
     binary_dep_depinfo: bool = ("Track changes to dependency artifacts"),
@@ -856,11 +858,11 @@ unstable_cli_options!(
     cargo_lints: bool = ("Enable the `[lints.cargo]` table"),
     checksum_freshness: bool = ("Use a checksum to determine if output is fresh rather than filesystem mtime"),
     codegen_backend: bool = ("Enable the `codegen-backend` option in profiles in .cargo/config.toml file"),
-    config_include: bool = ("Enable the `include` key in config files"),
     direct_minimal_versions: bool = ("Resolve minimal dependency versions instead of maximum (direct dependencies only)"),
     dual_proc_macros: bool = ("Build proc-macros for both the host and the target"),
     feature_unification: bool = ("Enable new feature unification modes in workspaces"),
     features: Option<Vec<String>>,
+    fine_grain_locking: bool = ("Use fine grain locking instead of locking the entire build cache"),
     fix_edition: Option<FixEdition> = ("Permanently unstable edition migration helper"),
     gc: bool = ("Track cache usage and \"garbage collect\" unused files"),
     #[serde(deserialize_with = "deserialize_git_features")]
@@ -868,6 +870,7 @@ unstable_cli_options!(
     #[serde(deserialize_with = "deserialize_gitoxide_features")]
     gitoxide: Option<GitoxideFeatures> = ("Use gitoxide for the given git interactions, or all of them if no argument is given"),
     host_config: bool = ("Enable the `[host]` section in the .cargo/config.toml file"),
+    lockfile_path: bool = ("Enable the `resolver.lockfile-path` config option"),
     minimal_versions: bool = ("Resolve minimal dependency versions instead of maximum"),
     msrv_policy: bool = ("Enable rust-version aware policy within cargo"),
     mtime_on_use: bool = ("Configure Cargo to update the mtime of used files"),
@@ -881,8 +884,10 @@ unstable_cli_options!(
     public_dependency: bool = ("Respect a dependency's `public` field in Cargo.toml to control public/private dependencies"),
     publish_timeout: bool = ("Enable the `publish.timeout` key in .cargo/config.toml file"),
     root_dir: Option<PathBuf> = ("Set the root directory relative to which paths are printed (defaults to workspace root)"),
+    rustc_unicode: bool = ("Enable `rustc`'s unicode error format in Cargo's error messages"),
     rustdoc_depinfo: bool = ("Use dep-info files in rustdoc rebuild detection"),
     rustdoc_map: bool = ("Allow passing external documentation mappings to rustdoc"),
+    rustdoc_mergeable_info: bool = ("Use rustdoc mergeable cross-crate-info files"),
     rustdoc_scrape_examples: bool = ("Allows Rustdoc to scrape code examples from reverse-dependencies"),
     sbom: bool = ("Enable the `sbom` option in build config in .cargo/config.toml file"),
     script: bool = ("Enable support for single-file, `.rs` packages"),
@@ -976,6 +981,8 @@ const STABILIZED_PACKAGE_WORKSPACE: &str =
     "Workspace packaging and publishing (a.k.a. `-Zpackage-workspace`) is now always enabled.";
 
 const STABILIZED_BUILD_DIR: &str = "build.build-dir is now always enabled.";
+
+const STABILIZED_CONFIG_INCLUDE: &str = "The `include` config key is now always available";
 
 fn deserialize_comma_separated_list<'de, D>(
     deserializer: D,
@@ -1241,6 +1248,9 @@ impl CliUnstable {
         if self.gitoxide.is_none() && cargo_use_gitoxide_instead_of_git2() {
             self.gitoxide = GitoxideFeatures::safe().into();
         }
+
+        self.implicitly_enable_features_if_needed();
+
         Ok(warnings)
     }
 
@@ -1361,10 +1371,12 @@ impl CliUnstable {
             "doctest-xcompile" => stabilized_warn(k, "1.89", STABILIZED_DOCTEST_XCOMPILE),
             "package-workspace" => stabilized_warn(k, "1.89", STABILIZED_PACKAGE_WORKSPACE),
             "build-dir" => stabilized_warn(k, "1.91", STABILIZED_BUILD_DIR),
+            "config-include" => stabilized_warn(k, "1.93", STABILIZED_CONFIG_INCLUDE),
 
             // Unstable features
             // Sorted alphabetically:
             "advanced-env" => self.advanced_env = parse_empty(k, v)?,
+            "any-build-script-metadata" => self.any_build_script_metadata = parse_empty(k, v)?,
             "asymmetric-token" => self.asymmetric_token = parse_empty(k, v)?,
             "avoid-dev-deps" => self.avoid_dev_deps = parse_empty(k, v)?,
             "binary-dep-depinfo" => self.binary_dep_depinfo = parse_empty(k, v)?,
@@ -1375,10 +1387,10 @@ impl CliUnstable {
             "build-std-features" => self.build_std_features = Some(parse_list(v)),
             "cargo-lints" => self.cargo_lints = parse_empty(k, v)?,
             "codegen-backend" => self.codegen_backend = parse_empty(k, v)?,
-            "config-include" => self.config_include = parse_empty(k, v)?,
             "direct-minimal-versions" => self.direct_minimal_versions = parse_empty(k, v)?,
             "dual-proc-macros" => self.dual_proc_macros = parse_empty(k, v)?,
             "feature-unification" => self.feature_unification = parse_empty(k, v)?,
+            "fine-grain-locking" => self.fine_grain_locking = parse_empty(k, v)?,
             "fix-edition" => {
                 let fe = v
                     .ok_or_else(|| anyhow::anyhow!("-Zfix-edition expected a value"))?
@@ -1397,6 +1409,7 @@ impl CliUnstable {
                 )?
             }
             "host-config" => self.host_config = parse_empty(k, v)?,
+            "lockfile-path" => self.lockfile_path = parse_empty(k, v)?,
             "next-lockfile-bump" => self.next_lockfile_bump = parse_empty(k, v)?,
             "minimal-versions" => self.minimal_versions = parse_empty(k, v)?,
             "msrv-policy" => self.msrv_policy = parse_empty(k, v)?,
@@ -1411,8 +1424,10 @@ impl CliUnstable {
             "trim-paths" => self.trim_paths = parse_empty(k, v)?,
             "publish-timeout" => self.publish_timeout = parse_empty(k, v)?,
             "root-dir" => self.root_dir = v.map(|v| v.into()),
+            "rustc-unicode" => self.rustc_unicode = parse_empty(k, v)?,
             "rustdoc-depinfo" => self.rustdoc_depinfo = parse_empty(k, v)?,
             "rustdoc-map" => self.rustdoc_map = parse_empty(k, v)?,
+            "rustdoc-mergeable-info" => self.rustdoc_mergeable_info = parse_empty(k, v)?,
             "rustdoc-scrape-examples" => self.rustdoc_scrape_examples = parse_empty(k, v)?,
             "sbom" => self.sbom = parse_empty(k, v)?,
             "section-timings" => self.section_timings = parse_empty(k, v)?,
@@ -1510,19 +1525,28 @@ impl CliUnstable {
             );
         }
     }
+
+    fn implicitly_enable_features_if_needed(&mut self) {
+        if self.fine_grain_locking && !self.build_dir_new_layout {
+            debug!("-Zbuild-dir-new-layout implicitly enabled by -Zfine-grain-locking");
+            self.build_dir_new_layout = true;
+        }
+    }
 }
 
 /// Returns the current release channel ("stable", "beta", "nightly", "dev").
 pub fn channel() -> String {
-    // ALLOWED: For testing cargo itself only.
-    #[allow(clippy::disallowed_methods)]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "testing only, no reason for config support"
+    )]
     if let Ok(override_channel) = env::var("__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS") {
         return override_channel;
     }
-    // ALLOWED: the process of rustc bootstrapping reads this through
-    // `std::env`. We should make the behavior consistent. Also, we
-    // don't advertise this for bypassing nightly.
-    #[allow(clippy::disallowed_methods)]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "consistency with rustc, not specified behavior"
+    )]
     if let Ok(staging) = env::var("RUSTC_BOOTSTRAP") {
         if staging == "1" {
             return "dev".to_string();
@@ -1536,8 +1560,10 @@ pub fn channel() -> String {
 /// Only for testing and developing. See ["Running with gitoxide as default git backend in tests"][1].
 ///
 /// [1]: https://doc.crates.io/contrib/tests/running.html#running-with-gitoxide-as-default-git-backend-in-tests
-// ALLOWED: For testing cargo itself only.
-#[allow(clippy::disallowed_methods)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "testing only, no reason for config support"
+)]
 fn cargo_use_gitoxide_instead_of_git2() -> bool {
     std::env::var_os("__CARGO_USE_GITOXIDE_INSTEAD_OF_GIT2").map_or(false, |value| value == "1")
 }

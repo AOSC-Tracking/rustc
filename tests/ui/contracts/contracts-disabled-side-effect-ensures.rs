@@ -1,11 +1,11 @@
 //@ run-pass
+#![expect(incomplete_features)]
 #![feature(contracts)]
-//~^ WARN the feature `contracts` is incomplete and may not be safe to use and/or cause compiler crashes [incomplete_features]
 
 extern crate core;
 use core::contracts::ensures;
 
-#[ensures({*x = 0; |_ret| true})]
+#[ensures(*x = 0; |_ret| true)]
 fn buggy_add(x: &mut u32, y: u32) {
     *x = *x + y;
 }

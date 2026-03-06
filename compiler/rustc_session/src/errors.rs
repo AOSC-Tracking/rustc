@@ -83,6 +83,13 @@ pub(crate) struct CliFeatureDiagnosticHelp {
 }
 
 #[derive(Diagnostic)]
+#[diag(session_must_be_name_of_associated_function)]
+pub struct MustBeNameOfAssociatedFunction {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
 #[diag(session_not_circumvent_feature)]
 pub(crate) struct NotCircumventFeature;
 
@@ -238,8 +245,6 @@ pub(crate) struct InvalidCharacterInCrateName {
     pub(crate) span: Option<Span>,
     pub(crate) character: char,
     pub(crate) crate_name: Symbol,
-    #[help]
-    pub(crate) help: Option<()>,
 }
 
 #[derive(Subdiagnostic)]
@@ -369,6 +374,13 @@ struct BinaryFloatLiteralNotSupported {
     #[primary_span]
     #[label(session_not_supported)]
     span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(session_unsupported_crate_type_for_codegen_backend)]
+pub(crate) struct UnsupportedCrateTypeForCodegenBackend {
+    pub(crate) crate_type: CrateType,
+    pub(crate) codegen_backend: &'static str,
 }
 
 #[derive(Diagnostic)]

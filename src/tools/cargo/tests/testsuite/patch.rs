@@ -357,6 +357,63 @@ fn patch_to_git() {
         .run();
 }
 
+#[cargo_test(public_network_test)]
+fn patch_to_git_pull_request() {
+    Package::new("bar", "0.1.0").publish();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.1"
+                edition = "2015"
+                authors = []
+
+                [dependencies]
+                bar = "0.1"
+
+                [patch.crates-io]
+                bar = { git = 'https://github.com/rust-lang/does-not-exist/pull/123' }
+            "#,
+        )
+        .file(
+            "src/lib.rs",
+            "extern crate bar; pub fn foo() { bar::bar(); }",
+        )
+        .build();
+
+    p.cargo("check -v")
+        .with_status(101)
+        .with_stderr_data(format!(
+            r#"[UPDATING] git repository `https://github.com/rust-lang/does-not-exist/pull/123`
+...
+[ERROR] failed to load source for dependency `bar`
+
+Caused by:
+  Unable to update https://github.com/rust-lang/does-not-exist/pull/123
+
+Caused by:
+  failed to clone into: [ROOT]/home/.cargo/git/db/123-[HASH]
+
+Caused by:
+  network failure seems to have happened
+  if a proxy or similar is necessary `net.git-fetch-with-cli` may help here
+  https://doc.rust-lang.org/cargo/reference/config.html#netgit-fetch-with-cli
+
+  [NOTE] GitHub url https://github.com/rust-lang/does-not-exist/pull/123 is not a repository. 
+  [HELP] Replace the dependency with 
+         `git = "https://github.com/rust-lang/does-not-exist.git" rev = "refs/pull/123/head"` 
+     to specify pull requests as dependencies' revision.
+
+Caused by:
+...
+"#
+        ))
+        .run();
+}
+
 #[cargo_test]
 fn unused() {
     Package::new("bar", "0.1.0").publish();
@@ -1456,7 +1513,8 @@ fn replace_with_crates_io() {
 [ERROR] failed to resolve patches for `https://github.com/rust-lang/crates.io-index`
 
 Caused by:
-  patch for `bar` in `https://github.com/rust-lang/crates.io-index` points to the same source, but patches must point to different sources
+  patch for `bar` in `https://github.com/rust-lang/crates.io-index` points to the same source, but patches must point to different sources.
+  Check the patch definition in `[ROOT]/foo/Cargo.toml`.
 
 "#]])
         .run();
@@ -1795,7 +1853,7 @@ fn patch_same_version() {
         .file("src/lib.rs", "")
         .build();
 
-    cargo_test_support::registry::init();
+    registry::init();
 
     let p = project()
         .file(
@@ -1832,7 +1890,71 @@ fn patch_same_version() {
         .with_status(101)
         .with_stderr_data(str![[r#"
 [UPDATING] git repository `[ROOTURL]/override`
-[ERROR] cannot have two `[patch]` entries which both resolve to `bar v0.1.0`
+[ERROR] failed to resolve patches for `https://github.com/rust-lang/crates.io-index`
+
+Caused by:
+  cannot have two `[patch]` entries which both resolve to `bar v0.1.0`.
+  Check patch definitions for `bar` in `[ROOT]/foo/Cargo.toml`
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn patch_same_version_different_patch_locations() {
+    let bar = git::repo(&paths::root().join("override"))
+        .file("Cargo.toml", &basic_manifest("bar", "0.1.0"))
+        .file("src/lib.rs", "")
+        .build();
+
+    registry::init();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            &format!(
+                r#"
+                    [package]
+                    name = "foo"
+                    version = "0.0.1"
+                    edition = "2015"
+                    [dependencies]
+                    bar = "0.1"
+                    [patch.crates-io]
+                    bar2 = {{ git = '{}', package = 'bar' }}
+                "#,
+                bar.url(),
+            ),
+        )
+        .file(
+            ".cargo/config.toml",
+            r#"
+                [patch.crates-io]
+                bar = { path = "bar" }
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .file(
+            "bar/Cargo.toml",
+            r#"
+                [package]
+                name = "bar"
+                version = "0.1.0"
+                edition = "2015"
+            "#,
+        )
+        .file("bar/src/lib.rs", "")
+        .build();
+
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[UPDATING] git repository `[ROOTURL]/override`
+[ERROR] failed to resolve patches for `https://github.com/rust-lang/crates.io-index`
+
+Caused by:
+  cannot have two `[patch]` entries which both resolve to `bar v0.1.0`.
+  Check patch definitions for `bar` in `[ROOT]/foo/.cargo/config.toml, [ROOT]/foo/Cargo.toml`
 
 "#]])
         .run();
@@ -2172,7 +2294,7 @@ Caused by:
 Caused by:
   patch for `bar` in `registry `alternative`` resolved to more than one candidate
   Found versions: 0.1.0, 0.1.1
-  Update the patch definition to select only one package.
+  Update the patch definition in `[ROOT]/foo/Cargo.toml` to select only one package.
   For example, add an `=` version requirement to the patch definition, such as `version = "=0.1.1"`.
 
 "#]])
@@ -2213,6 +2335,7 @@ Caused by:
 
 Caused by:
   The patch location `[ROOT]/foo/bar` does not appear to contain any packages matching the name `bar`.
+  Check the patch definition in `[ROOT]/foo/Cargo.toml`.
 
 "#]])
         .run();
@@ -2251,8 +2374,133 @@ Caused by:
   patch for `bar` in `https://github.com/rust-lang/crates.io-index` failed to resolve
 
 Caused by:
-  The patch location `[ROOT]/foo/bar` contains a `bar` package with version `0.1.0`, but the patch definition requires `^0.1.1`.
+  The patch location `[ROOT]/foo/bar` contains a `bar` package with version `0.1.0`, but the patch definition in `[ROOT]/foo/Cargo.toml` requires `^0.1.1`.
   Check that the version in the patch location is what you expect, and update the patch definition to match.
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn mismatched_version_from_cli_config() {
+    // A patch to a location that has an old version.
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                 [package]
+                 name = "foo"
+                 version = "0.1.0"
+                 edition = "2015"
+
+                 [dependencies]
+                 bar = "0.1.1"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .file("bar/Cargo.toml", &basic_manifest("bar", "0.1.0"))
+        .file("bar/src/lib.rs", "")
+        .build();
+
+    p.cargo("check")
+        .arg_line("--config 'patch.crates-io.bar.path=\"bar\"'")
+        .arg_line("--config 'patch.crates-io.bar.version=\"0.1.1\"'")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to resolve patches for `https://github.com/rust-lang/crates.io-index`
+
+Caused by:
+  patch for `bar` in `https://github.com/rust-lang/crates.io-index` failed to resolve
+
+Caused by:
+  The patch location `[ROOT]/foo/bar` contains a `bar` package with version `0.1.0`, but the patch definition in `--config cli option` requires `^0.1.1`.
+  Check that the version in the patch location is what you expect, and update the patch definition to match.
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn mismatched_version_from_config_file_provided_via_cli() {
+    Package::new("bar", "0.1.1").publish(); // original dependency
+
+    // A patch to a location that has an old version.
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                 [package]
+                 name = "foo"
+                 version = "0.1.0"
+                 edition = "2015"
+
+                 [dependencies]
+                 bar = "0.1.1"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .file("bar/Cargo.toml", &basic_manifest("bar", "0.1.0"))
+        .file("bar/src/lib.rs", "")
+        .file(
+            "tmp/my-config.toml",
+            r#"
+                [patch.crates-io]
+                bar = { path = 'bar', version = '0.1.1' }
+            "#,
+        )
+        .build();
+
+    p.cargo("check")
+        .arg_line("--config tmp/my-config.toml")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to resolve patches for `https://github.com/rust-lang/crates.io-index`
+
+Caused by:
+  patch for `bar` in `https://github.com/rust-lang/crates.io-index` failed to resolve
+
+Caused by:
+  The patch location `[ROOT]/foo/bar` contains a `bar` package with version `0.1.0`, but the patch definition in `[ROOT]/foo/tmp/my-config.toml` requires `^0.1.1`.
+  Check that the version in the patch location is what you expect, and update the patch definition to match.
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn patch_from_env_config_is_ignored() {
+    Package::new("bar", "1.0.0").publish(); // original dependency
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                 [package]
+                 name = "foo"
+                 version = "0.1.0"
+                 edition = "2015"
+
+                 [dependencies]
+                 bar = "1.0.0"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    // copy of the [mismatched_version_from_cli_config] cli options using conversion to env
+    // described in https://doc.rust-lang.org/cargo/reference/config.html#environment-variables
+    p.cargo("check")
+        .env("CARGO_PATCH_CRATES_IO_BAR_PATH", "bar")
+        .env("CARGO_PATCH_CRATES_IO_BAR_VERSION", "0.1.1")
+        .with_status(0)
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to latest compatible version
+[DOWNLOADING] crates ...
+[DOWNLOADED] bar v1.0.0 (registry `dummy-registry`)
+[CHECKING] bar v1.0.0
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
         .run();
@@ -2361,7 +2609,7 @@ Caused by:
   patch for `bar` in `https://github.com/rust-lang/crates.io-index` failed to resolve
 
 Caused by:
-  The patch location `[ROOT]/foo/bar` contains a `bar` package with version `0.1.0`, but the patch definition requires `^0.1.1`.
+  The patch location `[ROOT]/foo/bar` contains a `bar` package with version `0.1.0`, but the patch definition in `[ROOT]/foo/Cargo.toml` requires `^0.1.1`.
   Check that the version in the patch location is what you expect, and update the patch definition to match.
 
 "#]])

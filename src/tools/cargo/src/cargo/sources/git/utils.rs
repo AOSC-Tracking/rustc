@@ -1,40 +1,33 @@
 //! Utilities for handling git repositories, mainly around
 //! authentication/cloning.
 
-use crate::core::{GitReference, Verbosity};
+use crate::core::{GitReference, SourceId, Verbosity};
 use crate::sources::git::fetch::RemoteKind;
 use crate::sources::git::oxide;
 use crate::sources::git::oxide::cargo_config_to_gitoxide_overrides;
+use crate::sources::git::source::GitSource;
+use crate::sources::source::Source as _;
 use crate::util::HumanBytes;
 use crate::util::errors::{CargoResult, GitCliError};
 use crate::util::{GlobalContext, IntoUrl, MetricsCounter, Progress, network};
+
 use anyhow::{Context as _, anyhow};
 use cargo_util::{ProcessBuilder, paths};
 use curl::easy::List;
 use git2::{ErrorClass, ObjectType, Oid};
-use serde::Serialize;
-use serde::ser;
+use tracing::{debug, info};
+use url::Url;
+
 use std::borrow::Cow;
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tracing::{debug, info};
-use url::Url;
 
 /// A file indicates that if present, `git reset` has been done and a repo
 /// checkout is ready to go. See [`GitCheckout::reset`] for why we need this.
 const CHECKOUT_READY_LOCK: &str = ".cargo-ok";
-
-fn serialize_str<T, S>(t: &T, s: S) -> Result<S::Ok, S::Error>
-where
-    T: fmt::Display,
-    S: ser::Serializer,
-{
-    s.collect_str(t)
-}
 
 /// A short abbreviated OID.
 ///
@@ -49,10 +42,9 @@ impl GitShortID {
 }
 
 /// A remote repository. It gets cloned into a local [`GitDatabase`].
-#[derive(PartialEq, Clone, Debug, Serialize)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct GitRemote {
     /// URL to a remote repository.
-    #[serde(serialize_with = "serialize_str")]
     url: Url,
 }
 
@@ -169,6 +161,7 @@ impl GitDatabase {
         rev: git2::Oid,
         dest: &Path,
         gctx: &GlobalContext,
+        quiet: bool,
     ) -> CargoResult<GitCheckout<'_>> {
         // If the existing checkout exists, and it is fresh, use it.
         // A non-fresh checkout can happen if the checkout operation was
@@ -182,7 +175,7 @@ impl GitDatabase {
             Some(co) => co,
             None => {
                 let (checkout, guard) = GitCheckout::clone_into(dest, self, rev, gctx)?;
-                checkout.update_submodules(gctx)?;
+                checkout.update_submodules(gctx, quiet)?;
                 guard.mark_ok()?;
                 checkout
             }
@@ -384,24 +377,27 @@ impl<'a> GitCheckout<'a> {
     /// Submodules set to `none` won't be fetched.
     ///
     /// [^1]: <https://git-scm.com/docs/git-submodule#Documentation/git-submodule.txt-none>
-    fn update_submodules(&self, gctx: &GlobalContext) -> CargoResult<()> {
-        return update_submodules(&self.repo, gctx, self.remote_url().as_str());
+    fn update_submodules(&self, gctx: &GlobalContext, quiet: bool) -> CargoResult<()> {
+        return update_submodules(&self.repo, gctx, quiet, self.remote_url().as_str());
 
         /// Recursive helper for [`GitCheckout::update_submodules`].
         fn update_submodules(
             repo: &git2::Repository,
             gctx: &GlobalContext,
+            quiet: bool,
             parent_remote_url: &str,
         ) -> CargoResult<()> {
             debug!("update submodules for: {:?}", repo.workdir().unwrap());
 
             for mut child in repo.submodules()? {
-                update_submodule(repo, &mut child, gctx, parent_remote_url).with_context(|| {
-                    format!(
-                        "failed to update submodule `{}`",
-                        child.name().unwrap_or("")
-                    )
-                })?;
+                update_submodule(repo, &mut child, gctx, quiet, parent_remote_url).with_context(
+                    || {
+                        format!(
+                            "failed to update submodule `{}`",
+                            child.name().unwrap_or("")
+                        )
+                    },
+                )?;
             }
             Ok(())
         }
@@ -411,6 +407,7 @@ impl<'a> GitCheckout<'a> {
             parent: &git2::Repository,
             child: &mut git2::Submodule<'_>,
             gctx: &GlobalContext,
+            quiet: bool,
             parent_remote_url: &str,
         ) -> CargoResult<()> {
             child.init(false)?;
@@ -447,10 +444,10 @@ impl<'a> GitCheckout<'a> {
                 let target = repo.head()?.target();
                 Ok((target, repo))
             });
-            let mut repo = match head_and_repo {
+            let repo = match head_and_repo {
                 Ok((head, repo)) => {
                     if child.head_id() == head {
-                        return update_submodules(&repo, gctx, &child_remote_url);
+                        return update_submodules(&repo, gctx, quiet, &child_remote_url);
                     }
                     repo
                 }
@@ -460,25 +457,23 @@ impl<'a> GitCheckout<'a> {
                     init(&path, false)?
                 }
             };
-            // Fetch data from origin and reset to the head commit
+            // Fetch submodule database and checkout to target revision
             let reference = GitReference::Rev(head.to_string());
-            gctx.shell()
-                .status("Updating", format!("git submodule `{child_remote_url}`"))?;
-            fetch(
-                &mut repo,
-                &child_remote_url,
-                &reference,
-                gctx,
-                RemoteKind::GitDependency,
-            )
-            .with_context(|| {
+
+            // GitSource created from SourceId without git precise will result to
+            // locked_rev being Deferred and fetch_db always try to fetch if online
+            let source_id = SourceId::for_git(&child_remote_url.into_url()?, reference)?
+                .with_git_precise(Some(head.to_string()));
+
+            let mut source = GitSource::new(source_id, gctx)?;
+            source.set_quiet(quiet);
+
+            let (db, actual_rev) = source.fetch_db(true).with_context(|| {
                 let name = child.name().unwrap_or("");
                 format!("failed to fetch submodule `{name}` from {child_remote_url}",)
             })?;
-
-            let obj = repo.find_object(head, None)?;
-            reset(&repo, &obj, gctx)?;
-            update_submodules(&repo, gctx, &child_remote_url)
+            db.copy_to(actual_rev, repo.path(), gctx, quiet)?;
+            Ok(())
         }
     }
 }
@@ -798,12 +793,14 @@ where
             | ErrorClass::FetchHead
             | ErrorClass::Ssh
             | ErrorClass::Http => {
-                let mut msg = "network failure seems to have happened\n".to_string();
-                msg.push_str(
-                    "if a proxy or similar is necessary `net.git-fetch-with-cli` may help here\n",
-                );
-                msg.push_str(
-                    "https://doc.rust-lang.org/cargo/reference/config.html#netgit-fetch-with-cli",
+                let msg = format!(
+                    concat!(
+                        "network failure seems to have happened\n",
+                        "if a proxy or similar is necessary `net.git-fetch-with-cli` may help here\n",
+                        "https://doc.rust-lang.org/cargo/reference/config.html#netgit-fetch-with-cli",
+                        "{}"
+                    ),
+                    note_github_pull_request(url).unwrap_or_default()
                 );
                 err = err.context(msg);
             }
@@ -1010,7 +1007,7 @@ pub fn fetch(
                 fast_path_rev = true;
                 refspecs.push(format!("+{0}:refs/commit/{0}", oid_to_fetch));
             } else if !matches!(shallow, gix::remote::fetch::Shallow::NoChange)
-                && rev.parse::<Oid>().is_ok()
+                && rev_to_oid(rev).is_some()
             {
                 // There is a specific commit to fetch and we will do so in shallow-mode only
                 // to not disturb the previous logic.
@@ -1030,8 +1027,9 @@ pub fn fetch(
         }
     }
 
+    debug!("doing a fetch for {remote_url}");
     let result = if let Some(true) = gctx.net_config()?.git_fetch_with_cli {
-        fetch_with_cli(repo, remote_url, &refspecs, tags, gctx)
+        fetch_with_cli(repo, remote_url, &refspecs, tags, shallow, gctx)
     } else if gctx.cli_unstable().gitoxide.map_or(false, |git| git.fetch) {
         fetch_with_gitoxide(repo, remote_url, refspecs, tags, shallow, gctx)
     } else {
@@ -1075,14 +1073,21 @@ fn fetch_with_cli(
     url: &str,
     refspecs: &[String],
     tags: bool,
+    shallow: gix::remote::fetch::Shallow,
     gctx: &GlobalContext,
 ) -> CargoResult<()> {
+    debug!(target: "git-fetch", backend = "git-cli");
+
     let mut cmd = ProcessBuilder::new("git");
     cmd.arg("fetch");
     if tags {
         cmd.arg("--tags");
     } else {
         cmd.arg("--no-tags");
+    }
+    if let gix::remote::fetch::Shallow::DepthAtRemote(depth) = shallow {
+        let depth = 0i32.saturating_add_unsigned(depth.get());
+        cmd.arg(format!("--depth={depth}"));
     }
     match gctx.shell().verbosity() {
         Verbosity::Normal => {}
@@ -1126,12 +1131,15 @@ fn fetch_with_gitoxide(
     shallow: gix::remote::fetch::Shallow,
     gctx: &GlobalContext,
 ) -> CargoResult<()> {
+    debug!(target: "git-fetch", backend = "gitoxide");
+
     let git2_repo = repo;
     let config_overrides = cargo_config_to_gitoxide_overrides(gctx)?;
     let repo_reinitialized = AtomicBool::default();
     let res = oxide::with_retry_and_progress(
         git2_repo.path(),
         gctx,
+        remote_url,
         &|repo_path,
           should_interrupt,
           mut progress,
@@ -1234,7 +1242,8 @@ fn fetch_with_libgit2(
     shallow: gix::remote::fetch::Shallow,
     gctx: &GlobalContext,
 ) -> CargoResult<()> {
-    debug!("doing a fetch for {remote_url}");
+    debug!(target: "git-fetch", backend = "libgit2");
+
     let git_config = git2::Config::open_default()?;
     with_fetch_options(&git_config, remote_url, gctx, &mut |mut opts| {
         if tags {
@@ -1560,8 +1569,10 @@ fn github_fast_path(
     if response_code == 304 {
         debug!("github fast path up-to-date");
         Ok(FastPathRev::UpToDate)
-    } else if response_code == 200 {
-        let oid_to_fetch = str::from_utf8(&response_body)?.parse::<Oid>()?;
+    } else if response_code == 200
+        && let Some(oid_to_fetch) = rev_to_oid(str::from_utf8(&response_body)?)
+    {
+        // response expected to be a full hash hexstring (40 or 64 chars)
         debug!("github fast path fetch {oid_to_fetch}");
         Ok(FastPathRev::NeedsFetch(oid_to_fetch))
     } else {
@@ -1576,6 +1587,33 @@ fn github_fast_path(
 /// Whether a `url` is one from GitHub.
 fn is_github(url: &Url) -> bool {
     url.host_str() == Some("github.com")
+}
+
+// Give some messages on GitHub PR URL given as is
+pub(crate) fn note_github_pull_request(url: &str) -> Option<String> {
+    if let Ok(url) = url.parse::<Url>()
+        && is_github(&url)
+    {
+        let path_segments = url
+            .path_segments()
+            .map(|p| p.into_iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if let [owner, repo, "pull", pr_number, ..] = path_segments[..] {
+            let repo_url = format!("https://github.com/{owner}/{repo}.git");
+            let rev = format!("refs/pull/{pr_number}/head");
+            return Some(format!(
+                concat!(
+                    "\n\nnote: GitHub url {} is not a repository. \n",
+                    "help: Replace the dependency with \n",
+                    "       `git = \"{}\" rev = \"{}\"` \n",
+                    "   to specify pull requests as dependencies' revision."
+                ),
+                url, repo_url, rev
+            ));
+        }
+    }
+
+    None
 }
 
 /// Whether a `rev` looks like a commit hash (ASCII hex digits).

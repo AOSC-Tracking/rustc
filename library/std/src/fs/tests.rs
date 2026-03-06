@@ -1,25 +1,11 @@
 use rand::RngCore;
 
-#[cfg(any(
-    windows,
-    target_os = "freebsd",
-    target_os = "linux",
-    target_os = "netbsd",
-    target_os = "illumos",
-    target_vendor = "apple",
-))]
+#[cfg(not(miri))]
+use super::Dir;
 use crate::assert_matches::assert_matches;
-use crate::char::MAX_LEN_UTF8;
-#[cfg(any(
-    windows,
-    target_os = "freebsd",
-    target_os = "linux",
-    target_os = "netbsd",
-    target_os = "illumos",
-    target_vendor = "apple",
-))]
-use crate::fs::TryLockError;
-use crate::fs::{self, File, FileTimes, OpenOptions};
+use crate::fs::{self, File, FileTimes, OpenOptions, TryLockError};
+#[cfg(not(miri))]
+use crate::io;
 use crate::io::prelude::*;
 use crate::io::{BorrowedBuf, ErrorKind, SeekFrom};
 use crate::mem::MaybeUninit;
@@ -174,7 +160,7 @@ fn file_test_io_non_positional_read() {
 #[test]
 fn file_test_io_seek_and_tell_smoke_test() {
     let message = "ten-four";
-    let mut read_mem = [0; MAX_LEN_UTF8];
+    let mut read_mem = [0; char::MAX_LEN_UTF8];
     let set_cursor = 4 as u64;
     let tell_pos_pre_read;
     let tell_pos_post_read;
@@ -223,15 +209,23 @@ fn file_test_io_seek_and_write() {
 }
 
 #[test]
-#[cfg(any(
-    windows,
-    target_os = "freebsd",
-    target_os = "linux",
-    target_os = "netbsd",
-    target_os = "solaris",
-    target_os = "illumos",
-    target_vendor = "apple",
-))]
+#[cfg_attr(
+    not(any(
+        windows,
+        target_os = "aix",
+        target_os = "cygwin",
+        target_os = "freebsd",
+        target_os = "fuchsia",
+        target_os = "hurd",
+        target_os = "illumos",
+        target_os = "linux",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "solaris",
+        target_vendor = "apple",
+    )),
+    should_panic
+)]
 fn file_lock_multiple_shared() {
     let tmpdir = tmpdir();
     let filename = &tmpdir.join("file_lock_multiple_shared_test.txt");
@@ -248,15 +242,23 @@ fn file_lock_multiple_shared() {
 }
 
 #[test]
-#[cfg(any(
-    windows,
-    target_os = "freebsd",
-    target_os = "linux",
-    target_os = "netbsd",
-    target_os = "solaris",
-    target_os = "illumos",
-    target_vendor = "apple",
-))]
+#[cfg_attr(
+    not(any(
+        windows,
+        target_os = "aix",
+        target_os = "cygwin",
+        target_os = "freebsd",
+        target_os = "fuchsia",
+        target_os = "hurd",
+        target_os = "illumos",
+        target_os = "linux",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "solaris",
+        target_vendor = "apple",
+    )),
+    should_panic
+)]
 fn file_lock_blocking() {
     let tmpdir = tmpdir();
     let filename = &tmpdir.join("file_lock_blocking_test.txt");
@@ -274,15 +276,23 @@ fn file_lock_blocking() {
 }
 
 #[test]
-#[cfg(any(
-    windows,
-    target_os = "freebsd",
-    target_os = "linux",
-    target_os = "netbsd",
-    target_os = "solaris",
-    target_os = "illumos",
-    target_vendor = "apple",
-))]
+#[cfg_attr(
+    not(any(
+        windows,
+        target_os = "aix",
+        target_os = "cygwin",
+        target_os = "freebsd",
+        target_os = "fuchsia",
+        target_os = "hurd",
+        target_os = "illumos",
+        target_os = "linux",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "solaris",
+        target_vendor = "apple",
+    )),
+    should_panic
+)]
 fn file_lock_drop() {
     let tmpdir = tmpdir();
     let filename = &tmpdir.join("file_lock_dup_test.txt");
@@ -297,15 +307,23 @@ fn file_lock_drop() {
 }
 
 #[test]
-#[cfg(any(
-    windows,
-    target_os = "freebsd",
-    target_os = "linux",
-    target_os = "netbsd",
-    target_os = "solaris",
-    target_os = "illumos",
-    target_vendor = "apple",
-))]
+#[cfg_attr(
+    not(any(
+        windows,
+        target_os = "aix",
+        target_os = "cygwin",
+        target_os = "freebsd",
+        target_os = "fuchsia",
+        target_os = "hurd",
+        target_os = "illumos",
+        target_os = "linux",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "solaris",
+        target_vendor = "apple",
+    )),
+    should_panic
+)]
 fn file_lock_dup() {
     let tmpdir = tmpdir();
     let filename = &tmpdir.join("file_lock_dup_test.txt");
@@ -405,7 +423,7 @@ fn file_test_io_seek_shakedown() {
     let chunk_one: &str = "qwer";
     let chunk_two: &str = "asdf";
     let chunk_three: &str = "zxcv";
-    let mut read_mem = [0; MAX_LEN_UTF8];
+    let mut read_mem = [0; char::MAX_LEN_UTF8];
     let tmpdir = tmpdir();
     let filename = &tmpdir.join("file_rt_io_file_test_seek_shakedown.txt");
     {
@@ -782,7 +800,7 @@ fn file_test_directoryinfo_readdir() {
         check!(w.write(msg));
     }
     let files = check!(fs::read_dir(dir));
-    let mut mem = [0; MAX_LEN_UTF8];
+    let mut mem = [0; char::MAX_LEN_UTF8];
     for f in files {
         let f = f.unwrap().path();
         {
@@ -1253,7 +1271,7 @@ fn readlink_not_symlink() {
 }
 
 #[test]
-#[cfg_attr(target_os = "android", ignore)] // Android SELinux rules prevent creating hardlinks
+#[cfg_attr(target_os = "android", ignore = "Android SELinux rules prevent creating hardlinks")]
 fn links_work() {
     let tmpdir = tmpdir();
     let input = tmpdir.join("in.txt");
@@ -1749,7 +1767,7 @@ fn metadata_access_times() {
 
 /// Test creating hard links to symlinks.
 #[test]
-#[cfg_attr(target_os = "android", ignore)] // Android SELinux rules prevent creating hardlinks
+#[cfg_attr(target_os = "android", ignore = "Android SELinux rules prevent creating hardlinks")]
 fn symlink_hard_link() {
     let tmpdir = tmpdir();
     if !got_symlink_permission(&tmpdir) {
@@ -2450,4 +2468,31 @@ fn test_fs_set_times_nofollow() {
     let target_metadata = fs::metadata(&target).unwrap();
     assert_ne!(target_metadata.accessed().unwrap(), accessed);
     assert_ne!(target_metadata.modified().unwrap(), modified);
+}
+
+#[test]
+// FIXME: libc calls fail on miri
+#[cfg(not(miri))]
+fn test_dir_smoke_test() {
+    let tmpdir = tmpdir();
+    let dir = Dir::open(tmpdir.path());
+    check!(dir);
+}
+
+#[test]
+// FIXME: libc calls fail on miri
+#[cfg(not(miri))]
+fn test_dir_read_file() {
+    let tmpdir = tmpdir();
+    let mut f = check!(File::create(tmpdir.join("foo.txt")));
+    check!(f.write(b"bar"));
+    check!(f.flush());
+    drop(f);
+    let dir = check!(Dir::open(tmpdir.path()));
+    let f = check!(dir.open_file("foo.txt"));
+    let buf = check!(io::read_to_string(f));
+    assert_eq!("bar", &buf);
+    let f = check!(dir.open_file(tmpdir.join("foo.txt")));
+    let buf = check!(io::read_to_string(f));
+    assert_eq!("bar", &buf);
 }

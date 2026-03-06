@@ -5,14 +5,11 @@
 //! This API is completely unstable and subject to change.
 
 // tidy-alphabetical-start
-#![allow(internal_features)]
 #![allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
-#![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![doc(rust_logo)]
 #![feature(decl_macro)]
 #![feature(panic_backtrace_config)]
 #![feature(panic_update_hook)]
-#![feature(rustdoc_internals)]
+#![feature(trim_prefix_suffix)]
 #![feature(try_blocks)]
 // tidy-alphabetical-end
 
@@ -466,7 +463,7 @@ pub enum Compilation {
 fn handle_explain(early_dcx: &EarlyDiagCtxt, registry: Registry, code: &str, color: ColorConfig) {
     // Allow "E0123" or "0123" form.
     let upper_cased_code = code.to_ascii_uppercase();
-    if let Ok(code) = upper_cased_code.strip_prefix('E').unwrap_or(&upper_cased_code).parse::<u32>()
+    if let Ok(code) = upper_cased_code.trim_prefix('E').parse::<u32>()
         && code <= ErrCode::MAX_AS_U32
         && let Ok(description) = registry.try_find_description(ErrCode::from_u32(code))
     {
@@ -686,7 +683,12 @@ fn print_crate_info(
                 };
                 let t_outputs = rustc_interface::util::build_output_filenames(attrs, sess);
                 let crate_name = passes::get_crate_name(sess, attrs);
-                let crate_types = collect_crate_types(sess, attrs);
+                let crate_types = collect_crate_types(
+                    sess,
+                    &codegen_backend.supported_crate_types(sess),
+                    codegen_backend.name(),
+                    attrs,
+                );
                 for &style in &crate_types {
                     let fname = rustc_session::output::filename_for_input(
                         sess, style, crate_name, &t_outputs,
@@ -763,30 +765,35 @@ fn print_crate_info(
                 for (name, expected_values) in &sess.psess.check_config.expecteds {
                     use crate::config::ExpectedValues;
                     match expected_values {
-                        ExpectedValues::Any => check_cfgs.push(format!("{name}=any()")),
+                        ExpectedValues::Any => {
+                            check_cfgs.push(format!("cfg({name}, values(any()))"))
+                        }
                         ExpectedValues::Some(values) => {
-                            if !values.is_empty() {
-                                check_cfgs.extend(values.iter().map(|value| {
+                            let mut values: Vec<_> = values
+                                .iter()
+                                .map(|value| {
                                     if let Some(value) = value {
-                                        format!("{name}=\"{value}\"")
+                                        format!("\"{value}\"")
                                     } else {
-                                        name.to_string()
+                                        "none()".to_string()
                                     }
-                                }))
-                            } else {
-                                check_cfgs.push(format!("{name}="))
-                            }
+                                })
+                                .collect();
+
+                            values.sort_unstable();
+
+                            let values = values.join(", ");
+
+                            check_cfgs.push(format!("cfg({name}, values({values}))"))
                         }
                     }
                 }
 
                 check_cfgs.sort_unstable();
-                if !sess.psess.check_config.exhaustive_names {
-                    if !sess.psess.check_config.exhaustive_values {
-                        println_info!("any()=any()");
-                    } else {
-                        println_info!("any()");
-                    }
+                if !sess.psess.check_config.exhaustive_names
+                    && sess.psess.check_config.exhaustive_values
+                {
+                    println_info!("cfg(any())");
                 }
                 for check_cfg in check_cfgs {
                     println_info!("{check_cfg}");
@@ -795,6 +802,10 @@ fn print_crate_info(
             CallingConventions => {
                 let calling_conventions = rustc_abi::all_names();
                 println_info!("{}", calling_conventions.join("\n"));
+            }
+            BackendHasZstd => {
+                let has_zstd: bool = codegen_backend.has_zstd();
+                println_info!("{has_zstd}");
             }
             RelocationModels
             | CodeModels
@@ -1262,7 +1273,7 @@ fn warn_on_confusing_output_filename_flag(
     if let Some(name) = matches.opt_str("o")
         && let Some(suspect) = args.iter().find(|arg| arg.starts_with("-o") && *arg != "-o")
     {
-        let filename = suspect.strip_prefix("-").unwrap_or(suspect);
+        let filename = suspect.trim_prefix("-");
         let optgroups = config::rustc_optgroups();
         let fake_args = ["optimize", "o0", "o1", "o2", "o3", "ofast", "og", "os", "oz"];
 
@@ -1525,14 +1536,14 @@ fn report_ice(
                         .map(PathBuf::from)
                         .map(|env_var| session_diagnostics::IcePathErrorEnv { env_var }),
                 });
-                dcx.emit_note(session_diagnostics::IceVersion { version, triple: tuple });
                 None
             }
         }
     } else {
-        dcx.emit_note(session_diagnostics::IceVersion { version, triple: tuple });
         None
     };
+
+    dcx.emit_note(session_diagnostics::IceVersion { version, triple: tuple });
 
     if let Some((flags, excluded_cargo_defaults)) = rustc_session::utils::extra_compiler_flags() {
         dcx.emit_note(session_diagnostics::IceFlags { flags: flags.join(" ") });

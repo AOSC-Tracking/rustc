@@ -2,33 +2,28 @@ r[const-eval]
 # Constant evaluation
 
 r[const-eval.general]
-Constant evaluation is the process of computing the result of
-[expressions] during compilation. Only a subset of all expressions
-can be evaluated at compile-time.
+Constant evaluation is the process of computing the result of [expressions] during compilation. Only a subset of all expressions can be evaluated at compile-time.
 
 r[const-eval.const-expr]
 ## Constant expressions
 
 r[const-eval.const-expr.general]
-Certain forms of expressions, called constant expressions, can be evaluated at
-compile time.
+Certain forms of expressions, called constant expressions, can be evaluated at compile time.
 
 r[const-eval.const-expr.const-context]
-In [const contexts](#const-context), these are the only allowed
-expressions, and are always evaluated at compile time.
+Expressions in a [const context] must be constant expressions.
+
+r[const-eval.const-expr.evaluation]
+Expressions in const contexts are always evaluated at compile time.
 
 r[const-eval.const-expr.runtime-context]
-In other places, such as [let statements], constant expressions *may* be, but are not guaranteed to be, evaluated at compile time.
+Outside of const contexts, constant expressions *may* be, but are not guaranteed to be, evaluated at compile time.
 
 r[const-eval.const-expr.error]
-Behaviors such as out of bounds [array indexing] or [overflow] are compiler errors if the value
-must be evaluated at compile time (i.e. in const contexts). Otherwise, these
-behaviors are warnings, but will likely panic at run-time.
+Behaviors such as out of bounds [array indexing] or [overflow] are compiler errors if the value must be evaluated at compile time (i.e. in const contexts). Otherwise, these behaviors are warnings, but will likely panic at run-time.
 
 r[const-eval.const-expr.list]
-The following expressions are constant expressions, so long as any operands are
-also constant expressions and do not cause any [`Drop::drop`][destructors] calls
-to be run.
+The following expressions are constant expressions, so long as any operands are also constant expressions and do not cause any [`Drop::drop`][destructors] calls to be run.
 
 r[const-eval.const-expr.literal]
 * [Literals].
@@ -37,8 +32,7 @@ r[const-eval.const-expr.parameter]
 * [Const parameters].
 
 r[const-eval.const-expr.path-item]
-* [Paths] to [functions] and [constants].
-  Recursively defining constants is not allowed.
+* [Paths] to [functions] and [constants]. Recursively defining constants is not allowed.
 
 r[const-eval.const-expr.path-static]
 * Paths to [statics] with these restrictions:
@@ -55,7 +49,7 @@ r[const-eval.const-expr.array]
 * [Array expressions].
 
 r[const-eval.const-expr.constructor]
-* [Struct] expressions.
+* [Struct expressions].
 
 r[const-eval.const-expr.block]
 * [Block expressions], including `unsafe` and `const` blocks.
@@ -77,8 +71,7 @@ r[const-eval.const-expr.closure]
 * [Closure expressions] which don't capture variables from the environment.
 
 r[const-eval.const-expr.builtin-arith-logic]
-* Built-in [negation], [arithmetic], [logical], [comparison] or [lazy boolean]
-  operators used on integer and floating point types, `bool`, and `char`.
+* Built-in [negation], [arithmetic], [logical], [comparison] or [lazy boolean] operators used on integer and floating point types, `bool`, and `char`.
 
 r[const-eval.const-expr.borrows]
 * All forms of [borrow]s, including raw borrows, except borrows of expressions whose temporary scopes would be extended (see [temporary lifetime extension]) to the end of the program and which are either:
@@ -203,7 +196,23 @@ r[const-eval.const-expr.borrows]
   > See [issue #143129](https://github.com/rust-lang/rust/issues/143129) for more details.
 
 r[const-eval.const-expr.deref]
-* The [dereference operator] except for raw pointers.
+* [Dereference expressions].
+
+  ```rust,no_run
+  # use core::cell::UnsafeCell;
+  const _: u8 = unsafe {
+      let x: *mut u8 = &raw mut *&mut 0;
+      //                        ^^^^^^^
+      //             Dereference of mutable reference.
+      *x = 1; // Dereference of mutable pointer.
+      *(x as *const u8) // Dereference of constant pointer.
+  };
+  const _: u8 = unsafe {
+      let x = &UnsafeCell::new(0);
+      *x.get() = 1; // Mutation of interior mutable value.
+      *x.get()
+  };
+  ```
 
 r[const-eval.const-expr.group]
 
@@ -249,11 +258,7 @@ r[const-eval.const-context.block]
 * A [const block]
 
 r[const-eval.const-context.outer-generics]
-Const contexts that are used as parts of types (array type and repeat length
-expressions as well as const generic arguments) can only make restricted use of
-surrounding generic parameters: such an expression must either be a single bare
-const generic parameter, or an arbitrary expression not making use of any
-generics.
+Const contexts that are used as parts of types (array type and repeat length expressions as well as const generic arguments) can only make restricted use of surrounding generic parameters: such an expression must either be a single bare const generic parameter, or an arbitrary expression not making use of any generics.
 
 r[const-eval.const-fn]
 ## Const functions
@@ -304,8 +309,8 @@ The types of a const function's parameters and return type are restricted to tho
 [constant expressions]: #constant-expressions
 [constants]:            items/constant-items.md
 [Const parameters]:     items/generics.md
-[dereference expression]: expressions/operator-expr.md#the-dereference-operator
-[dereference operator]: expressions/operator-expr.md#the-dereference-operator
+[dereference expression]: expr.deref
+[dereference expressions]: expr.deref
 [destructors]:          destructors.md
 [enum discriminants]:   items/enumerations.md#discriminants
 [expression statements]: statements.md#expression-statements
@@ -332,7 +337,7 @@ The types of a const function's parameters and return type are restricted to tho
 [range expressions]:    expressions/range-expr.md
 [slice]:                types/slice.md
 [statics]:              items/static-items.md
-[struct]:               expressions/struct-expr.md
+[Struct expressions]:   expressions/struct-expr.md
 [temporary lifetime extension]: destructors.scope.lifetime-extension
 [tuple enum variant]:   items/enumerations.md
 [tuple expressions]:    expressions/tuple-expr.md

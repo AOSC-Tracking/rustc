@@ -16,6 +16,9 @@ concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
 
+env:
+  MDBOOK_VERSION: 0.5.1
+
 jobs:
   conclusion:
     needs:
@@ -26,8 +29,10 @@ jobs:
       - lint-docs
       - lockfile
       - resolver
+      - report-timings
       - rustfmt
       - schema
+      - spellcheck
       - test
       - test_gitoxide
     permissions:
@@ -60,7 +65,17 @@ jobs:
 
   # Ensure there are no clippy warnings
   clippy:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+        - name: Linux x86_64
+          os: ubuntu-latest
+        - name: macOS aarch64
+          os: macos-14
+        - name: Windows x86_64 MSVC
+          os: windows-latest
+    name: Clippy ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - run: rustup update stable && rustup default stable
@@ -103,7 +118,7 @@ jobs:
       - name: Install cargo-semver-checks
         run: |
           mkdir installed-bins
-          curl -Lf https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.44.0/cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz \
+          curl -Lf https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.45.0/cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz --directory=./installed-bins
           echo `pwd`/installed-bins >> $GITHUB_PATH
       - run: ci/validate-version-bump.sh
@@ -289,7 +304,7 @@ jobs:
     - name: Install mdbook
       run: |
         mkdir mdbook
-        curl -Lf https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-unknown-linux-gnu.tar.gz | tar -xz --directory=./mdbook
+        curl -Lf https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz | tar -xz --directory=./mdbook
         echo `pwd`/mdbook >> $GITHUB_PATH
     - run: cd src/doc && mdbook build --dest-dir ../../target/doc
     - name: Run linkchecker.sh
@@ -304,3 +319,29 @@ jobs:
     - uses: actions/checkout@v5
     - uses: taiki-e/install-action@cargo-hack
     - run: cargo hack check --all-targets --rust-version --workspace --ignore-private --locked
+
+  spellcheck:
+    name: Spell Check with Typos
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Actions Repository
+      uses: actions/checkout@v5
+    - name: Spell Check Repo
+      uses: crate-ci/typos@v1.42.0
+
+  report-timings:
+    name: Timing HTML report
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - run: rustup update nightly && rustup default nightly
+    - run: cargo build
+    - name: Generate timing report for rustfix
+      run: |
+        cargo run -- build -p rustfix -Zbuild-analysis -Zsection-timings --config build.analysis.enabled=true --config 'build.build-dir="tmp"'
+        cargo run -- report timings -Zbuild-analysis
+    - uses: actions/upload-artifact@v6
+      with:
+        name: timing-report
+        path: target/cargo-timings/*.html
+        if-no-files-found: error

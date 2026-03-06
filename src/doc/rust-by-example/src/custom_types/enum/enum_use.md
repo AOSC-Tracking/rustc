@@ -1,6 +1,6 @@
 # use
 
-The `use` declaration can be used so manual scoping isn't needed:
+The `use` declaration can be used to avoid typing the full module path to access a name:
 
 ```rust,editable
 // An attribute to hide warnings for unused code.
@@ -19,9 +19,9 @@ enum Role {
 fn main() {
     // Explicitly `use` each name so they are available without
     // manual scoping.
-    use crate::Stage::{Beginner, Advanced};
+    use Stage::{Beginner, Advanced};
     // Automatically `use` each name inside `Role`.
-    use crate::Role::*;
+    use Role::*;
 
     // Equivalent to `Stage::Beginner`.
     let stage = Beginner;

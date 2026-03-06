@@ -73,6 +73,18 @@ Build scripts may save any output files or intermediate artifacts in the
 directory specified in the [`OUT_DIR` environment variable][build-env]. Scripts
 should not modify any files outside of that directory.
 
+> **Note:** Cargo does not clean or reset `OUT_DIR` between builds. The contents
+> of this directory may persist across rebuilds, even if the build script is
+> re-run. This behavior is intentional to support incremental builds, such as
+> native code compilation.
+>
+>Build scripts should not rely on `OUT_DIR` being empty, as its contents may
+>persist across rebuilds. If a script requires a clean directory, it is currently
+>responsible for managing or cleaning up any files or subdirectories it creates.
+>Future improvements in this area are being discussed (see
+>[#16427](https://github.com/rust-lang/cargo/issues/16427) and
+>[#9661](https://github.com/rust-lang/cargo/issues/9661)).
+
 Build scripts communicate with Cargo by printing to stdout. Cargo will
 interpret each line that starts with `cargo::` as an instruction that will
 influence compilation of the package. All other lines are ignored.
@@ -445,7 +457,7 @@ The metadata is passed to the build scripts of **dependent** packages. For
 example, if the package `foo` depends on `bar`, which links `baz`, then if 
 `bar` generates `key=value` as part of its build script metadata, then the
 build script of `foo` will have the environment variables `DEP_BAZ_KEY=value`
-(note that the value of the `links` key is used).
+(note that the value of the `links` key is used and the case change for `key`).
 See the ["Using another `sys` crate"][using-another-sys] for an example of 
 how this can be used.
 
@@ -475,7 +487,7 @@ convention of native-library-related packages:
 
 * Common dependencies on `foo-sys` alleviates the rule about one package per
   value of `links`.
-* Other `-sys` packages can take advantage of the `DEP_NAME_KEY=value`
+* Other `-sys` packages can take advantage of the `DEP_LINKS_KEY=value`
   environment variables to better integrate with other packages. See the
   ["Using another `sys` crate"][using-another-sys] example.
 * A common dependency allows centralizing logic on discovering `libfoo` itself

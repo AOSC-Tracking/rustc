@@ -970,11 +970,13 @@ fn connect_run_custom_build_deps(state: &mut State<'_, '_>) {
                         .iter()
                         .map(move |a| (reverse_dep, a))
                 })
+                // Exclude ourself
+                .filter(|(_parent, other)| other.unit.pkg != unit.pkg)
                 // Only deps with `links`.
                 .filter(|(_parent, other)| {
-                    other.unit.pkg != unit.pkg
-                        && other.unit.target.is_linkable()
-                        && other.unit.pkg.manifest().links().is_some()
+                    state.gctx.cli_unstable().any_build_script_metadata
+                        || (other.unit.target.is_linkable()
+                            && other.unit.pkg.manifest().links().is_some())
                 })
                 // Avoid cycles when using the doc --scrape-examples feature:
                 // Say a workspace has crates A and B where A has a build-dependency on B.
@@ -1003,7 +1005,16 @@ fn connect_run_custom_build_deps(state: &mut State<'_, '_>) {
                     state.unit_dependencies[&other.unit]
                         .iter()
                         .find(|other_dep| other_dep.unit.mode == CompileMode::RunCustomBuild)
-                        .cloned()
+                        .map(|other_dep| {
+                            let mut dep = other_dep.clone();
+                            let dep_name = other.dep_name.unwrap_or(other.unit.pkg.name());
+                            // Propagate the manifest dep name from the sibling edge.
+                            // The RunCustomBuild-RustCustomBuild edge is synthetic
+                            // and doesn't carry a usable dep name, but build script
+                            // metadata needs one for `CARGO_DEP_<dep_name>_*` env var
+                            dep.dep_name = Some(dep_name);
+                            dep
+                        })
                 })
                 .collect::<HashSet<_>>();
 

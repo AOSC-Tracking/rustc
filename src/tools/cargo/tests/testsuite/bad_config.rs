@@ -87,36 +87,6 @@ Caused by:
 }
 
 #[cargo_test]
-fn unsupported_int_array() {
-    let p = project()
-        .file("src/lib.rs", "")
-        .file(
-            ".cargo/config.toml",
-            r#"
-                [alias]
-                ints = [1, 2]
-            "#,
-        )
-        .build();
-    p.cargo("check")
-        .with_status(101)
-        .with_stderr_data(str![[r#"
-[ERROR] could not load Cargo configuration
-
-Caused by:
-  failed to load TOML configuration from `[ROOT]/foo/.cargo/config.toml`
-
-Caused by:
-  failed to parse config at `alias.ints[0]`
-
-Caused by:
-  expected string but found integer at index 0
-
-"#]])
-        .run();
-}
-
-#[cargo_test]
 fn unsupported_float_array() {
     let p = project()
         .file("src/lib.rs", "")
@@ -140,7 +110,7 @@ Caused by:
   failed to parse config at `alias.floats[0]`
 
 Caused by:
-  expected string but found float at index 0
+  unsupported TOML configuration type `float`
 
 "#]])
         .run();
@@ -170,7 +140,7 @@ Caused by:
   failed to parse config at `alias.datetimes[0]`
 
 Caused by:
-  expected string but found datetime at index 0
+  unsupported TOML configuration type `datetime`
 
 "#]])
         .run();
@@ -574,13 +544,11 @@ fn malformed_override() {
     p.cargo("check")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] newlines are unsupported in inline tables, expected nothing
-  --> Cargo.toml:9:27
+[ERROR] missing assignment between key-value pairs, expected `=`
+  --> Cargo.toml:10:24
    |
- 9 |                   native = {
-   |  ___________________________^
-10 | |                   foo: "bar"
-   | |_^
+10 |                   foo: "bar"
+   |                        ^
 
 "#]])
         .run();
@@ -802,74 +770,125 @@ fn unused_keys() {
         .file(
             "Cargo.toml",
             r#"
-               [package]
-               name = "foo"
-               version = "0.1.0"
-               edition = "2015"
-               authors = []
+paths = ["/path/to/override"]
 
-               [target.foo]
-               bar = "3"
-            "#,
+[package]
+name = "foo"
+version = "0.1.0"
+edition = "2015"
+authors = []
+unused = "foo"
+
+[target.foo]
+bar = "3"
+
+[lib]
+build = "foo"
+
+## Config fields
+
+[alias]
+b = "build"
+
+[build]
+jobs = 1
+
+[credential-alias]
+my-alias = ["/usr/bin/cargo-credential-example", "--argument", "value", "--flag"]
+
+[doc]
+browser = "chromium"
+
+[env]
+ENV_VAR_NAME = "value"
+
+[future-incompat-report]
+frequency = 'always'
+
+[cache]
+auto-clean-frequency = "1 day"
+
+[cargo-new]
+vcs = "none"
+
+[http]
+debug = false
+
+[install]
+root = "/some/path"
+
+[net]
+retry = 3
+
+[net.ssh]
+known-hosts = ["..."]
+
+[resolver]
+incompatible-rust-versions = "allow"
+
+[registries.alternative]
+index = "…"
+
+[registries.crates-io]
+protocol = "sparse"
+
+[registry]
+default = "…"
+
+[source.alternative]
+replace-with = "…"
+
+[target.'cfg(unix)']
+linker = "…"
+
+[term]
+quiet = false
+"#,
         )
         .file("src/lib.rs", "")
         .build();
 
     p.cargo("check")
         .with_stderr_data(str![[r#"
-[WARNING] unused manifest key: target.foo.bar
-[CHECKING] foo v0.1.0 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-
-                name = "foo"
-                version = "0.5.0"
-                edition = "2015"
-                authors = ["wycats@example.com"]
-                bulid = "foo"
-            "#,
-        )
-        .file("src/lib.rs", "pub fn foo() {}")
-        .build();
-    p.cargo("check")
-        .with_stderr_data(str![[r#"
-[WARNING] unused manifest key: package.bulid
-[CHECKING] foo v0.5.0 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-
-    let p = project()
-        .at("bar")
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-
-                name = "foo"
-                version = "0.5.0"
-                edition = "2015"
-                authors = ["wycats@example.com"]
-
-                [lib]
-                build = "foo"
-            "#,
-        )
-        .file("src/lib.rs", "pub fn foo() {}")
-        .build();
-    p.cargo("check")
-        .with_stderr_data(str![[r#"
+[WARNING] unused manifest key: alias
+[HELP] alias is a valid .cargo/config.toml key
+[WARNING] unused manifest key: build
+[HELP] build is a valid .cargo/config.toml key
+[WARNING] unused manifest key: cache
+[HELP] cache is a valid .cargo/config.toml key
+[WARNING] unused manifest key: cargo-new
+[HELP] cargo-new is a valid .cargo/config.toml key
+[WARNING] unused manifest key: credential-alias
+[HELP] credential-alias is a valid .cargo/config.toml key
+[WARNING] unused manifest key: doc
+[HELP] doc is a valid .cargo/config.toml key
+[WARNING] unused manifest key: env
+[HELP] env is a valid .cargo/config.toml key
+[WARNING] unused manifest key: future-incompat-report
+[HELP] future-incompat-report is a valid .cargo/config.toml key
+[WARNING] unused manifest key: http
+[HELP] http is a valid .cargo/config.toml key
+[WARNING] unused manifest key: install
+[HELP] install is a valid .cargo/config.toml key
 [WARNING] unused manifest key: lib.build
-[CHECKING] foo v0.5.0 ([ROOT]/bar)
+[WARNING] unused manifest key: net
+[HELP] net is a valid .cargo/config.toml key
+[WARNING] unused manifest key: package.unused
+[WARNING] unused manifest key: paths
+[HELP] paths is a valid .cargo/config.toml key
+[WARNING] unused manifest key: registries
+[HELP] registries is a valid .cargo/config.toml key
+[WARNING] unused manifest key: registry
+[HELP] registry is a valid .cargo/config.toml key
+[WARNING] unused manifest key: resolver
+[HELP] resolver is a valid .cargo/config.toml key
+[WARNING] unused manifest key: source
+[HELP] source is a valid .cargo/config.toml key
+[WARNING] unused manifest key: target.cfg(unix).linker
+[WARNING] unused manifest key: target.foo.bar
+[WARNING] unused manifest key: term
+[HELP] term is a valid .cargo/config.toml key
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -884,7 +903,7 @@ fn unused_keys_in_virtual_manifest() {
             r#"
                 [workspace]
                 members = ["bar"]
-                bulid = "foo"
+                unused = "foo"
             "#,
         )
         .file("bar/Cargo.toml", &basic_manifest("bar", "0.0.1"))
@@ -892,7 +911,7 @@ fn unused_keys_in_virtual_manifest() {
         .build();
     p.cargo("check --workspace")
         .with_stderr_data(str![[r#"
-[WARNING] [ROOT]/foo/Cargo.toml: unused manifest key: workspace.bulid
+[WARNING] [ROOT]/foo/Cargo.toml: unused manifest key: workspace.unused
 [CHECKING] bar v0.0.1 ([ROOT]/foo/bar)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -2285,6 +2304,47 @@ fn ambiguous_git_reference() {
 Caused by:
   dependency (bar) specification is ambiguous. Only one of `branch`, `tag` or `rev` is allowed.
 
+"#]])
+        .run();
+}
+
+#[cargo_test(public_network_test)]
+fn github_pull_request_url() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.0"
+                edition = "2015"
+                authors = []
+
+                [dependencies.bar]
+                git = "https://github.com/rust-lang/does-not-exist/pull/123"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("check -v")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[UPDATING] git repository `https://github.com/rust-lang/does-not-exist/pull/123`
+...
+[ERROR] failed to get `bar` as a dependency of package `foo v0.0.0 ([ROOT]/foo)`
+
+Caused by:
+  failed to load source for dependency `bar`
+
+Caused by:
+  Unable to update https://github.com/rust-lang/does-not-exist/pull/123
+...
+  [NOTE] GitHub url https://github.com/rust-lang/does-not-exist/pull/123 is not a repository. 
+  [HELP] Replace the dependency with 
+         `git = "https://github.com/rust-lang/does-not-exist.git" rev = "refs/pull/123/head"` 
+     to specify pull requests as dependencies' revision.
+...
 "#]])
         .run();
 }
@@ -3689,6 +3749,439 @@ please set bin.path in Cargo.toml
 [CHECKING] foo v1.0.0 ([ROOT]/foo)
 [RUNNING] `rustc [..]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn nonexistent_example_target_path() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "1.0.0"
+                edition = "2024"
+
+                [[example]]
+                name = "bar"
+                path = "examples/null.rs"
+            "#,
+        )
+        .build();
+    p.cargo("check --examples")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] can't find example `bar` at path `[ROOT]/foo/examples/null.rs`
+ --> [ROOT]/foo/Cargo.toml
+[ERROR] could not compile due to 1 previous target resolution error
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn nonexistent_library_target_path() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "1.0.0"
+                edition = "2024"
+
+                [lib]
+                path = "src/null.rs"
+            "#,
+        )
+        .file("src/lib.rs", "fn bar() {}")
+        .build();
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] can't find lib `foo` at path `[ROOT]/foo/src/null.rs`
+ --> [ROOT]/foo/Cargo.toml
+[ERROR] could not compile due to 1 previous target resolution error
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn nonexistent_binary_target_path() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "1.0.0"
+                edition = "2024"
+
+                [[bin]]
+                name = "null"
+                path = "src/null.rs"
+            "#,
+        )
+        .build();
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] can't find bin `null` at path `[ROOT]/foo/src/null.rs`
+ --> [ROOT]/foo/Cargo.toml
+[ERROR] could not compile due to 1 previous target resolution error
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn nonexistent_test_target_path() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "1.0.0"
+                edition = "2024"
+
+                [[test]]
+                name = "null"
+                path = "src/null.rs"
+            "#,
+        )
+        .build();
+    p.cargo("test")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] can't find integration-test `null` at path `[ROOT]/foo/src/null.rs`
+ --> [ROOT]/foo/Cargo.toml
+[ERROR] could not compile due to 1 previous target resolution error
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn nonexistent_bench_target_path() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "1.0.0"
+                edition = "2024"
+
+                [[bench]]
+                name = "null"
+                path = "src/null.rs"
+            "#,
+        )
+        .build();
+    p.cargo("bench")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] can't find bench `null` at path `[ROOT]/foo/src/null.rs`
+ --> [ROOT]/foo/Cargo.toml
+[ERROR] could not compile due to 1 previous target resolution error
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn directory_as_example_target_path() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "1.0.0"
+                edition = "2024"
+
+                [[example]]
+                name = "bar"
+                path = "examples/bar"
+            "#,
+        )
+        .file("examples/bar/.temp", "")
+        .build();
+    p.cargo("check --example bar")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] path `[ROOT]/foo/examples/bar` for example `bar` is a directory, but a source file was expected.
+ --> [ROOT]/foo/Cargo.toml
+[ERROR] could not compile due to 1 previous target resolution error
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn directory_as_library_target_path() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "1.0.0"
+                edition = "2024"
+
+                [lib]
+                path = "src/null"
+            "#,
+        )
+        .file("src/null/.temp", "")
+        .build();
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] path `[ROOT]/foo/src/null` for lib `foo` is a directory, but a source file was expected.
+ --> [ROOT]/foo/Cargo.toml
+[ERROR] could not compile due to 1 previous target resolution error
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn directory_as_binary_target_path() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "1.0.0"
+                edition = "2024"
+
+                [[bin]]
+                name = "null"
+                path = "src/null"
+            "#,
+        )
+        .file("src/null/.temp", "")
+        .build();
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] path `[ROOT]/foo/src/null` for bin `null` is a directory, but a source file was expected.
+ --> [ROOT]/foo/Cargo.toml
+[ERROR] could not compile due to 1 previous target resolution error
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn directory_as_test_target_path() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "1.0.0"
+                edition = "2024"
+
+                [[test]]
+                name = "null"
+                path = "src/null"
+            "#,
+        )
+        .file("src/null/.temp", "")
+        .build();
+    p.cargo("test")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] path `[ROOT]/foo/src/null` for integration-test `null` is a directory, but a source file was expected.
+ --> [ROOT]/foo/Cargo.toml
+[ERROR] could not compile due to 1 previous target resolution error
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn directory_as_bench_target_path() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "1.0.0"
+                edition = "2024"
+
+                [[bench]]
+                name = "null"
+                path = "src/null"
+            "#,
+        )
+        .file("src/null/.temp", "")
+        .build();
+    p.cargo("bench")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] path `[ROOT]/foo/src/null` for bench `null` is a directory, but a source file was expected.
+ --> [ROOT]/foo/Cargo.toml
+[ERROR] could not compile due to 1 previous target resolution error
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn directory_as_example_target_path_with_entrypoint() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "1.0.0"
+                edition = "2024"
+
+                [[example]]
+                name = "bar"
+                path = "examples/bar"
+            "#,
+        )
+        .file("examples/bar/main.rs", "fn main() {}")
+        .build();
+    p.cargo("check --example bar")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] path `[ROOT]/foo/examples/bar` for example `bar` is a directory, but a source file was expected.
+ --> [ROOT]/foo/Cargo.toml
+  = [HELP] an entry point exists at `[ROOT]/foo/examples/bar/main.rs`
+[ERROR] could not compile due to 1 previous target resolution error
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn directory_as_library_target_path_with_entrypoint() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "1.0.0"
+                edition = "2024"
+
+                [lib]
+                path = "src/null"
+            "#,
+        )
+        .file("src/null/lib.rs", "fn foo() {}")
+        .build();
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] path `[ROOT]/foo/src/null` for lib `foo` is a directory, but a source file was expected.
+ --> [ROOT]/foo/Cargo.toml
+  = [HELP] an entry point exists at `[ROOT]/foo/src/null/lib.rs`
+[ERROR] could not compile due to 1 previous target resolution error
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn directory_as_binary_target_path_with_entrypoint() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "1.0.0"
+                edition = "2024"
+
+                [[bin]]
+                name = "null"
+                path = "src/null"
+            "#,
+        )
+        .file("src/null/main.rs", "fn main() {}")
+        .build();
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] path `[ROOT]/foo/src/null` for bin `null` is a directory, but a source file was expected.
+ --> [ROOT]/foo/Cargo.toml
+  = [HELP] an entry point exists at `[ROOT]/foo/src/null/main.rs`
+[ERROR] could not compile due to 1 previous target resolution error
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn directory_as_test_target_path_with_entrypoint() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "1.0.0"
+                edition = "2024"
+
+                [[test]]
+                name = "null"
+                path = "src/null"
+            "#,
+        )
+        .file("src/null/main.rs", "fn main() {}")
+        .build();
+    p.cargo("test")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] path `[ROOT]/foo/src/null` for integration-test `null` is a directory, but a source file was expected.
+ --> [ROOT]/foo/Cargo.toml
+  = [HELP] an entry point exists at `[ROOT]/foo/src/null/main.rs`
+[ERROR] could not compile due to 1 previous target resolution error
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn directory_as_bench_target_path_with_entrypoint() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "1.0.0"
+                edition = "2024"
+
+                [[bench]]
+                name = "null"
+                path = "src/null"
+            "#,
+        )
+        .file("src/null/main.rs", "fn main() {}")
+        .build();
+    p.cargo("bench")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] path `[ROOT]/foo/src/null` for bench `null` is a directory, but a source file was expected.
+ --> [ROOT]/foo/Cargo.toml
+  = [HELP] an entry point exists at `[ROOT]/foo/src/null/main.rs`
+[ERROR] could not compile due to 1 previous target resolution error
 
 "#]])
         .run();

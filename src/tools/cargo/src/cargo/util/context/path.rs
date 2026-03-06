@@ -30,7 +30,7 @@ impl ConfigRelativePath {
     /// This will always return an absolute path where it's relative to the
     /// location for configuration for this value.
     pub fn resolve_path(&self, gctx: &GlobalContext) -> PathBuf {
-        self.0.definition.root(gctx).join(&self.0.val)
+        self.0.definition.root(gctx.cwd()).join(&self.0.val)
     }
 
     /// Same as [`Self::resolve_path`] but will make string replacements
@@ -72,7 +72,7 @@ impl ConfigRelativePath {
             });
         }
 
-        Ok(self.0.definition.root(gctx).join(&value))
+        Ok(self.0.definition.root(gctx.cwd()).join(&value))
     }
 
     /// Resolves this configuration-relative path to either an absolute path or
@@ -98,7 +98,7 @@ impl ConfigRelativePath {
 /// to get the actual program.
 ///
 /// **Note**: Any usage of this type in config needs to be listed in
-/// the `util::context::is_nonmergable_list` check to prevent list merging
+/// the `NON_MERGEABLE_LISTS` check to prevent list merging
 /// from multiple config files.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PathAndArgs {

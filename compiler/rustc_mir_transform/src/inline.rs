@@ -635,7 +635,7 @@ fn try_inlining<'tcx, I: Inliner<'tcx>>(
 
     // Normally, this shouldn't be required, but trait normalization failure can create a
     // validation ICE.
-    if !validate_types(tcx, inliner.typing_env(), &callee_body, &caller_body).is_empty() {
+    if !validate_types(tcx, inliner.typing_env(), &callee_body, caller_body).is_empty() {
         debug!("failed to validate callee body");
         return Err("implementation limitation -- callee body failed validation");
     }
@@ -775,8 +775,11 @@ fn check_mir_is_available<'tcx, I: Inliner<'tcx>>(
     {
         // If we know for sure that the function we're calling will itself try to
         // call us, then we avoid inlining that function.
-        if inliner.tcx().mir_callgraph_cyclic(caller_def_id.expect_local()).contains(&callee_def_id)
-        {
+        let Some(cyclic_callees) = inliner.tcx().mir_callgraph_cyclic(caller_def_id.expect_local())
+        else {
+            return Err("call graph cycle detection bailed due to recursion limit");
+        };
+        if cyclic_callees.contains(&callee_def_id) {
             debug!("query cycle avoidance");
             return Err("caller might be reachable from callee");
         }
@@ -818,7 +821,7 @@ fn check_codegen_attributes<'tcx, I: Inliner<'tcx>>(
     }
 
     let codegen_fn_attrs = tcx.codegen_fn_attrs(inliner.caller_def_id());
-    if callee_attrs.no_sanitize != codegen_fn_attrs.no_sanitize {
+    if callee_attrs.sanitizers != codegen_fn_attrs.sanitizers {
         return Err("incompatible sanitizer set");
     }
 

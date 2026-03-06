@@ -39,6 +39,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use crate::core::compiler::UnitIndex;
 use crate::core::compiler::UserIntent;
 use crate::core::compiler::unit_dependencies::build_unit_dependencies;
 use crate::core::compiler::unit_graph::{self, UnitDep, UnitGraph};
@@ -53,14 +54,18 @@ use crate::core::{PackageId, PackageSet, SourceId, TargetKind, Workspace};
 use crate::drop_println;
 use crate::ops;
 use crate::ops::resolve::{SpecsAndResolvedFeatures, WorkspaceResolve};
+use crate::util::BuildLogger;
 use crate::util::context::{GlobalContext, WarningHandling};
 use crate::util::interning::InternedString;
+use crate::util::log_message::LogMessage;
 use crate::util::{CargoResult, StableHasher};
 
 mod compile_filter;
+use annotate_snippets::{Group, Level, Origin};
 pub use compile_filter::{CompileFilter, FilterRule, LibRule};
 
 pub(super) mod unit_generator;
+use itertools::Itertools as _;
 use unit_generator::UnitGenerator;
 
 mod packages;
@@ -140,7 +145,8 @@ pub fn compile_with_exec<'a>(
 ) -> CargoResult<Compilation<'a>> {
     ws.emit_warnings()?;
     let compilation = compile_ws(ws, options, exec)?;
-    if ws.gctx().warning_handling()? == WarningHandling::Deny && compilation.warning_count > 0 {
+    if ws.gctx().warning_handling()? == WarningHandling::Deny && compilation.lint_warning_count > 0
+    {
         anyhow::bail!("warnings are denied by `build.warnings` configuration")
     }
     Ok(compilation)
@@ -154,7 +160,28 @@ pub fn compile_ws<'a>(
     exec: &Arc<dyn Executor>,
 ) -> CargoResult<Compilation<'a>> {
     let interner = UnitInterner::new();
-    let bcx = create_bcx(ws, options, &interner)?;
+    let logger = BuildLogger::maybe_new(ws)?;
+
+    if let Some(ref logger) = logger {
+        let rustc = ws.gctx().load_global_rustc(Some(ws))?;
+        let num_cpus = std::thread::available_parallelism()
+            .ok()
+            .map(|x| x.get() as u64);
+        logger.log(LogMessage::BuildStarted {
+            cwd: ws.gctx().cwd().to_path_buf(),
+            host: rustc.host.to_string(),
+            jobs: options.build_config.jobs,
+            num_cpus,
+            profile: options.build_config.requested_profile.to_string(),
+            rustc_version: rustc.version.to_string(),
+            rustc_version_verbose: rustc.verbose_version.clone(),
+            target_dir: ws.target_dir().as_path_unlocked().to_path_buf(),
+            workspace_root: ws.root().to_path_buf(),
+        });
+    }
+
+    let bcx = create_bcx(ws, options, &interner, logger.as_ref())?;
+
     if options.build_config.unit_graph {
         unit_graph::emit_serialized_unit_graph(&bcx.roots, &bcx.unit_graph, ws.gctx())?;
         return Compilation::new(&bcx);
@@ -212,6 +239,7 @@ pub fn create_bcx<'a, 'gctx>(
     ws: &'a Workspace<'gctx>,
     options: &'a CompileOptions,
     interner: &'a UnitInterner,
+    logger: Option<&'a BuildLogger>,
 ) -> CargoResult<BuildContext<'a, 'gctx>> {
     let CompileOptions {
         ref build_config,
@@ -230,17 +258,24 @@ pub fn create_bcx<'a, 'gctx>(
     match build_config.intent {
         UserIntent::Test | UserIntent::Build | UserIntent::Check { .. } | UserIntent::Bench => {
             if ws.gctx().get_env("RUST_FLAGS").is_ok() {
-                gctx.shell()
-                    .warn("ignoring environment variable `RUST_FLAGS`")?;
-                gctx.shell().note("rust flags are passed via `RUSTFLAGS`")?;
+                gctx.shell().print_report(
+                    &[Level::WARNING
+                        .secondary_title("ignoring environment variable `RUST_FLAGS`")
+                        .element(Level::HELP.message("rust flags are passed via `RUSTFLAGS`"))],
+                    false,
+                )?;
             }
         }
         UserIntent::Doc { .. } | UserIntent::Doctest => {
             if ws.gctx().get_env("RUSTDOC_FLAGS").is_ok() {
-                gctx.shell()
-                    .warn("ignoring environment variable `RUSTDOC_FLAGS`")?;
-                gctx.shell()
-                    .note("rustdoc flags are passed via `RUSTDOCFLAGS`")?;
+                gctx.shell().print_report(
+                    &[Level::WARNING
+                        .secondary_title("ignoring environment variable `RUSTDOC_FLAGS`")
+                        .element(
+                            Level::HELP.message("rustdoc flags are passed via `RUSTDOCFLAGS`"),
+                        )],
+                    false,
+                )?;
             }
         }
     }
@@ -271,6 +306,11 @@ pub fn create_bcx<'a, 'gctx>(
         }
     };
     let dry_run = false;
+
+    if let Some(logger) = logger {
+        let elapsed = ws.gctx().creation_time().elapsed().as_secs_f64();
+        logger.log(LogMessage::ResolutionStarted { elapsed });
+    }
     let resolve = ops::resolve_ws_with_opts(
         ws,
         &mut target_data,
@@ -287,6 +327,11 @@ pub fn create_bcx<'a, 'gctx>(
         targeted_resolve: resolve,
         specs_and_features,
     } = resolve;
+
+    if let Some(logger) = logger {
+        let elapsed = ws.gctx().creation_time().elapsed().as_secs_f64();
+        logger.log(LogMessage::ResolutionFinished { elapsed });
+    }
 
     let std_resolve_features = if let Some(crates) = &gctx.cli_unstable().build_std {
         let (std_package_set, std_resolve, std_features) = standard_lib::resolve_std(
@@ -364,9 +409,14 @@ pub fn create_bcx<'a, 'gctx>(
         })
         .collect();
 
-    let mut units = Vec::new();
+    let mut root_units = Vec::new();
     let mut unit_graph = HashMap::new();
     let mut scrape_units = Vec::new();
+
+    if let Some(logger) = logger {
+        let elapsed = ws.gctx().creation_time().elapsed().as_secs_f64();
+        logger.log(LogMessage::UnitGraphStarted { elapsed });
+    }
 
     for SpecsAndResolvedFeatures {
         specs,
@@ -446,14 +496,14 @@ pub fn create_bcx<'a, 'gctx>(
             &profiles,
             interner,
         )?);
-        units.extend(targeted_root_units);
+        root_units.extend(targeted_root_units);
         scrape_units.extend(targeted_scrape_units);
     }
 
     // TODO: In theory, Cargo should also dedupe the roots, but I'm uncertain
     // what heuristics to use in that case.
     if build_config.intent.wants_deps_docs() {
-        remove_duplicate_doc(build_config, &units, &mut unit_graph);
+        remove_duplicate_doc(build_config, &root_units, &mut unit_graph);
     }
 
     let host_kind_requested = build_config
@@ -463,18 +513,59 @@ pub fn create_bcx<'a, 'gctx>(
     // Rebuild the unit graph, replacing the explicit host targets with
     // CompileKind::Host, removing `artifact_target_for_features` and merging any dependencies
     // shared with build and artifact dependencies.
-    (units, scrape_units, unit_graph) = rebuild_unit_graph_shared(
+    //
+    // NOTE: after this point, all units and the unit graph must be immutable.
+    let (root_units, scrape_units, unit_graph) = rebuild_unit_graph_shared(
         interner,
         unit_graph,
-        &units,
+        &root_units,
         &scrape_units,
         host_kind_requested.then_some(explicit_host_kind),
         build_config.compile_time_deps_only,
     );
 
+    let units: Vec<_> = unit_graph.keys().sorted().collect();
+    let unit_to_index: HashMap<_, _> = units
+        .iter()
+        .enumerate()
+        .map(|(i, &unit)| (unit.clone(), UnitIndex(i as u64)))
+        .collect();
+    if let Some(logger) = logger {
+        let root_unit_indexes: HashSet<_> =
+            root_units.iter().map(|unit| unit_to_index[&unit]).collect();
+
+        for (index, unit) in units.into_iter().enumerate() {
+            let index = UnitIndex(index as u64);
+            let dependencies = unit_graph
+                .get(unit)
+                .map(|deps| {
+                    deps.iter()
+                        .filter_map(|dep| unit_to_index.get(&dep.unit).copied())
+                        .collect()
+                })
+                .unwrap_or_default();
+            logger.log(LogMessage::UnitRegistered {
+                package_id: unit.pkg.package_id().to_spec(),
+                target: (&unit.target).into(),
+                mode: unit.mode,
+                platform: target_data.short_name(&unit.kind).to_owned(),
+                index,
+                features: unit
+                    .features
+                    .iter()
+                    .map(|s| s.as_str().to_owned())
+                    .collect(),
+                requested: root_unit_indexes.contains(&index),
+                dependencies,
+            });
+        }
+        let elapsed = ws.gctx().creation_time().elapsed().as_secs_f64();
+        logger.log(LogMessage::UnitGraphFinished { elapsed });
+    }
+
     let mut extra_compiler_args = HashMap::new();
     if let Some(args) = extra_args {
-        if units.len() != 1 {
+        if root_units.len() != 1 {
             anyhow::bail!(
                 "extra arguments to `{}` can only be passed to one \
                  target, consider filtering\nthe package by passing, \
@@ -482,10 +573,10 @@ pub fn create_bcx<'a, 'gctx>(
                 extra_args_name
             );
         }
-        extra_compiler_args.insert(units[0].clone(), args);
+        extra_compiler_args.insert(root_units[0].clone(), args);
     }
 
-    for unit in units
+    for unit in root_units
         .iter()
         .filter(|unit| unit.mode.is_doc() || unit.mode.is_doc_test())
         .filter(|unit| rustdoc_document_private_items || unit.target.is_bin())
@@ -504,6 +595,27 @@ pub fn create_bcx<'a, 'gctx>(
             .entry(unit.clone())
             .or_default()
             .extend(args);
+    }
+
+    // Validate target src path for each root unit
+    let mut error_count: usize = 0;
+    for unit in &root_units {
+        if let Some(target_src_path) = unit.target.src_path().path() {
+            validate_target_path_as_source_file(
+                gctx,
+                target_src_path,
+                unit.target.name(),
+                unit.target.kind(),
+                unit.pkg.manifest_path(),
+                &mut error_count,
+            )?
+        }
+    }
+    if error_count > 0 {
+        let plural: &str = if error_count > 1 { "s" } else { "" };
+        anyhow::bail!(
+            "could not compile due to {error_count} previous target resolution error{plural}"
+        );
     }
 
     if honor_rust_version.unwrap_or(true) {
@@ -559,17 +671,118 @@ where `<compatible-ver>` is the latest version supporting rustc {rustc_version}"
 
     let bcx = BuildContext::new(
         ws,
+        logger,
         pkg_set,
         build_config,
         profiles,
         extra_compiler_args,
         target_data,
-        units,
+        root_units,
         unit_graph,
+        unit_to_index,
         scrape_units,
     )?;
 
     Ok(bcx)
+}
+
+// Checks if a target path exists and is a source file, not a directory
+fn validate_target_path_as_source_file(
+    gctx: &GlobalContext,
+    target_path: &std::path::Path,
+    target_name: &str,
+    target_kind: &TargetKind,
+    unit_manifest_path: &std::path::Path,
+    error_count: &mut usize,
+) -> CargoResult<()> {
+    if !target_path.exists() {
+        *error_count += 1;
+
+        let err_msg = format!(
+            "can't find {} `{}` at path `{}`",
+            target_kind.description(),
+            target_name,
+            target_path.display()
+        );
+
+        let group = Group::with_title(Level::ERROR.primary_title(err_msg)).element(Origin::path(
+            unit_manifest_path.to_str().unwrap_or_default(),
+        ));
+
+        gctx.shell().print_report(&[group], true)?;
+    } else if target_path.is_dir() {
+        *error_count += 1;
+
+        // suggest setting the path to a likely entrypoint
+        let main_rs = target_path.join("main.rs");
+        let lib_rs = target_path.join("lib.rs");
+
+        let suggested_files_opt = match target_kind {
+            TargetKind::Lib(_) => {
+                if lib_rs.exists() {
+                    Some(format!("`{}`", lib_rs.display()))
+                } else {
+                    None
+                }
+            }
+            TargetKind::Bin => {
+                if main_rs.exists() {
+                    Some(format!("`{}`", main_rs.display()))
+                } else {
+                    None
+                }
+            }
+            TargetKind::Test => {
+                if main_rs.exists() {
+                    Some(format!("`{}`", main_rs.display()))
+                } else {
+                    None
+                }
+            }
+            TargetKind::ExampleBin => {
+                if main_rs.exists() {
+                    Some(format!("`{}`", main_rs.display()))
+                } else {
+                    None
+                }
+            }
+            TargetKind::Bench => {
+                if main_rs.exists() {
+                    Some(format!("`{}`", main_rs.display()))
+                } else {
+                    None
+                }
+            }
+            TargetKind::ExampleLib(_) => {
+                if lib_rs.exists() {
+                    Some(format!("`{}`", lib_rs.display()))
+                } else {
+                    None
+                }
+            }
+            TargetKind::CustomBuild => None,
+        };
+
+        let err_msg = format!(
+            "path `{}` for {} `{}` is a directory, but a source file was expected.",
+            target_path.display(),
+            target_kind.description(),
+            target_name,
+        );
+        let mut group = Group::with_title(Level::ERROR.primary_title(err_msg)).element(
+            Origin::path(unit_manifest_path.to_str().unwrap_or_default()),
+        );
+
+        if let Some(suggested_files) = suggested_files_opt {
+            group = group.element(
+                Level::HELP.message(format!("an entry point exists at {}", suggested_files)),
+            );
+        }
+
+        gctx.shell().print_report(&[group], true)?;
+    }
+
+    Ok(())
 }
 
 /// This is used to rebuild the unit graph, sharing host dependencies if possible,

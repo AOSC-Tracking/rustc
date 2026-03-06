@@ -1,5 +1,0 @@
-[book]
-title = "redirect_existing_page"
-
-[output.html.redirect]
-"/chapter_1.html" = "other-page.html"

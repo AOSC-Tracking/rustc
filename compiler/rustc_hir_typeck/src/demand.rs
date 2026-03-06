@@ -415,11 +415,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     });
                     Some(self.resolve_vars_if_possible(possible_rcvr_ty))
                 });
-                if let Some(rcvr_ty) = possible_rcvr_ty {
-                    rcvr_ty
-                } else {
-                    return false;
-                }
+                let Some(rcvr_ty) = possible_rcvr_ty else { return false };
+                rcvr_ty
             }
         };
 
@@ -1196,6 +1193,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let hir::Node::Expr(parent_expr) = self.tcx.parent_hir_node(expr.hir_id) else {
             return;
         };
+        if parent_expr.span.desugaring_kind().is_some() {
+            return;
+        }
         enum CallableKind {
             Function,
             Method,

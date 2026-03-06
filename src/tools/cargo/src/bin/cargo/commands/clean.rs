@@ -6,6 +6,8 @@ use cargo::core::global_cache_tracker::GlobalCacheTracker;
 use cargo::ops::CleanContext;
 use cargo::ops::{self, CleanOptions};
 use cargo::util::print_available_packages;
+use clap_complete::ArgValueCandidates;
+use indexmap::IndexSet;
 use std::time::Duration;
 
 pub fn cli() -> Command {
@@ -13,7 +15,14 @@ pub fn cli() -> Command {
         .about("Remove artifacts that cargo has generated in the past")
         .arg_doc("Whether or not to clean just the documentation directory")
         .arg_silent_suggestion()
-        .arg_package_spec_simple("Package to clean artifacts for")
+        .arg_package_spec_simple(
+            "Package to clean artifacts for",
+            ArgValueCandidates::new(get_pkg_name_candidates),
+        )
+        .arg(
+            flag("workspace", "Clean artifacts of the workspace members")
+                .help_heading(heading::PACKAGE_SELECTION),
+        )
         .arg_release("Whether or not to clean release artifacts")
         .arg_profile("Clean artifacts of the specified profile")
         .arg_target_triple("Target triple to clean output for")
@@ -142,10 +151,14 @@ pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
     if args.is_present_with_zero_values("package") {
         print_available_packages(&ws)?;
     }
+    let mut spec = IndexSet::from_iter(values(args, "package"));
 
+    if args.flag("workspace") {
+        spec.extend(ws.members().map(|package| package.name().to_string()))
+    };
     let opts = CleanOptions {
         gctx,
-        spec: values(args, "package"),
+        spec,
         targets: args.targets()?,
         requested_profile: args.get_profile_name("dev", ProfileChecking::Custom)?,
         profile_specified: args.contains_id("profile") || args.flag("release"),

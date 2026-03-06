@@ -47,8 +47,9 @@ OPTIONS
        execute the binary to exercise and test its behavior. The
        CARGO_BIN_EXE_<name> environment variable
        <https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-sets-for-crates>
-       is set when the integration test is built so that it can use the env
-       macro <https://doc.rust-lang.org/std/macro.env.html> to locate the
+       is set when the integration test is built and run so that it can use the
+       env macro <https://doc.rust-lang.org/std/macro.env.html> or the var
+       function <https://doc.rust-lang.org/std/env/fn.var.html> to locate the
        executable.
 
        Passing target selection flags will build only the specified targets.
@@ -182,24 +183,15 @@ OPTIONS
            <https://doc.rust-lang.org/cargo/reference/profiles.html> for more
            details on profiles.
 
-       --timings=fmts
+       --timings
            Output information how long each compilation takes, and track
-           concurrency information over time. Accepts an optional
-           comma-separated list of output formats; --timings without an
-           argument will default to --timings=html. Specifying an output format
-           (rather than the default) is unstable and requires
-           -Zunstable-options. Valid output formats:
+           concurrency information over time.
 
-           o  html (unstable, requires -Zunstable-options): Write a
-              human-readable file cargo-timing.html to the target/cargo-timings
-              directory with a report of the compilation. Also write a report
-              to the same directory with a timestamp in the filename if you
-              want to look at older runs. HTML output is suitable for human
-              consumption only, and does not provide machine-readable timing
-              data.
-
-           o  json (unstable, requires -Zunstable-options): Emit
-              machine-readable JSON information about timing information.
+           A file cargo-timing.html will be written to the target/cargo-timings
+           directory at the end of the build. An additional report with a
+           timestamp in its filename is also written if you want to look at a
+           previous run. These reports are suitable for human consumption only,
+           and do not provide machine-readable timing data.
 
        --crate-type crate-type
            Build for the given crate type. This flag accepts a comma-separated
@@ -316,21 +308,6 @@ OPTIONS
 
        --frozen
            Equivalent to specifying both --locked and --offline.
-
-       --lockfile-path PATH
-           Changes the path of the lockfile from the default
-           (<workspace_root>/Cargo.lock) to PATH. PATH must end with Cargo.lock
-           (e.g. --lockfile-path /tmp/temporary-lockfile/Cargo.lock). Note that
-           providing --lockfile-path will ignore existing lockfile at the
-           default path, and instead will either use the lockfile from PATH, or
-           write a new lockfile into the provided PATH if it doesn’t exist.
-           This flag can be used to run most commands in read-only directories,
-           writing lockfile into the provided PATH.
-
-           This option is only available on the nightly channel
-           <https://doc.rust-lang.org/book/appendix-07-nightly-rust.html> and
-           requires the -Z unstable-options flag to enable (see #14421
-           <https://github.com/rust-lang/cargo/issues/14421>).
 
    Common Options
        +toolchain

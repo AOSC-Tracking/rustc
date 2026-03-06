@@ -37,7 +37,7 @@ fn custom_build_script_failed() {
         .file("src/main.rs", "fn main() {}")
         .file("build.rs", "fn main() { std::process::exit(101); }")
         .build();
-    p.cargo("build -v")
+    p.cargo("check -v")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
@@ -74,7 +74,7 @@ fn custom_build_script_failed_backtraces_message() {
         .file("src/main.rs", "fn main() {}")
         .file("build.rs", "fn main() { std::process::exit(101); }")
         .build();
-    p.cargo("build -v")
+    p.cargo("check -v")
         .env("RUST_BACKTRACE", "1")
         .with_status(101)
         .with_stderr_data(str![[r#"
@@ -127,7 +127,7 @@ fn custom_build_script_failed_backtraces_message_with_debuginfo() {
         .file("src/main.rs", "fn main() {}")
         .file("build.rs", "fn main() { std::process::exit(101); }")
         .build();
-    p.cargo("build -v")
+    p.cargo("check -v")
         .env("RUST_BACKTRACE", "1")
         .env("CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG", "true")
         .with_status(101)
@@ -248,8 +248,8 @@ fn custom_build_env_vars() {
 
     let p = p.file("bar/build.rs", &file_content).build();
 
-    p.cargo("build --features bar_feat").run();
-    p.cargo("build --features bar_feat")
+    p.cargo("check --features bar_feat").run();
+    p.cargo("check --features bar_feat")
         // we use rustc since $CARGO is only used if it points to a path that exists
         .env("CHECK_CARGO_IS_RUSTC", "1")
         .env(cargo::CARGO_ENV, rustc)
@@ -832,7 +832,7 @@ fn custom_build_script_wrong_rustc_flags() {
         )
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
@@ -978,7 +978,7 @@ fn links_no_build_cmd() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
@@ -1027,7 +1027,7 @@ fn links_duplicates() {
         .file("a-sys/build.rs", "")
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [ERROR] failed to select a version for `a-sys`.
@@ -1080,7 +1080,7 @@ fn links_duplicates_old_registry() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
@@ -1153,7 +1153,7 @@ fn links_duplicates_deep_dependency() {
         .file("a/a-sys/build.rs", "")
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [ERROR] failed to select a version for `a-sys`.
@@ -1344,6 +1344,433 @@ fn links_passes_env_vars() {
 }
 
 #[cargo_test]
+fn metadata_from_dep_kinds() {
+    let set_metadata = r#"
+fn main() {
+    println!("cargo::metadata=key=value");
+}
+"#;
+
+    let get_metadata = r#"
+fn warn_print_env_var(key: &str) {
+    println!("cargo::warning={key}={:?}", std::env::var(key));
+}
+fn main() {
+    warn_print_env_var("DEP_FOO_KEY");
+    warn_print_env_var("CARGO_DEP_LINKS_KEY");
+}
+"#;
+
+    // Create a project with a crate with `links` and 3 test crates that imports this crate as a
+    // normal dependency (n), dev-dependency (d), and build-dependency (b).
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [workspace]
+                resolver = "3"
+                members = ["links", "n", "b", "d"]
+            "#,
+        )
+        .file(
+            "links/Cargo.toml",
+            r#"
+[package]
+name = "links"
+edition = "2024"
+links = "foo"
+"#,
+        )
+        .file("links/src/lib.rs", "")
+        .file("links/build.rs", set_metadata)
+        .file(
+            "n/Cargo.toml",
+            r#"
+[package]
+name = "n"
+edition = "2024"
+
+[dependencies]
+links.path = "../links"
+"#,
+        )
+        .file("n/src/lib.rs", "")
+        .file("n/build.rs", get_metadata)
+        .file(
+            "b/Cargo.toml",
+            r#"
+[package]
+name = "b"
+edition = "2024"
+
+[build-dependencies]
+links.path = "../links"
+"#,
+        )
+        .file("b/src/lib.rs", "")
+        .file("b/build.rs", get_metadata)
+        .file(
+            "d/Cargo.toml",
+            r#"
+[package]
+name = "d"
+edition = "2024"
+
+[dev-dependencies]
+links.path = "../links"
+"#,
+        )
+        .file("d/src/lib.rs", "")
+        .file("d/build.rs", get_metadata)
+        .build();
+
+    p.cargo("check --all-targets -Zany-build-script-metadata")
+        .masquerade_as_nightly_cargo(&["any-build-script-metadata"])
+        .with_stderr_data(
+            str![[r#"
+[COMPILING] links v0.0.0 ([ROOT]/foo/links)
+[COMPILING] n v0.0.0 ([ROOT]/foo/n)
+[COMPILING] b v0.0.0 ([ROOT]/foo/b)
+[COMPILING] d v0.0.0 ([ROOT]/foo/d)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[WARNING] n@0.0.0: DEP_FOO_KEY=Ok("value")
+[WARNING] n@0.0.0: CARGO_DEP_LINKS_KEY=Ok("value")
+[WARNING] d@0.0.0: DEP_FOO_KEY=Err(NotPresent)
+[WARNING] d@0.0.0: CARGO_DEP_LINKS_KEY=Err(NotPresent)
+[WARNING] b@0.0.0: DEP_FOO_KEY=Err(NotPresent)
+[WARNING] b@0.0.0: CARGO_DEP_LINKS_KEY=Err(NotPresent)
+
+"#]]
+            .unordered(),
+        )
+        .run();
+}
+
+#[cargo_test]
+fn links_passes_env_vars_with_any_build_script_unstable_feature() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.5.0"
+                edition = "2015"
+                authors = []
+                build = "build.rs"
+
+                [dependencies.a]
+                path = "a"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .file(
+            "build.rs",
+            r#"
+                use std::env;
+                fn main() {
+                    assert_eq!(env::var("DEP_FOO_FOO").unwrap(), "bar");
+                    assert_eq!(env::var("DEP_FOO_BAR").unwrap(), "baz");
+                    assert_eq!(env::var("CARGO_DEP_A_FOO").unwrap(), "bar");
+                    assert_eq!(env::var("CARGO_DEP_A_BAR").unwrap(), "baz");
+                }
+            "#,
+        )
+        .file(
+            "a/Cargo.toml",
+            r#"
+                [package]
+                name = "a"
+                version = "0.5.0"
+                edition = "2015"
+                authors = []
+                links = "foo"
+                build = "build.rs"
+            "#,
+        )
+        .file("a/src/lib.rs", "")
+        .file(
+            "a/build.rs",
+            r#"
+                use std::env;
+                fn main() {
+                    let lib = env::var("CARGO_MANIFEST_LINKS").unwrap();
+                    assert_eq!(lib, "foo");
+
+                    println!("cargo::metadata=foo=bar");
+                    println!("cargo::metadata=bar=baz");
+                }
+            "#,
+        )
+        .build();
+
+    p.cargo("check -v -Zany-build-script-metadata")
+        .masquerade_as_nightly_cargo(&["any-build-script-metadata"])
+        .run();
+}
+
+#[cargo_test]
+fn non_links_can_pass_env_vars() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.5.0"
+                edition = "2015"
+                authors = []
+                build = "build.rs"
+
+                [dependencies.a]
+                path = "a"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .file(
+            "build.rs",
+            r#"
+                use std::env;
+                fn main() {
+                    // DEP_<links>_<key> is only allowed for `links` crates
+                    assert!(env::var("DEP_FOO_FOO").is_err());
+                    assert!(env::var("DEP_FOO_BAR").is_err());
+                    // Make sure DEP_<name-in-toml>_<key> is not present.
+                    // This is not a valid scenario but verify these are not present just incase.
+                    assert!(env::var("DEP_A_FOO").is_err());
+                    assert!(env::var("DEP_A_BAR").is_err());
+
+                    assert_eq!(env::var("CARGO_DEP_A_FOO").unwrap(), "bar");
+                    assert_eq!(env::var("CARGO_DEP_A_BAR").unwrap(), "baz");
+                }
+            "#,
+        )
+        .file(
+            "a/Cargo.toml",
+            r#"
+                [package]
+                name = "a"
+                version = "0.5.0"
+                edition = "2015"
+                authors = []
+                build = "build.rs"
+            "#,
+        )
+        .file("a/src/lib.rs", "")
+        .file(
+            "a/build.rs",
+            r#"
+                fn main() {
+                    println!("cargo::metadata=foo=bar");
+                    println!("cargo::metadata=bar=baz");
+                }
+            "#,
+        )
+        .build();
+
+    p.cargo("check -v -Zany-build-script-metadata")
+        .masquerade_as_nightly_cargo(&["any-build-script-metadata"])
+        .run();
+}
+
+#[cargo_test]
+fn non_links_can_pass_env_vars_with_dep_renamed() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.5.0"
+                edition = "2015"
+                authors = []
+                build = "build.rs"
+
+                [dependencies]
+                my-renamed-package = { package = "a", path = "a" }
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .file(
+            "build.rs",
+            r#"
+                use std::env;
+                fn main() {
+                    assert!(env::var("DEP_A_FOO").is_err());
+                    assert!(env::var("DEP_A_BAR").is_err());
+                    assert!(env::var("DEP_MY_RENAMED_PACKAGE_FOO").is_err());
+                    assert!(env::var("DEP_MY_RENAMED_PACKAGE_BAR").is_err());
+
+                    // If dep was renamed, we should not add env vars with the original name
+                    // and env vars with the renamed package should be added
+                    assert!(env::var("CARGO_DEP_A_FOO").is_err());
+                    assert!(env::var("CARGO_DEP_A_BAR").is_err());
+                    assert_eq!(env::var("CARGO_DEP_MY_RENAMED_PACKAGE_FOO").unwrap(), "bar");
+                    assert_eq!(env::var("CARGO_DEP_MY_RENAMED_PACKAGE_BAR").unwrap(), "baz");
+                }
+            "#,
+        )
+        .file(
+            "a/Cargo.toml",
+            r#"
+                [package]
+                name = "a"
+                version = "0.5.0"
+                edition = "2015"
+                authors = []
+                build = "build.rs"
+            "#,
+        )
+        .file("a/src/lib.rs", "")
+        .file(
+            "a/build.rs",
+            r#"
+                fn main() {
+                    println!("cargo::metadata=foo=bar");
+                    println!("cargo::metadata=bar=baz");
+                }
+            "#,
+        )
+        .build();
+
+    p.cargo("check -v -Zany-build-script-metadata")
+        .masquerade_as_nightly_cargo(&["any-build-script-metadata"])
+        .run();
+}
+
+#[cargo_test]
+fn non_links_can_pass_env_vars_direct_deps_only() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.5.0"
+                edition = "2015"
+                authors = []
+                build = "build.rs"
+
+                [dependencies]
+                direct = { path = "direct" }
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .file(
+            "build.rs",
+            r#"
+                use std::env;
+                fn main() {
+                    assert!(env::var("DEP_DIRECT_FOO").is_err());
+                    assert!(env::var("DEP_TRANSITIVE_FOO").is_err());
+
+                    assert_eq!(env::var("CARGO_DEP_DIRECT_FOO").unwrap(), "direct");
+                    assert!(env::var("CARGO_DEP_TRANSITIVE_FOO").is_err());
+                }
+            "#,
+        )
+        .file(
+            "direct/Cargo.toml",
+            r#"
+                [package]
+                name = "direct"
+                version = "0.5.0"
+                edition = "2015"
+                authors = []
+                build = "build.rs"
+
+                [dependencies]
+                transitive = { path = "../transitive" }
+            "#,
+        )
+        .file("direct/src/lib.rs", "")
+        .file(
+            "direct/build.rs",
+            r#"
+                use std::env;
+                fn main() {
+                    println!("cargo::metadata=foo=direct");
+
+                    assert_eq!(env::var("CARGO_DEP_TRANSITIVE_FOO").unwrap(), "transitive");
+                }
+            "#,
+        )
+        .file(
+            "transitive/Cargo.toml",
+            r#"
+                [package]
+                name = "transitive"
+                version = "0.5.0"
+                edition = "2015"
+                authors = []
+                build = "build.rs"
+            "#,
+        )
+        .file("transitive/src/lib.rs", "")
+        .file(
+            "transitive/build.rs",
+            r#"
+                fn main() {
+                    println!("cargo::metadata=foo=transitive");
+                }
+            "#,
+        )
+        .build();
+
+    p.cargo("check -v -Zany-build-script-metadata")
+        .masquerade_as_nightly_cargo(&["any-build-script-metadata"])
+        .run();
+}
+
+/// Regression test for https://github.com/rust-lang/cargo/issues/16493
+#[cargo_test]
+fn with_patch() {
+    Package::new("cxx", "1.0.0").publish();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [package]
+            name = "foo"
+            edition = "2021"
+
+            [dependencies]
+            cxx = "1.0.0"
+
+            [patch.crates-io]
+            cxx = { path = "cxx" }
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .file("build.rs", "fn main() {}")
+        .file(
+            "cxx/Cargo.toml",
+            r#"
+            [package]
+            name = "cxx"
+            version = "1.0.0"
+            edition = "2021"
+            links = "cxx"
+            "#,
+        )
+        .file("cxx/src/lib.rs", "")
+        .file("cxx/build.rs", "fn main() {}")
+        .build();
+
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to latest compatible version
+[COMPILING] cxx v1.0.0 ([ROOT]/foo/cxx)
+[COMPILING] foo v0.0.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
 fn only_rerun_build_script() {
     let p = project()
         .file(
@@ -1361,13 +1788,13 @@ fn only_rerun_build_script() {
         .file("build.rs", "fn main() {}")
         .build();
 
-    p.cargo("build -v").run();
+    p.cargo("check -v").run();
     p.root().move_into_the_past();
 
     p.change_file("some-new-file", "");
     p.root().move_into_the_past();
 
-    p.cargo("build -v")
+    p.cargo("check -v")
         .with_stderr_data(str![[r#"
 [DIRTY] foo v0.5.0 ([ROOT]/foo): the precalculated components changed
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
@@ -1441,13 +1868,13 @@ fn rebuild_continues_to_pass_env_vars() {
         )
         .build();
 
-    p.cargo("build -v").run();
+    p.cargo("check -v").run();
     p.root().move_into_the_past();
 
     p.change_file("some-new-file", "");
     p.root().move_into_the_past();
 
-    p.cargo("build -v").run();
+    p.cargo("check -v").run();
 }
 
 #[cargo_test]
@@ -1710,7 +2137,7 @@ fn build_deps_simple() {
         .file("a/src/lib.rs", "")
         .build();
 
-    p.cargo("build -v").with_stderr_data(str![[r#"
+    p.cargo("check -v").with_stderr_data(str![[r#"
 [LOCKING] 1 package to latest compatible version
 [COMPILING] a v0.5.0 ([ROOT]/foo/a)
 [RUNNING] `rustc --crate-name a [..]`
@@ -1756,7 +2183,7 @@ fn build_deps_not_for_normal() {
         .file("a/src/lib.rs", "")
         .build();
 
-    p.cargo("build -v --target")
+    p.cargo("check -v --target")
         .arg(&target)
         .with_status(101)
         .with_stderr_data(
@@ -1823,7 +2250,7 @@ fn build_cmd_with_a_build_cmd() {
         .file("b/src/lib.rs", "")
         .build();
 
-    p.cargo("build -v").with_stderr_data(str![[r#"
+    p.cargo("check -v").with_stderr_data(str![[r#"
 [LOCKING] 2 packages to latest compatible versions
 [COMPILING] b v0.5.0 ([ROOT]/foo/b)
 [RUNNING] `rustc --crate-name b [..]`
@@ -1834,7 +2261,7 @@ fn build_cmd_with_a_build_cmd() {
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
 [RUNNING] `rustc --crate-name build_script_build --edition=2015 build.rs [..]--crate-type bin --emit=[..]link[..]-C metadata=[..] --out-dir [ROOT]/foo/target/debug/build/foo-[HASH] -L dependency=[ROOT]/foo/target/debug/deps --extern a=[ROOT]/foo/target/debug/deps/liba-[HASH].rlib`
 [RUNNING] `[ROOT]/foo/target/debug/build/foo-[HASH]/build-script-build`
-[RUNNING] `rustc --crate-name foo [..]src/lib.rs [..]--crate-type lib --emit=[..]link[..]-C debuginfo=2 [..]-C metadata=[..] --out-dir [ROOT]/foo/target/debug/deps -L dependency=[ROOT]/foo/target/debug/deps`
+[RUNNING] `rustc --crate-name foo [..]src/lib.rs [..]--crate-type lib --emit=[..]-C debuginfo=2 [..]-C metadata=[..] --out-dir [ROOT]/foo/target/debug/deps -L dependency=[ROOT]/foo/target/debug/deps`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]]).run();
@@ -1870,7 +2297,7 @@ fn out_dir_is_preserved() {
         .build();
 
     // Make the file
-    p.cargo("build -v").run();
+    p.cargo("check -v").run();
 
     // Change to asserting that it's there
     p.change_file(
@@ -1885,7 +2312,7 @@ fn out_dir_is_preserved() {
             }
         "#,
     );
-    p.cargo("build -v")
+    p.cargo("check -v")
         .with_stderr_data(str![[r#"
 [DIRTY] foo v0.5.0 ([ROOT]/foo): the file `build.rs` has changed ([TIME_DIFF_AFTER_LAST_BUILD])
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
@@ -1898,7 +2325,7 @@ fn out_dir_is_preserved() {
         .run();
 
     // Run a fresh build where file should be preserved
-    p.cargo("build -v")
+    p.cargo("check -v")
         .with_stderr_data(str![[r#"
 [FRESH] foo v0.5.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -1908,7 +2335,7 @@ fn out_dir_is_preserved() {
 
     // One last time to make sure it's still there.
     p.change_file("foo", "");
-    p.cargo("build -v")
+    p.cargo("check -v")
         .with_stderr_data(str![[r#"
 [DIRTY] foo v0.5.0 ([ROOT]/foo): the precalculated components changed
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
@@ -2044,15 +2471,10 @@ fn code_generation() {
         )
         .build();
 
-    p.cargo("run")
+    p.cargo("check")
         .with_stderr_data(str![[r#"
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[RUNNING] `target/debug/foo[EXE]`
-
-"#]])
-        .with_stdout_data(str![[r#"
-Hello, World!
 
 "#]])
         .run();
@@ -2083,7 +2505,7 @@ fn release_with_build_script() {
         )
         .build();
 
-    p.cargo("build -v --release").run();
+    p.cargo("check -v --release").run();
 }
 
 #[cargo_test]
@@ -2102,7 +2524,7 @@ fn build_script_only() {
         )
         .file("build.rs", r#"fn main() {}"#)
         .build();
-    p.cargo("build -v")
+    p.cargo("check -v")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
@@ -2165,7 +2587,7 @@ fn shared_dep_with_a_build_script() {
         )
         .file("b/src/lib.rs", "")
         .build();
-    p.cargo("build -v").run();
+    p.cargo("check -v").run();
 }
 
 #[cargo_test]
@@ -2405,7 +2827,7 @@ fn profile_debug_0() {
             "#,
         )
         .build();
-    p.cargo("build").run();
+    p.cargo("check").run();
 }
 
 #[cargo_test]
@@ -2428,7 +2850,7 @@ fn build_script_with_lto() {
         .file("src/lib.rs", "")
         .file("build.rs", "fn main() {}")
         .build();
-    p.cargo("build").run();
+    p.cargo("check").run();
 }
 
 #[cargo_test]
@@ -2469,7 +2891,7 @@ fn test_duplicate_deps() {
         .file("bar/src/lib.rs", "pub fn do_nothing() {}")
         .build();
 
-    p.cargo("build").run();
+    p.cargo("check").run();
 }
 
 #[cargo_test]
@@ -2492,7 +2914,7 @@ fn cfg_feedback() {
             r#"fn main() { println!("cargo::rustc-cfg=foo"); }"#,
         )
         .build();
-    p.cargo("build -v").run();
+    p.cargo("check -v").run();
 }
 
 #[cargo_test]
@@ -2526,7 +2948,7 @@ fn cfg_override() {
         )
         .build();
 
-    p.cargo("build -v").run();
+    p.cargo("check -v").run();
 }
 
 #[cargo_test]
@@ -2829,13 +3251,7 @@ fn env_build() {
             r#"fn main() { println!("cargo::rustc-env=FOO=foo"); }"#,
         )
         .build();
-    p.cargo("build -v").run();
-    p.cargo("run -v")
-        .with_stdout_data(str![[r#"
-foo
-
-"#]])
-        .run();
+    p.cargo("check -v").run();
 }
 
 #[cargo_test]
@@ -3528,11 +3944,11 @@ fn rebuild_only_on_explicit_paths() {
         )
         .build();
 
-    p.cargo("build -v").run();
+    p.cargo("check -v").run();
 
     // files don't exist, so should always rerun if they don't exist
     println!("run without");
-    p.cargo("build -v")
+    p.cargo("check -v")
         .with_stderr_data(str![[r#"
 [DIRTY] foo v0.5.0 ([ROOT]/foo): the file `foo` is missing
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
@@ -3550,7 +3966,7 @@ fn rebuild_only_on_explicit_paths() {
 
     // now the exist, so run once, catch the mtime, then shouldn't run again
     println!("run with");
-    p.cargo("build -v")
+    p.cargo("check -v")
         .with_stderr_data(str![[r#"
 [DIRTY] foo v0.5.0 ([ROOT]/foo): the file `foo` has changed ([TIME_DIFF_AFTER_LAST_BUILD])
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
@@ -3562,7 +3978,7 @@ fn rebuild_only_on_explicit_paths() {
         .run();
 
     println!("run with2");
-    p.cargo("build -v")
+    p.cargo("check -v")
         .with_stderr_data(str![[r#"
 [FRESH] foo v0.5.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -3575,7 +3991,7 @@ fn rebuild_only_on_explicit_paths() {
     // random other files do not affect freshness
     println!("run baz");
     p.change_file("baz", "// modified");
-    p.cargo("build -v")
+    p.cargo("check -v")
         .with_stderr_data(str![[r#"
 [FRESH] foo v0.5.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -3586,7 +4002,7 @@ fn rebuild_only_on_explicit_paths() {
     // but changing dependent files does
     println!("run foo change");
     p.change_file("foo", "// modified");
-    p.cargo("build -v")
+    p.cargo("check -v")
         .with_stderr_data(str![[r#"
 [DIRTY] foo v0.5.0 ([ROOT]/foo): the file `foo` has changed ([TIME_DIFF_AFTER_LAST_BUILD])
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
@@ -3600,7 +4016,7 @@ fn rebuild_only_on_explicit_paths() {
     // .. as does deleting a file
     println!("run bar delete");
     fs::remove_file(p.root().join("bar")).unwrap();
-    p.cargo("build -v")
+    p.cargo("check -v")
         .with_stderr_data(str![[r#"
 [DIRTY] foo v0.5.0 ([ROOT]/foo): the file `bar` is missing
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
@@ -3753,7 +4169,7 @@ fn non_utf8_output() {
         .file("src/main.rs", "#[cfg(foo)] fn main() {}")
         .build();
 
-    p.cargo("build -v").run();
+    p.cargo("check -v").run();
 }
 
 #[cargo_test]
@@ -3795,7 +4211,7 @@ fn custom_target_dir() {
         .file("a/src/lib.rs", "")
         .build();
 
-    p.cargo("build -v").run();
+    p.cargo("check -v").run();
 }
 
 #[cargo_test]
@@ -3889,7 +4305,7 @@ fn warnings_emitted() {
         )
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_stderr_data(str![[r#"
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
 [WARNING] foo@0.5.0: foo
@@ -3928,7 +4344,7 @@ fn errors_and_warnings_emitted_and_build_failed() {
         )
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
@@ -3982,13 +4398,13 @@ fn warnings_emitted_from_path_dep() {
         )
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_stderr_data(str![[r#"
 [LOCKING] 1 package to latest compatible version
 [COMPILING] a v0.5.0 ([ROOT]/foo/a)
 [WARNING] a@0.5.0: foo
 [WARNING] a@0.5.0: bar
-[COMPILING] foo v0.5.0 ([ROOT]/foo)
+[CHECKING] foo v0.5.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -4022,7 +4438,7 @@ fn warnings_emitted_when_build_script_panics() {
         )
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
         .with_stdout_data("")
         .with_stderr_data(str![[r#"
@@ -4089,7 +4505,7 @@ fn warnings_emitted_when_dependency_panics() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
     .with_status(101)
     .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
@@ -4160,7 +4576,7 @@ fn log_messages_emitted_when_dependency_logs_errors() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
@@ -4221,7 +4637,7 @@ fn warnings_hidden_for_upstream() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("build -v")
+    p.cargo("check -v")
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
 [LOCKING] 1 package to latest compatible version
@@ -4231,7 +4647,7 @@ fn warnings_hidden_for_upstream() {
 [RUNNING] `rustc --crate-name build_script_build [..]`
 [RUNNING] `[ROOT]/foo/target/debug/build/bar-[HASH]/build-script-build`
 [RUNNING] `rustc --crate-name bar [..]`
-[COMPILING] foo v0.5.0 ([ROOT]/foo)
+[CHECKING] foo v0.5.0 ([ROOT]/foo)
 [RUNNING] `rustc --crate-name foo [..]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -4282,7 +4698,7 @@ fn warnings_printed_on_vv() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("build -vv")
+    p.cargo("check -vv")
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
 [LOCKING] 1 package to latest compatible version
@@ -4294,7 +4710,7 @@ fn warnings_printed_on_vv() {
 [WARNING] bar@0.1.0: foo
 [WARNING] bar@0.1.0: bar
 [RUNNING] `[..] rustc --crate-name bar [..]`
-[COMPILING] foo v0.5.0 ([ROOT]/foo)
+[CHECKING] foo v0.5.0 ([ROOT]/foo)
 [RUNNING] `[..] rustc --crate-name foo [..]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -4330,7 +4746,7 @@ fn output_shows_on_vv() {
         )
         .build();
 
-    p.cargo("build -vv")
+    p.cargo("check -vv")
         .with_stdout_data(str![[r#"
 [foo 0.5.0] stdout
 
@@ -4766,7 +5182,7 @@ fn links_duplicates_with_cycle() {
         .file("b/src/lib.rs", "")
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [ERROR] failed to select a version for `a`.
@@ -5113,8 +5529,8 @@ fn using_rerun_if_changed_does_not_rebuild() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("build").run();
-    p.cargo("build")
+    p.cargo("check").run();
+    p.cargo("check")
         .with_stderr_data(str![[r#"
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -5630,7 +6046,7 @@ fn wrong_output() {
         )
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
@@ -5666,7 +6082,7 @@ fn custom_build_closes_stdin() {
             }"#,
         )
         .build();
-    p.cargo("build").run();
+    p.cargo("check").run();
 }
 
 #[cargo_test]
@@ -5700,13 +6116,7 @@ fn test_old_syntax() {
             }"#,
         )
         .build();
-    p.cargo("build -v").run();
-    p.cargo("run -v")
-        .with_stdout_data(str![[r#"
-foo
-
-"#]])
-        .run();
+    p.cargo("check -v").run();
 }
 
 #[cargo_test]
@@ -5723,7 +6133,7 @@ fn test_invalid_old_syntax() {
             "#,
         )
         .build();
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
@@ -5750,7 +6160,7 @@ fn test_invalid_new_syntax() {
         )
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
@@ -5773,7 +6183,7 @@ See https://doc.rust-lang.org/cargo/reference/build-scripts.html#outputs-of-the-
         )
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
@@ -5811,7 +6221,7 @@ fn test_new_syntax_with_old_msrv() {
         )
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
@@ -5849,7 +6259,7 @@ fn test_new_syntax_with_old_msrv_and_reserved_prefix() {
         )
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
@@ -5887,7 +6297,7 @@ fn test_new_syntax_with_old_msrv_and_unknown_prefix() {
         )
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
         .with_stderr_data(str![[r#"
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
@@ -5963,13 +6373,7 @@ fn test_old_syntax_with_old_msrv() {
             }"#,
         )
         .build();
-    p.cargo("build -v").run();
-    p.cargo("run -v")
-        .with_stdout_data(str![[r#"
-foo
-
-"#]])
-        .run();
+    p.cargo("check -v").run();
 }
 
 #[cargo_test]
@@ -6083,7 +6487,7 @@ fn directory_with_leading_underscore() {
             .file("_foo/foo/src/main.rs", "fn main() {}")
             .file("_foo/foo/build.rs", "fn main() { }")
     });
-    p.cargo("build --manifest-path=_foo/foo/Cargo.toml -v")
+    p.cargo("check --manifest-path=_foo/foo/Cargo.toml -v")
         .with_status(0)
         .run();
 }

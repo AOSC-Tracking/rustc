@@ -2,6 +2,25 @@
 
 Note: [Cargo's linting system is unstable](unstable.md#lintscargo) and can only be used on nightly toolchains
 
+
+
+| Group                | Description                                                      | Default level |
+|----------------------|------------------------------------------------------------------|---------------|
+| `cargo::complexity`  | code that does something simple but in a complex way             | warn          |
+| `cargo::correctness` | code that is outright wrong or useless                           | deny          |
+| `cargo::nursery`     | new lints that are still under development                       | allow         |
+| `cargo::pedantic`    | lints which are rather strict or have occasional false positives | allow         |
+| `cargo::perf`        | code that can be written to run faster                           | warn          |
+| `cargo::restriction` | lints which prevent the use of Cargo features                    | allow         |
+| `cargo::style`       | code that should be written in a more idiomatic way              | warn          |
+| `cargo::suspicious`  | code that is most likely wrong or useless                        | warn          |
+
+
+## Allowed-by-default
+
+These lints are all set to the 'allow' level by default.
+- [`implicit_minimum_version_req`](#implicit_minimum_version_req)
+
 ## Warn-by-default
 
 These lints are all set to the 'warn' level by default.
@@ -9,7 +28,9 @@ These lints are all set to the 'warn' level by default.
 - [`unknown_lints`](#unknown_lints)
 
 ## `blanket_hint_mostly_unused`
-Set to `warn` by default
+Group: `suspicious`
+
+Level: `warn`
 
 ### What it does
 Checks if `hint-mostly-unused` being applied to all dependencies.
@@ -36,8 +57,61 @@ hint-mostly-unused = true
 ```
 
 
+## `implicit_minimum_version_req`
+Group: `pedantic`
+
+Level: `allow`
+
+### What it does
+
+Checks for dependency version requirements
+that do not explicitly specify a full `major.minor.patch` version requirement,
+such as `serde = "1"` or `serde = "1.0"`.
+
+This lint currently only applies to caret requirements
+(the [default requirements](specifying-dependencies.md#default-requirements)).
+
+### Why it is bad
+
+Version requirements without an explicit full version
+can be misleading about the actual minimum supported version.
+For example,
+`serde = "1"` has an implicit minimum bound of `1.0.0`.
+If your code actually requires features from `1.0.219`,
+the implicit minimum bound of `1.0.0` gives a false impression about compatibility.
+
+Specifying the full version helps with:
+
+- Accurate minimum version documentation
+- Better compatibility with `-Z minimal-versions`
+- Clearer dependency constraints for consumers
+
+### Drawbacks
+
+Even with a fully specified version,
+the minimum bound might still be incorrect if untested.
+This lint helps make the minimum version requirement explicit
+but doesn't guarantee correctness.
+
+### Example
+
+```toml
+[dependencies]
+serde = "1"
+```
+
+Should be written as a full specific version:
+
+```toml
+[dependencies]
+serde = "1.0.219"
+```
+
+
 ## `unknown_lints`
-Set to `warn` by default
+Group: `suspicious`
+
+Level: `warn`
 
 ### What it does
 Checks for unknown lints in the `[lints.cargo]` table

@@ -167,45 +167,6 @@ fn is_capture(place: PlaceRef<'_>) -> bool {
     }
 }
 
-/// Give a diagnostic when any of the string constants look like a naked format string that would
-/// interpolate our dead local.
-fn maybe_suggest_literal_matching_name(
-    body: &Body<'_>,
-    name: Symbol,
-) -> Vec<errors::UnusedVariableStringInterp> {
-    struct LiteralFinder<'body, 'tcx> {
-        body: &'body Body<'tcx>,
-        name: String,
-        name_colon: String,
-        found: Vec<errors::UnusedVariableStringInterp>,
-    }
-
-    impl<'tcx> Visitor<'tcx> for LiteralFinder<'_, 'tcx> {
-        fn visit_const_operand(&mut self, constant: &ConstOperand<'tcx>, loc: Location) {
-            if let ty::Ref(_, ref_ty, _) = constant.ty().kind()
-                && ref_ty.kind() == &ty::Str
-            {
-                let rendered_constant = constant.const_.to_string();
-                if rendered_constant.contains(&self.name)
-                    || rendered_constant.contains(&self.name_colon)
-                {
-                    let lit = self.body.source_info(loc).span;
-                    self.found.push(errors::UnusedVariableStringInterp { lit });
-                }
-            }
-        }
-    }
-
-    let mut finder = LiteralFinder {
-        body,
-        name: format!("{{{name}}}"),
-        name_colon: format!("{{{name}:"),
-        found: vec![],
-    };
-    finder.visit_body(body);
-    finder.found
-}
-
 /// Give a diagnostic when an unused variable may be a typo of a unit variant or a struct.
 fn maybe_suggest_unit_pattern_typo<'tcx>(
     tcx: TyCtxt<'tcx>,
@@ -911,6 +872,44 @@ impl<'a, 'tcx> AssignmentResult<'a, 'tcx> {
     fn report_fully_unused(&mut self) {
         let tcx = self.tcx;
 
+        // Give a diagnostic when any of the string constants look like a naked format string that
+        // would interpolate our dead local.
+        let mut string_constants_in_body = None;
+        let mut maybe_suggest_literal_matching_name = |name: Symbol| {
+            // Visiting MIR to enumerate string constants can be expensive, so cache the result.
+            let string_constants_in_body = string_constants_in_body.get_or_insert_with(|| {
+                struct LiteralFinder {
+                    found: Vec<(Span, String)>,
+                }
+
+                impl<'tcx> Visitor<'tcx> for LiteralFinder {
+                    fn visit_const_operand(&mut self, constant: &ConstOperand<'tcx>, _: Location) {
+                        if let ty::Ref(_, ref_ty, _) = constant.ty().kind()
+                            && ref_ty.kind() == &ty::Str
+                        {
+                            let rendered_constant = constant.const_.to_string();
+                            self.found.push((constant.span, rendered_constant));
+                        }
+                    }
+                }
+
+                let mut finder = LiteralFinder { found: vec![] };
+                finder.visit_body(self.body);
+                finder.found
+            });
+
+            let brace_name = format!("{{{name}");
+            string_constants_in_body
+                .iter()
+                .filter(|(_, rendered_constant)| {
+                    rendered_constant
+                        .split(&brace_name)
+                        .any(|c| matches!(c.chars().next(), Some('}' | ':')))
+                })
+                .map(|&(lit, _)| errors::UnusedVariableStringInterp { lit })
+                .collect::<Vec<_>>()
+        };
+
         // First, report fully unused locals.
         for (index, place) in self.checked_places.iter() {
             if self.ever_live.contains(index) {
@@ -976,7 +975,7 @@ impl<'a, 'tcx> AssignmentResult<'a, 'tcx> {
                     def_span,
                     errors::UnusedVariable {
                         name,
-                        string_interp: maybe_suggest_literal_matching_name(self.body, name),
+                        string_interp: maybe_suggest_literal_matching_name(name),
                         sugg,
                     },
                 );
@@ -987,7 +986,7 @@ impl<'a, 'tcx> AssignmentResult<'a, 'tcx> {
             // warn twice, for the unused local and for the unused assignment. Therefore, we remove
             // from the list of assignments the ones that happen at the definition site.
             statements.retain(|source_info, _| {
-                source_info.span.find_ancestor_inside(binding.pat_span).is_none()
+                !binding.introductions.iter().any(|intro| intro.span == source_info.span)
             });
 
             // Extra assignments that we recognize thanks to the initialization span. We need to
@@ -1068,7 +1067,7 @@ impl<'a, 'tcx> AssignmentResult<'a, 'tcx> {
                 spans,
                 errors::UnusedVariable {
                     name,
-                    string_interp: maybe_suggest_literal_matching_name(self.body, name),
+                    string_interp: maybe_suggest_literal_matching_name(name),
                     sugg,
                 },
             );
@@ -1200,7 +1199,7 @@ impl<'tcx> Analysis<'tcx> for MaybeLivePlaces<'_, 'tcx> {
     }
 
     fn apply_primary_statement_effect(
-        &mut self,
+        &self,
         trans: &mut Self::Domain,
         statement: &Statement<'tcx>,
         location: Location,
@@ -1209,7 +1208,7 @@ impl<'tcx> Analysis<'tcx> for MaybeLivePlaces<'_, 'tcx> {
     }
 
     fn apply_primary_terminator_effect<'mir>(
-        &mut self,
+        &self,
         trans: &mut Self::Domain,
         terminator: &'mir Terminator<'tcx>,
         location: Location,
@@ -1219,7 +1218,7 @@ impl<'tcx> Analysis<'tcx> for MaybeLivePlaces<'_, 'tcx> {
     }
 
     fn apply_call_return_effect(
-        &mut self,
+        &self,
         _trans: &mut Self::Domain,
         _block: BasicBlock,
         _return_places: CallReturnPlaces<'_, 'tcx>,
@@ -1239,9 +1238,12 @@ struct TransferFunction<'a, 'tcx> {
 impl<'tcx> Visitor<'tcx> for TransferFunction<'_, 'tcx> {
     fn visit_statement(&mut self, statement: &Statement<'tcx>, location: Location) {
         match statement.kind {
-            // `ForLet(None)` fake read erroneously marks the just-assigned local as live.
-            // This defeats the purpose of the analysis for `let` bindings.
-            StatementKind::FakeRead(box (FakeReadCause::ForLet(None), _)) => return,
+            // `ForLet(None)` and `ForGuardBinding` fake reads erroneously mark the just-assigned
+            // locals as live. This defeats the purpose of the analysis for such bindings.
+            StatementKind::FakeRead(box (
+                FakeReadCause::ForLet(None) | FakeReadCause::ForGuardBinding,
+                _,
+            )) => return,
             // Handle self-assignment by restricting the read/write they do.
             StatementKind::Assign(box (ref dest, ref rvalue))
                 if self.self_assignment.contains(&location) =>
@@ -1284,6 +1286,7 @@ impl<'tcx> Visitor<'tcx> for TransferFunction<'_, 'tcx> {
             TerminatorKind::Return
             | TerminatorKind::Yield { .. }
             | TerminatorKind::Goto { target: START_BLOCK } // Inserted for the `FnMut` case.
+            | TerminatorKind::Call { target: None, .. } // unwinding could be caught
                 if self.capture_kind != CaptureKind::None =>
             {
                 // All indirect captures have an effect on the environment, so we mark them as live.

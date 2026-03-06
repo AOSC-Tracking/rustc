@@ -18,6 +18,7 @@ pub use self::into_url::IntoUrl;
 pub use self::into_url_with_base::IntoUrlWithBase;
 pub(crate) use self::io::LimitErrorReader;
 pub use self::lockserver::{LockServer, LockServerClient, LockServerStarted};
+pub use self::logger::BuildLogger;
 pub use self::once::OnceExt;
 pub use self::progress::{Progress, ProgressStyle};
 pub use self::queue::Queue;
@@ -41,7 +42,7 @@ mod dependency_queue;
 pub mod diagnostic_server;
 pub mod edit_distance;
 pub mod errors;
-mod flock;
+pub mod flock;
 pub mod frontmatter;
 pub mod graph;
 mod hasher;
@@ -53,11 +54,13 @@ pub mod into_url;
 mod into_url_with_base;
 mod io;
 pub mod job;
-pub mod lints;
 mod lockserver;
+pub mod log_message;
+pub mod logger;
 pub mod machine_message;
 pub mod network;
 mod once;
+pub mod open;
 mod progress;
 mod queue;
 pub mod restricted_names;
@@ -72,9 +75,7 @@ mod vcs;
 mod workspace;
 
 pub fn is_rustup() -> bool {
-    // ALLOWED: `RUSTUP_HOME` should only be read from process env, otherwise
-    // other tools may point to executables from incompatible distributions.
-    #[allow(clippy::disallowed_methods)]
+    #[expect(clippy::disallowed_methods, reason = "consistency with rustup")]
     std::env::var_os("RUSTUP_HOME").is_some()
 }
 

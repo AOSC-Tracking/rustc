@@ -86,6 +86,13 @@ There’s a couple of points of note here:
   such crate as a dependency, because there's an *implicit* invariant that
   sources in `.cargo/registry` should be immutable. `cargo` won't allow such
   scripts when packaging.
+  * Sometimes, projects want to check in a generated file, and treat it as
+    source code. However, in this case, the file shouldn't be generated from
+    `build.rs`. Instead, have a test or similar which checks that the file
+    precisely matches the generated version *and fails if the result doesn't
+    match*, and run that test as part of your CI. (The test can generate a
+    temporary file to compare to, and if you want to update the generated file,
+    you can replace the checked-in file with that temporary file.)
 * This script is relatively simple as it just writes out a small generated file.
   One could imagine that other more complex operations could take place such as
   generating a Rust module from a C header file or another language definition,
@@ -383,7 +390,7 @@ Here's an example:
 # Cargo.toml
 
 [package]
-name = "zuser"
+name = "z_user"
 version = "0.1.0"
 edition = "2024"
 
@@ -403,12 +410,12 @@ script:
 
 fn main() {
     let mut cfg = cc::Build::new();
-    cfg.file("src/zuser.c");
+    cfg.file("src/z_user.c");
     if let Some(include) = std::env::var_os("DEP_Z_INCLUDE") {
         cfg.include(include);
     }
-    cfg.compile("zuser");
-    println!("cargo::rerun-if-changed=src/zuser.c");
+    cfg.compile("z_user");
+    println!("cargo::rerun-if-changed=src/z_user.c");
 }
 ```
 
@@ -417,7 +424,7 @@ the zlib header, and it should find the header, even on systems where it isn't
 already installed.
 
 ```c
-// src/zuser.c
+// src/z_user.c
 
 #include "zlib.h"
 

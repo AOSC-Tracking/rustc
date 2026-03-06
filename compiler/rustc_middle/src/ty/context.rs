@@ -30,7 +30,7 @@ use rustc_data_structures::sync::{
     self, DynSend, DynSync, FreezeReadGuard, Lock, RwLock, WorkerLocal,
 };
 use rustc_errors::{
-    Applicability, Diag, DiagCtxtHandle, ErrorGuaranteed, LintDiagnostic, LintEmitter, MultiSpan,
+    Applicability, Diag, DiagCtxtHandle, ErrorGuaranteed, LintDiagnostic, MultiSpan,
 };
 use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::{CtorKind, CtorOf, DefKind};
@@ -148,7 +148,7 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
     type BoundTy = ty::BoundTy;
     type Symbol = Symbol;
 
-    type PlaceholderTy = ty::PlaceholderType;
+    type PlaceholderTy = ty::PlaceholderType<'tcx>;
     type ErrorGuaranteed = ErrorGuaranteed;
     type BoundExistentialPredicates = &'tcx List<PolyExistentialPredicate<'tcx>>;
 
@@ -158,19 +158,20 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
     type Safety = hir::Safety;
     type Abi = ExternAbi;
     type Const = ty::Const<'tcx>;
-    type PlaceholderConst = ty::PlaceholderConst;
+    type PlaceholderConst = ty::PlaceholderConst<'tcx>;
 
     type ParamConst = ty::ParamConst;
     type BoundConst = ty::BoundConst;
     type ValueConst = ty::Value<'tcx>;
     type ExprConst = ty::Expr<'tcx>;
     type ValTree = ty::ValTree<'tcx>;
+    type ScalarInt = ty::ScalarInt;
 
     type Region = Region<'tcx>;
     type EarlyParamRegion = ty::EarlyParamRegion;
     type LateParamRegion = ty::LateParamRegion;
     type BoundRegion = ty::BoundRegion;
-    type PlaceholderRegion = ty::PlaceholderRegion;
+    type PlaceholderRegion = ty::PlaceholderRegion<'tcx>;
 
     type RegionAssumptions = &'tcx ty::List<ty::ArgOutlivesPredicate<'tcx>>;
 
@@ -241,6 +242,9 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
     }
     fn type_of_opaque_hir_typeck(self, def_id: LocalDefId) -> ty::EarlyBinder<'tcx, Ty<'tcx>> {
         self.type_of_opaque_hir_typeck(def_id)
+    }
+    fn const_of_item(self, def_id: DefId) -> ty::EarlyBinder<'tcx, Const<'tcx>> {
+        self.const_of_item(def_id)
     }
 
     type AdtDef = ty::AdtDef<'tcx>;
@@ -586,13 +590,13 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
             | ty::Never
             | ty::Tuple(_)
             | ty::UnsafeBinder(_) => {
-                let simp = ty::fast_reject::simplify_type(
+                if let Some(simp) = ty::fast_reject::simplify_type(
                     tcx,
                     self_ty,
                     ty::fast_reject::TreatParams::AsRigid,
-                )
-                .unwrap();
-                consider_impls_for_simplified_type(simp);
+                ) {
+                    consider_impls_for_simplified_type(simp);
+                }
             }
 
             // HACK: For integer and float variables we have to manually look at all impls
@@ -853,6 +857,7 @@ bidirectional_lang_item_map! {
     PointeeTrait,
     Sized,
     TransmuteTrait,
+    TrivialClone,
     Tuple,
     Unpin,
     Unsize,
@@ -902,10 +907,6 @@ impl<'tcx> rustc_type_ir::inherent::Features<TyCtxt<'tcx>> for &'tcx rustc_featu
         self.coroutine_clone()
     }
 
-    fn associated_const_equality(self) -> bool {
-        self.associated_const_equality()
-    }
-
     fn feature_bound_holds_in_crate(self, symbol: Symbol) -> bool {
         // We don't consider feature bounds to hold in the crate when `staged_api` feature is
         // enabled, even if it is enabled through `#[feature]`.
@@ -950,8 +951,7 @@ pub struct CtxtInterners<'tcx> {
     fields: InternedSet<'tcx, List<FieldIdx>>,
     local_def_ids: InternedSet<'tcx, List<LocalDefId>>,
     captures: InternedSet<'tcx, List<&'tcx ty::CapturedPlace<'tcx>>>,
-    offset_of: InternedSet<'tcx, List<(VariantIdx, FieldIdx)>>,
-    valtree: InternedSet<'tcx, ty::ValTreeKind<'tcx>>,
+    valtree: InternedSet<'tcx, ty::ValTreeKind<TyCtxt<'tcx>>>,
     patterns: InternedSet<'tcx, List<ty::Pattern<'tcx>>>,
     outlives: InternedSet<'tcx, List<ty::ArgOutlivesPredicate<'tcx>>>,
 }
@@ -988,7 +988,6 @@ impl<'tcx> CtxtInterners<'tcx> {
             fields: InternedSet::with_capacity(N * 4),
             local_def_ids: InternedSet::with_capacity(N),
             captures: InternedSet::with_capacity(N),
-            offset_of: InternedSet::with_capacity(N),
             valtree: InternedSet::with_capacity(N),
             patterns: InternedSet::with_capacity(N),
             outlives: InternedSet::with_capacity(N),
@@ -1532,20 +1531,6 @@ pub struct TyCtxt<'tcx> {
     gcx: &'tcx GlobalCtxt<'tcx>,
 }
 
-impl<'tcx> LintEmitter for TyCtxt<'tcx> {
-    type Id = HirId;
-
-    fn emit_node_span_lint(
-        self,
-        lint: &'static Lint,
-        hir_id: HirId,
-        span: impl Into<MultiSpan>,
-        decorator: impl for<'a> LintDiagnostic<'a, ()>,
-    ) {
-        self.emit_node_span_lint(lint, hir_id, span, decorator);
-    }
-}
-
 // Explicitly implement `DynSync` and `DynSend` for `TyCtxt` to short circuit trait resolution. Its
 // field are asserted to implement these traits below, so this is trivially safe, and it greatly
 // speeds-up compilation of this crate and its dependents.
@@ -1906,6 +1891,12 @@ impl<'tcx> TyCtxt<'tcx> {
         self.is_lang_item(self.parent(def_id), LangItem::AsyncDropInPlace)
     }
 
+    /// Check if the given `def_id` is a const with the `#[type_const]` attribute.
+    pub fn is_type_const(self, def_id: DefId) -> bool {
+        matches!(self.def_kind(def_id), DefKind::Const | DefKind::AssocConst)
+            && find_attr!(self.get_all_attrs(def_id), AttributeKind::TypeConst(_))
+    }
+
     /// Returns the movability of the coroutine of `def_id`, or panics
     /// if given a `def_id` that is not a coroutine.
     pub fn coroutine_movability(self, def_id: DefId) -> hir::Movability {
@@ -2088,6 +2079,8 @@ impl<'tcx> TyCtxt<'tcx> {
         self.sess.dcx()
     }
 
+    /// Checks to see if the caller (`body_features`) has all the features required by the callee
+    /// (`callee_features`).
     pub fn is_target_feature_call_safe(
         self,
         callee_features: &[TargetFeature],
@@ -2282,6 +2275,12 @@ impl<'tcx> TyCtxt<'tcx> {
 
     #[inline]
     pub fn local_crate_exports_generics(self) -> bool {
+        // compiler-builtins has some special treatment in codegen, which can result in confusing
+        // behavior if another crate ends up calling into its monomorphizations.
+        // https://github.com/rust-lang/rust/issues/150173
+        if self.is_compiler_builtins(LOCAL_CRATE) {
+            return false;
+        }
         self.crate_types().iter().any(|crate_type| {
             match crate_type {
                 CrateType::Executable
@@ -2388,7 +2387,7 @@ impl<'tcx> TyCtxt<'tcx> {
     /// Determines whether identifiers in the assembly have strict naming rules.
     /// Currently, only NVPTX* targets need it.
     pub fn has_strict_asm_symbol_naming(self) -> bool {
-        self.sess.target.arch.contains("nvptx")
+        self.sess.target.llvm_target.starts_with("nvptx")
     }
 
     /// Returns `&'static core::panic::Location<'static>`.
@@ -2664,7 +2663,7 @@ struct InternedInSet<'tcx, T: ?Sized + PointeeSized>(&'tcx T);
 
 impl<'tcx, T: 'tcx + ?Sized + PointeeSized> Clone for InternedInSet<'tcx, T> {
     fn clone(&self) -> Self {
-        InternedInSet(self.0)
+        *self
     }
 }
 
@@ -2787,7 +2786,7 @@ macro_rules! direct_interners {
 // crate only, and have a corresponding `mk_` function.
 direct_interners! {
     region: pub(crate) intern_region(RegionKind<'tcx>): Region -> Region<'tcx>,
-    valtree: pub(crate) intern_valtree(ValTreeKind<'tcx>): ValTree -> ValTree<'tcx>,
+    valtree: pub(crate) intern_valtree(ValTreeKind<TyCtxt<'tcx>>): ValTree -> ValTree<'tcx>,
     pat: pub mk_pat(PatternKind<'tcx>): Pattern -> Pattern<'tcx>,
     const_allocation: pub mk_const_alloc(Allocation): ConstAllocation -> ConstAllocation<'tcx>,
     layout: pub mk_layout(LayoutData<FieldIdx, VariantIdx>): Layout -> Layout<'tcx>,
@@ -2827,19 +2826,26 @@ slice_interners!(
     fields: pub mk_fields(FieldIdx),
     local_def_ids: intern_local_def_ids(LocalDefId),
     captures: intern_captures(&'tcx ty::CapturedPlace<'tcx>),
-    offset_of: pub mk_offset_of((VariantIdx, FieldIdx)),
     patterns: pub mk_patterns(Pattern<'tcx>),
     outlives: pub mk_outlives(ty::ArgOutlivesPredicate<'tcx>),
     predefined_opaques_in_body: pub mk_predefined_opaques_in_body((ty::OpaqueTypeKey<'tcx>, Ty<'tcx>)),
 );
 
 impl<'tcx> TyCtxt<'tcx> {
-    /// Given a `fn` type, returns an equivalent `unsafe fn` type;
+    /// Given a `fn` sig, returns an equivalent `unsafe fn` type;
     /// that is, a `fn` type that is equivalent in every way for being
     /// unsafe.
     pub fn safe_to_unsafe_fn_ty(self, sig: PolyFnSig<'tcx>) -> Ty<'tcx> {
         assert!(sig.safety().is_safe());
         Ty::new_fn_ptr(self, sig.map_bound(|sig| ty::FnSig { safety: hir::Safety::Unsafe, ..sig }))
+    }
+
+    /// Given a `fn` sig, returns an equivalent `unsafe fn` sig;
+    /// that is, a `fn` sig that is equivalent in every way for being
+    /// unsafe.
+    pub fn safe_to_unsafe_sig(self, sig: PolyFnSig<'tcx>) -> PolyFnSig<'tcx> {
+        assert!(sig.safety().is_safe());
+        sig.map_bound(|sig| ty::FnSig { safety: hir::Safety::Unsafe, ..sig })
     }
 
     /// Given the def_id of a Trait `trait_def_id` and the name of an associated item `assoc_name`
@@ -3230,14 +3236,6 @@ impl<'tcx> TyCtxt<'tcx> {
         T::collect_and_apply(iter, |xs| self.mk_fields(xs))
     }
 
-    pub fn mk_offset_of_from_iter<I, T>(self, iter: I) -> T::Output
-    where
-        I: Iterator<Item = T>,
-        T: CollectAndApply<(VariantIdx, FieldIdx), &'tcx List<(VariantIdx, FieldIdx)>>,
-    {
-        T::collect_and_apply(iter, |xs| self.mk_offset_of(xs))
-    }
-
     pub fn mk_args_trait(
         self,
         self_ty: Ty<'tcx>,
@@ -3542,7 +3540,14 @@ impl<'tcx> TyCtxt<'tcx> {
 
     /// Whether this is a trait implementation that has `#[diagnostic::do_not_recommend]`
     pub fn do_not_recommend_impl(self, def_id: DefId) -> bool {
-        self.get_diagnostic_attr(def_id, sym::do_not_recommend).is_some()
+        find_attr!(self.get_all_attrs(def_id), AttributeKind::DoNotRecommend { .. })
+    }
+
+    pub fn is_trivial_const<P>(self, def_id: P) -> bool
+    where
+        P: IntoQueryParam<DefId>,
+    {
+        self.trivial_const(def_id).is_some()
     }
 
     /// Whether this def is one of the special bin crate entrypoint functions that must have a

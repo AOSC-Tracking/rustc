@@ -1,0 +1,33 @@
+[package]
+name = "mdbook-i18n-helpers"
+version = "0.4.0"
+authors = ["Martin Geisler <mgeisler@google.com>"]
+categories = ["command-line-utilities", "localization"]
+edition = "2021"
+keywords = ["mdbook", "i18n", "translation", "gettext"]
+license = "Apache-2.0"
+repository = "https://github.com/google/mdbook-i18n-helpers"
+description = "Plugins for a mdbook translation workflow based on Gettext."
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono = { version = "0.4.42", default-features = false, features = ["alloc"] }
+dateparser = "0.2.1"
+mdbook-preprocessor.workspace = true
+mdbook-renderer.workspace = true
+polib.workspace = true
+pulldown-cmark = { version = "0.13.0", default-features = false, features = ["html"] }
+pulldown-cmark-to-cmark = "21.0.0"
+regex = "1.12"
+semver = "1.0.27"
+serde_json.workspace = true
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }
+textwrap = { version = "0.16.2", default-features = false }
+
+[dev-dependencies]
+mdbook-driver.workspace = true
+pretty_assertions.workspace = true
+tempfile.workspace = true

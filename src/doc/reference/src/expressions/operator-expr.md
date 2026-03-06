@@ -378,7 +378,7 @@ The operands of all of these operators are evaluated in [value expression contex
 | `/`    | Division*†              |               | Division       | `std::ops::Div`    | `std::ops::DivAssign`                 |
 | `%`    | Remainder**†            |               | Remainder      | `std::ops::Rem`    | `std::ops::RemAssign`                 |
 | `&`    | Bitwise AND             | [Logical AND] |                | `std::ops::BitAnd` | `std::ops::BitAndAssign`              |
-| <code>&#124;</code> | Bitwise OR | [Logical OR]  |                | `std::ops::BitOr`  | `std::ops::BitOrAssign`               |
+| `\|` | Bitwise OR | [Logical OR]  |                | `std::ops::BitOr`  | `std::ops::BitOrAssign`               |
 | `^`    | Bitwise XOR             | [Logical XOR] |                | `std::ops::BitXor` | `std::ops::BitXorAssign`              |
 | `<<`   | Left Shift              |               |                | `std::ops::Shl`    | `std::ops::ShlAssign`                 |
 | `>>`   | Right Shift***          |               |                | `std::ops::Shr`    |  `std::ops::ShrAssign`                |
@@ -539,17 +539,17 @@ reference types and `mut` or `const` in pointer types.
 | [Function pointer]    | Integer               | Function pointer to address cast                      |
 | Closure [^no-capture] | Function pointer      | Closure to function pointer cast                      |
 
-[^meta-compat]: where `T` and `V` have compatible metadata:
+[^meta-compat]: Where `T` and `V` have compatible metadata:
       * `V: Sized`, or
       * Both slice metadata (`*[u16]` -> `*[u8]`, `*str` -> `*(u8, [u32])`), or
       * Both the same trait object metadata, modulo dropping auto traits (`*dyn Debug` -> `*(u16, dyn Debug)`, `*dyn Debug + Send` -> `*dyn Debug`)
           * **Note**: *adding* auto traits is only allowed if the principal trait has the auto trait as a super trait (given `trait T: Send {}`, `*dyn T` -> `*dyn T + Send` is valid, but `*dyn Debug` -> `*dyn Debug + Send` is not)
           * **Note**: Generics (including lifetimes) must match (`*dyn T<'a, A>` -> `*dyn T<'b, B>` requires `'a = 'b` and `A = B`)
 
-[^lessmut]: only when `m₁` is `mut` or `m₂` is `const`. Casting `mut` reference/pointer to
+[^lessmut]: Only when `m₁` is `mut` or `m₂` is `const`. Casting `mut` reference/pointer to
 `const` pointer is allowed.
 
-[^no-capture]: only for closures that do not capture (close over) any local variables can be casted to function pointers.
+[^no-capture]: Only closures that do not capture (close over) any local variables can be cast to function pointers.
 
 ### Semantics
 

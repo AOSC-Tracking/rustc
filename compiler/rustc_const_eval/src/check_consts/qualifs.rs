@@ -228,9 +228,7 @@ where
     F: FnMut(Local) -> bool,
 {
     match rvalue {
-        Rvalue::ThreadLocalRef(_) | Rvalue::NullaryOp(..) => {
-            Q::in_any_value_of_ty(cx, rvalue.ty(cx.body, cx.tcx))
-        }
+        Rvalue::ThreadLocalRef(_) => Q::in_any_value_of_ty(cx, rvalue.ty(cx.body, cx.tcx)),
 
         Rvalue::Discriminant(place) => in_place::<Q, _>(cx, in_local, place.as_ref()),
 
@@ -312,7 +310,7 @@ where
         // i.e., we treat all qualifs as non-structural for deref projections. Generally,
         // we can say very little about `*ptr` even if we know that `ptr` satisfies all
         // sorts of properties.
-        if matches!(elem, ProjectionElem::Deref) {
+        if elem == ProjectionElem::Deref {
             // We have to assume that this qualifies.
             return true;
         }
@@ -338,6 +336,7 @@ where
         Operand::Copy(place) | Operand::Move(place) => {
             return in_place::<Q, _>(cx, in_local, place.as_ref());
         }
+        Operand::RuntimeChecks(_) => return Q::in_any_value_of_ty(cx, cx.tcx.types.bool),
 
         Operand::Constant(c) => c,
     };
@@ -365,8 +364,10 @@ where
         // check performed after the promotion. Verify that with an assertion.
         assert!(promoted.is_none() || Q::ALLOW_PROMOTED);
 
-        // Don't peek inside trait associated constants.
-        if promoted.is_none() && cx.tcx.trait_of_assoc(def).is_none() {
+        // Don't peak inside trait associated constants, also `#[type_const] const` items
+        // don't have bodies so there's nothing to look at
+        if promoted.is_none() && cx.tcx.trait_of_assoc(def).is_none() && !cx.tcx.is_type_const(def)
+        {
             let qualifs = cx.tcx.at(constant.span).mir_const_qualif(def);
 
             if !Q::in_qualifs(&qualifs) {
