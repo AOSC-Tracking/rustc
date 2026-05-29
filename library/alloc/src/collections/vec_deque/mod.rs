@@ -790,7 +790,7 @@ impl<T> VecDeque<T> {
     /// ```
     /// use std::collections::VecDeque;
     ///
-    /// let deque: VecDeque<u32> = VecDeque::with_capacity(10);
+    /// let deque: VecDeque<i32> = VecDeque::with_capacity(10);
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -830,9 +830,12 @@ impl<T, A: Allocator> VecDeque<T, A> {
     /// # Examples
     ///
     /// ```
-    /// use std::collections::VecDeque;
+    /// # #![feature(allocator_api)]
     ///
-    /// let deque: VecDeque<u32> = VecDeque::new();
+    /// use std::collections::VecDeque;
+    /// use std::alloc::Global;
+    ///
+    /// let deque: VecDeque<i32> = VecDeque::new_in(Global);
     /// ```
     #[inline]
     #[unstable(feature = "allocator_api", issue = "32838")]
@@ -845,9 +848,12 @@ impl<T, A: Allocator> VecDeque<T, A> {
     /// # Examples
     ///
     /// ```
-    /// use std::collections::VecDeque;
+    /// # #![feature(allocator_api)]
     ///
-    /// let deque: VecDeque<u32> = VecDeque::with_capacity(10);
+    /// use std::collections::VecDeque;
+    /// use std::alloc::Global;
+    ///
+    /// let deque: VecDeque<i32> = VecDeque::with_capacity_in(10, Global);
     /// ```
     #[unstable(feature = "allocator_api", issue = "32838")]
     pub fn with_capacity_in(capacity: usize, alloc: A) -> VecDeque<T, A> {
@@ -2168,7 +2174,6 @@ impl<T, A: Allocator> VecDeque<T, A> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(push_mut)]
     /// use std::collections::VecDeque;
     ///
     /// let mut d = VecDeque::from([1, 2, 3]);
@@ -2176,7 +2181,7 @@ impl<T, A: Allocator> VecDeque<T, A> {
     /// *x -= 1;
     /// assert_eq!(d.front(), Some(&7));
     /// ```
-    #[unstable(feature = "push_mut", issue = "135974")]
+    #[stable(feature = "push_mut", since = "1.95.0")]
     #[must_use = "if you don't need a reference to the value, use `VecDeque::push_front` instead"]
     pub fn push_front_mut(&mut self, value: T) -> &mut T {
         if self.is_full() {
@@ -2212,7 +2217,6 @@ impl<T, A: Allocator> VecDeque<T, A> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(push_mut)]
     /// use std::collections::VecDeque;
     ///
     /// let mut d = VecDeque::from([1, 2, 3]);
@@ -2220,7 +2224,7 @@ impl<T, A: Allocator> VecDeque<T, A> {
     /// *x += 1;
     /// assert_eq!(d.back(), Some(&10));
     /// ```
-    #[unstable(feature = "push_mut", issue = "135974")]
+    #[stable(feature = "push_mut", since = "1.95.0")]
     #[must_use = "if you don't need a reference to the value, use `VecDeque::push_back` instead"]
     pub fn push_back_mut(&mut self, value: T) -> &mut T {
         if self.is_full() {
@@ -2419,7 +2423,6 @@ impl<T, A: Allocator> VecDeque<T, A> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(push_mut)]
     /// use std::collections::VecDeque;
     ///
     /// let mut vec_deque = VecDeque::from([1, 2, 3]);
@@ -2428,7 +2431,7 @@ impl<T, A: Allocator> VecDeque<T, A> {
     /// *x += 7;
     /// assert_eq!(vec_deque, &[1, 12, 2, 3]);
     /// ```
-    #[unstable(feature = "push_mut", issue = "135974")]
+    #[stable(feature = "push_mut", since = "1.95.0")]
     #[must_use = "if you don't need a reference to the value, use `VecDeque::insert` instead"]
     pub fn insert_mut(&mut self, index: usize, value: T) -> &mut T {
         assert!(index <= self.len(), "index out of bounds");

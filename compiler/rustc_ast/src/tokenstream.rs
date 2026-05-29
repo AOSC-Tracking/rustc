@@ -14,7 +14,7 @@ use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::sync;
 use rustc_macros::{Decodable, Encodable, HashStable_Generic, Walkable};
 use rustc_serialize::{Decodable, Encodable};
-use rustc_span::{DUMMY_SP, Span, SpanDecoder, SpanEncoder, Symbol, sym};
+use rustc_span::{DUMMY_SP, HashStableContext, Span, SpanDecoder, SpanEncoder, Symbol, sym};
 use thin_vec::ThinVec;
 
 use crate::ast::AttrStyle;
@@ -138,8 +138,8 @@ impl<D: SpanDecoder> Decodable<D> for LazyAttrTokenStream {
     }
 }
 
-impl<CTX> HashStable<CTX> for LazyAttrTokenStream {
-    fn hash_stable(&self, _hcx: &mut CTX, _hasher: &mut StableHasher) {
+impl<Hcx> HashStable<Hcx> for LazyAttrTokenStream {
+    fn hash_stable(&self, _hcx: &mut Hcx, _hasher: &mut StableHasher) {
         panic!("Attempted to compute stable hash for LazyAttrTokenStream");
     }
 }
@@ -354,7 +354,13 @@ fn make_attr_token_stream(
                         FrameData { open_delim_sp: Some((delim, span, spacing)), inner: vec![] },
                     ));
                 } else if let Some(delim) = kind.close_delim() {
-                    let frame_data = mem::replace(&mut stack_top, stack_rest.pop().unwrap());
+                    // If there's no matching opening delimiter, the token stream is malformed,
+                    // likely due to a improper delimiter positions in the source code.
+                    // It's not delimiter mismatch, and lexer can not detect it, so we just ignore it here.
+                    let Some(frame) = stack_rest.pop() else {
+                        return AttrTokenStream::new(stack_top.inner);
+                    };
+                    let frame_data = mem::replace(&mut stack_top, frame);
                     let (open_delim, open_sp, open_spacing) = frame_data.open_delim_sp.unwrap();
                     assert!(
                         open_delim.eq_ignoring_invisible_origin(&delim),
@@ -818,11 +824,11 @@ impl FromIterator<TokenTree> for TokenStream {
     }
 }
 
-impl<CTX> HashStable<CTX> for TokenStream
+impl<Hcx> HashStable<Hcx> for TokenStream
 where
-    CTX: crate::HashStableContext,
+    Hcx: HashStableContext,
 {
-    fn hash_stable(&self, hcx: &mut CTX, hasher: &mut StableHasher) {
+    fn hash_stable(&self, hcx: &mut Hcx, hasher: &mut StableHasher) {
         for sub_tt in self.iter() {
             sub_tt.hash_stable(hcx, hasher);
         }

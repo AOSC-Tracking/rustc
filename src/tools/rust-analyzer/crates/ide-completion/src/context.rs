@@ -6,7 +6,7 @@ mod tests;
 
 use std::iter;
 
-use base_db::RootQueryDb as _;
+use base_db::toolchain_channel;
 use hir::{
     DisplayTarget, HasAttrs, InFile, Local, ModuleDef, ModuleSource, Name, PathResolution,
     ScopeDef, Semantics, SemanticsScope, Symbol, Type, TypeInfo,
@@ -101,6 +101,28 @@ impl PathCompletionCtx<'_> {
                 ..
             }
         )
+    }
+
+    pub(crate) fn required_thin_arrow(&self) -> Option<(&'static str, TextSize)> {
+        let PathKind::Type {
+            location:
+                TypeLocation::TypeAscription(TypeAscriptionTarget::RetType {
+                    item: Some(ref fn_item),
+                    ..
+                }),
+        } = self.kind
+        else {
+            return None;
+        };
+        if fn_item.ret_type().is_some_and(|it| it.thin_arrow_token().is_some()) {
+            return None;
+        }
+        let ret_type = fn_item.ret_type().and_then(|it| it.ty());
+        match (ret_type, fn_item.param_list()) {
+            (Some(ty), _) => Some(("-> ", ty.syntax().text_range().start())),
+            (None, Some(param)) => Some((" ->", param.syntax().text_range().end())),
+            (None, None) => None,
+        }
     }
 }
 
@@ -231,7 +253,7 @@ impl TypeLocation {
 pub(crate) enum TypeAscriptionTarget {
     Let(Option<ast::Pat>),
     FnParam(Option<ast::Pat>),
-    RetType(Option<ast::Expr>),
+    RetType { body: Option<ast::Expr>, item: Option<ast::Fn> },
     Const(Option<ast::Expr>),
 }
 
@@ -288,7 +310,7 @@ pub(crate) struct PatternContext {
     pub(crate) record_pat: Option<ast::RecordPat>,
     pub(crate) impl_or_trait: Option<Either<ast::Impl, ast::Trait>>,
     /// List of missing variants in a match expr
-    pub(crate) missing_variants: Vec<hir::Variant>,
+    pub(crate) missing_variants: Vec<hir::EnumVariant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -527,7 +549,7 @@ impl CompletionContext<'_> {
                 hir::ModuleDef::Module(it) => self.is_visible(it),
                 hir::ModuleDef::Function(it) => self.is_visible(it),
                 hir::ModuleDef::Adt(it) => self.is_visible(it),
-                hir::ModuleDef::Variant(it) => self.is_visible(it),
+                hir::ModuleDef::EnumVariant(it) => self.is_visible(it),
                 hir::ModuleDef::Const(it) => self.is_visible(it),
                 hir::ModuleDef::Static(it) => self.is_visible(it),
                 hir::ModuleDef::Trait(it) => self.is_visible(it),
@@ -628,7 +650,7 @@ impl CompletionContext<'_> {
     }
 
     /// A version of [`SemanticsScope::process_all_names`] that filters out `#[doc(hidden)]` items and
-    /// passes all doc-aliases along, to funnel it into [`Completions::add_path_resolution`].
+    /// passes all doc-aliases along, to funnel it into `Completions::add_path_resolution`.
     pub(crate) fn process_all_names(&self, f: &mut dyn FnMut(Name, ScopeDef, Vec<SmolStr>)) {
         let _p = tracing::info_span!("CompletionContext::process_all_names").entered();
         self.scope.process_all_names(&mut |name, def| {
@@ -715,7 +737,7 @@ impl<'db> CompletionContext<'db> {
         // actual completion.
         let file_with_fake_ident = {
             let (_, edition) = editioned_file_id.unpack(db);
-            let parse = db.parse(editioned_file_id);
+            let parse = editioned_file_id.parse(db);
             parse.reparse(TextRange::empty(offset), COMPLETION_MARKER, edition).tree()
         };
 
@@ -768,7 +790,7 @@ impl<'db> CompletionContext<'db> {
         let containing_function = scope.containing_function();
         let edition = krate.edition(db);
 
-        let toolchain = db.toolchain_channel(krate.into());
+        let toolchain = toolchain_channel(db, krate.into());
         // `toolchain == None` means we're in some detached files. Since we have no information on
         // the toolchain being used, let's just allow unstable items to be listed.
         let is_nightly = matches!(toolchain, Some(base_db::ReleaseChannel::Nightly) | None);
@@ -821,7 +843,10 @@ impl<'db> CompletionContext<'db> {
             CompleteSemicolon::DoNotComplete
         } else if let Some(term_node) =
             sema.token_ancestors_with_macros(token.clone()).find(|node| {
-                matches!(node.kind(), BLOCK_EXPR | MATCH_ARM | CLOSURE_EXPR | ARG_LIST | PAREN_EXPR)
+                matches!(
+                    node.kind(),
+                    BLOCK_EXPR | MATCH_ARM | CLOSURE_EXPR | ARG_LIST | PAREN_EXPR | ARRAY_EXPR
+                )
             })
         {
             let next_token = iter::successors(token.next_token(), |it| it.next_token())

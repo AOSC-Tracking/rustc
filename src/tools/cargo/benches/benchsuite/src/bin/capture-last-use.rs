@@ -24,7 +24,7 @@ use std::path::Path;
 
 fn main() {
     // Set up config.
-    let shell = cargo::core::Shell::new();
+    let shell = cargo_util_terminal::Shell::new();
     let homedir = Path::new(env!("CARGO_MANIFEST_DIR")).join("global-cache-tracker");
     let cwd = homedir.clone();
     let mut gctx = GlobalContext::new(shell, cwd, homedir.clone());
@@ -131,7 +131,7 @@ fn main() {
 
     src_entries.retain(|src| src.encoded_registry_name == biggest);
     let mut rng = &mut rand::rng();
-    let sample: Vec<_> = src_entries.choose_multiple(&mut rng, 500).collect();
+    let sample: Vec<_> = src_entries.sample(&mut rng, 500).collect();
     let mut f = File::create(homedir.join("random-sample")).unwrap();
     for src in sample {
         writeln!(

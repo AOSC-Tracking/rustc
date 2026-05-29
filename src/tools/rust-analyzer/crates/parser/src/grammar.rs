@@ -6,7 +6,7 @@
 //! each submodule starts with `use super::*` import and exports
 //! "public" productions via `pub(super)`.
 //!
-//! See docs for [`Parser`](super::parser::Parser) to learn about API,
+//! See docs for [`Parser`] to learn about API,
 //! available to the grammar, and see docs for [`Event`](super::event::Event)
 //! to learn how this actually manages to produce parse trees.
 //!
@@ -295,6 +295,18 @@ fn opt_ret_type(p: &mut Parser<'_>) -> bool {
     if p.at(T![->]) {
         let m = p.start();
         p.bump(T![->]);
+        types::type_no_bounds(p);
+        m.complete(p, RET_TYPE);
+        true
+    } else {
+        false
+    }
+}
+
+fn opt_no_arrow_ret_type(p: &mut Parser<'_>) -> bool {
+    if p.at_ts(PATH_NAME_REF_KINDS) {
+        let m = p.start();
+        p.error("missing thin-arrow `->`");
         types::type_no_bounds(p);
         m.complete(p, RET_TYPE);
         true

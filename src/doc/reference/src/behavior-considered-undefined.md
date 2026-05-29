@@ -1,7 +1,7 @@
 r[undefined]
 # Behavior considered undefined
 
-r[undefined.general]
+r[undefined.intro]
 Rust code is incorrect if it exhibits any of the behaviors in the following
 list. This includes code within `unsafe` blocks and `unsafe` functions.
 `unsafe` only means that avoiding undefined behavior is on the programmer; it
@@ -93,12 +93,12 @@ r[undefined.misaligned]
 ## Places based on misaligned pointers
 [based on a misaligned pointer]: #places-based-on-misaligned-pointers
 
-r[undefined.misaligned.general]
+r[undefined.misaligned.ptr]
 A place is said to be "based on a misaligned pointer" if the last `*` projection
 during place computation was performed on a pointer that was not aligned for its
 type. (If there is no `*` projection in the place expression, then this is
 accessing the field of a local or `static` and rustc will guarantee proper alignment. If
-there are multiple `*` projection, then each of them incurs a load of the
+there are multiple `*` projections, then each of them incurs a load of the
 pointer-to-be-dereferenced itself from memory, and each of these loads is
 subject to the alignment constraint. Note that some `*` projections can be
 omitted in surface Rust syntax due to automatic dereferencing; we are
@@ -133,7 +133,7 @@ r[undefined.dangling]
 ## Dangling pointers
 [dangling]: #dangling-pointers
 
-r[undefined.dangling.general]
+r[undefined.dangling.def]
 A reference/pointer is "dangling" if not all of the bytes it
 [points to] are part of the same live allocation (so in particular they all have to be
 part of *some* allocation).
@@ -155,7 +155,7 @@ r[undefined.validity]
 ## Invalid values
 [invalid-values]: #invalid-values
 
-r[undefined.validity.general]
+r[undefined.validity.def]
 The Rust compiler assumes that all values produced during program execution are
 "valid", and producing an invalid value is hence immediate UB.
 

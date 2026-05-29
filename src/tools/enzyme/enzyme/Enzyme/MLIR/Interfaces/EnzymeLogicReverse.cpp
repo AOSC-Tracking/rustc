@@ -30,8 +30,8 @@ void handleReturns(Block *oBB, Block *newBB, Block *reverseBB,
 
     OpBuilder forwardToBackwardBuilder(newBB, newBB->end());
 
-    Operation *newBranchOp = forwardToBackwardBuilder.create<cf::BranchOp>(
-        oBB->getTerminator()->getLoc(), reverseBB);
+    Operation *newBranchOp = cf::BranchOp::create(
+        forwardToBackwardBuilder, oBB->getTerminator()->getLoc(), reverseBB);
 
     gutils->originalToNewFnOps[oBB->getTerminator()] = newBranchOp;
   }
@@ -45,19 +45,6 @@ static bool isFullyInactive(Operation *op, MGradientUtils *gutils) {
              op->getResults(),
              [gutils](Value v) { return gutils->isConstantValue(v); }) &&
          gutils->isConstantInstruction(op);
-}
-
-static Value packIntoStruct(ValueRange values, OpBuilder &builder,
-                            Location loc) {
-  SmallVector<Type> resultTypes =
-      llvm::map_to_vector(values, [](Value v) { return v.getType(); });
-  auto structType =
-      LLVM::LLVMStructType::getLiteral(builder.getContext(), resultTypes);
-  Value result = LLVM::PoisonOp::create(builder, loc, structType);
-  for (auto &&[i, v] : llvm::enumerate(values))
-    result = LLVM::InsertValueOp::create(builder, loc, result, v, i);
-
-  return result;
 }
 
 /*
@@ -106,7 +93,7 @@ void MEnzymeLogic::handlePredecessors(
     Value cache = gutils->insertInit(gutils->getIndexCacheType());
 
     Value flag =
-        revBuilder.create<enzyme::PopOp>(loc, gutils->getIndexType(), cache);
+        enzyme::PopOp::create(revBuilder, loc, gutils->getIndexType(), cache);
 
     Block *defaultBlock = nullptr;
 
@@ -134,8 +121,8 @@ void MEnzymeLogic::handlePredecessors(
       OpBuilder predecessorBuilder(newPred->getTerminator());
 
       Value pred_idx_c =
-          predecessorBuilder.create<arith::ConstantIntOp>(loc, idx - 1, 32);
-      predecessorBuilder.create<enzyme::PushOp>(loc, cache, pred_idx_c);
+          arith::ConstantIntOp::create(predecessorBuilder, loc, idx - 1, 32);
+      enzyme::PushOp::create(predecessorBuilder, loc, cache, pred_idx_c);
 
       if (idx == 0) {
         defaultBlock = reversePred;
@@ -156,12 +143,13 @@ void MEnzymeLogic::handlePredecessors(
               if (diffes[idx]) {
 
                 Value rev_idx_c =
-                    revBuilder.create<arith::ConstantIntOp>(loc, idx - 1, 32);
+                    arith::ConstantIntOp::create(revBuilder, loc, idx - 1, 32);
 
-                auto to_prop = revBuilder.create<arith::SelectOp>(
-                    loc,
-                    revBuilder.create<arith::CmpIOp>(
-                        loc, arith::CmpIPredicate::eq, flag, rev_idx_c),
+                auto to_prop = arith::SelectOp::create(
+                    revBuilder, loc,
+                    arith::CmpIOp::create(revBuilder, loc,
+                                          arith::CmpIPredicate::eq, flag,
+                                          rev_idx_c),
                     diffes[idx],
                     cast<AutoDiffTypeInterface>(diffes[idx].getType())
                         .createNullValue(revBuilder, loc));
@@ -174,10 +162,9 @@ void MEnzymeLogic::handlePredecessors(
       }
     }
 
-    revBuilder.create<cf::SwitchOp>(
-        loc, flag, defaultBlock, ArrayRef<Value>(), ArrayRef<APInt>(indices),
-        ArrayRef<Block *>(blocks),
-        SmallVector<ValueRange>(indices.size(), ValueRange()));
+    cf::SwitchOp::create(revBuilder, loc, flag, defaultBlock, ArrayRef<Value>(),
+                         ArrayRef<APInt>(indices), ArrayRef<Block *>(blocks),
+                         SmallVector<ValueRange>(indices.size(), ValueRange()));
   }
 }
 
@@ -263,16 +250,11 @@ FunctionOpInterface MEnzymeLogic::CreateReverseDiff(
     }
 
     Location loc = oBB->rbegin()->getLoc();
-    if (isa<LLVM::LLVMFuncOp>(fn)) {
-      if (retargs.size() > 1) {
-        Value packedReturns = packIntoStruct(retargs, builder, loc);
-        builder.create<LLVM::ReturnOp>(loc, packedReturns);
-      } else {
-        builder.create<LLVM::ReturnOp>(loc, retargs);
-      }
-    } else {
-      builder.create<func::ReturnOp>(loc, retargs);
-    }
+    if (auto iface = dyn_cast<enzyme::AutoDiffFunctionInterface>(*fn))
+      iface.createReturn(builder, loc, retargs);
+    else
+      fn->emitError() << "this function operation does not implement "
+                         "AutoDiffFunctionInterface";
     return;
   };
 

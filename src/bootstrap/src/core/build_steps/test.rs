@@ -37,11 +37,12 @@ use crate::core::{android, debuggers};
 use crate::utils::build_stamp::{self, BuildStamp};
 use crate::utils::exec::{BootstrapCommand, command};
 use crate::utils::helpers::{
-    self, LldThreads, add_dylib_path, add_rustdoc_cargo_linker_args, dylib_path, dylib_path_var,
-    linker_args, linker_flags, t, target_supports_cranelift_backend, up_to_date,
+    self, LldThreads, TestFilterCategory, add_dylib_path, add_rustdoc_cargo_linker_args,
+    dylib_path, dylib_path_var, linker_args, linker_flags, t, target_supports_cranelift_backend,
+    up_to_date,
 };
 use crate::utils::render_tests::{add_flags_and_try_run_tests, try_run_tests};
-use crate::{CLang, CodegenBackendKind, DocTests, GitRepo, Mode, PathSet, envify};
+use crate::{CLang, CodegenBackendKind, GitRepo, Mode, PathSet, TestTarget, envify};
 
 mod compiletest;
 
@@ -174,7 +175,7 @@ You can skip linkcheck with --skip src/tools/linkchecker"
         );
         run_cargo_test(cargo, &[], &[], "linkchecker self tests", bootstrap_host, builder);
 
-        if builder.doc_tests == DocTests::No {
+        if !builder.test_target.runs_doctests() {
             return;
         }
 
@@ -509,6 +510,13 @@ impl Step for RustAnalyzer {
         cargo.arg("--workspace");
         cargo.arg("--exclude=xtask");
 
+        if build_compiler.stage == 0 {
+            // This builds a proc macro against the bootstrap libproc_macro, which is not ABI
+            // compatible with the ABI proc-macro-srv expects to load.
+            cargo.arg("--exclude=proc-macro-srv");
+            cargo.arg("--exclude=proc-macro-srv-cli");
+        }
+
         let mut skip_tests = vec![];
 
         // NOTE: the following test skips is a bit cheeky in that it assumes there are no
@@ -734,7 +742,13 @@ impl Step for Miri {
 
         // Run it again for mir-opt-level 4 to catch some miscompilations.
         if builder.config.test_args().is_empty() {
-            cargo.env("MIRIFLAGS", "-O -Zmir-opt-level=4 -Cdebug-assertions=yes");
+            cargo.env(
+                "MIRIFLAGS",
+                format!(
+                    "{} -O -Zmir-opt-level=4 -Cdebug-assertions=yes",
+                    env::var("MIRIFLAGS").unwrap_or_default()
+                ),
+            );
             // Optimizations can change backtraces
             cargo.env("MIRI_SKIP_UI_CHECKS", "1");
             // `MIRI_SKIP_UI_CHECKS` and `RUSTC_BLESS` are incompatible
@@ -798,17 +812,30 @@ impl Step for CargoMiri {
             &[],
         );
 
+        // If we are testing stage 2+ cargo miri, make sure that it works with the in-tree cargo.
+        // We want to do this *somewhere* to ensure that Miri + nightly cargo actually works.
+        if stage >= 2 {
+            let built_cargo = builder
+                .ensure(tool::Cargo::from_build_compiler(
+                    // Build stage 1 cargo here, we don't need it to be built in any special way,
+                    // just that it is built from in-tree sources.
+                    builder.compiler(0, builder.host_target),
+                    builder.host_target,
+                ))
+                .tool_path;
+            cargo.env("CARGO", built_cargo);
+        }
+
         // We're not using `prepare_cargo_test` so we have to do this ourselves.
         // (We're not using that as the test-cargo-miri crate is not known to bootstrap.)
-        match builder.doc_tests {
-            DocTests::Yes => {}
-            DocTests::No => {
-                cargo.args(["--lib", "--bins", "--examples", "--tests", "--benches"]);
+        match builder.test_target {
+            TestTarget::AllTargets => {
+                cargo.args(["--lib", "--bins", "--examples", "--tests", "--benches"])
             }
-            DocTests::Only => {
-                cargo.arg("--doc");
-            }
-        }
+            TestTarget::Default => &mut cargo,
+            TestTarget::DocOnly => cargo.arg("--doc"),
+            TestTarget::Tests => cargo.arg("--tests"),
+        };
         cargo.arg("--").args(builder.config.test_args());
 
         // Finally, run everything.
@@ -927,8 +954,9 @@ impl Step for Clippy {
 
         cargo.env("RUSTC_TEST_SUITE", builder.rustc(build_compiler));
         cargo.env("RUSTC_LIB_PATH", builder.rustc_libdir(build_compiler));
-        let host_libs =
-            builder.stage_out(build_compiler, Mode::ToolRustcPrivate).join(builder.cargo_dir());
+        let host_libs = builder
+            .stage_out(build_compiler, Mode::ToolRustcPrivate)
+            .join(builder.cargo_dir(Mode::ToolRustcPrivate));
         cargo.env("HOST_LIBS", host_libs);
 
         // Build the standard library that the tests can use.
@@ -942,13 +970,15 @@ impl Step for Clippy {
             let paths = &builder.config.paths[..];
             let mut test_names = Vec::new();
             for path in paths {
-                if let Some(path) =
-                    helpers::is_valid_test_suite_arg(path, "src/tools/clippy/tests", builder)
-                {
-                    test_names.push(path);
-                } else if path.ends_with("src/tools/clippy") {
-                    // When src/tools/clippy is called directly, all tests should be run.
-                    break 'partially_test;
+                match helpers::is_valid_test_suite_arg(path, "src/tools/clippy/tests", builder) {
+                    TestFilterCategory::Arg(path) => {
+                        test_names.push(path);
+                    }
+                    TestFilterCategory::Fullsuite => {
+                        // When src/tools/clippy is called directly, all tests should be run.
+                        break 'partially_test;
+                    }
+                    TestFilterCategory::Uninteresting => {}
                 }
             }
             cargo.env("TESTNAME", test_names.join(","));
@@ -1077,16 +1107,30 @@ impl Step for RustdocJSStd {
             .arg(builder.doc_out(self.target))
             .arg("--test-folder")
             .arg(builder.src.join("tests/rustdoc-js-std"));
-        for path in &builder.paths {
-            if let Some(p) = helpers::is_valid_test_suite_arg(path, "tests/rustdoc-js-std", builder)
-            {
-                if !p.ends_with(".js") {
-                    eprintln!("A non-js file was given: `{}`", path.display());
-                    panic!("Cannot run rustdoc-js-std tests");
+
+        let full_suite = builder.paths.iter().any(|path| {
+            matches!(
+                helpers::is_valid_test_suite_arg(path, "tests/rustdoc-js-std", builder),
+                TestFilterCategory::Fullsuite
+            )
+        });
+
+        // If we have to also run the full suite, don't worry about the individual arguments.
+        // They will be covered by running the entire suite
+        if !full_suite {
+            for path in &builder.paths {
+                if let TestFilterCategory::Arg(p) =
+                    helpers::is_valid_test_suite_arg(path, "tests/rustdoc-js-std", builder)
+                {
+                    if !p.ends_with(".js") {
+                        eprintln!("A non-js file was given: `{}`", path.display());
+                        panic!("Cannot run rustdoc-js-std tests");
+                    }
+                    command.arg("--test-file").arg(path);
                 }
-                command.arg("--test-file").arg(path);
             }
         }
+
         builder.ensure(crate::core::build_steps::doc::Std::from_build_compiler(
             self.build_compiler,
             self.target,
@@ -1185,7 +1229,7 @@ impl Step for RustdocGUI {
 
     fn is_default_step(builder: &Builder<'_>) -> bool {
         builder.config.nodejs.is_some()
-            && builder.doc_tests != DocTests::Only
+            && builder.test_target != TestTarget::DocOnly
             && get_browser_ui_test_version(builder).is_some()
     }
 
@@ -1225,14 +1269,27 @@ impl Step for RustdocGUI {
 
         add_rustdoc_cargo_linker_args(&mut cmd, builder, self.test_compiler.host, LldThreads::No);
 
-        for path in &builder.paths {
-            if let Some(p) = helpers::is_valid_test_suite_arg(path, "tests/rustdoc-gui", builder) {
-                if !p.ends_with(".goml") {
-                    eprintln!("A non-goml file was given: `{}`", path.display());
-                    panic!("Cannot run rustdoc-gui tests");
-                }
-                if let Some(name) = path.file_name().and_then(|f| f.to_str()) {
-                    cmd.arg("--goml-file").arg(name);
+        let full_suite = builder.paths.iter().any(|path| {
+            matches!(
+                helpers::is_valid_test_suite_arg(path, "tests/rustdoc-js-std", builder),
+                TestFilterCategory::Fullsuite
+            )
+        });
+
+        // If we have to also run the full suite, don't worry about the individual arguments.
+        // They will be covered by running the entire suite
+        if !full_suite {
+            for path in &builder.paths {
+                if let TestFilterCategory::Arg(p) =
+                    helpers::is_valid_test_suite_arg(path, "tests/rustdoc-gui", builder)
+                {
+                    if !p.ends_with(".goml") {
+                        eprintln!("A non-goml file was given: `{}`", path.display());
+                        panic!("Cannot run rustdoc-gui tests");
+                    }
+                    if let Some(name) = path.file_name().and_then(|f| f.to_str()) {
+                        cmd.arg("--goml-file").arg(name);
+                    }
                 }
             }
         }
@@ -1275,7 +1332,7 @@ impl Step for Tidy {
     }
 
     fn is_default_step(builder: &Builder<'_>) -> bool {
-        builder.doc_tests != DocTests::Only
+        builder.test_target != TestTarget::DocOnly
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -1292,25 +1349,28 @@ impl Step for Tidy {
     /// for the `dev` or `nightly` channels.
     fn run(self, builder: &Builder<'_>) {
         let mut cmd = builder.tool_cmd(Tool::Tidy);
-        cmd.arg(&builder.src);
-        cmd.arg(&builder.initial_cargo);
-        cmd.arg(&builder.out);
+        cmd.arg(format!("--root-path={}", &builder.src.display()));
+        cmd.arg(format!("--cargo-path={}", &builder.initial_cargo.display()));
+        cmd.arg(format!("--output-dir={}", &builder.out.display()));
         // Tidy is heavily IO constrained. Still respect `-j`, but use a higher limit if `jobs` hasn't been configured.
         let jobs = builder.config.jobs.unwrap_or_else(|| {
             8 * std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get) as u32
         });
-        cmd.arg(jobs.to_string());
+        cmd.arg(format!("--concurrency={jobs}"));
         // pass the path to the yarn command used for installing js deps.
         if let Some(yarn) = &builder.config.yarn {
-            cmd.arg(yarn);
+            cmd.arg(format!("--npm-path={}", yarn.display()));
         } else {
-            cmd.arg("yarn");
+            cmd.arg("--npm-path=yarn");
         }
         if builder.is_verbose() {
             cmd.arg("--verbose");
         }
         if builder.config.cmd.bless() {
             cmd.arg("--bless");
+        }
+        if builder.config.is_running_on_ci() {
+            cmd.arg("--ci=true");
         }
         if let Some(s) =
             builder.config.cmd.extra_checks().or(builder.config.tidy_extra_checks.as_deref())
@@ -1625,6 +1685,12 @@ test!(RunMakeCargo {
     suite: "run-make-cargo",
     default: true
 });
+test!(BuildStd {
+    path: "tests/build-std",
+    mode: CompiletestMode::RunMake,
+    suite: "build-std",
+    default: false
+});
 
 test!(AssemblyLlvm {
     path: "tests/assembly-llvm",
@@ -1825,7 +1891,7 @@ impl Step for Compiletest {
     }
 
     fn run(self, builder: &Builder<'_>) {
-        if builder.doc_tests == DocTests::Only {
+        if builder.test_target == TestTarget::DocOnly {
             return;
         }
 
@@ -1948,7 +2014,7 @@ NOTE: if you're sure you want to do this, please open an issue as to why. In the
             let stage0_rustc_path = builder.compiler(0, test_compiler.host);
             cmd.arg("--stage0-rustc-path").arg(builder.rustc(stage0_rustc_path));
 
-            if suite == "run-make-cargo" {
+            if matches!(suite, "run-make-cargo" | "build-std") {
                 let cargo_path = if test_compiler.stage == 0 {
                     // If we're using `--stage 0`, we should provide the bootstrap cargo.
                     builder.initial_cargo.clone()
@@ -2170,6 +2236,9 @@ Please disable assertions with `rust.debug-assertions = false`.
         for flag in targetflags {
             cmd.arg("--target-rustcflags").arg(flag);
         }
+        if target.is_synthetic() {
+            cmd.arg("--target-rustcflags").arg("-Zunstable-options");
+        }
 
         cmd.arg("--python").arg(
             builder.config.python.as_ref().expect("python is required for running rustdoc tests"),
@@ -2231,11 +2300,23 @@ Please disable assertions with `rust.debug-assertions = false`.
             }
             paths = &paths_v;
         }
+
         // Get test-args by striping suite path
-        let mut test_args: Vec<&str> = paths
-            .iter()
-            .filter_map(|p| helpers::is_valid_test_suite_arg(p, suite_path, builder))
-            .collect();
+        let mut test_args = Vec::new();
+        for p in paths {
+            match helpers::is_valid_test_suite_arg(p, suite_path, builder) {
+                TestFilterCategory::Fullsuite => {
+                    // If we also have to run the full suite, don't append _any_ test args here,
+                    // clear the list instead and break out.
+                    // That way none of the more specific paths make it into test_args,
+                    // since running the whole suite will run the specific ones anyway.
+                    test_args.clear();
+                    break;
+                }
+                TestFilterCategory::Arg(a) => test_args.push(a),
+                TestFilterCategory::Uninteresting => {}
+            }
+        }
 
         test_args.append(&mut builder.config.test_args());
 
@@ -2940,15 +3021,12 @@ fn prepare_cargo_test(
         cargo.arg("--message-format=json");
     }
 
-    match builder.doc_tests {
-        DocTests::Only => {
-            cargo.arg("--doc");
-        }
-        DocTests::No => {
-            cargo.args(["--bins", "--examples", "--tests", "--benches"]);
-        }
-        DocTests::Yes => {}
-    }
+    match builder.test_target {
+        TestTarget::AllTargets => cargo.args(["--bins", "--examples", "--tests", "--benches"]),
+        TestTarget::Default => &mut cargo,
+        TestTarget::DocOnly => cargo.arg("--doc"),
+        TestTarget::Tests => cargo.arg("--tests"),
+    };
 
     for krate in crates {
         cargo.arg("-p").arg(krate);
@@ -3074,6 +3152,17 @@ impl Step for Crate {
             // does not set this directly, but relies on the rustc wrapper to set it, and we are not using
             // the wrapper -- hence we have to set it ourselves.
             cargo.rustflag("-Zforce-unstable-if-unmarked");
+            // Miri is told to invoke the libtest runner and bootstrap sets unstable flags
+            // for that runner. That only works when RUSTC_BOOTSTRAP is set. Bootstrap sets
+            // that flag but Miri by default does not forward the host environment to the test.
+            // Here we set up MIRIFLAGS to forward that env var.
+            cargo.env(
+                "MIRIFLAGS",
+                format!(
+                    "{} -Zmiri-env-forward=RUSTC_BOOTSTRAP",
+                    env::var("MIRIFLAGS").unwrap_or_default()
+                ),
+            );
             cargo
         } else {
             // Also prepare a sysroot for the target.
@@ -3142,7 +3231,7 @@ impl Step for CrateRustdoc {
     const IS_HOST: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.paths(&["src/librustdoc", "src/tools/rustdoc"])
+        run.path("src/librustdoc").path("src/tools/rustdoc")
     }
 
     fn is_default_step(_builder: &Builder<'_>) -> bool {
@@ -3268,7 +3357,7 @@ impl Step for CrateRustdocJsonTypes {
             builder.kind,
             "src/rustdoc-json-types",
             SourceType::InTree,
-            &[],
+            &["rkyv_0_8".to_owned()],
         );
 
         // FIXME: this looks very wrong, libtest doesn't accept `-C` arguments and the quotes are fishy.
@@ -3399,6 +3488,8 @@ fn distcheck_plain_source_tarball(builder: &Builder<'_>, plain_src_dir: &Path) {
     command("./configure")
         .arg("--set")
         .arg("rust.omit-git-hash=false")
+        .arg("--set")
+        .arg("rust.remap-debuginfo=false")
         .args(&configure_args)
         .arg("--enable-vendor")
         .current_dir(plain_src_dir)
@@ -3483,7 +3574,7 @@ impl Step for BootstrapPy {
         // Bootstrap tests might not be perfectly self-contained and can depend
         // on the environment, so only run them by default in CI, not locally.
         // See `test::Bootstrap::should_run`.
-        builder.config.is_running_on_ci
+        builder.config.is_running_on_ci()
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -3522,7 +3613,7 @@ impl Step for Bootstrap {
         // Bootstrap tests might not be perfectly self-contained and can depend on the external
         // environment, submodules that are checked out, etc.
         // Therefore we only run them by default on CI.
-        builder.config.is_running_on_ci
+        builder.config.is_running_on_ci()
     }
 
     /// Tests the build system itself.
@@ -3803,7 +3894,7 @@ impl Step for CodegenCranelift {
     const IS_HOST: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.paths(&["compiler/rustc_codegen_cranelift"])
+        run.path("compiler/rustc_codegen_cranelift")
     }
 
     fn is_default_step(_builder: &Builder<'_>) -> bool {
@@ -3815,7 +3906,7 @@ impl Step for CodegenCranelift {
         let host = run.build_triple();
         let compilers = RustcPrivateCompilers::new(run.builder, run.builder.top_stage, host);
 
-        if builder.doc_tests == DocTests::Only {
+        if builder.test_target == TestTarget::DocOnly {
             return;
         }
 
@@ -3924,7 +4015,7 @@ impl Step for CodegenGCC {
     const IS_HOST: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.paths(&["compiler/rustc_codegen_gcc"])
+        run.path("compiler/rustc_codegen_gcc")
     }
 
     fn is_default_step(_builder: &Builder<'_>) -> bool {
@@ -3936,7 +4027,7 @@ impl Step for CodegenGCC {
         let host = run.build_triple();
         let compilers = RustcPrivateCompilers::new(run.builder, run.builder.top_stage, host);
 
-        if builder.doc_tests == DocTests::Only {
+        if builder.test_target == TestTarget::DocOnly {
             return;
         }
 

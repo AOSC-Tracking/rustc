@@ -12,8 +12,10 @@ use crate::elaborate::Elaboratable;
 use crate::fold::{TypeFoldable, TypeSuperFoldable};
 use crate::relate::Relate;
 use crate::solve::{AdtDestructorKind, SizedTraitKind};
-use crate::visit::{Flags, TypeSuperVisitable, TypeVisitable, TypeVisitableExt};
-use crate::{self as ty, CollectAndApply, Interner, UpcastFrom};
+use crate::visit::{Flags, TypeSuperVisitable, TypeVisitable};
+use crate::{
+    self as ty, ClauseKind, CollectAndApply, FieldInfo, Interner, PredicateKind, UpcastFrom,
+};
 
 pub trait Ty<I: Interner<Ty = Self>>:
     Copy
@@ -42,21 +44,20 @@ pub trait Ty<I: Interner<Ty = Self>>:
 
     fn new_param(interner: I, param: I::ParamTy) -> Self;
 
-    fn new_placeholder(interner: I, param: I::PlaceholderTy) -> Self;
+    fn new_placeholder(interner: I, param: ty::PlaceholderType<I>) -> Self;
 
-    fn new_bound(interner: I, debruijn: ty::DebruijnIndex, var: I::BoundTy) -> Self;
+    fn new_bound(interner: I, debruijn: ty::DebruijnIndex, var: ty::BoundTy<I>) -> Self;
 
     fn new_anon_bound(interner: I, debruijn: ty::DebruijnIndex, var: ty::BoundVar) -> Self;
 
     fn new_canonical_bound(interner: I, var: ty::BoundVar) -> Self;
 
-    fn new_alias(interner: I, kind: ty::AliasTyKind, alias_ty: ty::AliasTy<I>) -> Self;
+    fn new_alias(interner: I, alias_ty: ty::AliasTy<I>) -> Self;
 
     fn new_projection_from_args(interner: I, def_id: I::DefId, args: I::GenericArgs) -> Self {
-        Ty::new_alias(
+        Self::new_alias(
             interner,
-            ty::AliasTyKind::Projection,
-            ty::AliasTy::new_from_args(interner, def_id, args),
+            ty::AliasTy::new_from_args(interner, ty::AliasTyKind::Projection { def_id }, args),
         )
     }
 
@@ -65,10 +66,9 @@ pub trait Ty<I: Interner<Ty = Self>>:
         def_id: I::DefId,
         args: impl IntoIterator<Item: Into<I::GenericArg>>,
     ) -> Self {
-        Ty::new_alias(
+        Self::new_alias(
             interner,
-            ty::AliasTyKind::Projection,
-            ty::AliasTy::new(interner, def_id, args),
+            ty::AliasTy::new(interner, ty::AliasTyKind::Projection { def_id }, args),
         )
     }
 
@@ -185,7 +185,7 @@ pub trait Ty<I: Interner<Ty = Self>>:
             | ty::CoroutineWitness(_, _)
             | ty::Never
             | ty::Tuple(_)
-            | ty::Alias(_, _)
+            | ty::Alias(_)
             | ty::Param(_)
             | ty::Bound(_, _)
             | ty::Placeholder(_)
@@ -228,7 +228,7 @@ pub trait Region<I: Interner<Region = Self>>:
     + Flags
     + Relate<I>
 {
-    fn new_bound(interner: I, debruijn: ty::DebruijnIndex, var: I::BoundRegion) -> Self;
+    fn new_bound(interner: I, debruijn: ty::DebruijnIndex, var: ty::BoundRegion<I>) -> Self;
 
     fn new_anon_bound(interner: I, debruijn: ty::DebruijnIndex, var: ty::BoundVar) -> Self;
 
@@ -236,7 +236,7 @@ pub trait Region<I: Interner<Region = Self>>:
 
     fn new_static(interner: I) -> Self;
 
-    fn new_placeholder(interner: I, var: I::PlaceholderRegion) -> Self;
+    fn new_placeholder(interner: I, var: ty::PlaceholderRegion<I>) -> Self;
 
     fn is_bound(self) -> bool {
         matches!(self.kind(), ty::ReBound(..))
@@ -260,13 +260,13 @@ pub trait Const<I: Interner<Const = Self>>:
 
     fn new_var(interner: I, var: ty::ConstVid) -> Self;
 
-    fn new_bound(interner: I, debruijn: ty::DebruijnIndex, bound_const: I::BoundConst) -> Self;
+    fn new_bound(interner: I, debruijn: ty::DebruijnIndex, bound_const: ty::BoundConst<I>) -> Self;
 
     fn new_anon_bound(interner: I, debruijn: ty::DebruijnIndex, var: ty::BoundVar) -> Self;
 
     fn new_canonical_bound(interner: I, var: ty::BoundVar) -> Self;
 
-    fn new_placeholder(interner: I, param: I::PlaceholderConst) -> Self;
+    fn new_placeholder(interner: I, param: ty::PlaceholderConst<I>) -> Self;
 
     fn new_unevaluated(interner: I, uv: ty::UnevaluatedConst<I>) -> Self;
 
@@ -290,12 +290,6 @@ pub trait Const<I: Interner<Const = Self>>:
 pub trait ValueConst<I: Interner<ValueConst = Self>>: Copy + Debug + Hash + Eq {
     fn ty(self) -> I::Ty;
     fn valtree(self) -> I::ValTree;
-}
-
-// FIXME(mgca): This trait can be removed once we're not using a `Box` in `Branch`
-pub trait ValTree<I: Interner<ValTree = Self>>: Copy + Debug + Hash + Eq {
-    // This isnt' `IntoKind` because then we can't return a reference
-    fn kind(&self) -> &ty::ValTreeKind<I>;
 }
 
 pub trait ExprConst<I: Interner<ExprConst = Self>>: Copy + Debug + Hash + Eq + Relate<I> {
@@ -396,7 +390,7 @@ pub trait Term<I: Interner<Term = Self>>:
     fn to_alias_term(self) -> Option<ty::AliasTerm<I>> {
         match self.kind() {
             ty::TermKind::Ty(ty) => match ty.kind() {
-                ty::Alias(_kind, alias_ty) => Some(alias_ty.into()),
+                ty::Alias(alias_ty) => Some(alias_ty.into()),
                 _ => None,
             },
             ty::TermKind::Const(ct) => match ct.kind() {
@@ -478,8 +472,27 @@ pub trait Predicate<I: Interner<Predicate = Self>>:
         }
     }
 
-    // FIXME: Eventually uplift the impl out of rustc and make this defaulted.
-    fn allow_normalization(self) -> bool;
+    fn allow_normalization(self) -> bool {
+        match self.kind().skip_binder() {
+            PredicateKind::Clause(ClauseKind::WellFormed(_)) | PredicateKind::AliasRelate(..) => {
+                false
+            }
+            PredicateKind::Clause(ClauseKind::Trait(_))
+            | PredicateKind::Clause(ClauseKind::HostEffect(..))
+            | PredicateKind::Clause(ClauseKind::RegionOutlives(_))
+            | PredicateKind::Clause(ClauseKind::TypeOutlives(_))
+            | PredicateKind::Clause(ClauseKind::Projection(_))
+            | PredicateKind::Clause(ClauseKind::ConstArgHasType(..))
+            | PredicateKind::Clause(ClauseKind::UnstableFeature(_))
+            | PredicateKind::DynCompatible(_)
+            | PredicateKind::Subtype(_)
+            | PredicateKind::Coerce(_)
+            | PredicateKind::Clause(ClauseKind::ConstEvaluatable(_))
+            | PredicateKind::ConstEquate(_, _)
+            | PredicateKind::NormalizesTo(..)
+            | PredicateKind::Ambiguous => true,
+        }
+    }
 }
 
 pub trait Clause<I: Interner<Clause = Self>>:
@@ -543,66 +556,10 @@ pub trait Clauses<I: Interner<Clauses = Self>>:
 {
 }
 
-/// Common capabilities of placeholder kinds
-pub trait PlaceholderLike<I: Interner>: Copy + Debug + Hash + Eq {
-    fn universe(self) -> ty::UniverseIndex;
-    fn var(self) -> ty::BoundVar;
-
-    type Bound: BoundVarLike<I>;
-    fn new(ui: ty::UniverseIndex, bound: Self::Bound) -> Self;
-    fn new_anon(ui: ty::UniverseIndex, var: ty::BoundVar) -> Self;
-    fn with_updated_universe(self, ui: ty::UniverseIndex) -> Self;
-}
-
-pub trait PlaceholderConst<I: Interner>: PlaceholderLike<I, Bound = I::BoundConst> {
-    fn find_const_ty_from_env(self, env: I::ParamEnv) -> I::Ty;
-}
-impl<I: Interner> PlaceholderConst<I> for I::PlaceholderConst {
-    fn find_const_ty_from_env(self, env: I::ParamEnv) -> I::Ty {
-        let mut candidates = env.caller_bounds().iter().filter_map(|clause| {
-            // `ConstArgHasType` are never desugared to be higher ranked.
-            match clause.kind().skip_binder() {
-                ty::ClauseKind::ConstArgHasType(placeholder_ct, ty) => {
-                    assert!(!(placeholder_ct, ty).has_escaping_bound_vars());
-
-                    match placeholder_ct.kind() {
-                        ty::ConstKind::Placeholder(placeholder_ct) if placeholder_ct == self => {
-                            Some(ty)
-                        }
-                        _ => None,
-                    }
-                }
-                _ => None,
-            }
-        });
-
-        // N.B. it may be tempting to fix ICEs by making this function return
-        // `Option<Ty<'tcx>>` instead of `Ty<'tcx>`; however, this is generally
-        // considered to be a bandaid solution, since it hides more important
-        // underlying issues with how we construct generics and predicates of
-        // items. It's advised to fix the underlying issue rather than trying
-        // to modify this function.
-        let ty = candidates.next().unwrap_or_else(|| {
-            panic!("cannot find `{self:?}` in param-env: {env:#?}");
-        });
-        assert!(
-            candidates.next().is_none(),
-            "did not expect duplicate `ConstParamHasTy` for `{self:?}` in param-env: {env:#?}"
-        );
-        ty
-    }
-}
-
 pub trait IntoKind {
     type Kind;
 
     fn kind(self) -> Self::Kind;
-}
-
-pub trait BoundVarLike<I: Interner>: Copy + Debug + Hash + Eq {
-    fn var(self) -> ty::BoundVar;
-
-    fn assert_eq(self, var: I::BoundVarKind);
 }
 
 pub trait ParamLike: Copy + Debug + Hash + Eq {
@@ -614,6 +571,8 @@ pub trait AdtDef<I: Interner>: Copy + Debug + Hash + Eq {
 
     fn is_struct(self) -> bool;
 
+    fn is_packed(self) -> bool;
+
     /// Returns the type of the struct tail.
     ///
     /// Expects the `AdtDef` to be a struct. If it is not, then this will panic.
@@ -622,6 +581,12 @@ pub trait AdtDef<I: Interner>: Copy + Debug + Hash + Eq {
     fn is_phantom_data(self) -> bool;
 
     fn is_manually_drop(self) -> bool;
+
+    fn field_representing_type_info(
+        self,
+        interner: I,
+        args: I::GenericArgs,
+    ) -> Option<FieldInfo<I>>;
 
     // FIXME: perhaps use `all_fields` and expose `FieldDef`.
     fn all_field_tys(self, interner: I) -> ty::EarlyBinder<I, impl IntoIterator<Item = I::Ty>>;
@@ -767,4 +732,8 @@ impl<'a, S: SliceLike> SliceLike for &'a S {
     fn as_slice(&self) -> &[Self::Item] {
         (*self).as_slice()
     }
+}
+
+pub trait Symbol<I>: Copy + Hash + PartialEq + Eq + Debug {
+    fn is_kw_underscore_lifetime(self) -> bool;
 }

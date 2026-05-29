@@ -126,6 +126,7 @@ fn synthesize_auto_trait_impl<'tcx>(
                 items: Vec::new(),
                 polarity,
                 kind: clean::ImplKind::Auto,
+                is_deprecated: false,
             })),
             item_id: clean::ItemId::Auto { trait_: trait_def_id, for_: item_def_id },
             cfg: None,
@@ -202,7 +203,7 @@ fn clean_param_env<'tcx>(
 
     let mut generics = clean::Generics { params, where_predicates };
     simplify::sized_bounds(cx, &mut generics);
-    generics.where_predicates = simplify::where_clauses(cx, generics.where_predicates);
+    generics.where_predicates = simplify::where_clauses(cx.tcx, generics.where_predicates);
     generics
 }
 

@@ -2,7 +2,6 @@
 //!
 //! [rustc dev guide]: https://rustc-dev-guide.rust-lang.org/traits/resolution.html#selection
 
-use std::assert_matches::assert_matches;
 use std::cell::{Cell, RefCell};
 use std::cmp;
 use std::fmt::{self, Display};
@@ -12,9 +11,8 @@ use hir::def::DefKind;
 use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_errors::{Diag, EmissionGuarantee};
-use rustc_hir as hir;
-use rustc_hir::LangItem;
 use rustc_hir::def_id::DefId;
+use rustc_hir::{self as hir, LangItem, find_attr};
 use rustc_infer::infer::BoundRegionConversionTime::{self, HigherRankedType};
 use rustc_infer::infer::DefineOpaqueTypes;
 use rustc_infer::infer::at::ToTrace;
@@ -22,7 +20,7 @@ use rustc_infer::infer::relate::TypeRelation;
 use rustc_infer::traits::{PredicateObligations, TraitObligation};
 use rustc_macros::{TypeFoldable, TypeVisitable};
 use rustc_middle::bug;
-use rustc_middle::dep_graph::{DepNodeIndex, dep_kinds};
+use rustc_middle::dep_graph::{DepKind, DepNodeIndex};
 pub use rustc_middle::traits::select::*;
 use rustc_middle::ty::abstract_const::NotConstEvaluatable;
 use rustc_middle::ty::error::TypeErrorToStringExt;
@@ -33,7 +31,7 @@ use rustc_middle::ty::{
     may_use_unstable_feature,
 };
 use rustc_next_trait_solver::solve::AliasBoundKind;
-use rustc_span::{Symbol, sym};
+use rustc_span::Symbol;
 use tracing::{debug, instrument, trace};
 
 use self::EvaluationResult::*;
@@ -212,8 +210,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
     /// Enables tracking of intercrate ambiguity causes. See
     /// the documentation of [`Self::intercrate_ambiguity_causes`] for more.
     pub fn enable_tracking_intercrate_ambiguity_causes(&mut self) {
-        assert_matches!(self.infcx.typing_mode(), TypingMode::Coherence);
+        assert!(self.infcx.typing_mode().is_coherence());
         assert!(self.intercrate_ambiguity_causes.is_none());
+
         self.intercrate_ambiguity_causes = Some(FxIndexSet::default());
         debug!("selcx: enable_tracking_intercrate_ambiguity_causes");
     }
@@ -224,7 +223,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
     pub fn take_intercrate_ambiguity_causes(
         &mut self,
     ) -> FxIndexSet<IntercrateAmbiguityCause<'tcx>> {
-        assert_matches!(self.infcx.typing_mode(), TypingMode::Coherence);
+        assert!(self.infcx.typing_mode().is_coherence());
+
         self.intercrate_ambiguity_causes.take().unwrap_or_default()
     }
 
@@ -878,7 +878,11 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                         use rustc_hir::def::DefKind;
                         match (c1.kind(), c2.kind()) {
                             (ty::ConstKind::Unevaluated(a), ty::ConstKind::Unevaluated(b))
-                                if a.def == b.def && tcx.def_kind(a.def) == DefKind::AssocConst =>
+                                if a.def == b.def
+                                    && matches!(
+                                        tcx.def_kind(a.def),
+                                        DefKind::AssocConst { .. }
+                                    ) =>
                             {
                                 if let Ok(InferOk { obligations, value: () }) = self
                                     .infcx
@@ -1014,7 +1018,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         previous_stack: TraitObligationStackList<'o, 'tcx>,
         mut obligation: PolyTraitObligation<'tcx>,
     ) -> Result<EvaluationResult, OverflowError> {
-        if !matches!(self.infcx.typing_mode(), TypingMode::Coherence)
+        if !self.infcx.typing_mode().is_coherence()
             && obligation.is_global()
             && obligation.param_env.caller_bounds().iter().all(|bound| bound.has_param())
         {
@@ -1223,7 +1227,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     && self.match_fresh_trait_preds(stack.fresh_trait_pred, prev.fresh_trait_pred)
             })
         {
-            debug!("evaluate_stack --> unbound argument, recursive --> giving up",);
+            debug!("evaluate_stack --> unbound argument, recursive --> giving up");
             return Ok(EvaluatedToAmbigStackDependent);
         }
 
@@ -1399,7 +1403,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
     where
         OP: FnOnce(&mut Self) -> R,
     {
-        self.tcx().dep_graph.with_anon_task(self.tcx(), dep_kinds::TraitSelect, || op(self))
+        self.tcx().dep_graph.with_anon_task(self.tcx(), DepKind::TraitSelect, || op(self))
     }
 
     /// filter_impls filters candidates that have a positive impl for a negative
@@ -1445,8 +1449,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             && let ty::ImplPolarity::Reservation = tcx.impl_polarity(def_id)
         {
             if let Some(intercrate_ambiguity_clauses) = &mut self.intercrate_ambiguity_causes {
-                let message =
-                    tcx.get_attr(def_id, sym::rustc_reservation_impl).and_then(|a| a.value_str());
+                let message = find_attr!(tcx, def_id, RustcReservationImpl(_, message) => *message);
                 if let Some(message) = message {
                     debug!(
                         "filter_reservation_impls: \
@@ -1642,8 +1645,13 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         let mut alias_bound_kind = AliasBoundKind::SelfBounds;
 
         loop {
-            let (kind, alias_ty) = match *self_ty.kind() {
-                ty::Alias(kind @ (ty::Projection | ty::Opaque), alias_ty) => (kind, alias_ty),
+            let (alias_ty, def_id) = match *self_ty.kind() {
+                ty::Alias(
+                    alias_ty @ ty::AliasTy {
+                        kind: ty::Projection { def_id } | ty::Opaque { def_id },
+                        ..
+                    },
+                ) => (alias_ty, def_id),
                 ty::Infer(ty::TyVar(_)) => {
                     on_ambiguity();
                     return ControlFlow::Continue(());
@@ -1656,9 +1664,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             // projections, we will never be able to equate, e.g. `<T as Tr>::A`
             // with `<<T as Tr>::A as Tr>::A`.
             let relevant_bounds = if alias_bound_kind == AliasBoundKind::NonSelfBounds {
-                self.tcx().item_non_self_bounds(alias_ty.def_id)
+                self.tcx().item_non_self_bounds(def_id)
             } else {
-                self.tcx().item_self_bounds(alias_ty.def_id)
+                self.tcx().item_self_bounds(def_id)
             };
 
             for bound in relevant_bounds.instantiate(self.tcx(), alias_ty.args) {
@@ -1666,7 +1674,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 idx += 1;
             }
 
-            if kind == ty::Projection {
+            if matches!(alias_ty.kind, ty::Projection { .. }) {
                 self_ty = alias_ty.self_ty();
             } else {
                 return ControlFlow::Continue(());
@@ -2037,7 +2045,6 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
                 | TraitUpcastingUnsizeCandidate(_)
                 | BuiltinObjectCandidate
                 | BuiltinUnsizeCandidate
-                | PointerLikeCandidate
                 | BikeshedGuaranteedNoDropCandidate => false,
                 // Non-global param candidates have already been handled, global
                 // where-bounds get ignored.
@@ -2328,7 +2335,10 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
             ty::Placeholder(..)
             | ty::Dynamic(..)
             | ty::Param(..)
-            | ty::Alias(ty::Projection | ty::Inherent | ty::Free, ..)
+            | ty::Alias(ty::AliasTy {
+                kind: ty::Projection { .. } | ty::Inherent { .. } | ty::Free { .. },
+                ..
+            })
             | ty::Bound(..)
             | ty::Infer(ty::TyVar(_) | ty::FreshTy(_) | ty::FreshIntTy(_) | ty::FreshFloatTy(_)) => {
                 bug!("asked to assemble constituent types of unexpected type: {:?}", t);
@@ -2396,22 +2406,18 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
                 assumptions: vec![],
             }),
 
-            ty::Alias(ty::Opaque, ty::AliasTy { def_id, args, .. }) => {
+            ty::Alias(ty::AliasTy { kind: ty::Opaque { def_id }, args, .. }) => {
                 if self.infcx.can_define_opaque_ty(def_id) {
                     unreachable!()
                 } else {
                     // We can resolve the opaque type to its hidden type,
                     // which enforces a DAG between the functions requiring
                     // the auto trait bounds in question.
-                    match self.tcx().type_of_opaque(def_id) {
-                        Ok(ty) => ty::Binder::dummy(AutoImplConstituents {
-                            types: vec![ty.instantiate(self.tcx(), args)],
-                            assumptions: vec![],
-                        }),
-                        Err(_) => {
-                            return Err(SelectionError::OpaqueTypeAutoTraitLeakageUnknown(def_id));
-                        }
-                    }
+                    let ty = self.tcx().type_of_opaque(def_id);
+                    ty::Binder::dummy(AutoImplConstituents {
+                        types: vec![ty.instantiate(self.tcx(), args)],
+                        assumptions: vec![],
+                    })
                 }
             }
         })
@@ -2544,7 +2550,7 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
         nested_obligations.extend(obligations);
 
         if impl_trait_header.polarity == ty::ImplPolarity::Reservation
-            && !matches!(self.infcx.typing_mode(), TypingMode::Coherence)
+            && !self.infcx.typing_mode().is_coherence()
         {
             debug!("reservation impls only apply in intercrate mode");
             return Err(());

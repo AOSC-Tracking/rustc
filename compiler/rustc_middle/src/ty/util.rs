@@ -4,17 +4,15 @@ use std::{fmt, iter};
 
 use rustc_abi::{Float, Integer, IntegerType, Size};
 use rustc_apfloat::Float as _;
-use rustc_ast::attr::AttributeExt;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_errors::ErrorGuaranteed;
 use rustc_hashes::Hash128;
-use rustc_hir as hir;
-use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::{CrateNum, DefId, LocalDefId};
 use rustc_hir::limit::Limit;
+use rustc_hir::{self as hir, find_attr};
 use rustc_index::bit_set::GrowableBitSet;
 use rustc_macros::{HashStable, TyDecodable, TyEncodable, extension};
 use rustc_span::sym;
@@ -167,7 +165,7 @@ impl<'tcx> TyCtxt<'tcx> {
                 | DefKind::AssocTy
                 | DefKind::Fn
                 | DefKind::AssocFn
-                | DefKind::AssocConst
+                | DefKind::AssocConst { .. }
                 | DefKind::Impl { .. },
                 def_id,
             ) => Some(def_id),
@@ -404,7 +402,7 @@ impl<'tcx> TyCtxt<'tcx> {
         validate: impl Fn(Self, LocalDefId) -> Result<(), ErrorGuaranteed>,
     ) -> Option<ty::Destructor> {
         let drop_trait = self.lang_items().drop_trait()?;
-        self.ensure_ok().coherent_trait(drop_trait).ok()?;
+        self.ensure_result().coherent_trait(drop_trait).ok()?;
 
         let mut dtor_candidate = None;
         // `Drop` impls can only be written in the same crate as the adt, and cannot be blanket impls
@@ -419,7 +417,7 @@ impl<'tcx> TyCtxt<'tcx> {
                 continue;
             }
 
-            let Some(item_id) = self.associated_item_def_ids(impl_did).first() else {
+            let Some(&item_id) = self.associated_item_def_ids(impl_did).first() else {
                 self.dcx()
                     .span_delayed_bug(self.def_span(impl_did), "Drop impl without drop function");
                 continue;
@@ -437,7 +435,7 @@ impl<'tcx> TyCtxt<'tcx> {
                     .delay_as_bug();
             }
 
-            dtor_candidate = Some(*item_id);
+            dtor_candidate = Some(item_id);
         }
 
         let did = dtor_candidate?;
@@ -451,7 +449,7 @@ impl<'tcx> TyCtxt<'tcx> {
         validate: impl Fn(Self, LocalDefId) -> Result<(), ErrorGuaranteed>,
     ) -> Option<ty::AsyncDestructor> {
         let async_drop_trait = self.lang_items().async_drop_trait()?;
-        self.ensure_ok().coherent_trait(async_drop_trait).ok()?;
+        self.ensure_result().coherent_trait(async_drop_trait).ok()?;
 
         let mut dtor_candidate = None;
         // `AsyncDrop` impls can only be written in the same crate as the adt, and cannot be blanket impls
@@ -609,9 +607,8 @@ impl<'tcx> TyCtxt<'tcx> {
     /// have the same `DefKind`.
     ///
     /// Note that closures have a `DefId`, but the closure *expression* also has a
-    /// `HirId` that is located within the context where the closure appears (and, sadly,
-    /// a corresponding `NodeId`, since those are not yet phased out). The parent of
-    /// the closure's `DefId` will also be the context where it appears.
+    /// `HirId` that is located within the context where the closure appears. The
+    /// parent of the closure's `DefId` will also be the context where it appears.
     pub fn is_closure_like(self, def_id: DefId) -> bool {
         matches!(self.def_kind(def_id), DefKind::Closure)
     }
@@ -643,16 +640,26 @@ impl<'tcx> TyCtxt<'tcx> {
     /// has its own type-checking context or "inference environment".
     ///
     /// For example, a closure has its own `DefId`, but it is type-checked
-    /// with the containing item. Similarly, an inline const block has its
-    /// own `DefId` but it is type-checked together with the containing item.
-    ///
-    /// Therefore, when we fetch the
-    /// `typeck` the closure, for example, we really wind up
-    /// fetching the `typeck` the enclosing fn item.
+    /// with the containing item. Therefore, when we fetch the `typeck` of the closure,
+    /// for example, we really wind up fetching the `typeck` of the enclosing fn item.
     pub fn typeck_root_def_id(self, def_id: DefId) -> DefId {
         let mut def_id = def_id;
         while self.is_typeck_child(def_id) {
             def_id = self.parent(def_id);
+        }
+        def_id
+    }
+
+    /// Given the `LocalDefId`, returns the `LocalDefId` of the innermost item that
+    /// has its own type-checking context or "inference environment".
+    ///
+    /// For example, a closure has its own `LocalDefId`, but it is type-checked
+    /// with the containing item. Therefore, when we fetch the `typeck` of the closure,
+    /// for example, we really wind up fetching the `typeck` of the enclosing fn item.
+    pub fn typeck_root_def_id_local(self, def_id: LocalDefId) -> LocalDefId {
+        let mut def_id = def_id;
+        while self.is_typeck_child(def_id.to_def_id()) {
+            def_id = self.local_parent(def_id);
         }
         def_id
     }
@@ -906,18 +913,18 @@ impl<'tcx> TyCtxt<'tcx> {
     /// [free]: ty::Free
     /// [expand_free_alias_tys]: Self::expand_free_alias_tys
     pub fn peel_off_free_alias_tys(self, mut ty: Ty<'tcx>) -> Ty<'tcx> {
-        let ty::Alias(ty::Free, _) = ty.kind() else { return ty };
+        let ty::Alias(ty::AliasTy { kind: ty::Free { .. }, .. }) = ty.kind() else { return ty };
 
         let limit = self.recursion_limit();
         let mut depth = 0;
 
-        while let ty::Alias(ty::Free, alias) = ty.kind() {
+        while let &ty::Alias(ty::AliasTy { kind: ty::Free { def_id }, args, .. }) = ty.kind() {
             if !limit.value_within_limit(depth) {
                 let guar = self.dcx().delayed_bug("overflow expanding free alias type");
                 return Ty::new_error(self, guar);
             }
 
-            ty = self.type_of(alias.def_id).instantiate(self, alias.args);
+            ty = self.type_of(def_id).instantiate(self, args);
             depth += 1;
         }
 
@@ -1006,7 +1013,7 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for OpaqueTypeExpander<'tcx> {
     }
 
     fn fold_ty(&mut self, t: Ty<'tcx>) -> Ty<'tcx> {
-        if let ty::Alias(ty::Opaque, ty::AliasTy { def_id, args, .. }) = *t.kind() {
+        if let ty::Alias(ty::AliasTy { kind: ty::Opaque { def_id }, args, .. }) = *t.kind() {
             self.expand_opaque_ty(def_id, args).unwrap_or(t)
         } else if t.has_opaque_types() {
             t.super_fold_with(self)
@@ -1050,7 +1057,7 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for FreeAliasTypeExpander<'tcx> {
         if !ty.has_type_flags(ty::TypeFlags::HAS_TY_FREE_ALIAS) {
             return ty;
         }
-        let ty::Alias(ty::Free, alias) = ty.kind() else {
+        let &ty::Alias(ty::AliasTy { kind: ty::Free { def_id }, args, .. }) = ty.kind() else {
             return ty.super_fold_with(self);
         };
         if !self.tcx.recursion_limit().value_within_limit(self.depth) {
@@ -1060,7 +1067,7 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for FreeAliasTypeExpander<'tcx> {
 
         self.depth += 1;
         let ty = ensure_sufficient_stack(|| {
-            self.tcx.type_of(alias.def_id).instantiate(self.tcx, alias.args).fold_with(self)
+            self.tcx.type_of(def_id).instantiate(self.tcx, args).fold_with(self)
         });
         self.depth -= 1;
         ty
@@ -1194,14 +1201,23 @@ impl<'tcx> Ty<'tcx> {
         }
     }
 
+    /// Checks whether values of this type `T` implement the `UnsafeUnpin` trait.
+    pub fn is_unsafe_unpin(self, tcx: TyCtxt<'tcx>, typing_env: ty::TypingEnv<'tcx>) -> bool {
+        self.is_trivially_unpin() || tcx.is_unsafe_unpin_raw(typing_env.as_query_input(self))
+    }
+
     /// Checks whether values of this type `T` implement the `Unpin` trait.
+    ///
+    /// Note that this is a safe trait, so it cannot be very semantically meaningful.
+    /// However, as a hack to mitigate <https://github.com/rust-lang/rust/issues/63818> until a
+    /// proper solution is implemented, we do give special semantics to the `Unpin` trait.
     pub fn is_unpin(self, tcx: TyCtxt<'tcx>, typing_env: ty::TypingEnv<'tcx>) -> bool {
         self.is_trivially_unpin() || tcx.is_unpin_raw(typing_env.as_query_input(self))
     }
 
-    /// Fast path helper for testing if a type is `Unpin`.
+    /// Fast path helper for testing if a type is `Unpin` *and* `UnsafeUnpin`.
     ///
-    /// Returning true means the type is known to be `Unpin`. Returning
+    /// Returning true means the type is known to be `Unpin` and `UnsafeUnpin`. Returning
     /// `false` means nothing -- could be `Unpin`, might not be.
     fn is_trivially_unpin(self) -> bool {
         match self.kind() {
@@ -1668,14 +1684,12 @@ pub fn reveal_opaque_types_in_bounds<'tcx>(
 
 /// Determines whether an item is directly annotated with `doc(hidden)`.
 fn is_doc_hidden(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
-    let attrs = tcx.hir_attrs(tcx.local_def_id_to_hir_id(def_id));
-    attrs.iter().any(|attr| attr.is_doc_hidden())
+    find_attr!(tcx, def_id, Doc(doc) if doc.hidden.is_some())
 }
 
 /// Determines whether an item is annotated with `doc(notable_trait)`.
 pub fn is_doc_notable_trait(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
-    let attrs = tcx.get_all_attrs(def_id);
-    attrs.iter().any(|attr| matches!(attr, hir::Attribute::Parsed(AttributeKind::Doc(doc)) if doc.notable_trait.is_some()))
+    find_attr!(tcx, def_id, Doc(doc) if doc.notable_trait.is_some())
 }
 
 /// Determines whether an item is an intrinsic (which may be via Abi or via the `rustc_intrinsic` attribute).
@@ -1684,7 +1698,7 @@ pub fn is_doc_notable_trait(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
 /// the compiler to make some assumptions about its shape; if the user doesn't use a feature gate, they may
 /// cause an ICE that we otherwise may want to prevent.
 pub fn intrinsic_raw(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<ty::IntrinsicDef> {
-    if tcx.features().intrinsics() && tcx.has_attr(def_id, sym::rustc_intrinsic) {
+    if tcx.features().intrinsics() && find_attr!(tcx, def_id, RustcIntrinsic) {
         let must_be_overridden = match tcx.hir_node_by_def_id(def_id) {
             hir::Node::Item(hir::Item { kind: hir::ItemKind::Fn { has_body, .. }, .. }) => {
                 !has_body
@@ -1694,7 +1708,7 @@ pub fn intrinsic_raw(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<ty::Intrinsi
         Some(ty::IntrinsicDef {
             name: tcx.item_name(def_id),
             must_be_overridden,
-            const_stable: tcx.has_attr(def_id, sym::rustc_intrinsic_const_stable_indirect),
+            const_stable: find_attr!(tcx, def_id, RustcIntrinsicConstStableIndirect),
         })
     } else {
         None

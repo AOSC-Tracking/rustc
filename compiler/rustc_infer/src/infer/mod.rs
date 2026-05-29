@@ -447,7 +447,7 @@ pub enum RegionVariableOrigin<'tcx> {
 
     /// Region variables created when instantiating a binder with
     /// existential variables, e.g. when calling a function or method.
-    BoundRegion(Span, ty::BoundRegionKind, BoundRegionConversionTime),
+    BoundRegion(Span, ty::BoundRegionKind<'tcx>, BoundRegionConversionTime),
 
     UpvarRegion(ty::UpvarId, Span),
 
@@ -564,16 +564,16 @@ impl<'tcx> InferCtxtBuilder<'tcx> {
     where
         T: TypeFoldable<TyCtxt<'tcx>>,
     {
-        let infcx = self.build(input.typing_mode);
+        let infcx = self.build(input.typing_mode.0);
         let (value, args) = infcx.instantiate_canonical(span, &input.canonical);
         (infcx, value, args)
     }
 
     pub fn build_with_typing_env(
         mut self,
-        TypingEnv { typing_mode, param_env }: TypingEnv<'tcx>,
+        typing_env: TypingEnv<'tcx>,
     ) -> (InferCtxt<'tcx>, ty::ParamEnv<'tcx>) {
-        (self.build(typing_mode), param_env)
+        (self.build(typing_env.typing_mode()), typing_env.param_env)
     }
 
     pub fn build(&mut self, typing_mode: TypingMode<'tcx>) -> InferCtxt<'tcx> {
@@ -1022,7 +1022,7 @@ impl<'tcx> InferCtxt<'tcx> {
                     if opaque_sub_vid == ty_sub_vid {
                         return Some(ty::AliasTy::new_from_args(
                             self.tcx,
-                            key.def_id.into(),
+                            ty::Opaque { def_id: key.def_id.into() },
                             key.args,
                         ));
                     }
@@ -1074,7 +1074,7 @@ impl<'tcx> InferCtxt<'tcx> {
 
     /// If `TyVar(vid)` resolves to a type, return that type. Else, return the
     /// universe index of `TyVar(vid)`.
-    pub fn probe_ty_var(&self, vid: TyVid) -> Result<Ty<'tcx>, ty::UniverseIndex> {
+    pub fn try_resolve_ty_var(&self, vid: TyVid) -> Result<Ty<'tcx>, ty::UniverseIndex> {
         use self::type_variable::TypeVariableValue;
 
         match self.inner.borrow_mut().type_variables().probe(vid) {
@@ -1228,7 +1228,10 @@ impl<'tcx> InferCtxt<'tcx> {
         value.fold_with(&mut r)
     }
 
-    pub fn probe_const_var(&self, vid: ty::ConstVid) -> Result<ty::Const<'tcx>, ty::UniverseIndex> {
+    pub fn try_resolve_const_var(
+        &self,
+        vid: ty::ConstVid,
+    ) -> Result<ty::Const<'tcx>, ty::UniverseIndex> {
         match self.inner.borrow_mut().const_unification_table().probe_value(vid) {
             ConstVariableValue::Known { value } => Ok(value),
             ConstVariableValue::Unknown { origin: _, universe } => Err(universe),
@@ -1300,13 +1303,13 @@ impl<'tcx> InferCtxt<'tcx> {
         }
 
         impl<'tcx> BoundVarReplacerDelegate<'tcx> for ToFreshVars<'tcx> {
-            fn replace_region(&mut self, br: ty::BoundRegion) -> ty::Region<'tcx> {
+            fn replace_region(&mut self, br: ty::BoundRegion<'tcx>) -> ty::Region<'tcx> {
                 self.args[br.var.index()].expect_region()
             }
-            fn replace_ty(&mut self, bt: ty::BoundTy) -> Ty<'tcx> {
+            fn replace_ty(&mut self, bt: ty::BoundTy<'tcx>) -> Ty<'tcx> {
                 self.args[bt.var.index()].expect_ty()
             }
-            fn replace_const(&mut self, bc: ty::BoundConst) -> ty::Const<'tcx> {
+            fn replace_const(&mut self, bc: ty::BoundConst<'tcx>) -> ty::Const<'tcx> {
                 self.args[bc.var.index()].expect_const()
             }
         }
@@ -1373,7 +1376,7 @@ impl<'tcx> InferCtxt<'tcx> {
             | ty::TypingMode::PostBorrowckAnalysis { .. }
             | ty::TypingMode::PostAnalysis) => mode,
         };
-        ty::TypingEnv { typing_mode, param_env }
+        ty::TypingEnv::new(param_env, typing_mode)
     }
 
     /// Similar to [`Self::canonicalize_query`], except that it returns

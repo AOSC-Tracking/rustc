@@ -219,15 +219,8 @@ fn query_summaries(
 ) -> CargoResult<(Vec<IndexSummary>, Option<String>)> {
     // Query without version requirement to get all index summaries.
     let dep = Dependency::parse(spec.name(), None, source_ids.original)?;
-    let results = loop {
-        // Use normalized crate name lookup for user-provided package names.
-        match registry.query_vec(&dep, QueryKind::Normalized) {
-            std::task::Poll::Ready(res) => {
-                break res?;
-            }
-            std::task::Poll::Pending => registry.block_until_ready()?,
-        }
-    };
+    // Use normalized crate name lookup for user-provided package names.
+    let results = crate::util::block_on(registry.query_vec(&dep, QueryKind::Normalized))?;
 
     let normalized_name = results.first().map(|s| s.package_id().name().to_string());
 
@@ -252,9 +245,7 @@ fn try_get_msrv_from_nearest_manifest_or_ws(
     ws: Option<&Workspace<'_>>,
 ) -> Option<PartialVersion> {
     // Try to get the MSRV from the nearest manifest.
-    let rust_version = nearest_package.and_then(|p| p.rust_version().map(|v| v.as_partial()));
+    let rust_version = nearest_package.and_then(|p| p.rust_version().map(|v| v.to_partial()));
     // If the nearest manifest does not have a specific Rust version, try to get it from the workspace.
-    rust_version
-        .or_else(|| ws.and_then(|ws| ws.lowest_rust_version().map(|v| v.as_partial())))
-        .cloned()
+    rust_version.or_else(|| ws.and_then(|ws| ws.lowest_rust_version().map(|v| v.to_partial())))
 }

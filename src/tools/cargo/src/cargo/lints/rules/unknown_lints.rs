@@ -1,9 +1,9 @@
-use annotate_snippets::AnnotationKind;
-use annotate_snippets::Group;
-use annotate_snippets::Level;
-use annotate_snippets::Origin;
-use annotate_snippets::Snippet;
 use cargo_util_schemas::manifest::TomlToolLints;
+use cargo_util_terminal::report::AnnotationKind;
+use cargo_util_terminal::report::Group;
+use cargo_util_terminal::report::Level;
+use cargo_util_terminal::report::Origin;
+use cargo_util_terminal::report::Snippet;
 
 use crate::CargoResult;
 use crate::GlobalContext;
@@ -15,11 +15,11 @@ use crate::lints::ManifestFor;
 use crate::lints::SUSPICIOUS;
 use crate::lints::get_key_value_span;
 
-pub const LINT: Lint = Lint {
+pub static LINT: &Lint = &Lint {
     name: "unknown_lints",
     desc: "unknown lint",
     primary_group: &SUSPICIOUS,
-    edition_lint_opts: None,
+    msrv: Some(super::CARGO_LINTS_MSRV),
     feature_gate: None,
     docs: Some(
         r#"
@@ -74,7 +74,7 @@ pub fn output_unknown_lints(
 
         let key_path = match manifest {
             ManifestFor::Package(_) => &["lints", "cargo", lint_name][..],
-            ManifestFor::Workspace(_) => &["workspace", "lints", "cargo", lint_name][..],
+            ManifestFor::Workspace { .. } => &["workspace", "lints", "cargo", lint_name][..],
         };
 
         let mut report = Vec::new();

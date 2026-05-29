@@ -7,7 +7,7 @@ use rustc_type_ir::fast_reject::DeepRejectCtxt;
 use rustc_type_ir::inherent::*;
 use rustc_type_ir::lang_items::{SolverAdtLangItem, SolverLangItem, SolverTraitLangItem};
 use rustc_type_ir::solve::SizedTraitKind;
-use rustc_type_ir::{self as ty, Interner, NormalizesTo, PredicateKind, Upcast as _};
+use rustc_type_ir::{self as ty, FieldInfo, Interner, NormalizesTo, PredicateKind, Upcast as _};
 use tracing::instrument;
 
 use crate::delegate::SolverDelegate;
@@ -653,7 +653,7 @@ where
                     .instantiate(cx, &[I::GenericArg::from(goal.predicate.self_ty())])
             }
 
-            ty::Alias(_, _) | ty::Param(_) | ty::Placeholder(..) => {
+            ty::Alias(_) | ty::Param(_) | ty::Placeholder(..) => {
                 // This is the "fallback impl" for type parameters, unnormalizable projections
                 // and opaque types: If the `self_ty` is `Sized`, then the metadata is `()`.
                 // FIXME(ptr_metadata): This impl overlaps with the other impls and shouldn't
@@ -910,7 +910,7 @@ where
             // Given an alias, parameter, or placeholder we add an impl candidate normalizing to a rigid
             // alias. In case there's a where-bound further constraining this alias it is preferred over
             // this impl candidate anyways. It's still a bit scuffed.
-            ty::Alias(_, _) | ty::Param(_) | ty::Placeholder(..) => {
+            ty::Alias(_) | ty::Param(_) | ty::Placeholder(..) => {
                 return ecx.probe_builtin_trait_candidate(BuiltinImplSource::Misc).enter(|ecx| {
                     ecx.structurally_instantiate_normalizes_to_term(goal, goal.predicate.alias);
                     ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
@@ -949,6 +949,29 @@ where
         goal: Goal<I, Self>,
     ) -> Result<Candidate<I>, NoSolution> {
         unreachable!("`BikeshedGuaranteedNoDrop` does not have an associated type: {:?}", goal)
+    }
+
+    fn consider_builtin_field_candidate(
+        ecx: &mut EvalCtxt<'_, D>,
+        goal: Goal<I, Self>,
+    ) -> Result<Candidate<I>, NoSolution> {
+        let self_ty = goal.predicate.self_ty();
+        let ty::Adt(def, args) = self_ty.kind() else {
+            return Err(NoSolution);
+        };
+        let Some(FieldInfo { base, ty, .. }) = def.field_representing_type_info(ecx.cx(), args)
+        else {
+            return Err(NoSolution);
+        };
+        let ty = match ecx.cx().as_lang_item(goal.predicate.def_id()) {
+            Some(SolverLangItem::FieldBase) => base,
+            Some(SolverLangItem::FieldType) => ty,
+            _ => panic!("unexpected associated type {:?} in `Field`", goal.predicate),
+        };
+        ecx.probe_builtin_trait_candidate(BuiltinImplSource::Misc).enter(|ecx| {
+            ecx.instantiate_normalizes_to_term(goal, ty.into());
+            ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+        })
     }
 }
 

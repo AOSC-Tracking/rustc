@@ -818,7 +818,7 @@ impl From<u8> for ExitCode {
 
 impl From<u32> for ExitCode {
     fn from(code: u32) -> Self {
-        ExitCode(u32::from(code))
+        ExitCode(code)
     }
 }
 
@@ -975,4 +975,8 @@ impl<'a> fmt::Debug for CommandArgs<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self.iter.clone()).finish()
     }
+}
+
+pub fn getpid() -> u32 {
+    unsafe { c::GetCurrentProcessId() }
 }

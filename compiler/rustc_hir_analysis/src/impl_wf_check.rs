@@ -8,7 +8,7 @@
 //! specialization errors. These things can (and probably should) be
 //! fixed, but for the moment it's easier to do these checks early.
 
-use std::assert_matches::debug_assert_matches;
+use std::debug_assert_matches;
 
 use min_specialization::check_min_specialization;
 use rustc_data_structures::fx::FxHashSet;
@@ -64,7 +64,7 @@ pub(crate) fn check_impl_wf(
     // Check that the args are constrained. We queryfied the check for ty/const params
     // since unconstrained type/const params cause ICEs in projection, so we want to
     // detect those specifically and project those to `TyKind::Error`.
-    let mut res = tcx.ensure_ok().enforce_impl_non_lifetime_params_are_constrained(impl_def_id);
+    let mut res = tcx.ensure_result().enforce_impl_non_lifetime_params_are_constrained(impl_def_id);
     res = res.and(enforce_impl_lifetime_params_are_constrained(tcx, impl_def_id, of_trait));
 
     if of_trait && tcx.features().min_specialization() {
@@ -102,7 +102,7 @@ pub(crate) fn enforce_impl_lifetime_params_are_constrained(
     let lifetimes_in_associated_types: FxHashSet<_> = tcx
         .associated_item_def_ids(impl_def_id)
         .iter()
-        .flat_map(|def_id| {
+        .flat_map(|&def_id| {
             let item = tcx.associated_item(def_id);
             match item.kind {
                 ty::AssocKind::Type { .. } => {

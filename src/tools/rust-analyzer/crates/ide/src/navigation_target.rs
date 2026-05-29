@@ -11,7 +11,7 @@ use hir::{
 };
 use ide_db::{
     FileId, FileRange, RootDatabase, SymbolKind,
-    base_db::{CrateOrigin, LangCrateOrigin, RootQueryDb},
+    base_db::{CrateOrigin, LangCrateOrigin, all_crates},
     defs::{Definition, find_std_module},
     documentation::{Documentation, HasDocs},
     famous_defs::FamousDefs,
@@ -19,7 +19,7 @@ use ide_db::{
 };
 use stdx::never;
 use syntax::{
-    AstNode, SyntaxNode, TextRange,
+    AstNode, AstPtr, SyntaxNode, TextRange,
     ast::{self, HasName},
 };
 
@@ -253,7 +253,7 @@ impl<'db> TryToNav for FileSymbol<'db> {
                 db,
                 self.loc.hir_file_id,
                 self.loc.ptr.text_range(),
-                Some(self.loc.name_ptr.text_range()),
+                self.loc.name_ptr.map(AstPtr::text_range),
             )
             .map(|(FileRange { file_id, range: full_range }, focus_range)| {
                 NavigationTarget {
@@ -264,7 +264,7 @@ impl<'db> TryToNav for FileSymbol<'db> {
                         .flatten()
                         .map_or_else(|| self.name.clone(), |it| it.symbol().clone()),
                     alias: self.is_alias.then(|| self.name.clone()),
-                    kind: Some(self.def.into()),
+                    kind: Some(SymbolKind::from_module_def(db, self.def)),
                     full_range,
                     focus_range,
                     container_name: self.container_name.clone(),
@@ -276,7 +276,7 @@ impl<'db> TryToNav for FileSymbol<'db> {
                             Some(it.display(db, display_target).to_string())
                         }
                         hir::ModuleDef::Adt(it) => Some(it.display(db, display_target).to_string()),
-                        hir::ModuleDef::Variant(it) => {
+                        hir::ModuleDef::EnumVariant(it) => {
                             Some(it.display(db, display_target).to_string())
                         }
                         hir::ModuleDef::Const(it) => {
@@ -319,7 +319,7 @@ impl TryToNav for Definition {
             Definition::GenericParam(it) => it.try_to_nav(sema),
             Definition::Function(it) => it.try_to_nav(sema),
             Definition::Adt(it) => it.try_to_nav(sema),
-            Definition::Variant(it) => it.try_to_nav(sema),
+            Definition::EnumVariant(it) => it.try_to_nav(sema),
             Definition::Const(it) => it.try_to_nav(sema),
             Definition::Static(it) => it.try_to_nav(sema),
             Definition::Trait(it) => it.try_to_nav(sema),
@@ -347,7 +347,7 @@ impl TryToNav for hir::ModuleDef {
             hir::ModuleDef::Module(it) => Some(it.to_nav(sema.db)),
             hir::ModuleDef::Function(it) => it.try_to_nav(sema),
             hir::ModuleDef::Adt(it) => it.try_to_nav(sema),
-            hir::ModuleDef::Variant(it) => it.try_to_nav(sema),
+            hir::ModuleDef::EnumVariant(it) => it.try_to_nav(sema),
             hir::ModuleDef::Const(it) => it.try_to_nav(sema),
             hir::ModuleDef::Static(it) => it.try_to_nav(sema),
             hir::ModuleDef::Trait(it) => it.try_to_nav(sema),
@@ -406,7 +406,7 @@ impl ToNavFromAst for hir::Enum {
         container_name(db, self)
     }
 }
-impl ToNavFromAst for hir::Variant {
+impl ToNavFromAst for hir::EnumVariant {
     const KIND: SymbolKind = SymbolKind::Variant;
 }
 impl ToNavFromAst for hir::Union {
@@ -480,16 +480,11 @@ impl ToNav for hir::Module {
             ModuleSource::Module(node) => (node.syntax(), node.name()),
             ModuleSource::BlockExpr(node) => (node.syntax(), None),
         };
+        let kind = if self.is_crate_root(db) { SymbolKind::CrateRoot } else { SymbolKind::Module };
 
         orig_range_with_focus(db, file_id, syntax, focus).map(
             |(FileRange { file_id, range: full_range }, focus_range)| {
-                NavigationTarget::from_syntax(
-                    file_id,
-                    name.clone(),
-                    focus_range,
-                    full_range,
-                    SymbolKind::Module,
-                )
+                NavigationTarget::from_syntax(file_id, name.clone(), focus_range, full_range, kind)
             },
         )
     }
@@ -549,7 +544,7 @@ impl TryToNav for hir::ExternCrateDecl {
                     self.alias_or_name(db).unwrap_or_else(|| self.name(db)).symbol().clone(),
                     focus_range,
                     full_range,
-                    SymbolKind::Module,
+                    SymbolKind::CrateRoot,
                 );
 
                 res.docs = self.docs(db).map(Documentation::into_owned);
@@ -866,8 +861,7 @@ impl TryToNav for hir::BuiltinType {
         sema: &Semantics<'_, RootDatabase>,
     ) -> Option<UpmappingResult<NavigationTarget>> {
         let db = sema.db;
-        let krate = db
-            .all_crates()
+        let krate = all_crates(db)
             .iter()
             .copied()
             .find(|&krate| matches!(krate.data(db).origin, CrateOrigin::Lang(LangCrateOrigin::Std)))

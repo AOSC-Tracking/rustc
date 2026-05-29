@@ -32,7 +32,7 @@ use rustc_span::edition::Edition;
 use rustc_span::{FileName, RemapPathScopeComponents, Span};
 use rustc_target::spec::{Target, TargetTuple};
 use tempfile::{Builder as TempFileBuilder, TempDir};
-use tracing::debug;
+use tracing::{debug, info};
 
 use self::rust::HirCollector;
 use crate::config::{MergeDoctests, Options as RustdocOptions, OutputFormat};
@@ -188,15 +188,13 @@ pub(crate) fn run(dcx: DiagCtxtHandle<'_>, input: Input, options: RustdocOptions
         output_file: None,
         output_dir: None,
         file_loader: None,
-        locale_resources: rustc_driver::DEFAULT_LOCALE_RESOURCES.to_vec(),
         lint_caps,
         psess_created: None,
-        hash_untracked_state: None,
+        track_state: None,
         register_lints: Some(Box::new(crate::lint::register_lints)),
         override_queries: None,
         extra_symbols: Vec::new(),
         make_codegen_backend: None,
-        registry: rustc_driver::diagnostics_registry(),
         ice_file: None,
         using_internal_features: &rustc_driver::USING_INTERNAL_FEATURES,
     };
@@ -694,7 +692,7 @@ fn run_test(
         compiler.stderr(Stdio::piped());
     }
 
-    debug!("compiler invocation for doctest: {compiler:?}");
+    info!("compiler invocation for doctest: {compiler:?}");
 
     let mut child = match compiler.spawn() {
         Ok(child) => child,
@@ -761,7 +759,7 @@ fn run_test(
             runner_compiler.stderr(Stdio::inherit());
         }
         runner_compiler.arg("--error-format=short");
-        debug!("compiler invocation for doctest runner: {runner_compiler:?}");
+        info!("compiler invocation for doctest runner: {runner_compiler:?}");
 
         let status = if !status.success() {
             status
@@ -861,6 +859,8 @@ fn run_test(
         cmd.current_dir(run_directory);
     }
 
+    info!("running doctest executable: {cmd:?}");
+
     let result = if doctest.is_multiple_tests() || rustdoc_options.no_capture {
         cmd.status().map(|status| process::Output {
             status,
@@ -957,8 +957,10 @@ impl ScrapedDocTest {
         if !item_path.is_empty() {
             item_path.push(' ');
         }
-        let name =
-            format!("{} - {item_path}(line {line})", filename.prefer_remapped_unconditionally());
+        let name = format!(
+            "{} - {item_path}(line {line})",
+            filename.display(RemapPathScopeComponents::DOCUMENTATION)
+        );
 
         Self { filename, line, langstr, text, name, span, global_crate_attrs }
     }
@@ -969,9 +971,12 @@ impl ScrapedDocTest {
     fn no_run(&self, opts: &RustdocOptions) -> bool {
         self.langstr.no_run || opts.no_run
     }
+
     fn path(&self) -> PathBuf {
         match &self.filename {
-            FileName::Real(name) => name.path(RemapPathScopeComponents::DIAGNOSTICS).to_path_buf(),
+            FileName::Real(name) => {
+                name.path(RemapPathScopeComponents::DOCUMENTATION).to_path_buf()
+            }
             _ => PathBuf::from(r"doctest.rs"),
         }
     }
@@ -1016,9 +1021,12 @@ impl CreateRunnableDocTests {
 
     fn add_test(&mut self, scraped_test: ScrapedDocTest, dcx: Option<DiagCtxtHandle<'_>>) {
         // For example `module/file.rs` would become `module_file_rs`
+        //
+        // Note that we are kind-of extending the definition of the MACRO scope here, but
+        // after all `#[doc]` is kind-of a macro.
         let file = scraped_test
             .filename
-            .prefer_local_unconditionally()
+            .display(RemapPathScopeComponents::MACRO)
             .to_string_lossy()
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })

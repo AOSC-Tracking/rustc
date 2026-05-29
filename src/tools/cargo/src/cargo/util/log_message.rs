@@ -16,11 +16,13 @@ use crate::core::compiler::fingerprint::DirtyReason;
 /// A log message.
 ///
 /// Each variant represents a different type of event.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "reason", rename_all = "kebab-case")]
 pub enum LogMessage {
     /// Emitted when a build starts.
     BuildStarted {
+        /// The command-line arguments Cargo was invoked with.
+        command: Vec<String>,
         /// Current working directory.
         cwd: PathBuf,
         /// Host triple.
@@ -153,7 +155,7 @@ pub enum LogMessage {
 }
 
 /// Cargo target information.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Target {
     /// Target name.
     pub name: String,
@@ -162,7 +164,7 @@ pub struct Target {
 }
 
 /// Status of the rebuild detection fingerprint.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub enum FingerprintStatus {
     /// There is no previous fingerprints for this unit.

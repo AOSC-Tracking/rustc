@@ -14,7 +14,7 @@ use crate::inherent::*;
 use crate::lift::Lift;
 use crate::upcast::{Upcast, UpcastFrom};
 use crate::visit::TypeVisitableExt as _;
-use crate::{self as ty, Interner};
+use crate::{self as ty, AliasTyKind, Interner};
 
 /// `A: 'region`
 #[derive_where(Clone, Hash, PartialEq, Debug; I: Interner, A)]
@@ -42,7 +42,9 @@ where
     }
 }
 
-/// A complete reference to a trait. These take numerous guises in syntax,
+/// A complete reference to a trait.
+///
+/// These take numerous guises in syntax,
 /// but perhaps the most recognizable form is in a where-clause:
 /// ```ignore (illustrative)
 /// T: Foo<U>
@@ -241,7 +243,9 @@ impl ImplPolarity {
     }
 }
 
-/// Polarity for a trait predicate. May either be negative or positive.
+/// Polarity for a trait predicate.
+///
+/// May either be negative or positive.
 /// Distinguished from [`ImplPolarity`] since we never compute goals with
 /// "reservation" level.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -327,6 +331,7 @@ impl<I: Interner> ty::Binder<I, ExistentialPredicate<I>> {
 }
 
 /// An existential reference to a trait, where `Self` is erased.
+///
 /// For example, the trait object `Trait<'a, 'b, X, Y>` is:
 /// ```ignore (illustrative)
 /// exists T. T: Trait<'a, 'b, X, Y>
@@ -415,6 +420,7 @@ pub struct ExistentialProjection<I: Interner> {
 
     /// This field exists to prevent the creation of `ExistentialProjection`
     /// without using [`ExistentialProjection::new_from_args`].
+    #[derive_where(skip(Debug))]
     use_existential_projection_new_instead: (),
 }
 
@@ -442,6 +448,7 @@ impl<I: Interner> ExistentialProjection<I> {
     }
 
     /// Extracts the underlying existential trait reference from this projection.
+    ///
     /// For example, if this is a projection of `exists T. <T as Iterator>::Item == X`,
     /// then this function would return an `exists T. T: Iterator` existential trait
     /// reference.
@@ -493,14 +500,17 @@ impl<I: Interner> ty::Binder<I, ExistentialProjection<I>> {
 #[cfg_attr(feature = "nightly", derive(Encodable, Decodable, HashStable_NoContext))]
 pub enum AliasTermKind {
     /// A projection `<Type as Trait>::AssocType`.
+    ///
     /// Can get normalized away if monomorphic enough.
     ProjectionTy,
     /// An associated type in an inherent `impl`
     InherentTy,
     /// An opaque type (usually from `impl Trait` in type aliases or function return types)
+    ///
     /// Can only be normalized away in PostAnalysis mode or its defining scope.
     OpaqueTy,
     /// A free type alias that actually checks its trait bounds.
+    ///
     /// Currently only used if the type alias references opaque types.
     /// Can always be normalized away.
     FreeTy,
@@ -544,13 +554,13 @@ impl AliasTermKind {
     }
 }
 
-impl From<ty::AliasTyKind> for AliasTermKind {
-    fn from(value: ty::AliasTyKind) -> Self {
+impl<I: Interner> From<ty::AliasTyKind<I>> for AliasTermKind {
+    fn from(value: ty::AliasTyKind<I>) -> Self {
         match value {
-            ty::Projection => AliasTermKind::ProjectionTy,
-            ty::Opaque => AliasTermKind::OpaqueTy,
-            ty::Free => AliasTermKind::FreeTy,
-            ty::Inherent => AliasTermKind::InherentTy,
+            ty::Projection { .. } => AliasTermKind::ProjectionTy,
+            ty::Opaque { .. } => AliasTermKind::OpaqueTy,
+            ty::Free { .. } => AliasTermKind::FreeTy,
+            ty::Inherent { .. } => AliasTermKind::InherentTy,
         }
     }
 }
@@ -614,19 +624,19 @@ impl<I: Interner> AliasTerm<I> {
     }
 
     pub fn expect_ty(self, interner: I) -> ty::AliasTy<I> {
-        match self.kind(interner) {
-            AliasTermKind::ProjectionTy
-            | AliasTermKind::InherentTy
-            | AliasTermKind::OpaqueTy
-            | AliasTermKind::FreeTy => {}
+        let kind = match self.kind(interner) {
+            AliasTermKind::ProjectionTy => AliasTyKind::Projection { def_id: self.def_id },
+            AliasTermKind::InherentTy => AliasTyKind::Inherent { def_id: self.def_id },
+            AliasTermKind::OpaqueTy => AliasTyKind::Opaque { def_id: self.def_id },
+            AliasTermKind::FreeTy => AliasTyKind::Free { def_id: self.def_id },
             AliasTermKind::InherentConst
             | AliasTermKind::FreeConst
             | AliasTermKind::UnevaluatedConst
             | AliasTermKind::ProjectionConst => {
                 panic!("Cannot turn `UnevaluatedConst` into `AliasTy`")
             }
-        }
-        ty::AliasTy { def_id: self.def_id, args: self.args, _use_alias_ty_new_instead: () }
+        };
+        ty::AliasTy { kind, args: self.args, _use_alias_ty_new_instead: () }
     }
 
     pub fn kind(self, interner: I) -> AliasTermKind {
@@ -634,40 +644,26 @@ impl<I: Interner> AliasTerm<I> {
     }
 
     pub fn to_term(self, interner: I) -> I::Term {
-        match self.kind(interner) {
-            AliasTermKind::ProjectionTy => Ty::new_alias(
-                interner,
-                ty::AliasTyKind::Projection,
-                ty::AliasTy { def_id: self.def_id, args: self.args, _use_alias_ty_new_instead: () },
-            )
-            .into(),
-            AliasTermKind::InherentTy => Ty::new_alias(
-                interner,
-                ty::AliasTyKind::Inherent,
-                ty::AliasTy { def_id: self.def_id, args: self.args, _use_alias_ty_new_instead: () },
-            )
-            .into(),
-            AliasTermKind::OpaqueTy => Ty::new_alias(
-                interner,
-                ty::AliasTyKind::Opaque,
-                ty::AliasTy { def_id: self.def_id, args: self.args, _use_alias_ty_new_instead: () },
-            )
-            .into(),
-            AliasTermKind::FreeTy => Ty::new_alias(
-                interner,
-                ty::AliasTyKind::Free,
-                ty::AliasTy { def_id: self.def_id, args: self.args, _use_alias_ty_new_instead: () },
-            )
-            .into(),
+        let alias_ty_kind = match self.kind(interner) {
             AliasTermKind::FreeConst
             | AliasTermKind::InherentConst
             | AliasTermKind::UnevaluatedConst
-            | AliasTermKind::ProjectionConst => I::Const::new_unevaluated(
-                interner,
-                ty::UnevaluatedConst::new(self.def_id.try_into().unwrap(), self.args),
-            )
-            .into(),
-        }
+            | AliasTermKind::ProjectionConst => {
+                return I::Const::new_unevaluated(
+                    interner,
+                    ty::UnevaluatedConst::new(self.def_id.try_into().unwrap(), self.args),
+                )
+                .into();
+            }
+
+            AliasTermKind::ProjectionTy => ty::Projection { def_id: self.def_id },
+            AliasTermKind::InherentTy => ty::Inherent { def_id: self.def_id },
+            AliasTermKind::OpaqueTy => ty::Opaque { def_id: self.def_id },
+            AliasTermKind::FreeTy => ty::Free { def_id: self.def_id },
+        };
+
+        Ty::new_alias(interner, ty::AliasTy::new_from_args(interner, alias_ty_kind, self.args))
+            .into()
     }
 }
 
@@ -750,7 +746,7 @@ impl<I: Interner> AliasTerm<I> {
 
 impl<I: Interner> From<ty::AliasTy<I>> for AliasTerm<I> {
     fn from(ty: ty::AliasTy<I>) -> Self {
-        AliasTerm { args: ty.args, def_id: ty.def_id, _use_alias_term_new_instead: () }
+        AliasTerm { args: ty.args, def_id: ty.kind.def_id(), _use_alias_term_new_instead: () }
     }
 }
 

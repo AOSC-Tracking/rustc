@@ -3,7 +3,7 @@
 use std::fmt;
 
 use base_db::Crate;
-use hir_def::{AdtId, DefWithBodyId, GenericParamId};
+use hir_def::{AdtId, ExpressionStoreOwnerId, GenericParamId};
 use hir_expand::name::Name;
 use intern::sym;
 use rustc_hash::FxHashSet;
@@ -147,7 +147,7 @@ impl<'db> InferenceTable<'db> {
         db: &'db dyn HirDatabase,
         trait_env: ParamEnv<'db>,
         krate: Crate,
-        owner: Option<DefWithBodyId>,
+        owner: Option<ExpressionStoreOwnerId>,
     ) -> Self {
         let interner = DbInterner::new_with(db, krate);
         let typing_mode = match owner {
@@ -259,16 +259,6 @@ impl<'db> InferenceTable<'db> {
         // result in new knowledge about variables
         self.select_obligations_where_possible();
         self.infer_ctxt.canonicalize_response(t)
-    }
-
-    // FIXME: We should get rid of this method. We cannot deeply normalize during inference, only when finishing.
-    // Inference should use shallow normalization (`try_structurally_resolve_type()`) only, when needed.
-    pub(crate) fn normalize_associated_types_in<T>(&mut self, ty: T) -> T
-    where
-        T: TypeFoldable<DbInterner<'db>> + Clone,
-    {
-        let ty = self.resolve_vars_with_obligations(ty);
-        self.at(&ObligationCause::new()).deeply_normalize(ty.clone()).unwrap_or(ty)
     }
 
     pub(crate) fn normalize_alias_ty(&mut self, alias: Ty<'db>) -> Ty<'db> {

@@ -7,7 +7,6 @@ use rustc_abi::VariantIdx;
 use rustc_ast::ast::Mutability;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir as hir;
-use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::{CtorKind, CtorOf, DefKind, Res};
 use rustc_hir::def_id::DefId;
 use rustc_hir::{Expr, FnDecl, LangItem, find_attr};
@@ -17,7 +16,7 @@ use rustc_lint::LateContext;
 use rustc_middle::mir::ConstValue;
 use rustc_middle::mir::interpret::Scalar;
 use rustc_middle::traits::EvaluationResult;
-use rustc_middle::ty::adjustment::{Adjust, Adjustment};
+use rustc_middle::ty::adjustment::{Adjust, Adjustment, DerefAdjustKind};
 use rustc_middle::ty::layout::ValidityRequirement;
 use rustc_middle::ty::{
     self, AdtDef, AliasTy, AssocItem, AssocTag, Binder, BoundRegion, BoundVarIndexKind, FnSig, GenericArg,
@@ -25,16 +24,16 @@ use rustc_middle::ty::{
     TypeVisitableExt, TypeVisitor, UintTy, Upcast, VariantDef, VariantDiscr,
 };
 use rustc_span::symbol::Ident;
-use rustc_span::{DUMMY_SP, Span, Symbol, sym};
+use rustc_span::{DUMMY_SP, Span, Symbol};
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt as _;
 use rustc_trait_selection::traits::query::normalize::QueryNormalizeExt;
 use rustc_trait_selection::traits::{Obligation, ObligationCause};
-use std::assert_matches::debug_assert_matches;
 use std::collections::hash_map::Entry;
-use std::{iter, mem};
+use std::{debug_assert_matches, iter, mem};
 
 use crate::paths::{PathNS, lookup_path_str};
 use crate::res::{MaybeDef, MaybeQPath};
+use crate::sym;
 
 mod type_certainty;
 pub use type_certainty::expr_type_is_certain;
@@ -102,7 +101,11 @@ pub fn contains_ty_adt_constructor_opaque<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'
                     return true;
                 }
 
-                if let ty::Alias(ty::Opaque, AliasTy { def_id, .. }) = *inner_ty.kind() {
+                if let ty::Alias(AliasTy {
+                    kind: ty::Opaque { def_id },
+                    ..
+                }) = *inner_ty.kind()
+                {
                     if !seen.insert(def_id) {
                         return false;
                     }
@@ -111,16 +114,15 @@ pub fn contains_ty_adt_constructor_opaque<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'
                         match predicate.kind().skip_binder() {
                             // For `impl Trait<U>`, it will register a predicate of `T: Trait<U>`, so we go through
                             // and check substitutions to find `U`.
-                            ty::ClauseKind::Trait(trait_predicate) => {
+                            ty::ClauseKind::Trait(trait_predicate)
                                 if trait_predicate
                                     .trait_ref
                                     .args
                                     .types()
                                     .skip(1) // Skip the implicit `Self` generic parameter
-                                    .any(|ty| contains_ty_adt_constructor_opaque_inner(cx, ty, needle, seen))
-                                {
-                                    return true;
-                                }
+                                    .any(|ty| contains_ty_adt_constructor_opaque_inner(cx, ty, needle, seen)) =>
+                            {
+                                return true;
                             },
                             // For `impl Trait<Assoc=U>`, it will register a predicate of `<T as Trait>::Assoc = U`,
                             // so we check the term for `U`.
@@ -305,24 +307,34 @@ pub fn has_drop<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
     }
 }
 
-// Returns whether the type has #[must_use] attribute
+// Returns whether the `ty` has `#[must_use]` attribute. If `ty` is a `Result`/`ControlFlow`
+// whose `Err`/`Break` payload is an uninhabited type, the `Ok`/`Continue` payload type
+// will be used instead. See <https://github.com/rust-lang/rust/pull/148214>.
 pub fn is_must_use_ty<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
     match ty.kind() {
-        ty::Adt(adt, _) => find_attr!(cx.tcx.get_all_attrs(adt.did()), AttributeKind::MustUse { .. }),
-        ty::Foreign(did) => find_attr!(cx.tcx.get_all_attrs(*did), AttributeKind::MustUse { .. }),
+        ty::Adt(adt, args) => match cx.tcx.get_diagnostic_name(adt.did()) {
+            Some(sym::Result) if args.type_at(1).is_privately_uninhabited(cx.tcx, cx.typing_env()) => {
+                is_must_use_ty(cx, args.type_at(0))
+            },
+            Some(sym::ControlFlow) if args.type_at(0).is_privately_uninhabited(cx.tcx, cx.typing_env()) => {
+                is_must_use_ty(cx, args.type_at(1))
+            },
+            _ => find_attr!(cx.tcx, adt.did(), MustUse { .. }),
+        },
+        ty::Foreign(did) => find_attr!(cx.tcx, *did, MustUse { .. }),
         ty::Slice(ty) | ty::Array(ty, _) | ty::RawPtr(ty, _) | ty::Ref(_, ty, _) => {
             // for the Array case we don't need to care for the len == 0 case
             // because we don't want to lint functions returning empty arrays
             is_must_use_ty(cx, *ty)
         },
         ty::Tuple(args) => args.iter().any(|ty| is_must_use_ty(cx, ty)),
-        ty::Alias(ty::Opaque, AliasTy { def_id, .. }) => {
-            for (predicate, _) in cx.tcx.explicit_item_self_bounds(def_id).skip_binder() {
+        ty::Alias(AliasTy {
+            kind: ty::Opaque { def_id },
+            ..
+        }) => {
+            for (predicate, _) in cx.tcx.explicit_item_self_bounds(*def_id).skip_binder() {
                 if let ty::ClauseKind::Trait(trait_predicate) = predicate.kind().skip_binder()
-                    && find_attr!(
-                        cx.tcx.get_all_attrs(trait_predicate.trait_ref.def_id),
-                        AttributeKind::MustUse { .. }
-                    )
+                    && find_attr!(cx.tcx, trait_predicate.trait_ref.def_id, MustUse { .. })
                 {
                     return true;
                 }
@@ -332,7 +344,7 @@ pub fn is_must_use_ty<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
         ty::Dynamic(binder, _) => {
             for predicate in *binder {
                 if let ty::ExistentialPredicate::Trait(ref trait_ref) = predicate.skip_binder()
-                    && find_attr!(cx.tcx.get_all_attrs(trait_ref.def_id), AttributeKind::MustUse { .. })
+                    && find_attr!(cx.tcx, trait_ref.def_id, MustUse { .. })
                 {
                     return true;
                 }
@@ -436,6 +448,21 @@ pub fn peel_and_count_ty_refs(mut ty: Ty<'_>) -> (Ty<'_>, usize, Option<Mutabili
         mutbl.replace(mutbl.map_or(*m, |mutbl: Mutability| mutbl.min(*m)));
     }
     (ty, count, mutbl)
+}
+
+/// Peels off `n` references on the type. Returns the underlying type and, if any references
+/// were removed, whether the pointer is ultimately mutable or not.
+pub fn peel_n_ty_refs(mut ty: Ty<'_>, n: usize) -> (Ty<'_>, Option<Mutability>) {
+    let mut mutbl = None;
+    for _ in 0..n {
+        if let ty::Ref(_, dest_ty, m) = ty.kind() {
+            ty = *dest_ty;
+            mutbl.replace(mutbl.map_or(*m, |mutbl: Mutability| mutbl.min(*m)));
+        } else {
+            break;
+        }
+    }
+    (ty, mutbl)
 }
 
 /// Checks whether `a` and `b` are same types having same `Const` generic args, but ignores
@@ -597,7 +624,11 @@ pub fn ty_sig<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> Option<ExprFnSig<'t
             Some(ExprFnSig::Closure(decl, subs.as_closure().sig()))
         },
         ty::FnDef(id, subs) => Some(ExprFnSig::Sig(cx.tcx.fn_sig(id).instantiate(cx.tcx, subs), Some(id))),
-        ty::Alias(ty::Opaque, AliasTy { def_id, args, .. }) => sig_from_bounds(
+        ty::Alias(AliasTy {
+            kind: ty::Opaque { def_id },
+            args,
+            ..
+        }) => sig_from_bounds(
             cx,
             ty,
             cx.tcx.item_self_bounds(def_id).iter_instantiated(cx.tcx, args),
@@ -621,7 +652,12 @@ pub fn ty_sig<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> Option<ExprFnSig<'t
                 _ => None,
             }
         },
-        ty::Alias(ty::Projection, proj) => match cx.tcx.try_normalize_erasing_regions(cx.typing_env(), ty) {
+        ty::Alias(
+            proj @ AliasTy {
+                kind: ty::Projection { .. },
+                ..
+            },
+        ) => match cx.tcx.try_normalize_erasing_regions(cx.typing_env(), ty) {
             Ok(normalized_ty) if normalized_ty != ty => ty_sig(cx, normalized_ty),
             _ => sig_for_projection(cx, proj).or_else(|| sig_from_bounds(cx, ty, cx.param_env.caller_bounds(), None)),
         },
@@ -679,7 +715,7 @@ fn sig_for_projection<'tcx>(cx: &LateContext<'tcx>, ty: AliasTy<'tcx>) -> Option
 
     for (pred, _) in cx
         .tcx
-        .explicit_item_bounds(ty.def_id)
+        .explicit_item_bounds(ty.kind.def_id())
         .iter_instantiated_copied(cx.tcx, ty.args)
     {
         match pred.kind().skip_binder() {
@@ -764,15 +800,15 @@ pub fn is_c_void(cx: &LateContext<'_>, ty: Ty<'_>) -> bool {
     }
 }
 
-pub fn for_each_top_level_late_bound_region<B>(
-    ty: Ty<'_>,
-    f: impl FnMut(BoundRegion) -> ControlFlow<B>,
+pub fn for_each_top_level_late_bound_region<'cx, B>(
+    ty: Ty<'cx>,
+    f: impl FnMut(BoundRegion<'cx>) -> ControlFlow<B>,
 ) -> ControlFlow<B> {
     struct V<F> {
         index: u32,
         f: F,
     }
-    impl<'tcx, B, F: FnMut(BoundRegion) -> ControlFlow<B>> TypeVisitor<TyCtxt<'tcx>> for V<F> {
+    impl<'tcx, B, F: FnMut(BoundRegion<'tcx>) -> ControlFlow<B>> TypeVisitor<TyCtxt<'tcx>> for V<F> {
         type Result = ControlFlow<B>;
         fn visit_region(&mut self, r: Region<'tcx>) -> Self::Result {
             if let RegionKind::ReBound(BoundVarIndexKind::Bound(idx), bound) = r.kind()
@@ -815,7 +851,7 @@ impl AdtVariantInfo {
                     .enumerate()
                     .map(|(i, f)| (i, approx_ty_size(cx, f.ty(cx.tcx, subst))))
                     .collect::<Vec<_>>();
-                fields_size.sort_by(|(_, a_size), (_, b_size)| a_size.cmp(b_size));
+                fields_size.sort_by_key(|(_, a_size)| *a_size);
 
                 Self {
                     ind: i,
@@ -824,7 +860,7 @@ impl AdtVariantInfo {
                 }
             })
             .collect::<Vec<_>>();
-        variants_size.sort_by(|a, b| b.size.cmp(&a.size));
+        variants_size.sort_by_key(|b| std::cmp::Reverse(b.size));
         variants_size
     }
 }
@@ -987,7 +1023,11 @@ pub fn make_projection<'tcx>(
         #[cfg(debug_assertions)]
         assert_generic_args_match(tcx, assoc_item.def_id, args);
 
-        Some(AliasTy::new_from_args(tcx, assoc_item.def_id, args))
+        Some(AliasTy::new_from_args(
+            tcx,
+            ty::AliasTyKind::new_from_def_id(tcx, assoc_item.def_id),
+            args,
+        ))
     }
     helper(
         tcx,
@@ -1026,7 +1066,9 @@ pub fn make_normalized_projection<'tcx>(
             );
             return None;
         }
-        match tcx.try_normalize_erasing_regions(typing_env, Ty::new_projection_from_args(tcx, ty.def_id, ty.args)) {
+        match tcx
+            .try_normalize_erasing_regions(typing_env, Ty::new_projection_from_args(tcx, ty.kind.def_id(), ty.args))
+        {
             Ok(ty) => Some(ty),
             Err(e) => {
                 debug_assert!(false, "failed to normalize type `{ty}`: {e:#?}");
@@ -1128,7 +1170,10 @@ impl<'tcx> InteriorMut<'tcx> {
                         .find_map(|f| self.interior_mut_ty_chain_inner(cx, f.ty(cx.tcx, args), depth))
                 }
             },
-            ty::Alias(ty::Projection, _) => match cx.tcx.try_normalize_erasing_regions(cx.typing_env(), ty) {
+            ty::Alias(AliasTy {
+                kind: ty::Projection { .. },
+                ..
+            }) => match cx.tcx.try_normalize_erasing_regions(cx.typing_env(), ty) {
                 Ok(normalized_ty) if ty != normalized_ty => self.interior_mut_ty_chain_inner(cx, normalized_ty, depth),
                 _ => None,
             },
@@ -1176,7 +1221,7 @@ pub fn make_normalized_projection_with_regions<'tcx>(
         let (infcx, param_env) = tcx.infer_ctxt().build_with_typing_env(typing_env);
         match infcx
             .at(&cause, param_env)
-            .query_normalize(Ty::new_projection_from_args(tcx, ty.def_id, ty.args))
+            .query_normalize(Ty::new_projection_from_args(tcx, ty.kind.def_id(), ty.args))
         {
             Ok(ty) => Some(ty.value),
             Err(e) => {
@@ -1226,7 +1271,7 @@ pub fn get_adt_inherent_method<'a>(cx: &'a LateContext<'_>, ty: Ty<'_>, method_n
                 .associated_items(did)
                 .filter_by_name_unhygienic(method_name)
                 .next()
-                .filter(|item| item.as_tag() == AssocTag::Fn)
+                .filter(|item| item.tag() == AssocTag::Fn)
         })
     } else {
         None
@@ -1245,6 +1290,13 @@ pub fn get_field_by_name<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, name: Symbol) ->
         ty::Tuple(args) => name.as_str().parse::<usize>().ok().and_then(|i| args.get(i).copied()),
         _ => None,
     }
+}
+
+pub fn get_field_def_id_by_name(ty: Ty<'_>, name: Symbol) -> Option<DefId> {
+    let ty::Adt(adt_def, ..) = ty.kind() else { return None };
+    adt_def
+        .all_fields()
+        .find_map(|field| if field.name == name { Some(field.did) } else { None })
 }
 
 /// Check if `ty` is an `Option` and return its argument type if it is.
@@ -1327,6 +1379,7 @@ pub fn get_field_idx_by_name(ty: Ty<'_>, name: Symbol) -> Option<usize> {
 pub fn adjust_derefs_manually_drop<'tcx>(adjustments: &'tcx [Adjustment<'tcx>], mut ty: Ty<'tcx>) -> bool {
     adjustments.iter().any(|a| {
         let ty = mem::replace(&mut ty, a.target);
-        matches!(a.kind, Adjust::Deref(Some(op)) if op.mutbl == Mutability::Mut) && is_manually_drop(ty)
+        matches!(a.kind, Adjust::Deref(DerefAdjustKind::Overloaded(op)) if op.mutbl == Mutability::Mut)
+            && is_manually_drop(ty)
     })
 }

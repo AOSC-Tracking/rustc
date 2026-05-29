@@ -8,7 +8,7 @@ use rustc_type_ir::solve::{
     AliasBoundKind, CandidatePreferenceMode, CanonicalResponse, SizedTraitKind,
 };
 use rustc_type_ir::{
-    self as ty, Interner, Movability, PredicatePolarity, TraitPredicate, TraitRef,
+    self as ty, FieldInfo, Interner, Movability, PredicatePolarity, TraitPredicate, TraitRef,
     TypeVisitableExt as _, TypingMode, Upcast as _, elaborate,
 };
 use tracing::{debug, instrument, trace};
@@ -230,9 +230,11 @@ where
         // when merging candidates anyways.
         //
         // See tests/ui/impl-trait/auto-trait-leakage/avoid-query-cycle-via-item-bound.rs.
-        if let ty::Alias(ty::Opaque, opaque_ty) = goal.predicate.self_ty().kind() {
-            debug_assert!(ecx.opaque_type_is_rigid(opaque_ty.def_id));
-            for item_bound in cx.item_self_bounds(opaque_ty.def_id).skip_binder() {
+        if let ty::Alias(ty::AliasTy { kind: ty::Opaque { def_id }, .. }) =
+            goal.predicate.self_ty().kind()
+        {
+            debug_assert!(ecx.opaque_type_is_rigid(def_id));
+            for item_bound in cx.item_self_bounds(def_id).skip_binder() {
                 if item_bound
                     .as_trait_clause()
                     .is_some_and(|b| b.def_id() == goal.predicate.def_id())
@@ -659,8 +661,14 @@ where
         }
 
         // `rustc_transmute` does not have support for type or const params
-        if goal.has_non_region_placeholders() {
+        if goal.predicate.has_non_region_placeholders() {
             return Err(NoSolution);
+        }
+
+        // Match the old solver by treating unresolved inference variables as
+        // ambiguous until `rustc_transmute` can compute their layout.
+        if goal.has_non_region_infer() {
+            return ecx.forced_ambiguity(MaybeCause::Ambiguity);
         }
 
         ecx.probe_builtin_trait_candidate(BuiltinImplSource::Misc).enter(|ecx| {
@@ -687,6 +695,9 @@ where
     ///
     /// because these impls overlap, and I'd rather not build a coherence hack for
     /// this harmless overlap.
+    ///
+    /// This trait is indirectly exposed on stable, so do *not* extend the set of types that
+    /// implement the trait without FCP!
     fn consider_builtin_bikeshed_guaranteed_no_drop_candidate(
         ecx: &mut EvalCtxt<'_, D>,
         goal: Goal<I, Self>,
@@ -840,6 +851,54 @@ where
                 _ => vec![],
             }
         })
+    }
+
+    fn consider_builtin_field_candidate(
+        ecx: &mut EvalCtxt<'_, D>,
+        goal: Goal<I, Self>,
+    ) -> Result<Candidate<I>, NoSolution> {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
+            return Err(NoSolution);
+        }
+        if let ty::Adt(def, args) = goal.predicate.self_ty().kind()
+            && let Some(FieldInfo { base, ty, .. }) =
+                def.field_representing_type_info(ecx.cx(), args)
+            && {
+                let sized_trait = ecx.cx().require_trait_lang_item(SolverTraitLangItem::Sized);
+                // FIXME: add better support for builtin impls of traits that check for the bounds
+                // on the trait definition in std.
+
+                // NOTE: these bounds have to be kept in sync with the definition of the `Field`
+                // trait in `library/core/src/field.rs` as well as the old trait solver `fn
+                // assemble_candidates_for_field_trait` in
+                // `compiler/rustc_trait_selection/src/traits/select/candidate_assembly.rs`.
+                ecx.add_goal(
+                    GoalSource::ImplWhereBound,
+                    Goal {
+                        param_env: goal.param_env,
+                        predicate: TraitRef::new(ecx.cx(), sized_trait, [base]).upcast(ecx.cx()),
+                    },
+                );
+                ecx.add_goal(
+                    GoalSource::ImplWhereBound,
+                    Goal {
+                        param_env: goal.param_env,
+                        predicate: TraitRef::new(ecx.cx(), sized_trait, [ty]).upcast(ecx.cx()),
+                    },
+                );
+                ecx.try_evaluate_added_goals()? == Certainty::Yes
+            }
+            && match base.kind() {
+                ty::Adt(def, _) => def.is_struct() && !def.is_packed(),
+                ty::Tuple(..) => true,
+                _ => false,
+            }
+        {
+            ecx.probe_builtin_trait_candidate(BuiltinImplSource::Misc)
+                .enter(|ecx| ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes))
+        } else {
+            Err(NoSolution)
+        }
     }
 }
 
@@ -1198,7 +1257,10 @@ where
             ty::Dynamic(..)
             | ty::Param(..)
             | ty::Foreign(..)
-            | ty::Alias(ty::Projection | ty::Free | ty::Inherent, ..)
+            | ty::Alias(ty::AliasTy {
+                kind: ty::Projection { .. } | ty::Free { .. } | ty::Inherent { .. },
+                ..
+            })
             | ty::Placeholder(..) => Some(Err(NoSolution)),
 
             ty::Infer(_) | ty::Bound(_, _) => panic!("unexpected type `{self_ty:?}`"),
@@ -1359,7 +1421,7 @@ where
         mut candidates: Vec<Candidate<I>>,
         failed_candidate_info: FailedCandidateInfo,
     ) -> Result<(CanonicalResponse<I>, Option<TraitGoalProvenVia>), NoSolution> {
-        if let TypingMode::Coherence = self.typing_mode() {
+        if self.typing_mode().is_coherence() {
             return if let Some((response, _)) = self.try_merge_candidates(&candidates) {
                 Ok((response, Some(TraitGoalProvenVia::Misc)))
             } else {

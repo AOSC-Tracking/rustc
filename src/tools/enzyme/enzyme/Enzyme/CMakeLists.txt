@@ -8,10 +8,8 @@ endif()
 
 get_target_property(TBL_LINKED_LIBS LLVMSupport INTERFACE_LINK_LIBRARIES)
 if (NOT TBL_LINKED_LIBS)
-message(STATUS "No TBL_LINKED_LIBS found")
 else()
-message(STATUS "TBL_LINKED_LIBS (test): ${TBL_LINKED_LIBS}")
-#list(REMOVE_ITEM TBL_LINKED_LIBS "ZLIB::ZLIB")
+list(REMOVE_ITEM TBL_LINKED_LIBS "ZLIB::ZLIB")
 set_property(TARGET LLVMSupport PROPERTY INTERFACE_LINK_LIBRARIES ${TBL_LINKED_LIBS})
 endif()
 
@@ -148,40 +146,56 @@ if (${ENZYME_EXTERNAL_SHARED_LIB})
     add_dependencies(Enzyme-${LLVM_VERSION_MAJOR} BlasTAIncGen)
     add_dependencies(Enzyme-${LLVM_VERSION_MAJOR} BlasDiffUseIncGen)
 
-    if (${LLVM_BUILD_LLVM_DYLIB})
-        target_link_libraries(Enzyme-${LLVM_VERSION_MAJOR} LLVM)
+    if (APPLE AND ENZYME_APPLE_DYNAMIC_LOOKUP)
+        target_link_options(Enzyme-${LLVM_VERSION_MAJOR} PRIVATE
+            "-Wl,-flat_namespace"
+            "-Wl,-undefined,dynamic_lookup")
     else()
-        # This would be the desired way to link against LLVM components,
-        # however this function is bugged and does not work with `all`, see:
-        # https://github.com/llvm/llvm-project/issues/46347
-        #llvm_map_components_to_libnames(llvm_libraries Passes)
-        # Therefore, manually invoke llvm-config
-        if (EXISTS "${LLVM_TOOLS_BINARY_DIR}/llvm-config")
-            message(STATUS "Using llvm-config from ${LLVM_TOOLS_BINARY_DIR}")
-        else()
-            message(SEND_ERROR "llvm-config not found in ${LLVM_TOOLS_BINARY_DIR}")
-        endif()
-        execute_process(COMMAND ${LLVM_TOOLS_BINARY_DIR}/llvm-config --libs all
-                    OUTPUT_VARIABLE llvm_libraries)
-        string(STRIP "${llvm_libraries}" llvm_libraries)
-        message(STATUS "Linking against LLVM libraries: ${llvm_libraries}")
-        # In theory, adding --libs should also add all the -l flags,
-        # but it isn't picked up correctly by clang, so we call target_link_libraries
-        execute_process(COMMAND ${LLVM_TOOLS_BINARY_DIR}/llvm-config --ldflags
-                    OUTPUT_VARIABLE llvm_ldflags)
-        string(STRIP "${llvm_ldflags}" llvm_ldflags)
-        message(STATUS "Linking against LLVM ldflags: ${llvm_ldflags}")
-        set_target_properties(Enzyme-${LLVM_VERSION_MAJOR} PROPERTIES LINK_FLAGS ${llvm_ldflags})
-        target_link_libraries(Enzyme-${LLVM_VERSION_MAJOR} ${llvm_libraries})
-        
-        llvm_map_components_to_libnames(llvm_librariess Passes Support)
-        target_link_libraries(Enzyme-${LLVM_VERSION_MAJOR} ${llvm_librariess})
+        target_link_libraries(Enzyme-${LLVM_VERSION_MAJOR} LLVM)
     endif()
+
     install(TARGETS Enzyme-${LLVM_VERSION_MAJOR}
         EXPORT EnzymeTargets
         LIBRARY DESTINATION lib COMPONENT shlib
         PUBLIC_HEADER DESTINATION "${INSTALL_INCLUDE_DIR}/Enzyme"
         COMPONENT dev)
+endif()
+
+# Reactant-focused Enzyme subset as one static lib.
+if (${ENZYME_ENABLE_REACTANT})
+  set(ENZYME_REACTANT_SUPPORT_SRC
+    PreserveNVVM.cpp
+  )
+
+  add_llvm_library(EnzymeReactantSupport-${LLVM_VERSION_MAJOR}
+    ${ENZYME_REACTANT_SUPPORT_SRC}
+    PARTIAL_SOURCES_INTENDED
+    STATIC
+  )
+
+  target_compile_definitions(EnzymeReactantSupport-${LLVM_VERSION_MAJOR}
+    PRIVATE ENZYME_ENABLE_NVVM_ATTRIBUTION=0
+  )
+
+  target_include_directories(EnzymeReactantSupport-${LLVM_VERSION_MAJOR}
+    PUBLIC
+      $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>
+      $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}>
+      $<INSTALL_INTERFACE:include>
+  )
+
+  install(TARGETS EnzymeReactantSupport-${LLVM_VERSION_MAJOR}
+    EXPORT EnzymeTargets
+    ARCHIVE DESTINATION lib COMPONENT dev
+  )
+
+  # Export internal Enzyme headers like Enzyme/Utils.h and Enzyme/PreserveNVVM.h
+  install(
+    DIRECTORY "${PROJECT_SOURCE_DIR}/Enzyme/"
+    DESTINATION include/Enzyme
+    FILES_MATCHING
+      PATTERN "*.h"
+  )
 endif()
 
 if (APPLE)

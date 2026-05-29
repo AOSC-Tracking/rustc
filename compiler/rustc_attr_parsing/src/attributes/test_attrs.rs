@@ -1,3 +1,4 @@
+use rustc_hir::attrs::RustcAbiAttrKind;
 use rustc_session::lint::builtin::ILL_FORMED_ATTRIBUTE_INPUT;
 
 use super::prelude::*;
@@ -6,7 +7,6 @@ pub(crate) struct IgnoreParser;
 
 impl<S: Stage> SingleAttributeParser<S> for IgnoreParser {
     const PATH: &[Symbol] = &[sym::ignore];
-    const ATTRIBUTE_ORDER: AttributeOrder = AttributeOrder::KeepOutermost;
     const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Warn;
     const ALLOWED_TARGETS: AllowedTargets =
         AllowedTargets::AllowListWarnRest(&[Allow(Target::Fn), Error(Target::WherePredicate)]);
@@ -22,13 +22,20 @@ impl<S: Stage> SingleAttributeParser<S> for IgnoreParser {
                 ArgParser::NoArgs => None,
                 ArgParser::NameValue(name_value) => {
                     let Some(str_value) = name_value.value_as_str() else {
-                        cx.warn_ill_formed_attribute_input(ILL_FORMED_ATTRIBUTE_INPUT);
+                        cx.adcx().warn_ill_formed_attribute_input(ILL_FORMED_ATTRIBUTE_INPUT);
                         return None;
                     };
                     Some(str_value)
                 }
-                ArgParser::List(_) => {
-                    cx.warn_ill_formed_attribute_input(ILL_FORMED_ATTRIBUTE_INPUT);
+                ArgParser::List(list) => {
+                    let help = list.single().and_then(|item| item.meta_item()).and_then(|item| {
+                        item.args().no_args().ok()?;
+                        Some(item.path().to_string())
+                    });
+                    cx.adcx().warn_ill_formed_attribute_input_with_help(
+                        ILL_FORMED_ATTRIBUTE_INPUT,
+                        help,
+                    );
                     return None;
                 }
             },
@@ -40,7 +47,6 @@ pub(crate) struct ShouldPanicParser;
 
 impl<S: Stage> SingleAttributeParser<S> for ShouldPanicParser {
     const PATH: &[Symbol] = &[sym::should_panic];
-    const ATTRIBUTE_ORDER: AttributeOrder = AttributeOrder::KeepOutermost;
     const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::WarnButFutureError;
     const ALLOWED_TARGETS: AllowedTargets =
         AllowedTargets::AllowListWarnRest(&[Allow(Target::Fn), Error(Target::WherePredicate)]);
@@ -56,7 +62,7 @@ impl<S: Stage> SingleAttributeParser<S> for ShouldPanicParser {
                 ArgParser::NoArgs => None,
                 ArgParser::NameValue(name_value) => {
                     let Some(str_value) = name_value.value_as_str() else {
-                        cx.expected_string_literal(
+                        cx.adcx().expected_string_literal(
                             name_value.value_span,
                             Some(name_value.value_as_lit()),
                         );
@@ -66,28 +72,191 @@ impl<S: Stage> SingleAttributeParser<S> for ShouldPanicParser {
                 }
                 ArgParser::List(list) => {
                     let Some(single) = list.single() else {
-                        cx.expected_single_argument(list.span);
+                        cx.adcx().expected_single_argument(list.span);
                         return None;
                     };
                     let Some(single) = single.meta_item() else {
-                        cx.expected_name_value(single.span(), Some(sym::expected));
+                        cx.adcx().expected_name_value(single.span(), Some(sym::expected));
                         return None;
                     };
                     if !single.path().word_is(sym::expected) {
-                        cx.expected_specific_argument_strings(list.span, &[sym::expected]);
+                        cx.adcx().expected_specific_argument_strings(list.span, &[sym::expected]);
                         return None;
                     }
                     let Some(nv) = single.args().name_value() else {
-                        cx.expected_name_value(single.span(), Some(sym::expected));
+                        cx.adcx().expected_name_value(single.span(), Some(sym::expected));
                         return None;
                     };
                     let Some(expected) = nv.value_as_str() else {
-                        cx.expected_string_literal(nv.value_span, Some(nv.value_as_lit()));
+                        cx.adcx().expected_string_literal(nv.value_span, Some(nv.value_as_lit()));
                         return None;
                     };
                     Some(expected)
                 }
             },
         })
+    }
+}
+
+pub(crate) struct ReexportTestHarnessMainParser;
+
+impl<S: Stage> SingleAttributeParser<S> for ReexportTestHarnessMainParser {
+    const PATH: &[Symbol] = &[sym::reexport_test_harness_main];
+    const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Error;
+    const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[Allow(Target::Crate)]);
+    const TEMPLATE: AttributeTemplate = template!(NameValueStr: "name");
+
+    fn convert(cx: &mut AcceptContext<'_, '_, S>, args: &ArgParser) -> Option<AttributeKind> {
+        let Some(nv) = args.name_value() else {
+            let inner_span = cx.inner_span;
+            cx.adcx().expected_name_value(
+                args.span().unwrap_or(inner_span),
+                Some(sym::reexport_test_harness_main),
+            );
+            return None;
+        };
+
+        let Some(name) = nv.value_as_str() else {
+            cx.adcx().expected_string_literal(nv.value_span, Some(nv.value_as_lit()));
+            return None;
+        };
+
+        Some(AttributeKind::ReexportTestHarnessMain(name))
+    }
+}
+
+pub(crate) struct RustcAbiParser;
+
+impl<S: Stage> SingleAttributeParser<S> for RustcAbiParser {
+    const PATH: &[Symbol] = &[sym::rustc_abi];
+    const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Warn;
+    const TEMPLATE: AttributeTemplate = template!(OneOf: &[sym::debug, sym::assert_eq]);
+    const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[
+        Allow(Target::TyAlias),
+        Allow(Target::Fn),
+        Allow(Target::ForeignFn),
+        Allow(Target::Method(MethodKind::Inherent)),
+        Allow(Target::Method(MethodKind::Trait { body: true })),
+        Allow(Target::Method(MethodKind::Trait { body: false })),
+        Allow(Target::Method(MethodKind::TraitImpl)),
+    ]);
+
+    fn convert(cx: &mut AcceptContext<'_, '_, S>, args: &ArgParser) -> Option<AttributeKind> {
+        let Some(args) = args.list() else {
+            let attr_span = cx.attr_span;
+            cx.adcx().expected_specific_argument_and_list(attr_span, &[sym::assert_eq, sym::debug]);
+            return None;
+        };
+
+        let Some(arg) = args.single() else {
+            let attr_span = cx.attr_span;
+            cx.adcx().expected_single_argument(attr_span);
+            return None;
+        };
+
+        let mut fail_incorrect_argument =
+            |span| cx.adcx().expected_specific_argument(span, &[sym::assert_eq, sym::debug]);
+
+        let Some(arg) = arg.meta_item() else {
+            fail_incorrect_argument(args.span);
+            return None;
+        };
+
+        let kind: RustcAbiAttrKind = match arg.path().word_sym() {
+            Some(sym::assert_eq) => RustcAbiAttrKind::AssertEq,
+            Some(sym::debug) => RustcAbiAttrKind::Debug,
+            None | Some(_) => {
+                fail_incorrect_argument(arg.span());
+                return None;
+            }
+        };
+
+        Some(AttributeKind::RustcAbi { attr_span: cx.attr_span, kind })
+    }
+}
+
+pub(crate) struct RustcDelayedBugFromInsideQueryParser;
+
+impl<S: Stage> NoArgsAttributeParser<S> for RustcDelayedBugFromInsideQueryParser {
+    const PATH: &[Symbol] = &[sym::rustc_delayed_bug_from_inside_query];
+    const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Warn;
+    const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[Allow(Target::Fn)]);
+    const CREATE: fn(Span) -> AttributeKind = |_| AttributeKind::RustcDelayedBugFromInsideQuery;
+}
+
+pub(crate) struct RustcEvaluateWhereClausesParser;
+
+impl<S: Stage> NoArgsAttributeParser<S> for RustcEvaluateWhereClausesParser {
+    const PATH: &[Symbol] = &[sym::rustc_evaluate_where_clauses];
+    const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Warn;
+    const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[
+        Allow(Target::Fn),
+        Allow(Target::Method(MethodKind::Inherent)),
+        Allow(Target::Method(MethodKind::Trait { body: true })),
+        Allow(Target::Method(MethodKind::TraitImpl)),
+        Allow(Target::Method(MethodKind::Trait { body: false })),
+    ]);
+    const CREATE: fn(Span) -> AttributeKind = |_| AttributeKind::RustcEvaluateWhereClauses;
+}
+
+pub(crate) struct TestRunnerParser;
+
+impl<S: Stage> SingleAttributeParser<S> for TestRunnerParser {
+    const PATH: &[Symbol] = &[sym::test_runner];
+    const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Error;
+    const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[Allow(Target::Crate)]);
+    const TEMPLATE: AttributeTemplate = template!(List: &["path"]);
+
+    fn convert(cx: &mut AcceptContext<'_, '_, S>, args: &ArgParser) -> Option<AttributeKind> {
+        let Some(list) = args.list() else {
+            let attr_span = cx.attr_span;
+            cx.adcx().expected_list(attr_span, args);
+            return None;
+        };
+
+        let Some(single) = list.single() else {
+            cx.adcx().expected_single_argument(list.span);
+            return None;
+        };
+
+        let Some(meta) = single.meta_item() else {
+            cx.adcx().expected_not_literal(single.span());
+            return None;
+        };
+
+        Some(AttributeKind::TestRunner(meta.path().0.clone()))
+    }
+}
+
+pub(crate) struct RustcTestMarkerParser;
+
+impl<S: Stage> SingleAttributeParser<S> for RustcTestMarkerParser {
+    const PATH: &[Symbol] = &[sym::rustc_test_marker];
+    const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Warn;
+    const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[
+        Allow(Target::Const),
+        Allow(Target::Fn),
+        Allow(Target::Static),
+    ]);
+    const TEMPLATE: AttributeTemplate = template!(NameValueStr: "test_path");
+
+    fn convert(cx: &mut AcceptContext<'_, '_, S>, args: &ArgParser) -> Option<AttributeKind> {
+        let Some(name_value) = args.name_value() else {
+            let attr_span = cx.attr_span;
+            cx.adcx().expected_name_value(attr_span, Some(sym::rustc_test_marker));
+            return None;
+        };
+
+        let Some(value_str) = name_value.value_as_str() else {
+            cx.adcx().expected_string_literal(name_value.value_span, None);
+            return None;
+        };
+
+        if value_str.as_str().trim().is_empty() {
+            cx.adcx().expected_non_empty_string_literal(name_value.value_span);
+            return None;
+        }
+
+        Some(AttributeKind::RustcTestMarker(value_str))
     }
 }

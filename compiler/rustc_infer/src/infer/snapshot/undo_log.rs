@@ -1,4 +1,4 @@
-use std::assert_matches::assert_matches;
+use std::assert_matches;
 use std::marker::PhantomData;
 
 use rustc_data_structures::undo_log::{Rollback, UndoLogs};

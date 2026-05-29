@@ -15,8 +15,8 @@ use rustc_ast_pretty::pprust;
 use rustc_errors::{Diag, PResult};
 use rustc_hir::{self as hir, AttrPath};
 use rustc_parse::exp;
-use rustc_parse::parser::{ForceCollect, Parser, PathStyle, token_descr};
-use rustc_session::errors::{create_lit_error, report_lit_error};
+use rustc_parse::parser::{ForceCollect, Parser, PathStyle, Recovery, token_descr};
+use rustc_session::errors::create_lit_error;
 use rustc_session::parse::ParseSess;
 use rustc_span::{Ident, Span, Symbol, sym};
 use thin_vec::ThinVec;
@@ -109,20 +109,35 @@ impl ArgParser {
         parts: &[Symbol],
         psess: &'sess ParseSess,
         should_emit: ShouldEmit,
+        allow_expr_metavar: AllowExprMetavar,
     ) -> Option<Self> {
         Some(match value {
             AttrArgs::Empty => Self::NoArgs,
             AttrArgs::Delimited(args) => {
-                // The arguments of rustc_dummy and diagnostic::do_not_recommend are not validated
-                // if the arguments are delimited.
-                // See https://doc.rust-lang.org/reference/attributes/diagnostics.html#r-attributes.diagnostic.namespace.unknown-invalid-syntax
-                if parts == &[sym::rustc_dummy]
-                    || parts == &[sym::diagnostic, sym::do_not_recommend]
-                {
-                    return Some(ArgParser::List(MetaItemListParser {
-                        sub_parsers: ThinVec::new(),
-                        span: args.dspan.entire(),
-                    }));
+                // Diagnostic attributes can't error if they encounter non meta item syntax.
+                // However, the current syntax for diagnostic attributes is meta item syntax.
+                // Therefore we can substitute with a dummy value on invalid syntax.
+                if matches!(parts, [sym::rustc_dummy] | [sym::diagnostic, ..]) {
+                    match MetaItemListParser::new(
+                        &args.tokens,
+                        args.dspan.entire(),
+                        psess,
+                        ShouldEmit::ErrorsAndLints { recovery: Recovery::Forbidden },
+                        allow_expr_metavar,
+                    ) {
+                        Ok(p) => return Some(ArgParser::List(p)),
+                        Err(e) => {
+                            // We can just dispose of the diagnostic and not bother with a lint,
+                            // because this will look like `#[diagnostic::attr()]` was used. This
+                            // is invalid for all diagnostic attrs, so a lint explaining the proper
+                            // form will be issued later.
+                            e.cancel();
+                            return Some(ArgParser::List(MetaItemListParser {
+                                sub_parsers: ThinVec::new(),
+                                span: args.dspan.entire(),
+                            }));
+                        }
+                    }
                 }
 
                 if args.delim != Delimiter::Parenthesis {
@@ -134,14 +149,22 @@ impl ArgParser {
                 }
 
                 Self::List(
-                    MetaItemListParser::new(&args.tokens, args.dspan.entire(), psess, should_emit)
-                        .map_err(|e| should_emit.emit_err(e))
-                        .ok()?,
+                    MetaItemListParser::new(
+                        &args.tokens,
+                        args.dspan.entire(),
+                        psess,
+                        should_emit,
+                        allow_expr_metavar,
+                    )
+                    .map_err(|e| should_emit.emit_err(e))
+                    .ok()?,
                 )
             }
             AttrArgs::Eq { eq_span, expr } => Self::NameValue(NameValueParser {
                 eq_span: *eq_span,
-                value: expr_to_lit(psess, &expr, expr.span, should_emit)?,
+                value: expr_to_lit(psess, &expr, expr.span, should_emit)
+                    .map_err(|e| should_emit.emit_err(e))
+                    .ok()??,
                 value_span: expr.span,
             }),
         })
@@ -178,7 +201,7 @@ impl ArgParser {
 
     /// Assert that there were no args.
     /// If there were, get a span to the arguments
-    /// (to pass to [`AcceptContext::expected_no_args`](crate::context::AcceptContext::expected_no_args)).
+    /// (to pass to [`AttributeDiagnosticContext::expected_no_args`](crate::context::AttributeDiagnosticContext::expected_no_args)).
     pub fn no_args(&self) -> Result<(), Span> {
         match self {
             Self::NoArgs => Ok(()),
@@ -202,8 +225,9 @@ impl MetaItemOrLitParser {
     pub fn parse_single<'sess>(
         parser: &mut Parser<'sess>,
         should_emit: ShouldEmit,
+        allow_expr_metavar: AllowExprMetavar,
     ) -> PResult<'sess, MetaItemOrLitParser> {
-        let mut this = MetaItemListParserContext { parser, should_emit };
+        let mut this = MetaItemListParserContext { parser, should_emit, allow_expr_metavar };
         this.parse_meta_item_inner()
     }
 
@@ -336,64 +360,72 @@ impl NameValueParser {
     }
 }
 
-fn expr_to_lit(
-    psess: &ParseSess,
+fn expr_to_lit<'sess>(
+    psess: &'sess ParseSess,
     expr: &Expr,
     span: Span,
     should_emit: ShouldEmit,
-) -> Option<MetaItemLit> {
+) -> PResult<'sess, Option<MetaItemLit>> {
     if let ExprKind::Lit(token_lit) = expr.kind {
         let res = MetaItemLit::from_token_lit(token_lit, expr.span);
         match res {
             Ok(lit) => {
                 if token_lit.suffix.is_some() {
-                    should_emit.emit_err(
-                        psess.dcx().create_err(SuffixedLiteralInAttribute { span: lit.span }),
-                    );
-                    None
+                    Err(psess.dcx().create_err(SuffixedLiteralInAttribute { span: lit.span }))
                 } else {
-                    if !lit.kind.is_unsuffixed() {
-                        // Emit error and continue, we can still parse the attribute as if the suffix isn't there
-                        should_emit.emit_err(
-                            psess.dcx().create_err(SuffixedLiteralInAttribute { span: lit.span }),
-                        );
+                    if lit.kind.is_unsuffixed() {
+                        Ok(Some(lit))
+                    } else {
+                        Err(psess.dcx().create_err(SuffixedLiteralInAttribute { span: lit.span }))
                     }
-
-                    Some(lit)
                 }
             }
             Err(err) => {
-                let guar = report_lit_error(psess, err, token_lit, expr.span);
-                let lit = MetaItemLit {
-                    symbol: token_lit.symbol,
-                    suffix: token_lit.suffix,
-                    kind: LitKind::Err(guar),
-                    span: expr.span,
-                };
-                Some(lit)
+                let err = create_lit_error(psess, err, token_lit, expr.span);
+                if matches!(
+                    should_emit,
+                    ShouldEmit::ErrorsAndLints { recovery: Recovery::Forbidden }
+                ) {
+                    Err(err)
+                } else {
+                    let lit = MetaItemLit {
+                        symbol: token_lit.symbol,
+                        suffix: token_lit.suffix,
+                        kind: LitKind::Err(err.emit()),
+                        span: expr.span,
+                    };
+                    Ok(Some(lit))
+                }
             }
         }
     } else {
-        if matches!(should_emit, ShouldEmit::Nothing) {
-            return None;
+        if matches!(should_emit, ShouldEmit::Nothing) || matches!(expr.kind, ExprKind::Err(_)) {
+            return Ok(None);
         }
 
         // Example cases:
         // - `#[foo = 1+1]`: results in `ast::ExprKind::BinOp`.
         // - `#[foo = include_str!("nonexistent-file.rs")]`:
-        //   results in `ast::ExprKind::Err`. In that case we delay
-        //   the error because an earlier error will have already
-        //   been reported.
+        //   results in `ast::ExprKind::Err`.
         let msg = "attribute value must be a literal";
         let err = psess.dcx().struct_span_err(span, msg);
-        should_emit.emit_err(err);
-        None
+        Err(err)
     }
+}
+
+/// Whether expansions of `expr` metavariables from decrarative macros
+/// are permitted. Used when parsing meta items; currently, only `cfg` predicates
+/// enable this option
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AllowExprMetavar {
+    No,
+    Yes,
 }
 
 struct MetaItemListParserContext<'a, 'sess> {
     parser: &'a mut Parser<'sess>,
     should_emit: ShouldEmit,
+    allow_expr_metavar: AllowExprMetavar,
 }
 
 impl<'a, 'sess> MetaItemListParserContext<'a, 'sess> {
@@ -420,28 +452,58 @@ impl<'a, 'sess> MetaItemListParserContext<'a, 'sess> {
 
         if !lit.kind.is_unsuffixed() {
             // Emit error and continue, we can still parse the attribute as if the suffix isn't there
-            self.should_emit.emit_err(
-                self.parser.dcx().create_err(SuffixedLiteralInAttribute { span: lit.span }),
-            );
+            let err = self.parser.dcx().create_err(SuffixedLiteralInAttribute { span: lit.span });
+            if matches!(
+                self.should_emit,
+                ShouldEmit::ErrorsAndLints { recovery: Recovery::Forbidden }
+            ) {
+                return Err(err);
+            } else {
+                self.should_emit.emit_err(err)
+            };
         }
 
         Ok(lit)
     }
 
-    fn parse_attr_item(&mut self) -> PResult<'sess, MetaItemParser> {
-        if let Some(MetaVarKind::Meta { has_meta_form }) = self.parser.token.is_metavar_seq() {
-            return if has_meta_form {
-                let attr_item = self
-                    .parser
-                    .eat_metavar_seq(MetaVarKind::Meta { has_meta_form: true }, |this| {
-                        MetaItemListParserContext { parser: this, should_emit: self.should_emit }
-                            .parse_attr_item()
-                    })
-                    .unwrap();
-                Ok(attr_item)
-            } else {
-                self.parser.unexpected_any()
-            };
+    fn parse_meta_item(&mut self) -> PResult<'sess, MetaItemParser> {
+        if let Some(metavar) = self.parser.token.is_metavar_seq() {
+            match (metavar, self.allow_expr_metavar) {
+                (kind @ MetaVarKind::Expr { .. }, AllowExprMetavar::Yes) => {
+                    return self
+                        .parser
+                        .eat_metavar_seq(kind, |this| {
+                            MetaItemListParserContext {
+                                parser: this,
+                                should_emit: self.should_emit,
+                                allow_expr_metavar: AllowExprMetavar::Yes,
+                            }
+                            .parse_meta_item()
+                        })
+                        .ok_or_else(|| {
+                            self.parser.unexpected_any::<core::convert::Infallible>().unwrap_err()
+                        });
+                }
+                (MetaVarKind::Meta { has_meta_form }, _) => {
+                    return if has_meta_form {
+                        let attr_item = self
+                            .parser
+                            .eat_metavar_seq(MetaVarKind::Meta { has_meta_form: true }, |this| {
+                                MetaItemListParserContext {
+                                    parser: this,
+                                    should_emit: self.should_emit,
+                                    allow_expr_metavar: self.allow_expr_metavar,
+                                }
+                                .parse_meta_item()
+                            })
+                            .unwrap();
+                        Ok(attr_item)
+                    } else {
+                        self.parser.unexpected_any()
+                    };
+                }
+                _ => {}
+            }
         }
 
         let path = self.parser.parse_path(PathStyle::Mod)?;
@@ -450,8 +512,12 @@ impl<'a, 'sess> MetaItemListParserContext<'a, 'sess> {
         let args = if self.parser.check(exp!(OpenParen)) {
             let start = self.parser.token.span;
             let (sub_parsers, _) = self.parser.parse_paren_comma_seq(|parser| {
-                MetaItemListParserContext { parser, should_emit: self.should_emit }
-                    .parse_meta_item_inner()
+                MetaItemListParserContext {
+                    parser,
+                    should_emit: self.should_emit,
+                    allow_expr_metavar: self.allow_expr_metavar,
+                }
+                .parse_meta_item_inner()
             })?;
             let end = self.parser.prev_token.span;
             ArgParser::List(MetaItemListParser { sub_parsers, span: start.with_hi(end.hi()) })
@@ -473,7 +539,7 @@ impl<'a, 'sess> MetaItemListParserContext<'a, 'sess> {
             Ok(MetaItemOrLitParser::Lit(self.unsuffixed_meta_item_from_lit(token_lit)?))
         } else {
             let prev_pros = self.parser.approx_token_stream_pos();
-            match self.parse_attr_item() {
+            match self.parse_meta_item() {
                 Ok(item) => Ok(MetaItemOrLitParser::MetaItemParser(item)),
                 Err(err) => {
                     // If `parse_attr_item` made any progress, it likely has a more precise error we should prefer
@@ -500,6 +566,13 @@ impl<'a, 'sess> MetaItemListParserContext<'a, 'sess> {
 
         if let token::OpenInvisible(_) = self.parser.token.kind {
             // Do not attempt to suggest anything when encountered as part of a macro expansion.
+            return self.parser.dcx().create_err(err);
+        }
+
+        if let ShouldEmit::ErrorsAndLints { recovery: Recovery::Forbidden } = self.should_emit {
+            // Do not attempt to suggest anything in `Recovery::Forbidden` mode.
+            // Malformed diagnostic-attr arguments that start with an `if` expression can lead to
+            // an ICE (https://github.com/rust-lang/rust/issues/152744), because callers may cancel the `InvalidMetaItem` error.
             return self.parser.dcx().create_err(err);
         }
 
@@ -554,9 +627,15 @@ impl<'a, 'sess> MetaItemListParserContext<'a, 'sess> {
         psess: &'sess ParseSess,
         span: Span,
         should_emit: ShouldEmit,
+        allow_expr_metavar: AllowExprMetavar,
     ) -> PResult<'sess, MetaItemListParser> {
         let mut parser = Parser::new(psess, tokens, None);
-        let mut this = MetaItemListParserContext { parser: &mut parser, should_emit };
+        if let ShouldEmit::ErrorsAndLints { recovery } = should_emit {
+            parser = parser.recovery(recovery);
+        }
+
+        let mut this =
+            MetaItemListParserContext { parser: &mut parser, should_emit, allow_expr_metavar };
 
         // Presumably, the majority of the time there will only be one attr.
         let mut sub_parsers = ThinVec::with_capacity(1);
@@ -588,8 +667,15 @@ impl MetaItemListParser {
         span: Span,
         psess: &'sess ParseSess,
         should_emit: ShouldEmit,
+        allow_expr_metavar: AllowExprMetavar,
     ) -> Result<Self, Diag<'sess>> {
-        MetaItemListParserContext::parse(tokens.clone(), psess, span, should_emit)
+        MetaItemListParserContext::parse(
+            tokens.clone(),
+            psess,
+            span,
+            should_emit,
+            allow_expr_metavar,
+        )
     }
 
     /// Lets you pick and choose as what you want to parse each element in the list

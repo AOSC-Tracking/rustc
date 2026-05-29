@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::{env, fs};
+use std::{env, fmt, fs};
 
 use crate::core::compiler::{CompileKind, DefaultExecutor, Executor, UnitOutput};
 use crate::core::{Dependency, Edition, Package, PackageId, SourceId, Target, Workspace};
@@ -17,9 +17,11 @@ use crate::{drop_println, ops};
 use anyhow::{Context as _, bail};
 use cargo_util::paths;
 use cargo_util_schemas::core::PartialVersion;
+use cargo_util_terminal::report::Level;
 use itertools::Itertools;
 use semver::VersionReq;
 use tempfile::Builder as TempFileBuilder;
+use tracing::debug;
 
 struct Transaction {
     bins: Vec<PathBuf>,
@@ -36,6 +38,42 @@ impl Drop for Transaction {
         for bin in self.bins.iter() {
             let _ = paths::remove_file(bin);
         }
+    }
+}
+
+enum RustupToolchainSource {
+    Default,
+    Environment,
+    CommandLine,
+    OverrideDB,
+    ToolchainFile,
+    Other(String),
+}
+
+#[allow(dead_code)]
+impl RustupToolchainSource {
+    fn is_implicit_override(&self) -> Option<bool> {
+        match self {
+            Self::Default => Some(false),
+            Self::Environment => Some(true),
+            Self::CommandLine => Some(false),
+            Self::OverrideDB => Some(true),
+            Self::ToolchainFile => Some(true),
+            Self::Other(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for RustupToolchainSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Default => "default",
+            Self::Environment => "environment variable",
+            Self::CommandLine => "command line",
+            Self::OverrideDB => "rustup directory override",
+            Self::ToolchainFile => "rustup toolchain file",
+            Self::Other(other) => other,
+        })
     }
 }
 
@@ -68,14 +106,13 @@ impl<'gctx> InstallablePackage<'gctx> {
         no_track: bool,
         needs_update_if_source_is_index: bool,
         current_rust_version: Option<&PartialVersion>,
-        lockfile_path: Option<&Path>,
     ) -> CargoResult<Option<Self>> {
         if let Some(name) = krate {
             if name == "." {
                 bail!(
-                    "To install the binaries for the package in current working \
+                    "to install the binaries for the package in current working \
                      directory use `cargo install --path .`. \n\
-                     Use `cargo build` if you want to simply build the package."
+                     use `cargo build` if you want to simply build the package."
                 )
             }
         }
@@ -150,13 +187,12 @@ impl<'gctx> InstallablePackage<'gctx> {
                 let mut source = map.load(source_id, &HashSet::new())?;
                 if let Ok(Some(pkg)) = installed_exact_package(
                     dep.clone(),
-                    &mut source,
+                    &mut *source,
                     gctx,
                     original_opts,
                     &root,
                     &dst,
                     force,
-                    lockfile_path,
                 ) {
                     let msg = format!(
                         "package `{}` is already installed, use --force to override",
@@ -166,7 +202,7 @@ impl<'gctx> InstallablePackage<'gctx> {
                     return Ok(None);
                 }
                 select_dep_pkg(
-                    &mut source,
+                    &mut *source,
                     dep,
                     gctx,
                     needs_update_if_source_is_index,
@@ -181,30 +217,13 @@ impl<'gctx> InstallablePackage<'gctx> {
             }
         };
 
-        let (ws, rustc, target) = make_ws_rustc_target(
-            gctx,
-            &original_opts,
-            &source_id,
-            pkg.clone(),
-            lockfile_path.clone(),
-        )?;
-
-        if !gctx.lock_update_allowed() {
-            // When --lockfile-path is set, check that passed lock file exists
-            // (unlike the usual flag behavior, lockfile won't be created as we imply --locked)
-            if let Some(requested_lockfile_path) = ws.requested_lockfile_path() {
-                if !requested_lockfile_path.is_file() {
-                    bail!(
-                        "no Cargo.lock file found in the requested path {}",
-                        requested_lockfile_path.display()
-                    );
-                }
-            // If we're installing in --locked mode and there's no `Cargo.lock` published
-            // ie. the bin was published before https://github.com/rust-lang/cargo/pull/7026
-            } else if !ws.root().join("Cargo.lock").exists() {
-                gctx.shell()
-                    .warn(format!("no Cargo.lock file published in {}", pkg))?;
-            }
+        let (ws, rustc, target) =
+            make_ws_rustc_target(gctx, &original_opts, &source_id, pkg.clone())?;
+        // If we're installing in --locked mode and there's no `Cargo.lock` published
+        // ie. the bin was published before https://github.com/rust-lang/cargo/pull/7026
+        if !gctx.lock_update_allowed() && !ws.root().join("Cargo.lock").exists() {
+            gctx.shell()
+                .warn(format!("no Cargo.lock file published in {}", pkg))?;
         }
         let pkg = if source_id.is_git() {
             // Don't use ws.current() in order to keep the package source as a git source so that
@@ -228,17 +247,17 @@ impl<'gctx> InstallablePackage<'gctx> {
         if from_cwd {
             if pkg.manifest().edition() == Edition::Edition2015 {
                 gctx.shell().warn(
-                    "Using `cargo install` to install the binaries from the \
+                    "using `cargo install` to install the binaries from the \
                      package in current working directory is deprecated, \
                      use `cargo install --path .` instead. \
-                     Use `cargo build` if you want to simply build the package.",
+                     note: use `cargo build` if you want to simply build the package.",
                 )?
             } else {
                 bail!(
-                    "Using `cargo install` to install the binaries from the \
+                    "using `cargo install` to install the binaries from the \
                      package in current working directory is no longer supported, \
                      use `cargo install --path .` instead. \
-                     Use `cargo build` if you want to simply build the package."
+                     note: use `cargo build` if you want to simply build the package."
                 )
             }
         };
@@ -316,6 +335,31 @@ impl<'gctx> InstallablePackage<'gctx> {
     fn install_one(mut self, dry_run: bool) -> CargoResult<bool> {
         self.gctx.shell().status("Installing", &self.pkg)?;
 
+        if let Some(source) = get_rustup_toolchain_source()
+            && source.is_implicit_override().unwrap_or_else(|| {
+                debug!("ignoring unrecognized rustup toolchain source `{source}`");
+                false
+            })
+        {
+            #[expect(clippy::disallowed_methods, reason = "consistency with rustup")]
+            let maybe_toolchain = env::var("RUSTUP_TOOLCHAIN")
+                .ok()
+                .map(|toolchain| format!(" with `{toolchain}`"))
+                .unwrap_or_default();
+            let report = &[Level::WARNING
+                .secondary_title(format!(
+                    "default toolchain implicitly overridden{maybe_toolchain} by {source}"
+                ))
+                .element(Level::HELP.message(format!(
+                    "use `cargo +stable install` if you meant to use the stable toolchain"
+                )))
+                .element(Level::NOTE.message(format!(
+                    "rustup selects the toolchain based on the parent environment and not the \
+                     environment of the package being installed"
+                )))];
+            self.gctx.shell().print_report(report, false)?;
+        }
+
         // Normalize to absolute path for consistency throughout.
         // See: https://github.com/rust-lang/cargo/issues/16023
         let dst = self.root.join("bin").into_path_unlocked();
@@ -356,9 +400,9 @@ impl<'gctx> InstallablePackage<'gctx> {
                 "failed to compile `{}`, intermediate artifacts can be \
                  found at `{}`.\nTo reuse those artifacts with a future \
                  compilation, set the environment variable \
-                 `CARGO_TARGET_DIR` to that path.",
+                 `CARGO_BUILD_BUILD_DIR` to that path.",
                 self.pkg,
-                self.ws.target_dir().display()
+                self.ws.build_dir().display()
             )
         })?;
         let mut binaries: Vec<(&str, &Path)> = compile
@@ -611,6 +655,20 @@ impl<'gctx> InstallablePackage<'gctx> {
     }
 }
 
+fn get_rustup_toolchain_source() -> Option<RustupToolchainSource> {
+    #[expect(clippy::disallowed_methods, reason = "consistency with rustup")]
+    let source = std::env::var("RUSTUP_TOOLCHAIN_SOURCE").ok()?;
+    let source = match source.as_str() {
+        "default" => RustupToolchainSource::Default,
+        "env" => RustupToolchainSource::Environment,
+        "cli" => RustupToolchainSource::CommandLine,
+        "path-override" => RustupToolchainSource::OverrideDB,
+        "toolchain-file" => RustupToolchainSource::ToolchainFile,
+        other => RustupToolchainSource::Other(other.to_owned()),
+    };
+    Some(source)
+}
+
 fn make_warning_about_missing_features(binaries: &[&Target]) -> String {
     let max_targets_listed = 7;
     let target_features_message = binaries
@@ -660,7 +718,6 @@ pub fn install(
     force: bool,
     no_track: bool,
     dry_run: bool,
-    lockfile_path: Option<&Path>,
 ) -> CargoResult<()> {
     let root = resolve_root(root, gctx)?;
     // Normalize to absolute path for consistency throughout.
@@ -700,7 +757,6 @@ pub fn install(
             no_track,
             true,
             current_rust_version.as_ref(),
-            lockfile_path,
         )?;
         let mut installed_anything = true;
         if let Some(installable_pkg) = installable_pkg {
@@ -732,7 +788,6 @@ pub fn install(
                     no_track,
                     !did_update,
                     current_rust_version.as_ref(),
-                    lockfile_path,
                 ) {
                     Ok(Some(installable_pkg)) => {
                         did_update = true;
@@ -831,19 +886,15 @@ fn is_installed(
 /// Checks if vers can only be satisfied by exactly one version of a package in a registry, and it's
 /// already installed. If this is the case, we can skip interacting with a registry to check if
 /// newer versions may be installable, as no newer version can exist.
-fn installed_exact_package<T>(
+fn installed_exact_package(
     dep: Dependency,
-    source: &mut T,
+    source: &mut dyn Source,
     gctx: &GlobalContext,
     opts: &ops::CompileOptions,
     root: &Filesystem,
     dst: &Path,
     force: bool,
-    lockfile_path: Option<&Path>,
-) -> CargoResult<Option<Package>>
-where
-    T: Source,
-{
+) -> CargoResult<Option<Package>> {
     if !dep.version_req().is_exact() {
         // If the version isn't exact, we may need to update the registry and look for a newer
         // version - we can't know if the package is installed without doing so.
@@ -855,7 +906,7 @@ where
     // best-effort check to see if we can avoid hitting the network.
     if let Ok(pkg) = select_dep_pkg(source, dep, gctx, false, None) {
         let (_ws, rustc, target) =
-            make_ws_rustc_target(gctx, opts, &source.source_id(), pkg.clone(), lockfile_path)?;
+            make_ws_rustc_target(gctx, opts, &source.source_id(), pkg.clone())?;
         if let Ok(true) = is_installed(&pkg, gctx, opts, &rustc, &target, root, dst, force) {
             return Ok(Some(pkg));
         }
@@ -868,7 +919,6 @@ fn make_ws_rustc_target<'gctx>(
     opts: &ops::CompileOptions,
     source_id: &SourceId,
     pkg: Package,
-    lockfile_path: Option<&Path>,
 ) -> CargoResult<(Workspace<'gctx>, Rustc, String)> {
     let mut ws = if source_id.is_git() || source_id.is_path() {
         Workspace::new(pkg.manifest_path(), gctx)?
@@ -879,11 +929,7 @@ fn make_ws_rustc_target<'gctx>(
     };
     ws.set_resolve_feature_unification(FeatureUnification::Selected);
     ws.set_ignore_lock(gctx.lock_update_allowed());
-    ws.set_requested_lockfile_path(lockfile_path.map(|p| p.to_path_buf()));
-    // if --lockfile-path is set, imply --locked
-    if ws.requested_lockfile_path().is_some() {
-        ws.set_ignore_lock(false);
-    }
+    ws.set_requested_lockfile_path(None);
     ws.set_require_optional_deps(false);
 
     let rustc = gctx.load_global_rustc(Some(&ws))?;

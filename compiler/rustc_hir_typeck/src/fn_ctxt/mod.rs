@@ -8,10 +8,10 @@ mod suggestions;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
 
-use hir::def_id::CRATE_DEF_ID;
 use rustc_errors::DiagCtxtHandle;
+use rustc_hir::attrs::{DivergingBlockBehavior, DivergingFallbackBehavior};
 use rustc_hir::def_id::{DefId, LocalDefId};
-use rustc_hir::{self as hir, HirId, ItemLocalMap};
+use rustc_hir::{self as hir, HirId, ItemLocalMap, find_attr};
 use rustc_hir_analysis::hir_ty_lowering::{
     HirTyLowerer, InherentAssocCandidate, RegionInferReason,
 };
@@ -19,15 +19,13 @@ use rustc_infer::infer::{self, RegionVariableOrigin};
 use rustc_infer::traits::{DynCompatibilityViolation, Obligation};
 use rustc_middle::ty::{self, Const, Ty, TyCtxt, TypeVisitableExt};
 use rustc_session::Session;
-use rustc_span::{self, DUMMY_SP, ErrorGuaranteed, Ident, Span, sym};
+use rustc_span::{self, DUMMY_SP, ErrorGuaranteed, Ident, Span};
 use rustc_trait_selection::error_reporting::TypeErrCtxt;
 use rustc_trait_selection::traits::{
     self, FulfillmentError, ObligationCause, ObligationCauseCode, ObligationCtxt,
 };
 
 use crate::coercion::CoerceMany;
-use crate::fallback::DivergingFallbackBehavior;
-use crate::fn_ctxt::checks::DivergingBlockBehavior;
 use crate::{CoroutineTypes, Diverges, EnclosingBreakables, TypeckRootCtxt};
 
 /// The `FnCtxt` stores type-checking context needed to type-check bodies of
@@ -405,9 +403,10 @@ impl<'tcx> HirTyLowerer<'tcx> for FnCtxt<'_, 'tcx> {
         match ty.kind() {
             ty::Adt(adt_def, _) => Some(*adt_def),
             // FIXME(#104767): Should we handle bound regions here?
-            ty::Alias(ty::Projection | ty::Inherent | ty::Free, _)
-                if !ty.has_escaping_bound_vars() =>
-            {
+            ty::Alias(ty::AliasTy {
+                kind: ty::Projection { .. } | ty::Inherent { .. } | ty::Free { .. },
+                ..
+            }) if !ty.has_escaping_bound_vars() => {
                 if self.next_trait_solver() {
                     self.try_structurally_resolve_type(span, ty).ty_adt_def()
                 } else {
@@ -425,8 +424,11 @@ impl<'tcx> HirTyLowerer<'tcx> for FnCtxt<'_, 'tcx> {
             // WF obligations that are registered elsewhere, but they have a
             // better cause code assigned to them in `add_required_obligations_for_hir`.
             // This means that they should shadow obligations with worse spans.
-            if let ty::Alias(ty::Projection | ty::Free, ty::AliasTy { args, def_id, .. }) =
-                ty.kind()
+            if let ty::Alias(ty::AliasTy {
+                kind: ty::Projection { def_id } | ty::Free { def_id },
+                args,
+                ..
+            }) = ty.kind()
             {
                 self.add_required_obligations_for_hir(span, *def_id, args, hir_id);
             }
@@ -517,51 +519,5 @@ fn parse_never_type_options_attr(
     // Error handling is dubious here (unwraps), but that's probably fine for an internal attribute.
     // Just don't write incorrect attributes <3
 
-    let mut fallback = None;
-    let mut block = None;
-
-    let items = if tcx.features().rustc_attrs() {
-        tcx.get_attr(CRATE_DEF_ID, sym::rustc_never_type_options)
-            .map(|attr| attr.meta_item_list().unwrap())
-    } else {
-        None
-    };
-    let items = items.unwrap_or_default();
-
-    for item in items {
-        if item.has_name(sym::fallback) && fallback.is_none() {
-            let mode = item.value_str().unwrap();
-            match mode {
-                sym::unit => fallback = Some(DivergingFallbackBehavior::ToUnit),
-                sym::never => fallback = Some(DivergingFallbackBehavior::ToNever),
-                sym::no => fallback = Some(DivergingFallbackBehavior::NoFallback),
-                _ => {
-                    tcx.dcx().span_err(item.span(), format!("unknown never type fallback mode: `{mode}` (supported: `unit`, `niko`, `never` and `no`)"));
-                }
-            };
-            continue;
-        }
-
-        if item.has_name(sym::diverging_block_default) && block.is_none() {
-            let default = item.value_str().unwrap();
-            match default {
-                sym::unit => block = Some(DivergingBlockBehavior::Unit),
-                sym::never => block = Some(DivergingBlockBehavior::Never),
-                _ => {
-                    tcx.dcx().span_err(item.span(), format!("unknown diverging block default: `{default}` (supported: `unit` and `never`)"));
-                }
-            };
-            continue;
-        }
-
-        tcx.dcx().span_err(
-            item.span(),
-            format!(
-                "unknown or duplicate never type option: `{}` (supported: `fallback`, `diverging_block_default`)",
-                item.name().unwrap()
-            ),
-        );
-    }
-
-    (fallback, block)
+    find_attr!(tcx, crate, RustcNeverTypeOptions {fallback, diverging_block_default} => (*fallback, *diverging_block_default)).unwrap_or_default()
 }

@@ -150,7 +150,9 @@ impl SlowVectorInit {
             && func.ty_rel_def(cx).is_diag_item(cx, sym::vec_with_capacity)
         {
             Some(InitializedSize::Initialized(len_expr))
-        } else if matches!(expr.kind, ExprKind::Call(func, []) if func.ty_rel_def(cx).is_diag_item(cx, sym::vec_new)) {
+        } else if let ExprKind::Call(func, []) = expr.kind
+            && func.ty_rel_def(cx).is_diag_item(cx, sym::vec_new)
+        {
             Some(InitializedSize::Uninitialized)
         } else {
             None
@@ -206,7 +208,7 @@ impl SlowVectorInit {
             .with_lo(vec_alloc.allocation_expr.span.source_callsite().lo());
 
         // If there is no comment in `span_to_replace`, Clippy can automatically fix the code.
-        let app = if span_contains_comment(cx.tcx.sess.source_map(), span_to_replace) {
+        let app = if span_contains_comment(cx, span_to_replace) {
             Applicability::Unspecified
         } else {
             Applicability::MachineApplicable

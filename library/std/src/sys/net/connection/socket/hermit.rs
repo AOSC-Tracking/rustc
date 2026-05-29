@@ -9,10 +9,9 @@ use crate::io::{self, BorrowedBuf, BorrowedCursor, IoSlice, IoSliceMut};
 use crate::net::{Shutdown, SocketAddr};
 use crate::os::hermit::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, RawFd};
 use crate::sys::fd::FileDesc;
-use crate::sys::time::Instant;
 use crate::sys::{AsInner, FromInner, IntoInner};
 pub use crate::sys::{cvt, cvt_r};
-use crate::time::Duration;
+use crate::time::{Duration, Instant};
 use crate::{cmp, mem};
 
 #[expect(non_camel_case_types)]
@@ -143,7 +142,7 @@ impl Socket {
             )
         })?;
         unsafe {
-            buf.advance_unchecked(ret as usize);
+            buf.advance(ret as usize);
         }
         Ok(())
     }
@@ -261,7 +260,7 @@ impl Socket {
     pub fn set_linger(&self, linger: Option<Duration>) -> io::Result<()> {
         let linger = netc::linger {
             l_onoff: linger.is_some() as i32,
-            l_linger: linger.unwrap_or_default().as_secs() as libc::c_int,
+            l_linger: cmp::min(linger.unwrap_or_default().as_secs(), c_int::MAX as u64) as c_int,
         };
 
         unsafe { setsockopt(self, netc::SOL_SOCKET, netc::SO_LINGER, linger) }

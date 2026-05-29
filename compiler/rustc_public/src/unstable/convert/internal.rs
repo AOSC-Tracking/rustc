@@ -368,14 +368,14 @@ impl RustcInternal for MirConst {
 }
 
 impl RustcInternal for MonoItem {
-    type T<'tcx> = rustc_middle::mir::mono::MonoItem<'tcx>;
+    type T<'tcx> = rustc_middle::mono::MonoItem<'tcx>;
 
     fn internal<'tcx>(
         &self,
         tables: &mut Tables<'_, BridgeTys>,
         tcx: impl InternalCx<'tcx>,
     ) -> Self::T<'tcx> {
-        use rustc_middle::mir::mono as rustc_mono;
+        use rustc_middle::mono as rustc_mono;
         match self {
             MonoItem::Fn(instance) => rustc_mono::MonoItem::Fn(instance.internal(tables, tcx)),
             MonoItem::Static(def) => rustc_mono::MonoItem::Static(def.internal(tables, tcx)),
@@ -433,7 +433,7 @@ where
 }
 
 impl RustcInternal for BoundVariableKind {
-    type T<'tcx> = rustc_ty::BoundVariableKind;
+    type T<'tcx> = rustc_ty::BoundVariableKind<'tcx>;
 
     fn internal<'tcx>(
         &self,
@@ -615,6 +615,7 @@ impl RustcInternal for Abi {
             Abi::RustInvalid => rustc_abi::ExternAbi::RustInvalid,
             Abi::RiscvInterruptM => rustc_abi::ExternAbi::RiscvInterruptM,
             Abi::RiscvInterruptS => rustc_abi::ExternAbi::RiscvInterruptS,
+            Abi::RustPreserveNone => rustc_abi::ExternAbi::RustPreserveNone,
             Abi::Custom => rustc_abi::ExternAbi::Custom,
         }
     }

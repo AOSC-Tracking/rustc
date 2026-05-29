@@ -54,7 +54,6 @@ pub fn cli() -> clap::Command {
         ])
         .arg_package("Package to remove from")
         .arg_manifest_path()
-        .arg_lockfile_path()
         .after_help(color_print::cstr!(
             "Run `<bright-cyan,bold>cargo help remove</>` for more detailed information.\n"
         ))
@@ -75,7 +74,8 @@ pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
         0 => {
             return Err(CliError::new(
                 anyhow::format_err!(
-                    "no packages selected to modify.  Please specify one with `-p <PKGID>`"
+                    "no package selected to modify
+help: specify a package with `-p <PKGID>`"
                 ),
                 101,
             ));
@@ -85,9 +85,9 @@ pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
             let names = packages.iter().map(|p| p.name()).collect::<Vec<_>>();
             return Err(CliError::new(
                 anyhow::format_err!(
-                    "`cargo remove` could not determine which package to modify. \
-                    Use the `--package` option to specify a package. \n\
-                    available packages: {}",
+                    "no package selected to modify
+help: specify a package with `-p <PKGID>`
+      available packages: {}",
                     names.join(", ")
                 ),
                 101,
@@ -124,7 +124,7 @@ pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
             let verbosity = ws.gctx().shell().verbosity();
             ws.gctx()
                 .shell()
-                .set_verbosity(cargo::core::Verbosity::Quiet);
+                .set_verbosity(cargo_util_terminal::Verbosity::Quiet);
             let resolve = resolve_ws(&ws, dry_run);
             ws.gctx().shell().set_verbosity(verbosity);
             resolve?.1

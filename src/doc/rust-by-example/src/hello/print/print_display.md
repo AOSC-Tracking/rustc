@@ -94,8 +94,9 @@ fn main() {
     println!("Display: {}", point);
     println!("Debug: {:?}", point);
 
-    // Error. Both `Debug` and `Display` were implemented, but `{:b}`
-    // requires `fmt::Binary` to be implemented. This will not work.
+    // The following line would not compile: both `Debug` and `Display`
+    // were implemented, but `{:b}` requires `fmt::Binary` to be
+    // implemented, which it hasn't been for `Point2D`.
     // println!("What does Point2D look like in binary: {:b}?", point);
 }
 ```
@@ -118,7 +119,7 @@ Display: 4.7 -2.3i
 Debug: Complex { real: 4.7, imag: -2.3 }
 ```
 
-Bonus: Add a space before the `+`/`-` signs.
+Bonus: Add a space after the `+`/`-` signs.
 
 Hints in case you get stuck:
 

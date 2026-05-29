@@ -139,11 +139,13 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             // For those, we both intercept `func` and `call@FBSD_1.0` symbols cases
             // since freebsd 12 the former form can be expected.
             "stat" | "stat@FBSD_1.0" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [path, buf] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let result = this.stat(path, buf)?;
                 this.write_scalar(result, dest)?;
             }
             "lstat" | "lstat@FBSD_1.0" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [path, buf] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let result = this.lstat(path, buf)?;
                 this.write_scalar(result, dest)?;
@@ -153,16 +155,28 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 let result = this.fstat(fd, buf)?;
                 this.write_scalar(result, dest)?;
             }
-            "readdir" | "readdir@FBSD_1.0" => {
+            "readdir@FBSD_1.0" => {
                 let [dirp] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
-                let result = this.readdir64("dirent", dirp)?;
-                this.write_scalar(result, dest)?;
+                this.readdir(dirp, dest)?;
             }
             // Miscellaneous
             "__error" => {
                 let [] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let errno_place = this.last_error_place()?;
                 this.write_scalar(errno_place.to_ref(this).to_scalar(), dest)?;
+            }
+            "__xuname" => {
+                // FreeBSD uses __xuname under the hood to implement uname, see:
+                // https://github.com/freebsd/freebsd-src/blob/3542d60fb8042474f66fbf2d779ed8c5a80d0f78/sys/sys/utsname.h#L64
+                // https://github.com/freebsd/freebsd-src/blob/3542d60fb8042474f66fbf2d779ed8c5a80d0f78/lib/libc/gen/uname.c#L44
+                let [size, uname] = this.check_shim_sig(
+                    shim_sig!(extern "C" fn(i32, *mut _) -> i32),
+                    link_name,
+                    abi,
+                    args,
+                )?;
+                let result = this.uname(uname, Some(size))?;
+                this.write_scalar(result, dest)?;
             }
 
             // Incomplete shims that we "stub out" just to get pre-main initialization code to work.

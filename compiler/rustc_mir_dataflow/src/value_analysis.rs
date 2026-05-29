@@ -1,4 +1,4 @@
-use std::assert_matches::debug_assert_matches;
+use std::debug_assert_matches;
 use std::fmt::{Debug, Formatter};
 use std::ops::Range;
 

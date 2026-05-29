@@ -4,7 +4,7 @@ use std::ops::ControlFlow;
 
 use hir_def::{
     AdtId, HasModule, TypeParamId,
-    hir::generics::{TypeOrConstParamData, TypeParamProvenance},
+    hir::generics::{GenericParams, TypeOrConstParamData, TypeParamProvenance},
 };
 use hir_def::{TraitId, type_ref::Rawness};
 use intern::{Interned, InternedRef, impl_internable};
@@ -508,6 +508,11 @@ impl<'db> Ty<'db> {
         references_non_lt_error(&self)
     }
 
+    /// Whether the type contains a type error (ignoring const and lifetime errors).
+    pub fn references_only_ty_error(self) -> bool {
+        references_only_ty_error(&self)
+    }
+
     pub fn callable_sig(self, interner: DbInterner<'db>) -> Option<Binder<'db, FnSig<'db>>> {
         match self.kind() {
             TyKind::FnDef(callable, args) => {
@@ -685,13 +690,13 @@ impl<'db> Ty<'db> {
             ),
             TyKind::Param(param) => {
                 // FIXME: We shouldn't use `param.id` here.
-                let generic_params = db.generic_params(param.id.parent());
+                let generic_params = GenericParams::of(db, param.id.parent());
                 let param_data = &generic_params[param.id.local_id()];
                 match param_data {
                     TypeOrConstParamData::TypeParamData(p) => match p.provenance {
                         TypeParamProvenance::ArgumentImplTrait => {
                             let predicates = GenericPredicates::query_all(db, param.id.parent())
-                                .iter_identity_copied()
+                                .iter_identity()
                                 .filter(|wc| match wc.kind().skip_binder() {
                                     ClauseKind::Trait(tr) => tr.self_ty() == self,
                                     ClauseKind::Projection(pred) => pred.self_ty() == self,
@@ -709,7 +714,7 @@ impl<'db> Ty<'db> {
             }
             TyKind::Coroutine(coroutine_id, _args) => {
                 let InternedCoroutine(owner, _) = coroutine_id.0.loc(db);
-                let krate = owner.module(db).krate(db);
+                let krate = owner.krate(db);
                 if let Some(future_trait) = hir_def::lang_item::lang_items(db, krate).Future {
                     // This is only used by type walking.
                     // Parameters will be walked outside, and projection predicate is not used.
@@ -774,6 +779,20 @@ impl<'db> TypeVisitor<DbInterner<'db>> for ReferencesNonLifetimeError {
 
     fn visit_const(&mut self, c: Const<'db>) -> Self::Result {
         if c.is_ct_error() { ControlFlow::Break(()) } else { c.super_visit_with(self) }
+    }
+}
+
+pub fn references_only_ty_error<'db, T: TypeVisitableExt<DbInterner<'db>>>(t: &T) -> bool {
+    t.references_error() && t.visit_with(&mut ReferencesOnlyTyError).is_break()
+}
+
+struct ReferencesOnlyTyError;
+
+impl<'db> TypeVisitor<DbInterner<'db>> for ReferencesOnlyTyError {
+    type Result = ControlFlow<()>;
+
+    fn visit_ty(&mut self, ty: Ty<'db>) -> Self::Result {
+        if ty.is_ty_error() { ControlFlow::Break(()) } else { ty.super_visit_with(self) }
     }
 }
 

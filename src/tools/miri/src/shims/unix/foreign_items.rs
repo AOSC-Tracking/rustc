@@ -143,6 +143,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_scalar(result, dest)?;
             }
             "getcwd" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [buf, size] = this.check_shim_sig(
                     shim_sig!(extern "C" fn(*mut _, usize) -> *mut _),
                     link_name,
@@ -153,6 +154,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_pointer(result, dest)?;
             }
             "chdir" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [path] = this.check_shim_sig(
                     shim_sig!(extern "C" fn(*const _) -> i32),
                     link_name,
@@ -170,6 +172,21 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                     args,
                 )?;
                 let result = this.getpid()?;
+                this.write_scalar(result, dest)?;
+            }
+            "uname" => {
+                // Not all Unixes have the `uname` symbol, e.g. FreeBSD does not.
+                this.check_target_os(
+                    &[Os::Linux, Os::Android, Os::MacOs, Os::Solaris, Os::Illumos],
+                    link_name,
+                )?;
+                let [uname] = this.check_shim_sig(
+                    shim_sig!(extern "C" fn(*mut _) -> i32),
+                    link_name,
+                    abi,
+                    args,
+                )?;
+                let result = this.uname(uname, None)?;
                 this.write_scalar(result, dest)?;
             }
             "sysconf" => {
@@ -209,6 +226,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write(fd, buf, count, None, dest)?;
             }
             "pread" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [fd, buf, count, offset] = this.check_shim_sig(
                     shim_sig!(extern "C" fn(i32, *mut _, usize, libc::off_t) -> isize),
                     link_name,
@@ -222,6 +240,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.read(fd, buf, count, Some(offset), dest)?;
             }
             "pwrite" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [fd, buf, n, offset] = this.check_shim_sig(
                     shim_sig!(extern "C" fn(i32, *const _, usize, libc::off_t) -> isize),
                     link_name,
@@ -299,6 +318,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_scalar(result, dest)?;
             }
             "unlink" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [path] = this.check_shim_sig(
                     shim_sig!(extern "C" fn(*const _) -> i32),
                     link_name,
@@ -309,6 +329,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_scalar(result, dest)?;
             }
             "symlink" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [target, linkpath] = this.check_shim_sig(
                     shim_sig!(extern "C" fn(*const _, *const _) -> i32),
                     link_name,
@@ -324,6 +345,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_scalar(result, dest)?;
             }
             "rename" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [oldpath, newpath] = this.check_shim_sig(
                     shim_sig!(extern "C" fn(*const _, *const _) -> i32),
                     link_name,
@@ -334,6 +356,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_scalar(result, dest)?;
             }
             "mkdir" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [path, mode] = this.check_shim_sig(
                     shim_sig!(extern "C" fn(*const _, libc::mode_t) -> i32),
                     link_name,
@@ -344,6 +367,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_scalar(result, dest)?;
             }
             "rmdir" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [path] = this.check_shim_sig(
                     shim_sig!(extern "C" fn(*const _) -> i32),
                     link_name,
@@ -373,7 +397,12 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 let result = this.closedir(dirp)?;
                 this.write_scalar(result, dest)?;
             }
+            "readdir" => {
+                let [dirp] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
+                this.readdir(dirp, dest)?;
+            }
             "lseek" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [fd, offset, whence] = this.check_shim_sig(
                     shim_sig!(extern "C" fn(i32, libc::off_t, i32) -> libc::off_t),
                     link_name,
@@ -383,7 +412,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 let fd = this.read_scalar(fd)?.to_i32()?;
                 let offset = this.read_scalar(offset)?.to_int(offset.layout.size)?;
                 let whence = this.read_scalar(whence)?.to_i32()?;
-                this.lseek64(fd, offset, whence, dest)?;
+                this.lseek(fd, offset, whence, dest)?;
             }
             "ftruncate" => {
                 let [fd, length] = this.check_shim_sig(
@@ -398,6 +427,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_scalar(result, dest)?;
             }
             "fsync" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [fd] = this.check_shim_sig(
                     shim_sig!(extern "C" fn(i32) -> i32),
                     link_name,
@@ -408,6 +438,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_scalar(result, dest)?;
             }
             "fdatasync" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [fd] = this.check_shim_sig(
                     shim_sig!(extern "C" fn(i32) -> i32),
                     link_name,
@@ -523,6 +554,114 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_scalar(result, dest)?;
             }
 
+            // Network sockets
+            "socket" => {
+                let [domain, type_, protocol] = this.check_shim_sig(
+                    shim_sig!(extern "C" fn(i32, i32, i32) -> i32),
+                    link_name,
+                    abi,
+                    args,
+                )?;
+                let result = this.socket(domain, type_, protocol)?;
+                this.write_scalar(result, dest)?;
+            }
+            "bind" => {
+                let [socket, address, address_len] = this.check_shim_sig(
+                    shim_sig!(extern "C" fn(i32, *const _, libc::socklen_t) -> i32),
+                    link_name,
+                    abi,
+                    args,
+                )?;
+                let result = this.bind(socket, address, address_len)?;
+                this.write_scalar(result, dest)?;
+            }
+            "listen" => {
+                let [socket, backlog] = this.check_shim_sig(
+                    shim_sig!(extern "C" fn(i32, i32) -> i32),
+                    link_name,
+                    abi,
+                    args,
+                )?;
+                let result = this.listen(socket, backlog)?;
+                this.write_scalar(result, dest)?;
+            }
+            "accept" => {
+                let [socket, address, address_len] = this.check_shim_sig(
+                    shim_sig!(extern "C" fn(i32, *mut _, *mut _) -> i32),
+                    link_name,
+                    abi,
+                    args,
+                )?;
+                this.accept4(socket, address, address_len, /* flags */ None, dest)?;
+            }
+            "accept4" => {
+                let [socket, address, address_len, flags] = this.check_shim_sig(
+                    shim_sig!(extern "C" fn(i32, *mut _, *mut _, i32) -> i32),
+                    link_name,
+                    abi,
+                    args,
+                )?;
+                this.accept4(socket, address, address_len, Some(flags), dest)?;
+            }
+            "connect" => {
+                let [socket, address, address_len] = this.check_shim_sig(
+                    shim_sig!(extern "C" fn(i32, *const _, libc::socklen_t) -> i32),
+                    link_name,
+                    abi,
+                    args,
+                )?;
+                this.connect(socket, address, address_len, dest)?;
+            }
+            "send" => {
+                let [socket, buffer, length, flags] = this.check_shim_sig(
+                    shim_sig!(extern "C" fn(i32, *const _, libc::size_t, i32) -> libc::ssize_t),
+                    link_name,
+                    abi,
+                    args,
+                )?;
+                this.send(socket, buffer, length, flags, dest)?;
+            }
+            "recv" => {
+                let [socket, buffer, length, flags] = this.check_shim_sig(
+                    shim_sig!(extern "C" fn(i32, *mut _, libc::size_t, i32) -> libc::ssize_t),
+                    link_name,
+                    abi,
+                    args,
+                )?;
+                this.recv(socket, buffer, length, flags, dest)?;
+            }
+            "setsockopt" => {
+                let [socket, level, option_name, option_value, option_len] = this.check_shim_sig(
+                    shim_sig!(extern "C" fn(i32, i32, i32, *const _, libc::socklen_t) -> i32),
+                    link_name,
+                    abi,
+                    args,
+                )?;
+                let result =
+                    this.setsockopt(socket, level, option_name, option_value, option_len)?;
+                this.write_scalar(result, dest)?;
+            }
+            "getsockname" => {
+                let [socket, address, address_len] = this.check_shim_sig(
+                    shim_sig!(extern "C" fn(i32, *mut _, *mut _) -> i32),
+                    link_name,
+                    abi,
+                    args,
+                )?;
+                let result = this.getsockname(socket, address, address_len)?;
+                this.write_scalar(result, dest)?;
+            }
+            "getpeername" => {
+                let [socket, address, address_len] = this.check_shim_sig(
+                    shim_sig!(extern "C" fn(i32, *mut _, *mut _) -> i32),
+                    link_name,
+                    abi,
+                    args,
+                )?;
+                let result = this.getpeername(socket, address, address_len)?;
+                this.write_scalar(result, dest)?;
+            }
+
             // Time
             "gettimeofday" => {
                 let [tv, tz] = this.check_shim_sig(
@@ -616,10 +755,13 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.read_target_usize(handle)?;
                 let symbol = this.read_pointer(symbol)?;
                 let name = this.read_c_str(symbol)?;
-                if let Ok(name) = str::from_utf8(name)
-                    && is_dyn_sym(name, &this.tcx.sess.target.os)
-                {
+                let Ok(name) = str::from_utf8(name) else {
+                    throw_unsup_format!("dlsym: non UTF-8 symbol name not supported")
+                };
+                if is_dyn_sym(name, &this.tcx.sess.target.os) {
                     let ptr = this.fn_ptr(FnVal::Other(DynSym::from_str(name)));
+                    this.write_pointer(ptr, dest)?;
+                } else if let Some(&ptr) = this.machine.extern_statics.get(&Symbol::intern(name)) {
                     this.write_pointer(ptr, dest)?;
                 } else {
                     this.write_null(dest)?;
@@ -659,6 +801,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_null(dest)?;
             }
             "pthread_key_delete" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [key] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let key = this.read_scalar(key)?.to_bits(key.layout.size)?;
                 this.machine.tls.delete_tls_key(key)?;
@@ -666,6 +809,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_null(dest)?;
             }
             "pthread_getspecific" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [key] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let key = this.read_scalar(key)?.to_bits(key.layout.size)?;
                 let active_thread = this.active_thread();
@@ -673,6 +817,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_scalar(ptr, dest)?;
             }
             "pthread_setspecific" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [key, new_ptr] =
                     this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 let key = this.read_scalar(key)?.to_bits(key.layout.size)?;
@@ -833,6 +978,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_scalar(res, dest)?;
             }
             "sched_yield" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 this.sched_yield()?;
                 this.write_null(dest)?;
@@ -941,6 +1087,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.write_scalar(result, dest)?;
             }
             "pthread_atfork" => {
+                // FIXME: This does not have a direct test (#3179).
                 let [prepare, parent, child] =
                     this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 this.read_pointer(prepare)?;
@@ -1024,7 +1171,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                     &[Os::Linux, Os::FreeBsd, Os::Illumos, Os::Solaris, Os::Android, Os::MacOs],
                     link_name,
                 )?;
-                // This function looks and behaves excatly like miri_start_unwind.
+                // This function looks and behaves exactly like miri_start_unwind.
                 let [payload] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 this.handle_miri_start_unwind(payload)?;
                 return interp_ok(EmulateItemResult::NeedsUnwind);

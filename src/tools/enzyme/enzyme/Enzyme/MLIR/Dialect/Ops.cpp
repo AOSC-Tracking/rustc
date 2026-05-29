@@ -24,6 +24,7 @@
 
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/LogicalResult.h"
+#include <type_traits>
 
 #define DEBUG_TYPE "enzyme"
 
@@ -165,6 +166,61 @@ ForwardDiffOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 // ForwardDiffOp
 //===----------------------------------------------------------------------===//
 
+// Some templated helpers for rewriting EnzymeOps(we can overload the create
+// definitions as and when necessary)
+template <typename SourceOp> struct EnzymeOpCreator;
+
+template <> struct EnzymeOpCreator<AutoDiffOp> {
+  static AutoDiffOp create(PatternRewriter &rewriter, AutoDiffOp uop,
+                           TypeRange out_ty, ValueRange in_args,
+                           ArrayAttr newInActivity, ArrayAttr newRetActivity) {
+
+    return AutoDiffOp::create(rewriter, uop.getLoc(), out_ty, uop.getFnAttr(),
+                              in_args, newInActivity, newRetActivity,
+                              uop.getWidthAttr(), uop.getStrongZeroAttr());
+  }
+};
+
+template <> struct EnzymeOpCreator<AutoDiffRegionOp> {
+  static AutoDiffRegionOp create(PatternRewriter &rewriter,
+                                 AutoDiffRegionOp uop, TypeRange out_ty,
+                                 ValueRange in_args, ArrayAttr newInActivity,
+                                 ArrayAttr newRetActivity) {
+    auto newOp = AutoDiffRegionOp::create(
+        rewriter, uop.getLoc(), out_ty, in_args, newInActivity, newRetActivity,
+        uop.getWidthAttr(), uop.getStrongZeroAttr(), uop.getFnAttr());
+
+    rewriter.inlineRegionBefore(uop.getBody(), newOp.getBody(),
+                                newOp.getBody().begin());
+    return newOp;
+  }
+};
+
+template <> struct EnzymeOpCreator<ForwardDiffOp> {
+  static ForwardDiffOp create(PatternRewriter &rewriter, ForwardDiffOp uop,
+                              TypeRange out_ty, ValueRange in_args,
+                              ArrayAttr newInActivity,
+                              ArrayAttr newRetActivity) {
+    return ForwardDiffOp::create(
+        rewriter, uop.getLoc(), out_ty, uop.getFnAttr(), in_args, newInActivity,
+        newRetActivity, uop.getWidthAttr(), uop.getStrongZeroAttr());
+  }
+};
+
+template <> struct EnzymeOpCreator<ForwardDiffRegionOp> {
+  static ForwardDiffRegionOp create(PatternRewriter &rewriter,
+                                    ForwardDiffRegionOp uop, TypeRange out_ty,
+                                    ValueRange in_args, ArrayAttr newInActivity,
+                                    ArrayAttr newRetActivity) {
+    auto newOp = ForwardDiffRegionOp::create(
+        rewriter, uop.getLoc(), out_ty, in_args, newInActivity, newRetActivity,
+        uop.getWidthAttr(), uop.getStrongZeroAttr(), uop.getFnAttr());
+    rewriter.inlineRegionBefore(uop.getBody(), newOp.getBody(),
+                                newOp.getBody().begin());
+    return newOp;
+  }
+};
+
 // Helper: check if any input is mutable.
 static inline bool isMutable(Type type) {
   if (isa<mlir::MemRefType>(type) || isa<mlir::UnrankedMemRefType>(type) ||
@@ -188,11 +244,12 @@ static inline bool isMutable(Type type) {
  *           ------> enzyme_const
  *
  */
-class FwdInpOpt final : public OpRewritePattern<ForwardDiffOp> {
+template <typename SourceOp>
+class FwdInpOpt final : public OpRewritePattern<SourceOp> {
 public:
-  using OpRewritePattern<ForwardDiffOp>::OpRewritePattern;
+  using OpRewritePattern<SourceOp>::OpRewritePattern;
 
-  LogicalResult matchAndRewrite(ForwardDiffOp uop,
+  LogicalResult matchAndRewrite(SourceOp uop,
                                 PatternRewriter &rewriter) const override {
 
     if (uop.getOutputs().size() == 0)
@@ -282,12 +339,23 @@ public:
         ArrayAttr::get(rewriter.getContext(),
                        llvm::ArrayRef<Attribute>(newInActivityArgs.begin(),
                                                  newInActivityArgs.end()));
-    rewriter.replaceOpWithNewOp<ForwardDiffOp>(
-        uop, uop->getResultTypes(), uop.getFnAttr(), in_args, newInActivity,
-        uop.getRetActivityAttr(), uop.getWidthAttr(), uop.getStrongZeroAttr());
+
+    if constexpr (std::is_same_v<SourceOp, ForwardDiffOp>) {
+
+      rewriter.replaceOpWithNewOp<ForwardDiffOp>(
+          uop, uop->getResultTypes(), uop.getFnAttr(), in_args, newInActivity,
+          uop.getRetActivityAttr(), uop.getWidthAttr(),
+          uop.getStrongZeroAttr());
+    } else {
+      rewriter.replaceOpWithNewOp<ForwardDiffRegionOp>(
+          uop, uop->getResultTypes(), in_args, newInActivity,
+          uop.getRetActivityAttr(), uop.getWidthAttr(), uop.getStrongZeroAttr(),
+          uop.getFnAttr());
+    }
     return success();
   }
 };
+
 /**
  *
  * Modifies return activites for the FwdDiffOp
@@ -301,11 +369,15 @@ public:
  *           ------> enzyme_const -----
  *
  */
-class FwdRetOpt final : public OpRewritePattern<ForwardDiffOp> {
-public:
-  using OpRewritePattern<ForwardDiffOp>::OpRewritePattern;
+template <typename SourceOp>
+class FwdRetOpt final : public OpRewritePattern<SourceOp> {
+private:
+  using SourceOpCreator = EnzymeOpCreator<SourceOp>;
 
-  LogicalResult matchAndRewrite(ForwardDiffOp uop,
+public:
+  using OpRewritePattern<SourceOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(SourceOp uop,
                                 PatternRewriter &rewriter) const override {
 
     if (uop.getOutputs().size() == 0)
@@ -436,10 +508,9 @@ public:
                        llvm::ArrayRef<Attribute>(newRetActivityArgs.begin(),
                                                  newRetActivityArgs.end()));
 
-    ForwardDiffOp newOp = rewriter.create<ForwardDiffOp>(
-        uop.getLoc(), out_ty, uop.getFnAttr(), uop.getInputs(),
-        uop.getActivityAttr(), newRetActivity, uop.getWidthAttr(),
-        uop.getStrongZeroAttr());
+    SmallVector<Value> in_args = uop.getInputs();
+    SourceOp newOp = SourceOpCreator::create(
+        rewriter, uop, out_ty, in_args, uop.getActivityAttr(), newRetActivity);
 
     // Map old uses of uop to newOp
     auto oldIdx = 0;
@@ -499,7 +570,7 @@ public:
 void ForwardDiffOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
                                                 MLIRContext *context) {
 
-  patterns.add<FwdRetOpt, FwdInpOpt>(context);
+  patterns.add<FwdRetOpt<ForwardDiffOp>, FwdInpOpt<ForwardDiffOp>>(context);
 }
 
 LogicalResult AutoDiffOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
@@ -600,7 +671,7 @@ void BroadcastOp::build(OpBuilder &builder, OperationState &result, Value input,
 template <typename SourceOp>
 class ReverseRetOpt final : public OpRewritePattern<SourceOp> {
 private:
-  struct SourceOpCreator;
+  using SourceOpCreator = EnzymeOpCreator<SourceOp>;
 
 public:
   using OpRewritePattern<SourceOp>::OpRewritePattern;
@@ -884,31 +955,69 @@ public:
   }
 };
 
-template <> struct ReverseRetOpt<AutoDiffOp>::SourceOpCreator {
-  static AutoDiffOp create(PatternRewriter &rewriter, AutoDiffOp uop,
-                           ArrayRef<Type> out_ty, ArrayRef<Value> in_args,
-                           ArrayAttr newInActivity, ArrayAttr newRetActivity) {
+template <typename SourceRegionOp>
+class RemoveUnusedArgs final : public OpRewritePattern<SourceRegionOp> {
 
-    return rewriter.create<AutoDiffOp>(
-        uop.getLoc(), out_ty, uop.getFnAttr(), in_args, newInActivity,
-        newRetActivity, uop.getWidthAttr(), uop.getStrongZeroAttr());
+private:
+  using SourceOpCreator = EnzymeOpCreator<SourceRegionOp>;
+
+public:
+  using OpRewritePattern<SourceRegionOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(SourceRegionOp uop,
+                                PatternRewriter &rewriter) const override {
+    SmallVector<Value> newInArgs;
+    SmallVector<size_t> argIdxToErase;
+    SmallVector<ActivityAttr> newInActivityArgs;
+    llvm::SmallVector<Value> blockArg(uop.getBody().getArguments());
+    auto in_idx = 0;
+    for (auto [idx, act] : llvm::enumerate(
+             uop.getActivity().template getAsRange<ActivityAttr>())) {
+      auto act_val = act.getValue();
+      Value res = uop.getInputs()[in_idx++];
+
+      if (blockArg[idx].use_empty()) {
+        argIdxToErase.push_back(idx);
+        if (act_val == Activity::enzyme_dup ||
+            act_val == Activity::enzyme_dupnoneed) {
+          in_idx++;
+        }
+      } else {
+        newInActivityArgs.push_back(act);
+        newInArgs.push_back(res);
+        if (act_val == Activity::enzyme_dup ||
+            act_val == Activity::enzyme_dupnoneed) {
+          res = uop.getInputs()[in_idx++];
+          newInArgs.push_back(res);
+        }
+      }
+    }
+
+    if (argIdxToErase.empty())
+      return failure();
+
+    // only needed for Autodiff region op
+    if constexpr (std::is_same_v<SourceRegionOp, AutoDiffRegionOp>) {
+      newInArgs.append(uop.getDifferentialReturns());
+    }
+
+    ArrayAttr newInActivity =
+        ArrayAttr::get(rewriter.getContext(),
+                       llvm::ArrayRef<Attribute>(newInActivityArgs.begin(),
+                                                 newInActivityArgs.end()));
+    auto newOp =
+        SourceOpCreator::create(rewriter, uop, uop.getResultTypes(), newInArgs,
+                                newInActivity, uop.getRetActivity());
+
+    for (auto idx : llvm::reverse(argIdxToErase)) {
+      newOp.getBody().eraseArgument(idx);
+    }
+
+    rewriter.replaceOp(uop, newOp);
+    return success();
   }
 };
 
-template <> struct ReverseRetOpt<AutoDiffRegionOp>::SourceOpCreator {
-  static AutoDiffRegionOp create(PatternRewriter &rewriter,
-                                 AutoDiffRegionOp uop, ArrayRef<Type> out_ty,
-                                 ArrayRef<Value> in_args,
-                                 ArrayAttr newInActivity,
-                                 ArrayAttr newRetActivity) {
-
-    auto newOp = rewriter.create<AutoDiffRegionOp>(
-        uop.getLoc(), out_ty, in_args, newInActivity, newRetActivity,
-        uop.getWidthAttr(), uop.getStrongZeroAttr(), uop.getFnAttr());
-    newOp.getBody().takeBody(uop.getBody());
-    return newOp;
-  }
-};
 void AutoDiffOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
                                              MLIRContext *context) {
   patterns.add<ReverseRetOpt<AutoDiffOp>>(context);
@@ -916,7 +1025,15 @@ void AutoDiffOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
 
 void AutoDiffRegionOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
                                                    MLIRContext *context) {
-  patterns.add<ReverseRetOpt<AutoDiffRegionOp>>(context);
+  patterns
+      .add<ReverseRetOpt<AutoDiffRegionOp>, RemoveUnusedArgs<AutoDiffRegionOp>>(
+          context);
+}
+
+void ForwardDiffRegionOp::getCanonicalizationPatterns(
+    RewritePatternSet &patterns, MLIRContext *context) {
+  patterns.add<FwdRetOpt<ForwardDiffRegionOp>, FwdInpOpt<ForwardDiffRegionOp>,
+               RemoveUnusedArgs<ForwardDiffRegionOp>>(context);
 }
 //===----------------------------------------------------------------------===//
 // SampleOp
@@ -971,6 +1088,89 @@ LogicalResult SimulateOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   if (!global)
     return emitOpError("'")
            << getFn() << "' does not reference a valid global funcOp";
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// RegenerateOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+RegenerateOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  // TODO: Verify that the result type is same as the type of the referenced
+  // func.func op.
+  auto global =
+      symbolTable.lookupNearestSymbolFrom<func::FuncOp>(*this, getFnAttr());
+  if (!global)
+    return emitOpError("'")
+           << getFn() << "' does not reference a valid global funcOp";
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// MHOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult MHOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  // TODO: Verify that the result type is same as the type of the referenced
+  // func.func op.
+  auto global =
+      symbolTable.lookupNearestSymbolFrom<func::FuncOp>(*this, getFnAttr());
+  if (!global)
+    return emitOpError("'")
+           << getFn() << "' does not reference a valid global funcOp";
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// MCMCOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult MCMCOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  if (auto fnAttr = getFnAttr()) {
+    auto global =
+        symbolTable.lookupNearestSymbolFrom<func::FuncOp>(*this, fnAttr);
+    if (!global)
+      return emitOpError("'")
+             << getFn().value() << "' does not reference a valid global funcOp";
+  }
+
+  if (auto logpdfAttr = getLogpdfFnAttr()) {
+    auto global =
+        symbolTable.lookupNearestSymbolFrom<func::FuncOp>(*this, logpdfAttr);
+    if (!global)
+      return emitOpError("'") << logpdfAttr.getValue()
+                              << "' does not reference a valid global funcOp";
+  }
+
+  return success();
+}
+
+LogicalResult MCMCOp::verify() {
+  bool hasHMC = getHmcConfig().has_value();
+  bool hasNUTS = getNutsConfig().has_value();
+
+  if (hasHMC + hasNUTS != 1) {
+    return emitOpError(
+        "Exactly one of hmc_config or nuts_config must be specified");
+  }
+
+  // TODO(#2695): More verification
+  if (!getFnAttr() && !getLogpdfFnAttr()) {
+    return emitOpError("one of `fn` or `logpdf_fn` must be specified");
+  }
+
+  if (getFnAttr() && getLogpdfFnAttr()) {
+    return emitOpError("specifying both `fn` and `logpdf_fn` is unsupported");
+  }
+
+  if (getLogpdfFnAttr() && !getInitialPosition()) {
+    return emitOpError(
+        "custom logpdf mode requires `initial_position` to be provided");
+  }
 
   return success();
 }

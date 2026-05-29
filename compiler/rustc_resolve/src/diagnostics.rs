@@ -1,3 +1,4 @@
+// ignore-tidy-filelength
 use std::ops::ControlFlow;
 
 use itertools::Itertools as _;
@@ -10,11 +11,11 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::unord::{UnordMap, UnordSet};
 use rustc_errors::codes::*;
 use rustc_errors::{
-    Applicability, Diag, DiagCtxtHandle, ErrorGuaranteed, MultiSpan, SuggestionStyle,
+    Applicability, Diag, DiagCtxtHandle, Diagnostic, ErrorGuaranteed, MultiSpan, SuggestionStyle,
     struct_span_code_err,
 };
 use rustc_feature::BUILTIN_ATTRIBUTES;
-use rustc_hir::attrs::{AttributeKind, CfgEntry, StrippedCfgItem};
+use rustc_hir::attrs::{CfgEntry, StrippedCfgItem};
 use rustc_hir::def::Namespace::{self, *};
 use rustc_hir::def::{self, CtorKind, CtorOf, DefKind, MacroKinds, NonMacroAttrKind, PerNS};
 use rustc_hir::def_id::{CRATE_DEF_ID, DefId};
@@ -22,18 +23,17 @@ use rustc_hir::{PrimTy, Stability, StabilityLevel, find_attr};
 use rustc_middle::bug;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::Session;
-use rustc_session::lint::BuiltinLintDiag;
 use rustc_session::lint::builtin::{
-    ABSOLUTE_PATHS_NOT_STARTING_WITH_CRATE, AMBIGUOUS_GLOB_IMPORTS, AMBIGUOUS_PANIC_IMPORTS,
-    MACRO_EXPANDED_MACRO_EXPORTS_ACCESSED_BY_ABSOLUTE_PATHS,
+    ABSOLUTE_PATHS_NOT_STARTING_WITH_CRATE, AMBIGUOUS_GLOB_IMPORTS, AMBIGUOUS_IMPORT_VISIBILITIES,
+    AMBIGUOUS_PANIC_IMPORTS, MACRO_EXPANDED_MACRO_EXPORTS_ACCESSED_BY_ABSOLUTE_PATHS,
 };
 use rustc_session::utils::was_invoked_from_cargo;
 use rustc_span::edit_distance::find_best_match_for_name;
 use rustc_span::edition::Edition;
 use rustc_span::hygiene::MacroKind;
-use rustc_span::source_map::{SourceMap, Spanned};
+use rustc_span::source_map::SourceMap;
 use rustc_span::{
-    BytePos, DUMMY_SP, Ident, Macros20NormalizedIdent, Span, Symbol, SyntaxContext, kw, sym,
+    BytePos, Ident, RemapPathScopeComponents, Span, Spanned, Symbol, SyntaxContext, kw, sym,
 };
 use thin_vec::{ThinVec, thin_vec};
 use tracing::{debug, instrument};
@@ -43,14 +43,15 @@ use crate::errors::{
     ExplicitUnsafeTraits, MacroDefinedLater, MacroRulesNot, MacroSuggMovePosition,
     MaybeMissingMacroRulesName,
 };
+use crate::hygiene::Macros20NormalizedSyntaxContext;
 use crate::imports::{Import, ImportKind};
 use crate::late::{DiagMetadata, PatternSource, Rib};
 use crate::{
     AmbiguityError, AmbiguityKind, AmbiguityWarning, BindingError, BindingKey, Decl, DeclKind,
-    Finalize, ForwardGenericParamBanReason, HasGenericParams, LateDecl, MacroRulesScope, Module,
-    ModuleKind, ModuleOrUniformRoot, ParentScope, PathResult, PrivacyError, ResolutionError,
-    Resolver, Scope, ScopeSet, Segment, UseError, Used, VisResolutionError, errors as errs,
-    path_names_to_string,
+    Finalize, ForwardGenericParamBanReason, HasGenericParams, IdentKey, LateDecl, MacroRulesScope,
+    Module, ModuleKind, ModuleOrUniformRoot, ParentScope, PathResult, PrivacyError,
+    ResolutionError, Resolver, Scope, ScopeSet, Segment, UseError, Used, VisResolutionError,
+    errors as errs, path_names_to_string,
 };
 
 type Res = def::Res<ast::NodeId>;
@@ -81,24 +82,14 @@ pub(crate) struct TypoSuggestion {
 }
 
 impl TypoSuggestion {
-    pub(crate) fn typo_from_ident(ident: Ident, res: Res) -> TypoSuggestion {
-        Self {
-            candidate: ident.name,
-            span: Some(ident.span),
-            res,
-            target: SuggestionTarget::SimilarlyNamed,
-        }
+    pub(crate) fn new(candidate: Symbol, span: Span, res: Res) -> TypoSuggestion {
+        Self { candidate, span: Some(span), res, target: SuggestionTarget::SimilarlyNamed }
     }
     pub(crate) fn typo_from_name(candidate: Symbol, res: Res) -> TypoSuggestion {
         Self { candidate, span: None, res, target: SuggestionTarget::SimilarlyNamed }
     }
-    pub(crate) fn single_item_from_ident(ident: Ident, res: Res) -> TypoSuggestion {
-        Self {
-            candidate: ident.name,
-            span: Some(ident.span),
-            res,
-            target: SuggestionTarget::SingleItem,
-        }
+    pub(crate) fn single_item(candidate: Symbol, span: Span, res: Res) -> TypoSuggestion {
+        Self { candidate, span: Some(span), res, target: SuggestionTarget::SingleItem }
     }
 }
 
@@ -147,7 +138,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         }
 
         for ambiguity_error in &self.ambiguity_errors {
-            let diag = self.ambiguity_diagnostic(ambiguity_error);
+            let mut diag = self.ambiguity_diagnostic(ambiguity_error);
 
             if let Some(ambiguity_warning) = ambiguity_error.warning {
                 let node_id = match ambiguity_error.b1.0.kind {
@@ -156,12 +147,14 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 };
 
                 let lint = match ambiguity_warning {
+                    _ if ambiguity_error.ambig_vis.is_some() => AMBIGUOUS_IMPORT_VISIBILITIES,
                     AmbiguityWarning::GlobImport => AMBIGUOUS_GLOB_IMPORTS,
                     AmbiguityWarning::PanicImport => AMBIGUOUS_PANIC_IMPORTS,
                 };
 
                 self.lint_buffer.buffer_lint(lint, node_id, diag.ident.span, diag);
             } else {
+                diag.is_error = true;
                 self.dcx().emit_err(diag);
             }
         }
@@ -212,7 +205,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
 
     pub(crate) fn report_conflict(
         &mut self,
-        ident: Ident,
+        ident: IdentKey,
         ns: Namespace,
         old_binding: Decl<'ra>,
         new_binding: Decl<'ra>,
@@ -259,20 +252,23 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         };
 
         let label = match new_binding.is_import_user_facing() {
-            true => errors::NameDefinedMultipleTimeLabel::Reimported { span },
-            false => errors::NameDefinedMultipleTimeLabel::Redefined { span },
+            true => errors::NameDefinedMultipleTimeLabel::Reimported { span, name },
+            false => errors::NameDefinedMultipleTimeLabel::Redefined { span, name },
         };
 
         let old_binding_label =
             (!old_binding.span.is_dummy() && old_binding.span != span).then(|| {
                 let span = self.tcx.sess.source_map().guess_head_span(old_binding.span);
                 match old_binding.is_import_user_facing() {
-                    true => {
-                        errors::NameDefinedMultipleTimeOldBindingLabel::Import { span, old_kind }
-                    }
+                    true => errors::NameDefinedMultipleTimeOldBindingLabel::Import {
+                        span,
+                        old_kind,
+                        name,
+                    },
                     false => errors::NameDefinedMultipleTimeOldBindingLabel::Definition {
                         span,
                         old_kind,
+                        name,
                     },
                 }
             });
@@ -324,10 +320,8 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         // Check if the target of the use for both bindings is the same.
         let duplicate = new_binding.res().opt_def_id() == old_binding.res().opt_def_id();
         let has_dummy_span = new_binding.span.is_dummy() || old_binding.span.is_dummy();
-        let from_item = self
-            .extern_prelude
-            .get(&Macros20NormalizedIdent::new(ident))
-            .is_none_or(|entry| entry.introduced_by_item());
+        let from_item =
+            self.extern_prelude.get(&ident).is_none_or(|entry| entry.introduced_by_item());
         // Only suggest removing an import if both bindings are to the same def, if both spans
         // aren't dummy spans. Further, if both bindings are imports, then the ident must have
         // been introduced by an item.
@@ -515,12 +509,35 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             return;
         }
 
-        let diag = BuiltinLintDiag::AbsPathWithModule(root_span);
-        self.lint_buffer.buffer_lint(
+        self.lint_buffer.dyn_buffer_lint_any(
             ABSOLUTE_PATHS_NOT_STARTING_WITH_CRATE,
             node_id,
             root_span,
-            diag,
+            move |dcx, level, sess| {
+                let (replacement, applicability) = match sess
+                    .downcast_ref::<Session>()
+                    .expect("expected a `Session`")
+                    .source_map()
+                    .span_to_snippet(root_span)
+                {
+                    Ok(ref s) => {
+                        // FIXME(Manishearth) ideally the emitting code
+                        // can tell us whether or not this is global
+                        let opt_colon = if s.trim_start().starts_with("::") { "" } else { "::" };
+
+                        (format!("crate{opt_colon}{s}"), Applicability::MachineApplicable)
+                    }
+                    Err(_) => ("crate::<path>".to_string(), Applicability::HasPlaceholders),
+                };
+                errors::AbsPathWithModule {
+                    sugg: errors::AbsPathWithModuleSugg {
+                        span: root_span,
+                        applicability,
+                        replacement,
+                    },
+                }
+                .into_diag(dcx, level)
+            },
         );
     }
 
@@ -531,10 +548,10 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         filter_fn: &impl Fn(Res) -> bool,
         ctxt: Option<SyntaxContext>,
     ) {
-        module.for_each_child(self, |_this, ident, _ns, binding| {
+        module.for_each_child(self, |_this, ident, orig_ident_span, _ns, binding| {
             let res = binding.res();
-            if filter_fn(res) && ctxt.is_none_or(|ctxt| ctxt == ident.span.ctxt()) {
-                names.push(TypoSuggestion::typo_from_ident(ident.0, res));
+            if filter_fn(res) && ctxt.is_none_or(|ctxt| ctxt == *ident.ctxt) {
+                names.push(TypoSuggestion::new(ident.name, orig_ident_span, res));
             }
         });
     }
@@ -569,7 +586,9 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     DefKind::Static { .. } => {
                         Some(errs::GenericParamsFromOuterItemStaticOrConst::Static)
                     }
-                    DefKind::Const => Some(errs::GenericParamsFromOuterItemStaticOrConst::Const),
+                    DefKind::Const { .. } => {
+                        Some(errs::GenericParamsFromOuterItemStaticOrConst::Const)
+                    }
                     _ => None,
                 };
                 let is_self =
@@ -585,6 +604,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                         errs::GenericParamsFromOuterItemInnerItem {
                             span: *span,
                             descr: kind.descr().to_string(),
+                            is_self,
                         }
                     }),
                 };
@@ -732,8 +752,8 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                                 Res::Def(
                                     DefKind::Ctor(CtorOf::Variant, CtorKind::Const)
                                         | DefKind::Ctor(CtorOf::Struct, CtorKind::Const)
-                                        | DefKind::Const
-                                        | DefKind::AssocConst,
+                                        | DefKind::Const { .. }
+                                        | DefKind::AssocConst { .. },
                                     _,
                                 )
                             )
@@ -741,11 +761,11 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     );
 
                     if import_suggestions.is_empty() && !suggested_typo {
-                        let kinds = [
-                            DefKind::Ctor(CtorOf::Variant, CtorKind::Const),
-                            DefKind::Ctor(CtorOf::Struct, CtorKind::Const),
-                            DefKind::Const,
-                            DefKind::AssocConst,
+                        let kind_matches: [fn(DefKind) -> bool; 4] = [
+                            |kind| matches!(kind, DefKind::Ctor(CtorOf::Variant, CtorKind::Const)),
+                            |kind| matches!(kind, DefKind::Ctor(CtorOf::Struct, CtorKind::Const)),
+                            |kind| matches!(kind, DefKind::Const { .. }),
+                            |kind| matches!(kind, DefKind::AssocConst { .. }),
                         ];
                         let mut local_names = vec![];
                         self.add_module_candidates(
@@ -764,13 +784,13 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
 
                         let mut local_suggestions = vec![];
                         let mut suggestions = vec![];
-                        for kind in kinds {
+                        for matches_kind in kind_matches {
                             if let Some(suggestion) = self.early_lookup_typo_candidate(
                                 ScopeSet::All(Namespace::ValueNS),
                                 &parent_scope,
                                 name,
                                 &|res: Res| match res {
-                                    Res::Def(k, _) => k == kind,
+                                    Res::Def(k, _) => matches_kind(k),
                                     _ => false,
                                 },
                             ) && let Res::Def(kind, mut def_id) = suggestion.res
@@ -905,15 +925,8 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     mpart_suggestion,
                 })
             }
-            ResolutionError::SelfImportCanOnlyAppearOnceInTheList => {
-                self.dcx().create_err(errs::SelfImportCanOnlyAppearOnceInTheList { span })
-            }
-            ResolutionError::SelfImportOnlyInImportListWithNonEmptyPrefix => {
-                self.dcx().create_err(errs::SelfImportOnlyInImportListWithNonEmptyPrefix { span })
-            }
-            ResolutionError::FailedToResolve { segment, label, suggestion, module } => {
-                let mut err =
-                    struct_span_code_err!(self.dcx(), span, E0433, "failed to resolve: {label}");
+            ResolutionError::FailedToResolve { segment, label, suggestion, module, message } => {
+                let mut err = struct_span_code_err!(self.dcx(), span, E0433, "{message}");
                 err.span_label(span, label);
 
                 if let Some((suggestions, msg, applicability)) = suggestion {
@@ -924,13 +937,11 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     err.multipart_suggestion(msg, suggestions, applicability);
                 }
 
-                if let Some(segment) = segment {
-                    let module = match module {
-                        Some(ModuleOrUniformRoot::Module(m)) if let Some(id) = m.opt_def_id() => id,
-                        _ => CRATE_DEF_ID.to_def_id(),
-                    };
-                    self.find_cfg_stripped(&mut err, &segment, module);
-                }
+                let module = match module {
+                    Some(ModuleOrUniformRoot::Module(m)) if let Some(id) = m.opt_def_id() => id,
+                    _ => CRATE_DEF_ID.to_def_id(),
+                };
+                self.find_cfg_stripped(&mut err, &segment, module);
 
                 err
             }
@@ -1022,16 +1033,14 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             ResolutionError::ParamInTyOfConstParam { name } => {
                 self.dcx().create_err(errs::ParamInTyOfConstParam { span, name })
             }
-            ResolutionError::ParamInNonTrivialAnonConst { name, param_kind: is_type } => {
+            ResolutionError::ParamInNonTrivialAnonConst { is_gca, name, param_kind: is_type } => {
                 self.dcx().create_err(errs::ParamInNonTrivialAnonConst {
                     span,
                     name,
                     param_kind: is_type,
-                    help: self
-                        .tcx
-                        .sess
-                        .is_nightly_build()
-                        .then_some(errs::ParamInNonTrivialAnonConstHelp),
+                    help: self.tcx.sess.is_nightly_build(),
+                    is_gca,
+                    help_gca: is_gca,
                 })
             }
             ResolutionError::ParamInEnumDiscriminant { name, param_kind: is_type } => self
@@ -1124,10 +1133,17 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             VisResolutionError::AncestorOnly(span) => {
                 self.dcx().create_err(errs::AncestorOnly(span))
             }
-            VisResolutionError::FailedToResolve(span, label, suggestion) => self.into_struct_error(
-                span,
-                ResolutionError::FailedToResolve { segment: None, label, suggestion, module: None },
-            ),
+            VisResolutionError::FailedToResolve(span, segment, label, suggestion, message) => self
+                .into_struct_error(
+                    span,
+                    ResolutionError::FailedToResolve {
+                        segment,
+                        label,
+                        suggestion,
+                        module: None,
+                        message,
+                    },
+                ),
             VisResolutionError::ExpectedFound(span, path_str, res) => {
                 self.dcx().create_err(errs::ExpectedModuleFound { span, res, path_str })
             }
@@ -1177,21 +1193,21 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         suggestions: &mut Vec<TypoSuggestion>,
         scope_set: ScopeSet<'ra>,
         ps: &ParentScope<'ra>,
-        ctxt: SyntaxContext,
+        sp: Span,
         filter_fn: &impl Fn(Res) -> bool,
     ) {
-        let ctxt = DUMMY_SP.with_ctxt(ctxt);
-        self.cm().visit_scopes(scope_set, ps, ctxt, None, |this, scope, use_prelude, _| {
+        let ctxt = Macros20NormalizedSyntaxContext::new(sp.ctxt());
+        self.cm().visit_scopes(scope_set, ps, ctxt, sp, None, |this, scope, use_prelude, _| {
             match scope {
                 Scope::DeriveHelpers(expn_id) => {
                     let res = Res::NonMacroAttr(NonMacroAttrKind::DeriveHelper);
                     if filter_fn(res) {
                         suggestions.extend(
-                            this.helper_attrs
-                                .get(&expn_id)
-                                .into_iter()
-                                .flatten()
-                                .map(|(ident, _)| TypoSuggestion::typo_from_ident(ident.0, res)),
+                            this.helper_attrs.get(&expn_id).into_iter().flatten().map(
+                                |&(ident, orig_ident_span, _)| {
+                                    TypoSuggestion::new(ident.name, orig_ident_span, res)
+                                },
+                            ),
                         );
                     }
                 }
@@ -1202,8 +1218,11 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     if let MacroRulesScope::Def(macro_rules_def) = macro_rules_scope.get() {
                         let res = macro_rules_def.decl.res();
                         if filter_fn(res) {
-                            suggestions
-                                .push(TypoSuggestion::typo_from_ident(macro_rules_def.ident.0, res))
+                            suggestions.push(TypoSuggestion::new(
+                                macro_rules_def.ident.name,
+                                macro_rules_def.orig_ident_span,
+                                res,
+                            ))
                         }
                     }
                 }
@@ -1233,9 +1252,9 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 }
                 Scope::ExternPreludeItems => {
                     // Add idents from both item and flag scopes.
-                    suggestions.extend(this.extern_prelude.keys().filter_map(|ident| {
+                    suggestions.extend(this.extern_prelude.iter().filter_map(|(ident, entry)| {
                         let res = Res::Def(DefKind::Mod, CRATE_DEF_ID.to_def_id());
-                        filter_fn(res).then_some(TypoSuggestion::typo_from_ident(ident.0, res))
+                        filter_fn(res).then_some(TypoSuggestion::new(ident.name, entry.span(), res))
                     }));
                 }
                 Scope::ExternPreludeFlags => {}
@@ -1244,7 +1263,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     suggestions.extend(
                         this.registered_tools
                             .iter()
-                            .map(|ident| TypoSuggestion::typo_from_ident(*ident, res)),
+                            .map(|ident| TypoSuggestion::new(ident.name, ident.span, res)),
                     );
                 }
                 Scope::StdLibPrelude => {
@@ -1280,8 +1299,13 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         filter_fn: &impl Fn(Res) -> bool,
     ) -> Option<TypoSuggestion> {
         let mut suggestions = Vec::new();
-        let ctxt = ident.span.ctxt();
-        self.add_scope_set_candidates(&mut suggestions, scope_set, parent_scope, ctxt, filter_fn);
+        self.add_scope_set_candidates(
+            &mut suggestions,
+            scope_set,
+            parent_scope,
+            ident.span,
+            filter_fn,
+        );
 
         // Make sure error reporting is deterministic.
         suggestions.sort_by(|a, b| a.candidate.as_str().cmp(b.candidate.as_str()));
@@ -1329,7 +1353,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             }
         {
             let in_module_is_extern = !in_module.def_id().is_local();
-            in_module.for_each_child(self, |this, ident, ns, name_binding| {
+            in_module.for_each_child(self, |this, ident, orig_ident_span, ns, name_binding| {
                 // Avoid non-importable candidates.
                 if name_binding.is_assoc_item()
                     && !this.tcx.features().import_trait_associated_functions()
@@ -1382,7 +1406,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 if ident.name == lookup_ident.name
                     && ns == namespace
                     && in_module != parent_scope.module
-                    && !ident.span.normalize_to_macros_2_0().from_expansion()
+                    && ident.ctxt.is_root()
                     && filter_fn(res)
                 {
                     // create the path
@@ -1395,7 +1419,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     };
                     segms.append(&mut path_segments.clone());
 
-                    segms.push(ast::PathSegment::from_ident(ident.0));
+                    segms.push(ast::PathSegment::from_ident(ident.orig(orig_ident_span)));
                     let path = Path { span: name_binding.span, segments: segms, tokens: None };
 
                     if child_accessible
@@ -1433,14 +1457,13 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                         // a note about editions
                         let note = if let Some(did) = did {
                             let requires_note = !did.is_local()
-                                && this.tcx.get_attrs(did, sym::rustc_diagnostic_item).any(
-                                    |attr| {
-                                        [sym::TryInto, sym::TryFrom, sym::FromIterator]
-                                            .map(|x| Some(x))
-                                            .contains(&attr.value_str())
-                                    },
+                                && find_attr!(
+                                    this.tcx,
+                                    did,
+                                    RustcDiagnosticItem(
+                                        sym::TryInto | sym::TryFrom | sym::FromIterator
+                                    )
                                 );
-
                             requires_note.then(|| {
                                 format!(
                                     "'{}' is included in the prelude starting in Edition 2021",
@@ -1468,7 +1491,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 if let Some(def_id) = name_binding.res().module_like_def_id() {
                     // form the path
                     let mut path_segments = path_segments.clone();
-                    path_segments.push(ast::PathSegment::from_ident(ident.0));
+                    path_segments.push(ast::PathSegment::from_ident(ident.orig(orig_ident_span)));
 
                     let alias_import = if let DeclKind::Import { import, .. } = name_binding.kind
                         && let ImportKind::ExternCrate { source: Some(_), .. } = import.kind
@@ -1557,8 +1580,8 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         );
 
         if lookup_ident.span.at_least_rust_2018() {
-            for &ident in self.extern_prelude.keys() {
-                if ident.span.from_expansion() {
+            for (ident, entry) in &self.extern_prelude {
+                if entry.span().from_expansion() {
                     // Idents are adjusted to the root context before being
                     // resolved in the extern prelude, so reporting this to the
                     // user is no help. This skips the injected
@@ -1582,7 +1605,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     self.resolutions(parent_scope.module).borrow().iter().any(
                         |(key, name_resolution)| {
                             if key.ns == TypeNS
-                                && key.ident == ident
+                                && key.ident == *ident
                                 && let Some(decl) = name_resolution.borrow().best_decl()
                             {
                                 match decl.res() {
@@ -1601,7 +1624,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 if needs_disambiguation {
                     crate_path.push(ast::PathSegment::path_root(rustc_span::DUMMY_SP));
                 }
-                crate_path.push(ast::PathSegment::from_ident(ident.0));
+                crate_path.push(ast::PathSegment::from_ident(ident.orig(entry.span())));
 
                 suggestions.extend(self.lookup_import_candidates_from_module(
                     lookup_ident,
@@ -1614,6 +1637,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             }
         }
 
+        suggestions.retain(|suggestion| suggestion.is_stable || self.tcx.sess.is_nightly_build());
         suggestions
     }
 
@@ -1719,7 +1743,6 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 ScopeSet::All(ns),
                 parent_scope,
                 None,
-                false,
                 None,
                 None,
             ) else {
@@ -1739,8 +1762,8 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 Res::Def(DefKind::Macro(kinds), _) => {
                     format!("{} {}", kinds.article(), kinds.descr())
                 }
-                Res::ToolMod => {
-                    // Don't confuse the user with tool modules.
+                Res::ToolMod | Res::OpenMod(..) => {
+                    // Don't confuse the user with tool modules or open modules.
                     continue;
                 }
                 Res::Def(DefKind::Trait, _) if macro_kind == MacroKind::Derive => {
@@ -1776,7 +1799,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             return;
         }
 
-        if self.macro_names.contains(&ident.normalize_to_macros_2_0()) {
+        if self.macro_names.contains(&IdentKey::new(ident)) {
             err.subdiagnostic(AddedMacroUse);
             return;
         }
@@ -1977,7 +2000,8 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             let (built_in, from) = match scope {
                 Scope::StdLibPrelude | Scope::MacroUsePrelude => ("", " from prelude"),
                 Scope::ExternPreludeFlags
-                    if self.tcx.sess.opts.externs.get(ident.as_str()).is_some() =>
+                    if self.tcx.sess.opts.externs.get(ident.as_str()).is_some()
+                        || matches!(res, Res::OpenMod(..)) =>
                 {
                     ("", " passed with `--extern`")
                 }
@@ -2000,14 +2024,15 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
     }
 
     fn ambiguity_diagnostic(&self, ambiguity_error: &AmbiguityError<'ra>) -> errors::Ambiguity {
-        let AmbiguityError { kind, ident, b1, b2, scope1, scope2, .. } = *ambiguity_error;
+        let AmbiguityError { kind, ambig_vis, ident, b1, b2, scope1, scope2, .. } =
+            *ambiguity_error;
         let extern_prelude_ambiguity = || {
             // Note: b1 may come from a module scope, as an extern crate item in module.
             matches!(scope2, Scope::ExternPreludeFlags)
                 && self
                     .extern_prelude
-                    .get(&Macros20NormalizedIdent::new(ident))
-                    .is_some_and(|entry| entry.item_decl.map(|(b, _)| b) == Some(b1))
+                    .get(&IdentKey::new(ident))
+                    .is_some_and(|entry| entry.item_decl.map(|(b, ..)| b) == Some(b1))
         };
         let (b1, b2, scope1, scope2, swapped) = if b2.span.is_dummy() && !b1.span.is_dummy() {
             // We have to print the span-less alternative first, otherwise formatting looks bad.
@@ -2079,14 +2104,24 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             None
         };
 
+        let ambig_vis = ambig_vis.map(|(vis1, vis2)| {
+            format!(
+                "{} or {}",
+                vis1.to_string(CRATE_DEF_ID, self.tcx),
+                vis2.to_string(CRATE_DEF_ID, self.tcx)
+            )
+        });
+
         errors::Ambiguity {
             ident,
             help,
+            ambig_vis,
             kind: kind.descr(),
             b1_note,
             b1_help_msgs,
             b2_note,
             b2_help_msgs,
+            is_error: false,
         }
     }
 
@@ -2166,7 +2201,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         // Otherwise, point out if the struct has any private fields.
         if let Some(def_id) = res.opt_def_id()
             && !def_id.is_local()
-            && let Some(attr_span) = find_attr!(self.tcx.get_all_attrs(def_id), AttributeKind::NonExhaustive(span) => *span)
+            && let Some(attr_span) = find_attr!(self.tcx, def_id, NonExhaustive(span) => *span)
         {
             non_exhaustive = Some(attr_span);
         } else if let Some(span) = ctor_fields_span {
@@ -2208,7 +2243,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     })
                 })
                 .collect();
-            if let Some(def_id) = path.get(0)
+            if let Some(&def_id) = path.get(0)
                 && let Some(path) = path_names
             {
                 if let Some(def_id) = def_id.as_local() {
@@ -2375,7 +2410,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                             (last_span.shrink_to_hi(), ", ..".to_string()),
                         ]
                     };
-                    err.multipart_suggestion_verbose(
+                    err.multipart_suggestion(
                         format!(
                             "the type `{ident}` of field `{}` is private, but you can construct \
                              the default value defined for it in `{}` using `..` in the struct \
@@ -2438,13 +2473,25 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         failed_segment_idx: usize,
         ident: Ident,
         diag_metadata: Option<&DiagMetadata<'_>>,
-    ) -> (String, Option<Suggestion>) {
+    ) -> (String, String, Option<Suggestion>) {
         let is_last = failed_segment_idx == path.len() - 1;
         let ns = if is_last { opt_ns.unwrap_or(TypeNS) } else { TypeNS };
         let module_res = match module {
             Some(ModuleOrUniformRoot::Module(module)) => module.res(),
             _ => None,
         };
+        let scope = match &path[..failed_segment_idx] {
+            [.., prev] => {
+                if prev.ident.name == kw::PathRoot {
+                    format!("the crate root")
+                } else {
+                    format!("`{}`", prev.ident)
+                }
+            }
+            _ => format!("this scope"),
+        };
+        let message = format!("cannot find `{ident}` in {scope}");
+
         if module_res == self.graph_root.res() {
             let is_mod = |res| matches!(res, Res::Def(DefKind::Mod, _));
             let mut candidates = self.lookup_import_candidates(ident, TypeNS, parent_scope, is_mod);
@@ -2462,6 +2509,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     Path { segments, span: Span::default(), tokens: None }
                 };
                 (
+                    message,
                     String::from("unresolved import"),
                     Some((
                         vec![(ident.span, pprust::path_to_string(&path))],
@@ -2471,6 +2519,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 )
             } else if ident.name == sym::core {
                 (
+                    message,
                     format!("you might be missing crate `{ident}`"),
                     Some((
                         vec![(ident.span, "std".to_string())],
@@ -2479,9 +2528,14 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     )),
                 )
             } else if ident.name == kw::Underscore {
-                (format!("`_` is not a valid crate or module name"), None)
+                (
+                    "invalid crate or module name `_`".to_string(),
+                    "`_` is not a valid crate or module name".to_string(),
+                    None,
+                )
             } else if self.tcx.sess.is_rust_2015() {
                 (
+                    format!("cannot find module or crate `{ident}` in {scope}"),
                     format!("use of unresolved module or unlinked crate `{ident}`"),
                     Some((
                         vec![(
@@ -2490,8 +2544,9 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                         )],
                         if was_invoked_from_cargo() {
                             format!(
-                                "if you wanted to use a crate named `{ident}`, use `cargo add {ident}` \
-                             to add it to your `Cargo.toml` and import it in your code",
+                                "if you wanted to use a crate named `{ident}`, use `cargo add \
+                                 {ident}` to add it to your `Cargo.toml` and import it in your \
+                                 code",
                             )
                         } else {
                             format!(
@@ -2503,7 +2558,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     )),
                 )
             } else {
-                (format!("could not find `{ident}` in the crate root"), None)
+                (message, format!("could not find `{ident}` in the crate root"), None)
             }
         } else if failed_segment_idx > 0 {
             let parent = path[failed_segment_idx - 1].ident.name;
@@ -2556,7 +2611,6 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                             ScopeSet::All(ns_to_try),
                             parent_scope,
                             None,
-                            false,
                             ignore_decl,
                             ignore_import,
                         )
@@ -2570,15 +2624,16 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     );
                 };
             }
-            (msg, None)
+            (message, msg, None)
         } else if ident.name == kw::SelfUpper {
             // As mentioned above, `opt_ns` being `None` indicates a module path in import.
             // We can use this to improve a confusing error for, e.g. `use Self::Variant` in an
             // impl
             if opt_ns.is_none() {
-                ("`Self` cannot be used in imports".to_string(), None)
+                (message, "`Self` cannot be used in imports".to_string(), None)
             } else {
                 (
+                    message,
                     "`Self` is only available in impls, traits, and type definitions".to_string(),
                     None,
                 )
@@ -2609,12 +2664,12 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 // }
                 // ```
                 Some(LateDecl::RibDef(Res::Local(id))) => {
-                    Some(*self.pat_span_map.get(&id).unwrap())
+                    Some((*self.pat_span_map.get(&id).unwrap(), "a", "local binding"))
                 }
                 // Name matches item from a local name binding
                 // created by `use` declaration. For example:
                 // ```
-                // pub Foo: &str = "";
+                // pub const Foo: &str = "";
                 //
                 // mod submod {
                 //     use super::Foo;
@@ -2622,18 +2677,27 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 //                               // binding `Foo`.
                 // }
                 // ```
-                Some(LateDecl::Decl(name_binding)) => Some(name_binding.span),
+                Some(LateDecl::Decl(name_binding)) => Some((
+                    name_binding.span,
+                    name_binding.res().article(),
+                    name_binding.res().descr(),
+                )),
                 _ => None,
             };
-            let suggestion = match_span.map(|span| {
-                (
-                    vec![(span, String::from(""))],
-                    format!("`{ident}` is defined here, but is not a type"),
-                    Applicability::MaybeIncorrect,
-                )
-            });
 
-            (format!("use of undeclared type `{ident}`"), suggestion)
+            let message = format!("cannot find type `{ident}` in {scope}");
+            let label = if let Some((span, article, descr)) = match_span {
+                format!(
+                    "`{ident}` is declared as {article} {descr} at `{}`, not a type",
+                    self.tcx
+                        .sess
+                        .source_map()
+                        .span_to_short_string(span, RemapPathScopeComponents::DIAGNOSTICS)
+                )
+            } else {
+                format!("use of undeclared type `{ident}`")
+            };
+            (message, label, None)
         } else {
             let mut suggestion = None;
             if ident.name == sym::alloc {
@@ -2660,12 +2724,12 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 ScopeSet::All(ValueNS),
                 parent_scope,
                 None,
-                false,
                 ignore_decl,
                 ignore_import,
             ) {
                 let descr = binding.res().descr();
-                (format!("{descr} `{ident}` is not a crate or module"), suggestion)
+                let message = format!("cannot find module or crate `{ident}` in {scope}");
+                (message, format!("{descr} `{ident}` is not a crate or module"), suggestion)
             } else {
                 let suggestion = if suggestion.is_some() {
                     suggestion
@@ -2687,7 +2751,12 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                         Applicability::MaybeIncorrect,
                     ))
                 };
-                (format!("use of unresolved module or unlinked crate `{ident}`"), suggestion)
+                let message = format!("cannot find module or crate `{ident}` in {scope}");
+                (
+                    message,
+                    format!("use of unresolved module or unlinked crate `{ident}`"),
+                    suggestion,
+                )
             }
         }
     }
@@ -2913,7 +2982,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             return None;
         }
 
-        let binding_key = BindingKey::new(Macros20NormalizedIdent::new(ident), MacroNS);
+        let binding_key = BindingKey::new(IdentKey::new(ident), MacroNS);
         let binding = self.resolution(crate_module, binding_key)?.binding()?;
         let Res::Def(DefKind::Macro(kinds), _) = binding.res() else {
             return None;
@@ -2936,7 +3005,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             corrections.push((import.span, format!("{module_name}::{import_snippet}")));
         } else {
             // Find the binding span (and any trailing commas and spaces).
-            //   ie. `use a::b::{c, d, e};`
+            //   i.e. `use a::b::{c, d, e};`
             //                      ^^^
             let (found_closing_brace, binding_span) = find_span_of_binding_until_next_binding(
                 self.tcx.sess,
@@ -2948,11 +3017,11 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             let mut removal_span = binding_span;
 
             // If the binding span ended with a closing brace, as in the below example:
-            //   ie. `use a::b::{c, d};`
+            //   i.e. `use a::b::{c, d};`
             //                      ^
             // Then expand the span of characters to remove to include the previous
             // binding's trailing comma.
-            //   ie. `use a::b::{c, d};`
+            //   i.e. `use a::b::{c, d};`
             //                    ^^^
             if found_closing_brace
                 && let Some(previous_span) =
@@ -2968,7 +3037,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
 
             // Find the span after the crate name and if it has nested imports immediately
             // after the crate name already.
-            //   ie. `use a::b::{c, d};`
+            //   i.e. `use a::b::{c, d};`
             //               ^^^^^^^^^
             //   or  `use a::{b, c, d}};`
             //               ^^^^^^^^^^^
@@ -3037,12 +3106,8 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 .stripped_cfg_items
                 .iter()
                 .filter_map(|item| {
-                    let parent_module = self.opt_local_def_id(item.parent_module)?.to_def_id();
-                    Some(StrippedCfgItem {
-                        parent_module,
-                        ident: item.ident,
-                        cfg: item.cfg.clone(),
-                    })
+                    let parent_scope = self.opt_local_def_id(item.parent_scope)?.to_def_id();
+                    Some(StrippedCfgItem { parent_scope, ident: item.ident, cfg: item.cfg.clone() })
                 })
                 .collect::<Vec<_>>();
             local_items.as_slice()
@@ -3050,10 +3115,12 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             self.tcx.stripped_cfg_items(module.krate)
         };
 
-        for &StrippedCfgItem { parent_module, ident, ref cfg } in symbols {
+        for &StrippedCfgItem { parent_scope, ident, ref cfg } in symbols {
             if ident.name != *segment {
                 continue;
             }
+
+            let parent_module = self.get_nearest_non_block_module(parent_scope).def_id();
 
             fn comes_from_same_module_for_glob(
                 r: &Resolver<'_, '_>,
@@ -3132,16 +3199,16 @@ fn find_span_of_binding_until_next_binding(
     let source_map = sess.source_map();
 
     // Find the span of everything after the binding.
-    //   ie. `a, e};` or `a};`
+    //   i.e. `a, e};` or `a};`
     let binding_until_end = binding_span.with_hi(use_span.hi());
 
     // Find everything after the binding but not including the binding.
-    //   ie. `, e};` or `};`
+    //   i.e. `, e};` or `};`
     let after_binding_until_end = binding_until_end.with_lo(binding_span.hi());
 
     // Keep characters in the span until we encounter something that isn't a comma or
     // whitespace.
-    //   ie. `, ` or ``.
+    //   i.e. `, ` or ``.
     //
     // Also note whether a closing brace character was encountered. If there
     // was, then later go backwards to remove any trailing commas that are left.
@@ -3155,7 +3222,7 @@ fn find_span_of_binding_until_next_binding(
         });
 
     // Combine the two spans.
-    //   ie. `a, ` or `a`.
+    //   i.e. `a, ` or `a`.
     //
     // Removing these would leave `issue_52891::{d, e};` or `issue_52891::{d, e, };`
     let span = binding_span.with_hi(after_binding_until_next_binding.hi());
@@ -3179,7 +3246,7 @@ fn extend_span_to_previous_binding(sess: &Session, binding_span: Span) -> Option
     let source_map = sess.source_map();
 
     // `prev_source` will contain all of the source that came before the span.
-    // Then split based on a command and take the first (ie. closest to our span)
+    // Then split based on a command and take the first (i.e. closest to our span)
     // snippet. In the example, this is a space.
     let prev_source = source_map.span_to_prev_source(binding_span).ok()?;
 

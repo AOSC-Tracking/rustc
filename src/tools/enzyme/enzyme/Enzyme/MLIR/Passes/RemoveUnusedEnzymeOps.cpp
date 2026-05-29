@@ -308,11 +308,10 @@ struct PushSimplify : public OpRewritePattern<enzyme::PushOp> {
 struct InitSimplify : public OpRewritePattern<enzyme::InitOp> {
   using OpRewritePattern<enzyme::InitOp>::OpRewritePattern;
 
-  LogicalResult matchAndRewrite(enzyme::InitOp get,
+  LogicalResult matchAndRewrite(enzyme::InitOp init,
                                 PatternRewriter &rewriter) const final {
-
-    if (get.use_empty()) {
-      rewriter.eraseOp(get);
+    if (init.use_empty()) {
+      rewriter.eraseOp(init);
       return success();
     }
     return failure();
@@ -339,6 +338,20 @@ static void applyPatterns(Operation *op) {
   GreedyRewriteConfig config;
   config.enableFolding();
   (void)applyPatternsGreedily(op, std::move(patterns), config);
+}
+
+static void annotateRegionOpsInLoops(Operation *op) {
+  // When we have non-looping region branch ops (e.g. scf.if) inside of a loop,
+  // we want the pushes/pops to be removed by the outer loop remover, not the
+  // inner op remover. This helps mincut reduce the overall caching overhead.
+  op->walk([](LoopLikeOpInterface loop) {
+    loop->walk([](RegionBranchOpInterface regionBranch) {
+      if (!regionBranch.hasLoop()) {
+        regionBranch->setAttr(kPreserveCacheAttrName,
+                              UnitAttr::get(regionBranch.getContext()));
+      }
+    });
+  });
 }
 
 // A worklist that supports removing operations
@@ -417,8 +430,9 @@ protected:
                                OpBuilder::InsertPoint previous) override;
   void notifyOperationErased(Operation *op) override;
 
-  void notifyMatchFailure(Location loc,
-                          function_ref<void(Diagnostic &)> reasonCallback);
+  void
+  notifyMatchFailure(Location loc,
+                     function_ref<void(Diagnostic &)> reasonCallback) override;
 
 private:
   void addToWorklist(Operation *op);
@@ -512,6 +526,7 @@ struct RemoveUnusedEnzymeOpsPass
 
     applyPatterns(op);
 
+    annotateRegionOpsInLoops(op);
     bool failed = false;
     op->walk([&](FunctionOpInterface func) {
       PostOrderWalkDriver driver(func);

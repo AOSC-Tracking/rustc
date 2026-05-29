@@ -120,6 +120,38 @@ bool DifferentialUseAnalysis::is_use_directly_needed_in_reverse(
           }
         }
       }
+
+      // And runtime activity updates
+      if (gutils->runtimeActivity && SI->getPointerOperand() == val) {
+        auto &DL = gutils->newFunc->getParent()->getDataLayout();
+        auto ET = SI->getValueOperand()->getType();
+        auto storeSize = (DL.getTypeSizeInBits(ET) + 7) / 8;
+        auto vd = TR.query(const_cast<Value *>(SI->getPointerOperand()))
+                      .Lookup(storeSize, DL);
+        if (!vd.isKnown()) {
+          // It verbatim needs to replicate the same behavior as
+          // adjointgenerator. From reverse mode type analysis
+          // (https://github.com/EnzymeAD/Enzyme/blob/194875cbccd73d63cacfefbfa85c1f583c2fa1fe/enzyme/Enzyme/AdjointGenerator.h#L556)
+          if (looseTypeAnalysis || true) {
+            vd = defaultTypeTreeForLLVM(ET, const_cast<StoreInst *>(SI));
+          }
+        }
+        bool hasFloat = true;
+        for (ssize_t i = -1; i < (ssize_t)storeSize; ++i) {
+          if (vd[{(int)i}].isFloat()) {
+            hasFloat = true;
+            break;
+          }
+        }
+        if (hasFloat && !gutils->isConstantValue(const_cast<llvm::Value *>(
+                            SI->getPointerOperand()))) {
+          if (EnzymePrintDiffUse)
+            llvm::errs() << " Need direct primal of " << *val
+                         << " in reverse from runtime active store " << *user
+                         << "\n";
+          return true;
+        }
+      }
     } else {
       bool backwardsShadow = false;
       bool forwardsShadow = true;
@@ -624,23 +656,34 @@ bool DifferentialUseAnalysis::is_use_directly_needed_in_reverse(
     if (shouldDisableNoWrite(CI)) {
       writeOnlyNoCapture = false;
     }
-    for (size_t i = 0; i < CI->arg_size(); i++) {
-      if (val == CI->getArgOperand(i)) {
-        if (!isNoCapture(CI, i)) {
-          writeOnlyNoCapture = false;
-          break;
-        }
-        if (!isWriteOnly(CI, i)) {
-          writeOnlyNoCapture = false;
-          break;
+    // Outside of forward mode, we don't need to keep a primal around in reverse
+    // just for the deallocation
+    if (!(mode == DerivativeMode::ForwardMode ||
+          mode == DerivativeMode::ForwardModeError) &&
+        isDeallocationFunction(funcName, gutils->TLI)) {
+    } else {
+      for (size_t i = 0; i < CI->arg_size(); i++) {
+        if (val == CI->getArgOperand(i)) {
+          if (!isNoCapture(CI, i)) {
+            writeOnlyNoCapture = false;
+            break;
+          }
+          if (!isWriteOnly(CI, i)) {
+            writeOnlyNoCapture = false;
+            break;
+          }
         }
       }
     }
 
     // Don't need the primal argument if it is write only and not captured
     if (!shadow)
-      if (writeOnlyNoCapture)
+      if (writeOnlyNoCapture) {
+        if (EnzymePrintDiffUse)
+          llvm::errs() << " No Need: primal of " << *val
+                       << " per write-only no-capture use in " << *CI << "\n";
         return false;
+      }
 
     if (shadow) {
       // Don't need the shadow argument if it is a pointer to pointers, which
@@ -724,14 +767,14 @@ bool DifferentialUseAnalysis::is_use_directly_needed_in_reverse(
 
   bool neededFB = false;
   if (auto CB = dyn_cast<CallBase>(const_cast<Instruction *>(user))) {
-    neededFB = !callShouldNotUseDerivative(gutils, *CB);
+    neededFB = !callShouldNotUseDerivative(gutils, *CB, qtype, val);
   } else {
     neededFB = !gutils->isConstantInstruction(user) ||
                !gutils->isConstantValue(const_cast<Instruction *>(user));
   }
   if (neededFB) {
     if (EnzymePrintDiffUse)
-      llvm::errs() << " Need direct primal of " << *val
+      llvm::errs() << " Need direct primal(" << mode << ") of " << *val
                    << " in reverse from fallback " << *user << "\n";
   }
   return neededFB;
@@ -884,9 +927,7 @@ void DifferentialUseAnalysis::minCut(const DataLayout &DL, LoopInfo &OrigLI,
           assert(pair.first.outgoing == 0 && N.outgoing == 1);
           assert(pair.first.V == N.V);
           MinReq.insert(N.V);
-          if (Orig.find(Node(N.V, true)) != Orig.end()) {
-            todo.insert(N.V);
-          }
+          todo.insert(N.V);
         }
       }
   }
@@ -894,15 +935,10 @@ void DifferentialUseAnalysis::minCut(const DataLayout &DL, LoopInfo &OrigLI,
   while (todo.size()) {
     auto V = todo.front();
     todo.remove(V);
-    auto found = Orig.find(Node(V, true));
-    assert(found != Orig.end());
-    const auto &mp = found->second;
-
     assert(MinReq.count(V));
 
     // Fix up non-cacheable calls to use their operand(s) instead
     if (hasNoCache(V)) {
-      assert(!Required.count(V));
       MinReq.remove(V);
       for (auto &pair : Orig) {
         if (pair.second.count(Node(V, false))) {
@@ -913,68 +949,75 @@ void DifferentialUseAnalysis::minCut(const DataLayout &DL, LoopInfo &OrigLI,
       continue;
     }
 
-    // When ambiguous, push to cache the last value in a computation chain
-    // This should be considered in a cost for the max flow
-    if (mp.size() == 1 && !Required.count(V)) {
-      bool potentiallyRecursive =
-          isa<PHINode>((*mp.begin()).V) &&
-          OrigLI.isLoopHeader(cast<PHINode>((*mp.begin()).V)->getParent());
-      int moreOuterLoop = cmpLoopNest(
-          OrigLI.getLoopFor(cast<Instruction>(V)->getParent()),
-          OrigLI.getLoopFor(cast<Instruction>(((*mp.begin()).V))->getParent()));
-      if (potentiallyRecursive)
-        continue;
-      if (moreOuterLoop == -1)
-        continue;
-      if (auto ASC = dyn_cast<AddrSpaceCastInst>((*mp.begin()).V)) {
-        if (ASC->getDestAddressSpace() == 11 ||
-            ASC->getDestAddressSpace() == 13)
+    auto found = Orig.find(Node(V, true));
+    if (found != Orig.end()) {
+      const auto &mp = found->second;
+
+      // When ambiguous, push to cache the last value in a computation chain
+      // This should be considered in a cost for the max flow
+      if (mp.size() == 1 && !Required.count(V)) {
+        bool potentiallyRecursive =
+            isa<PHINode>((*mp.begin()).V) &&
+            OrigLI.isLoopHeader(cast<PHINode>((*mp.begin()).V)->getParent());
+        int moreOuterLoop =
+            cmpLoopNest(OrigLI.getLoopFor(cast<Instruction>(V)->getParent()),
+                        OrigLI.getLoopFor(
+                            cast<Instruction>(((*mp.begin()).V))->getParent()));
+        if (potentiallyRecursive)
           continue;
-        if (ASC->getSrcAddressSpace() == 10 && ASC->getDestAddressSpace() == 0)
+        if (moreOuterLoop == -1)
           continue;
-      }
-      if (auto CI = dyn_cast<CastInst>((*mp.begin()).V)) {
-        if (CI->getType()->isPointerTy() &&
-            CI->getType()->getPointerAddressSpace() == 13)
+        if (auto ASC = dyn_cast<AddrSpaceCastInst>((*mp.begin()).V)) {
+          if (ASC->getDestAddressSpace() == 11 ||
+              ASC->getDestAddressSpace() == 13)
+            continue;
+          if (ASC->getSrcAddressSpace() == 10 &&
+              ASC->getDestAddressSpace() == 0)
+            continue;
+        }
+        if (auto CI = dyn_cast<CastInst>((*mp.begin()).V)) {
+          if (CI->getType()->isPointerTy() &&
+              CI->getType()->getPointerAddressSpace() == 13)
+            continue;
+        }
+        if (auto G = dyn_cast<GetElementPtrInst>((*mp.begin()).V)) {
+          if (G->getType()->getPointerAddressSpace() == 13)
+            continue;
+        }
+        if (hasNoCache((*mp.begin()).V)) {
           continue;
-      }
-      if (auto G = dyn_cast<GetElementPtrInst>((*mp.begin()).V)) {
-        if (G->getType()->getPointerAddressSpace() == 13)
-          continue;
-      }
-      if (hasNoCache((*mp.begin()).V)) {
-        continue;
-      }
-      // If an allocation call, we cannot cache any "capturing" users
-      if (isAllocationCall(V, TLI) || isa<AllocaInst>(V)) {
-        auto next = (*mp.begin()).V;
-        bool noncapture = false;
-        if (isa<LoadInst>(next) || isNVLoad(next)) {
-          noncapture = true;
-        } else if (auto CI = dyn_cast<CallInst>(next)) {
-          bool captures = false;
-          for (size_t i = 0; i < CI->arg_size(); i++) {
-            if (CI->getArgOperand(i) == V && !isNoCapture(CI, i)) {
-              captures = true;
-              break;
+        }
+        // If an allocation call, we cannot cache any "capturing" users
+        if (isAllocationCall(V, TLI) || isa<AllocaInst>(V)) {
+          auto next = (*mp.begin()).V;
+          bool noncapture = false;
+          if (isa<LoadInst>(next) || isNVLoad(next)) {
+            noncapture = true;
+          } else if (auto CI = dyn_cast<CallInst>(next)) {
+            bool captures = false;
+            for (size_t i = 0; i < CI->arg_size(); i++) {
+              if (CI->getArgOperand(i) == V && !isNoCapture(CI, i)) {
+                captures = true;
+                break;
+              }
             }
+            noncapture = !captures;
           }
-          noncapture = !captures;
+
+          if (!noncapture)
+            continue;
         }
 
-        if (!noncapture)
-          continue;
-      }
-
-      if (moreOuterLoop == 1 ||
-          (moreOuterLoop == 0 &&
-           DL.getTypeSizeInBits(V->getType()) >=
-               DL.getTypeSizeInBits((*mp.begin()).V->getType()))) {
-        MinReq.remove(V);
-        auto nnode = (*mp.begin()).V;
-        MinReq.insert(nnode);
-        if (Orig.find(Node(nnode, true)) != Orig.end())
-          todo.insert(nnode);
+        if (moreOuterLoop == 1 ||
+            (moreOuterLoop == 0 &&
+             DL.getTypeSizeInBits(V->getType()) >=
+                 DL.getTypeSizeInBits((*mp.begin()).V->getType()))) {
+          MinReq.remove(V);
+          auto nnode = (*mp.begin()).V;
+          MinReq.insert(nnode);
+          if (Orig.find(Node(nnode, true)) != Orig.end())
+            todo.insert(nnode);
+        }
       }
     }
   }
@@ -1019,7 +1062,8 @@ void DifferentialUseAnalysis::minCut(const DataLayout &DL, LoopInfo &OrigLI,
 }
 
 bool DifferentialUseAnalysis::callShouldNotUseDerivative(
-    const GradientUtils *gutils, CallBase &call) {
+    const GradientUtils *gutils, CallBase &call, QueryType qtype,
+    const Value *val) {
   bool shadowReturnUsed = false;
   auto smode = gutils->mode;
   if (smode == DerivativeMode::ReverseModeGradient)
@@ -1031,51 +1075,63 @@ bool DifferentialUseAnalysis::callShouldNotUseDerivative(
       (gutils->isConstantValue(&call) || !shadowReturnUsed);
   if (useConstantFallback && gutils->mode != DerivativeMode::ForwardMode &&
       gutils->mode != DerivativeMode::ForwardModeError) {
+
     // if there is an escaping allocation, which is deduced needed in
     // reverse pass, we need to do the recursive procedure to perform the
     // free.
-
-    // First test if the return is a potential pointer and needed for the
-    // reverse pass
     bool escapingNeededAllocation = false;
 
+    // First, some calls may be marked, non escaping. If that's the case, we
+    // can avoid unnecessary work.
     if (!isNoEscapingAllocation(&call)) {
-      escapingNeededAllocation = EnzymeGlobalActivity;
 
-      std::map<UsageKey, bool> CacheResults;
-      for (auto pair : gutils->knownRecomputeHeuristic) {
-        if (!pair.second || gutils->unnecessaryIntermediates.count(
-                                cast<Instruction>(pair.first))) {
-          CacheResults[UsageKey(pair.first, QueryType::Primal)] = false;
-        }
-      }
-
-      if (!escapingNeededAllocation &&
-          !(EnzymeJuliaAddrLoad && isSpecialPtr(call.getType()))) {
-        if (gutils->TR.anyPointer(&call)) {
-          auto found = gutils->knownRecomputeHeuristic.find(&call);
-          if (found != gutils->knownRecomputeHeuristic.end()) {
-            if (!found->second) {
-              CacheResults.erase(UsageKey(&call, QueryType::Primal));
-              escapingNeededAllocation =
-                  DifferentialUseAnalysis::is_value_needed_in_reverse<
-                      QueryType::Primal>(gutils, &call,
-                                         DerivativeMode::ReverseModeGradient,
-                                         CacheResults, gutils->notForAnalysis);
-            }
-          } else {
-            escapingNeededAllocation =
-                DifferentialUseAnalysis::is_value_needed_in_reverse<
-                    QueryType::Primal>(gutils, &call,
-                                       DerivativeMode::ReverseModeGradient,
-                                       CacheResults, gutils->notForAnalysis);
+      // If the function being called has a definition, check if any of the
+      // subcalls can allocate.
+      if (auto F = getFunctionFromCall(&call)) {
+        SmallVector<Function *, 1> todo = {F};
+        SmallPtrSet<Function *, 1> done;
+        bool seenAllocation = false;
+        while (todo.size() && !seenAllocation) {
+          auto cur = todo.pop_back_val();
+          if (done.count(cur))
+            continue;
+          done.insert(cur);
+          // assume empty functions allocate.
+          if (cur->empty()) {
+            // unless they are marked
+            if (isNoEscapingAllocation(cur))
+              continue;
+            seenAllocation = true;
+            break;
           }
+          auto UR = getGuaranteedUnreachable(cur);
+          for (auto &BB : *cur) {
+            if (UR.count(&BB))
+              continue;
+            for (auto &I : BB)
+              if (auto CB = dyn_cast<CallBase>(&I)) {
+                if (isNoEscapingAllocation(CB))
+                  continue;
+                if (isAllocationCall(CB, gutils->TLI)) {
+                  seenAllocation = true;
+                  goto finish;
+                }
+                if (auto F = getFunctionFromCall(CB)) {
+                  todo.push_back(F);
+                  continue;
+                }
+                // Conservatively assume indirect functions allocate.
+                seenAllocation = true;
+                goto finish;
+              }
+          }
+        finish:;
+          if (!seenAllocation)
+            goto doneEscapeCheck;
         }
-      }
 
-      // Next test if any allocation could be stored into one of the
-      // arguments.
-      if (!escapingNeededAllocation)
+        // Next, test if any allocation could be stored into one of the
+        // arguments.
         for (unsigned i = 0; i < call.arg_size(); ++i) {
           Value *a = call.getOperand(i);
 
@@ -1105,54 +1161,60 @@ bool DifferentialUseAnalysis::callShouldNotUseDerivative(
             continue;
 
           escapingNeededAllocation = true;
-        }
-    }
-
-    // If desired this can become even more aggressive by looking through the
-    // called function for any allocations.
-    if (auto F = getFunctionFromCall(&call)) {
-      SmallVector<Function *, 1> todo = {F};
-      SmallPtrSet<Function *, 1> done;
-      bool seenAllocation = false;
-      while (todo.size() && !seenAllocation) {
-        auto cur = todo.pop_back_val();
-        if (done.count(cur))
-          continue;
-        done.insert(cur);
-        // assume empty functions allocate.
-        if (cur->empty()) {
-          // unless they are marked
-          if (isNoEscapingAllocation(cur))
-            continue;
-          seenAllocation = true;
+          goto doneEscapeCheck;
           break;
         }
-        auto UR = getGuaranteedUnreachable(cur);
-        for (auto &BB : *cur) {
-          if (UR.count(&BB))
-            continue;
-          for (auto &I : BB)
-            if (auto CB = dyn_cast<CallBase>(&I)) {
-              if (isNoEscapingAllocation(CB))
-                continue;
-              if (isAllocationCall(CB, gutils->TLI)) {
-                seenAllocation = true;
-                goto finish;
-              }
-              if (auto F = getFunctionFromCall(CB)) {
-                todo.push_back(F);
-                continue;
-              }
-              // Conservatively assume indirect functions allocate.
-              seenAllocation = true;
-              goto finish;
-            }
+
+        // Finally, test if the return is a potential pointer, and needed for
+        // the reverse pass.
+        if (EnzymeGlobalActivity) {
+          escapingNeededAllocation = true;
+          goto doneEscapeCheck;
         }
-      finish:;
+
+        // Not a pointer
+        if (!gutils->TR.anyPointer(&call)) {
+          goto doneEscapeCheck;
+        }
+        // GC'd pointer, not needed to be explicitly free'd
+        if (EnzymeJuliaAddrLoad && isSpecialPtr(call.getType())) {
+          goto doneEscapeCheck;
+        }
+
+        std::map<UsageKey, bool> CacheResults;
+        for (auto pair : gutils->knownRecomputeHeuristic) {
+          if (!pair.second || gutils->unnecessaryIntermediates.count(
+                                  cast<Instruction>(pair.first))) {
+            CacheResults[UsageKey(pair.first, QueryType::Primal)] = false;
+          }
+        }
+
+        // to avoid an infinite loop, we assume this is needed by
+        // marking the query that led us.
+        if (val)
+          CacheResults[UsageKey(val, qtype)] = true;
+
+        auto found = gutils->knownRecomputeHeuristic.find(&call);
+        if (found != gutils->knownRecomputeHeuristic.end()) {
+          if (!found->second) {
+            CacheResults.erase(UsageKey(&call, QueryType::Primal));
+            escapingNeededAllocation =
+                DifferentialUseAnalysis::is_value_needed_in_reverse<
+                    QueryType::Primal>(gutils, &call,
+                                       DerivativeMode::ReverseModeGradient,
+                                       CacheResults, gutils->notForAnalysis);
+          }
+        } else {
+          escapingNeededAllocation =
+              DifferentialUseAnalysis::is_value_needed_in_reverse<
+                  QueryType::Primal>(gutils, &call,
+                                     DerivativeMode::ReverseModeGradient,
+                                     CacheResults, gutils->notForAnalysis);
+        }
       }
-      if (!seenAllocation)
-        escapingNeededAllocation = false;
     }
+
+  doneEscapeCheck:;
     if (escapingNeededAllocation)
       useConstantFallback = false;
   }

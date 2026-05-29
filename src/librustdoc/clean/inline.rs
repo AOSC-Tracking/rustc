@@ -5,10 +5,9 @@ use std::sync::Arc;
 
 use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::thin_vec::{ThinVec, thin_vec};
-use rustc_hir as hir;
-use rustc_hir::Mutability;
 use rustc_hir::def::{DefKind, MacroKinds, Res};
 use rustc_hir::def_id::{DefId, DefIdSet, LocalDefId, LocalModDefId};
+use rustc_hir::{self as hir, Mutability, find_attr};
 use rustc_metadata::creader::{CStore, LoadedMacro};
 use rustc_middle::ty::fast_reject::SimplifiedType;
 use rustc_middle::ty::{self, TyCtxt};
@@ -130,7 +129,7 @@ pub(crate) fn try_inline(
                 clean::StaticItem(build_static(cx, did, cx.tcx.is_mutable_static(did)))
             })
         }
-        Res::Def(DefKind::Const, did) => {
+        Res::Def(DefKind::Const { .. }, did) => {
             record_extern_fqn(cx, did, ItemType::Constant);
             cx.with_param_env(did, |cx| {
                 let ct = build_const_item(cx, did);
@@ -138,7 +137,7 @@ pub(crate) fn try_inline(
             })
         }
         Res::Def(DefKind::Macro(kinds), did) => {
-            let mac = build_macro(cx, did, name, kinds);
+            let mac = build_macro(cx.tcx, did, name, kinds);
 
             // FIXME: handle attributes and derives that aren't proc macros, and macros with
             // multiple kinds
@@ -192,7 +191,7 @@ pub(crate) fn try_inline_glob(
                 .iter()
                 .filter(|child| !child.reexport_chain.is_empty())
                 .filter_map(|child| child.res.opt_def_id())
-                .filter(|def_id| !cx.tcx.is_doc_hidden(def_id))
+                .filter(|&def_id| !cx.tcx.is_doc_hidden(def_id))
                 .collect();
             let attrs = cx.tcx.hir_attrs(import.hir_id());
             let mut items = build_module_items(
@@ -219,8 +218,10 @@ pub(crate) fn try_inline_glob(
     }
 }
 
-pub(crate) fn load_attrs<'hir>(cx: &DocContext<'hir>, did: DefId) -> &'hir [hir::Attribute] {
-    cx.tcx.get_all_attrs(did)
+pub(crate) fn load_attrs<'hir>(tcx: TyCtxt<'hir>, did: DefId) -> &'hir [hir::Attribute] {
+    // FIXME: all uses should use `find_attr`!
+    #[allow(deprecated)]
+    tcx.get_all_attrs(did)
 }
 
 pub(crate) fn item_relative_path(tcx: TyCtxt<'_>, def_id: DefId) -> Vec<Symbol> {
@@ -288,7 +289,7 @@ pub(crate) fn build_trait(cx: &mut DocContext<'_>, did: DefId) -> clean::Trait {
     supertrait_bounds.retain(|b| {
         // FIXME(sized-hierarchy): Always skip `MetaSized` bounds so that only `?Sized`
         // is shown and none of the new sizedness traits leak into documentation.
-        !b.is_meta_sized_bound(cx)
+        !b.is_meta_sized_bound(cx.tcx)
     });
 
     clean::Trait { def_id: did, generics, items: trait_items, bounds: supertrait_bounds }
@@ -301,7 +302,7 @@ fn build_trait_alias(cx: &mut DocContext<'_>, did: DefId) -> clean::TraitAlias {
     bounds.retain(|b| {
         // FIXME(sized-hierarchy): Always skip `MetaSized` bounds so that only `?Sized`
         // is shown and none of the new sizedness traits leak into documentation.
-        !b.is_meta_sized_bound(cx)
+        !b.is_meta_sized_bound(cx.tcx)
     });
 
     clean::TraitAlias { generics, bounds }
@@ -311,7 +312,7 @@ pub(super) fn build_function(cx: &mut DocContext<'_>, def_id: DefId) -> Box<clea
     let sig = cx.tcx.fn_sig(def_id).instantiate_identity();
     // The generics need to be cleaned before the signature.
     let mut generics = clean_ty_generics(cx, def_id);
-    let bound_vars = clean_bound_vars(sig.bound_vars(), cx);
+    let bound_vars = clean_bound_vars(sig.bound_vars(), cx.tcx);
 
     // At the time of writing early & late-bound params are stored separately in rustc,
     // namely in `generics.params` and `bound_vars` respectively.
@@ -387,8 +388,8 @@ pub(crate) fn build_impls(
     attrs: Option<(&[hir::Attribute], Option<LocalDefId>)>,
     ret: &mut Vec<clean::Item>,
 ) {
-    let _prof_timer = cx.tcx.sess.prof.generic_activity("build_inherent_impls");
     let tcx = cx.tcx;
+    let _prof_timer = tcx.sess.prof.generic_activity("build_inherent_impls");
 
     // for each implementation of an item represented by `did`, build the clean::Item for that impl
     for &did in tcx.inherent_impls(did).iter() {
@@ -403,7 +404,7 @@ pub(crate) fn build_impls(
     // * https://github.com/rust-lang/rust/issues/103170 — where it didn't used to get documented
     // * https://github.com/rust-lang/rust/pull/99917 — where the feature got used
     // * https://github.com/rust-lang/rust/issues/53487 — overall tracking issue for Error
-    if tcx.has_attr(did, sym::rustc_has_incoherent_inherent_impls) {
+    if find_attr!(tcx, did, RustcHasIncoherentInherentImpls) {
         let type_ =
             if tcx.is_trait(did) { SimplifiedType::Trait(did) } else { SimplifiedType::Adt(did) };
         for &did in tcx.incoherent_impls(type_).iter() {
@@ -415,7 +416,7 @@ pub(crate) fn build_impls(
 }
 
 pub(crate) fn merge_attrs(
-    cx: &mut DocContext<'_>,
+    tcx: TyCtxt<'_>,
     old_attrs: &[hir::Attribute],
     new_attrs: Option<(&[hir::Attribute], Option<LocalDefId>)>,
     cfg_info: &mut CfgInfo,
@@ -433,13 +434,10 @@ pub(crate) fn merge_attrs(
             } else {
                 Attributes::from_hir(&both)
             },
-            extract_cfg_from_attrs(both.iter(), cx.tcx, cfg_info),
+            extract_cfg_from_attrs(both.iter(), tcx, cfg_info),
         )
     } else {
-        (
-            Attributes::from_hir(old_attrs),
-            extract_cfg_from_attrs(old_attrs.iter(), cx.tcx, cfg_info),
-        )
+        (Attributes::from_hir(old_attrs), extract_cfg_from_attrs(old_attrs.iter(), tcx, cfg_info))
     }
 }
 
@@ -561,7 +559,7 @@ pub(crate) fn build_impl(
                             .find_by_ident_and_kind(
                                 tcx,
                                 item.ident(tcx),
-                                item.as_tag(),
+                                item.tag(),
                                 associated_trait.def_id,
                             )
                             .unwrap(); // corresponding associated item has to exist
@@ -582,7 +580,9 @@ pub(crate) fn build_impl(
     };
     let trait_ = associated_trait
         .map(|t| clean_trait_ref_with_constraints(cx, ty::Binder::dummy(t), ThinVec::new()));
-    if trait_.as_ref().map(|t| t.def_id()) == tcx.lang_items().deref_trait() {
+    if trait_.as_ref().map(|t| t.def_id()) == tcx.lang_items().deref_trait()
+        && polarity != ty::ImplPolarity::Negative
+    {
         super::build_deref_target_impls(cx, &trait_items, ret);
     }
 
@@ -622,7 +622,8 @@ pub(crate) fn build_impl(
     // doesn't matter at this point.
     //
     // We need to pass this empty `CfgInfo` because `merge_attrs` is used when computing the `cfg`.
-    let (merged_attrs, cfg) = merge_attrs(cx, load_attrs(cx, did), attrs, &mut CfgInfo::default());
+    let (merged_attrs, cfg) =
+        merge_attrs(cx.tcx, load_attrs(cx.tcx, did), attrs, &mut CfgInfo::default());
     trace!("merged_attrs={merged_attrs:?}");
 
     trace!(
@@ -645,6 +646,9 @@ pub(crate) fn build_impl(
             } else {
                 ImplKind::Normal
             },
+            is_deprecated: tcx
+                .lookup_deprecation(did)
+                .is_some_and(|deprecation| deprecation.is_in_effect()),
         })),
         merged_attrs,
         cfg,
@@ -767,17 +771,17 @@ fn build_static(cx: &mut DocContext<'_>, did: DefId, mutable: bool) -> clean::St
 }
 
 fn build_macro(
-    cx: &mut DocContext<'_>,
+    tcx: TyCtxt<'_>,
     def_id: DefId,
     name: Symbol,
     macro_kinds: MacroKinds,
 ) -> clean::ItemKind {
-    match CStore::from_tcx(cx.tcx).load_macro_untracked(cx.tcx, def_id) {
+    match CStore::from_tcx(tcx).load_macro_untracked(tcx, def_id) {
         // FIXME: handle attributes and derives that aren't proc macros, and macros with multiple
         // kinds
         LoadedMacro::MacroDef { def, .. } => match macro_kinds {
             MacroKinds::BANG => clean::MacroItem(clean::Macro {
-                source: utils::display_macro_source(cx, name, &def),
+                source: utils::display_macro_source(tcx, name, &def),
                 macro_rules: def.macro_rules,
             }),
             MacroKinds::DERIVE => clean::ProcMacroItem(clean::ProcMacro {

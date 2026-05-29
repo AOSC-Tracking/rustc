@@ -1,28 +1,29 @@
 use std::path::Path;
 
-use annotate_snippets::AnnotationKind;
-use annotate_snippets::Group;
-use annotate_snippets::Level;
-use annotate_snippets::Origin;
-use annotate_snippets::Patch;
-use annotate_snippets::Snippet;
 use cargo_util_schemas::manifest::ProfilePackageSpec;
 use cargo_util_schemas::manifest::TomlToolLints;
+use cargo_util_terminal::report::AnnotationKind;
+use cargo_util_terminal::report::Group;
+use cargo_util_terminal::report::Level;
+use cargo_util_terminal::report::Origin;
+use cargo_util_terminal::report::Patch;
+use cargo_util_terminal::report::Snippet;
 
 use crate::CargoResult;
 use crate::GlobalContext;
 use crate::core::MaybePackage;
+use crate::core::Workspace;
 use crate::lints::Lint;
 use crate::lints::LintLevel;
 use crate::lints::SUSPICIOUS;
 use crate::lints::get_key_value_span;
 use crate::lints::rel_cwd_manifest_path;
 
-pub const LINT: Lint = Lint {
+pub static LINT: &Lint = &Lint {
     name: "blanket_hint_mostly_unused",
     desc: "blanket_hint_mostly_unused lint",
     primary_group: &SUSPICIOUS,
-    edition_lint_opts: None,
+    msrv: Some(super::CARGO_LINTS_MSRV),
     feature_gate: None,
     docs: Some(
         r#"
@@ -54,6 +55,7 @@ hint-mostly-unused = true
 };
 
 pub fn blanket_hint_mostly_unused(
+    ws: &Workspace<'_>,
     maybe_pkg: &MaybePackage,
     path: &Path,
     pkg_lints: &TomlToolLints,
@@ -62,7 +64,7 @@ pub fn blanket_hint_mostly_unused(
 ) -> CargoResult<()> {
     let (lint_level, reason) = LINT.level(
         pkg_lints,
-        maybe_pkg.edition(),
+        ws.lowest_rust_version(),
         maybe_pkg.unstable_features(),
     );
 

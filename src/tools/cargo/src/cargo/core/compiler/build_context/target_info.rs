@@ -200,9 +200,7 @@ impl TargetInfo {
                 process.inherit_jobserver(client);
             }
 
-            if let CompileKind::Target(target) = kind {
-                process.arg("--target").arg(target.rustc_target());
-            }
+            kind.add_target_arg(&mut process);
 
             let crate_type_process = process.clone();
             const KNOWN_CRATE_TYPES: &[CrateType] = &[
@@ -331,11 +329,7 @@ impl TargetInfo {
                     .args(&rustflags)
                     .env_remove("RUSTC_LOG");
 
-                if let CompileKind::Target(target) = kind {
-                    target_spec_process
-                        .arg("--target")
-                        .arg(target.rustc_target());
-                }
+                kind.add_target_arg(&mut target_spec_process);
 
                 #[derive(Deserialize)]
                 struct Metadata {
@@ -876,15 +870,15 @@ fn rustflags_from_target(
     if let Some(target_cfg) = target_cfg {
         gctx.target_cfgs()?
             .iter()
-            .filter_map(|(key, cfg)| {
-                match flag {
-                    Flags::Rust => cfg
-                        .rustflags
-                        .as_ref()
-                        .map(|rustflags| (key, &rustflags.val)),
-                    // `target.cfg(…).rustdocflags` is currently not supported.
-                    Flags::Rustdoc => None,
-                }
+            .filter_map(|(key, cfg)| match flag {
+                Flags::Rust => cfg
+                    .rustflags
+                    .as_ref()
+                    .map(|rustflags| (key, &rustflags.val)),
+                Flags::Rustdoc => cfg
+                    .rustdocflags
+                    .as_ref()
+                    .map(|rustdocflags| (key, &rustdocflags.val)),
             })
             .filter(|(key, _rustflags)| CfgExpr::matches_key(key, target_cfg))
             .for_each(|(_key, cfg_rustflags)| {
@@ -965,7 +959,7 @@ impl<'gctx> RustcTargetData<'gctx> {
         let mut target_config = HashMap::new();
         let mut target_info = HashMap::new();
         let target_applies_to_host = gctx.target_applies_to_host()?;
-        let host_target = CompileTarget::new(&rustc.host)?;
+        let host_target = CompileTarget::new(&rustc.host, gctx.cli_unstable().json_target_spec)?;
         let host_info = TargetInfo::new(gctx, requested_kinds, &rustc, CompileKind::Host)?;
 
         // This config is used for link overrides and choosing a linker.

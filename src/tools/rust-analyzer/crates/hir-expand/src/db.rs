@@ -1,6 +1,6 @@
 //! Defines database & queries for macro expansion.
 
-use base_db::{Crate, RootQueryDb};
+use base_db::{Crate, SourceDatabase};
 use mbe::MatchedArmIndex;
 use span::{AstIdMap, Edition, Span, SyntaxContext};
 use syntax::{AstNode, Parse, SyntaxError, SyntaxNode, SyntaxToken, T, ast};
@@ -48,7 +48,7 @@ pub enum TokenExpander {
 }
 
 #[query_group::query_group]
-pub trait ExpandDatabase: RootQueryDb {
+pub trait ExpandDatabase: SourceDatabase {
     /// The proc macros. Do not use this! Use `proc_macros_for_crate()` instead.
     #[salsa::input]
     fn proc_macros(&self) -> Arc<ProcMacros>;
@@ -58,8 +58,8 @@ pub trait ExpandDatabase: RootQueryDb {
     fn proc_macros_for_crate(&self, krate: Crate) -> Option<Arc<CrateProcMacros>>;
 
     #[salsa::invoke(ast_id_map)]
-    #[salsa::lru(1024)]
-    fn ast_id_map(&self, file_id: HirFileId) -> Arc<AstIdMap>;
+    #[salsa::transparent]
+    fn ast_id_map(&self, file_id: HirFileId) -> &AstIdMap;
 
     #[salsa::transparent]
     fn resolve_span(&self, span: Span) -> FileRange;
@@ -162,7 +162,7 @@ fn syntax_context(db: &dyn ExpandDatabase, file: HirFileId, edition: Edition) ->
 }
 
 fn resolve_span(db: &dyn ExpandDatabase, Span { range, anchor, ctx: _ }: Span) -> FileRange {
-    let file_id = EditionedFileId::from_span_guess_origin(db, anchor.file_id);
+    let file_id = EditionedFileId::from_span_file_id(db, anchor.file_id);
     let anchor_offset =
         db.ast_id_map(file_id.into()).get_erased(anchor.ast_id).text_range().start();
     FileRange { file_id, range: range + anchor_offset }
@@ -334,15 +334,16 @@ pub fn expand_speculative(
     Some((node.syntax_node(), token))
 }
 
-fn ast_id_map(db: &dyn ExpandDatabase, file_id: HirFileId) -> triomphe::Arc<AstIdMap> {
-    triomphe::Arc::new(AstIdMap::from_source(&db.parse_or_expand(file_id)))
+#[salsa::tracked(lru = 1024, returns(ref))]
+fn ast_id_map(db: &dyn ExpandDatabase, file_id: HirFileId) -> AstIdMap {
+    AstIdMap::from_source(&db.parse_or_expand(file_id))
 }
 
 /// Main public API -- parses a hir file, not caring whether it's a real
 /// file or a macro expansion.
 fn parse_or_expand(db: &dyn ExpandDatabase, file_id: HirFileId) -> SyntaxNode {
     match file_id {
-        HirFileId::FileId(file_id) => db.parse(file_id).syntax_node(),
+        HirFileId::FileId(file_id) => file_id.parse(db).syntax_node(),
         HirFileId::MacroFile(macro_file) => {
             db.parse_macro_expansion(macro_file).value.0.syntax_node()
         }
@@ -388,7 +389,7 @@ pub(crate) fn parse_with_map(
 ) -> (Parse<SyntaxNode>, SpanMap) {
     match file_id {
         HirFileId::FileId(file_id) => {
-            (db.parse(file_id).to_syntax(), SpanMap::RealSpanMap(db.real_span_map(file_id)))
+            (file_id.parse(db).to_syntax(), SpanMap::RealSpanMap(db.real_span_map(file_id)))
         }
         HirFileId::MacroFile(macro_file) => {
             let (parse, map) = db.parse_macro_expansion(macro_file).value;

@@ -2,7 +2,7 @@
 //!
 //! Currently, this pass only propagates scalar values.
 
-use std::assert_matches::assert_matches;
+use std::assert_matches;
 use std::cell::RefCell;
 use std::fmt::Formatter;
 
@@ -467,7 +467,6 @@ impl<'a, 'tcx> ConstAnalysis<'a, 'tcx> {
             Rvalue::Discriminant(place) => state.get_discr(place.as_ref(), &self.map),
             Rvalue::Use(operand) => return self.handle_operand(operand, state),
             Rvalue::CopyForDeref(_) => bug!("`CopyForDeref` in runtime MIR"),
-            Rvalue::ShallowInitBox(..) => bug!("`ShallowInitBox` in runtime MIR"),
             Rvalue::Ref(..) | Rvalue::RawPtr(..) => {
                 // We don't track such places.
                 return ValueOrPlace::TOP;

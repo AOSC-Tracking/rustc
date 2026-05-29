@@ -1,6 +1,6 @@
 //! Conversion of internal Rust compiler `mir` items to stable ones.
 
-use rustc_middle::mir::mono::MonoItem;
+use rustc_middle::mono::MonoItem;
 use rustc_middle::{bug, mir};
 use rustc_public_bridge::context::CompilerCtxt;
 use rustc_public_bridge::{Tables, bridge};
@@ -239,9 +239,6 @@ impl<'tcx> Stable<'tcx> for mir::Rvalue<'tcx> {
             Aggregate(agg_kind, operands) => {
                 let operands = operands.iter().map(|op| op.stable(tables, cx)).collect();
                 crate::mir::Rvalue::Aggregate(agg_kind.stable(tables, cx), operands)
-            }
-            ShallowInitBox(op, ty) => {
-                crate::mir::Rvalue::ShallowInitBox(op.stable(tables, cx), ty.stable(tables, cx))
             }
             CopyForDeref(place) => crate::mir::Rvalue::CopyForDeref(place.stable(tables, cx)),
             WrapUnsafeBinder(..) => todo!("FIXME(unsafe_binders):"),

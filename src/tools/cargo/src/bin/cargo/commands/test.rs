@@ -60,7 +60,6 @@ pub fn cli() -> Command {
         .arg_unit_graph()
         .arg_timings()
         .arg_manifest_path()
-        .arg_lockfile_path()
         .arg_ignore_rust_version()
         .after_help(color_print::cstr!(
             "Run `<bright-cyan,bold>cargo help test</>` for more detailed information.\n\
@@ -89,11 +88,11 @@ pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
     if doc {
         if compile_opts.filter.is_specific() {
             return Err(
-                anyhow::format_err!("Can't mix --doc with other target selecting options").into(),
+                anyhow::format_err!("can't mix --doc with other target selecting options").into(),
             );
         }
         if no_run {
-            return Err(anyhow::format_err!("Can't skip running doc tests with --no-run").into());
+            return Err(anyhow::format_err!("can't skip running doc tests with --no-run").into());
         }
         compile_opts.build_config.intent = UserIntent::Doctest;
         compile_opts.filter = ops::CompileFilter::lib_only();

@@ -1,15 +1,15 @@
-use std::assert_matches::debug_assert_matches;
 use std::cell::LazyCell;
+use std::debug_assert_matches;
 
 use rustc_data_structures::fx::{FxHashMap, FxIndexMap, FxIndexSet};
 use rustc_data_structures::unord::UnordSet;
-use rustc_errors::{LintDiagnostic, Subdiagnostic};
+use rustc_errors::{Diagnostic, Subdiagnostic, msg};
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_infer::infer::outlives::env::OutlivesEnvironment;
-use rustc_macros::LintDiagnostic;
+use rustc_macros::Diagnostic;
 use rustc_middle::middle::resolve_bound_vars::ResolvedArg;
 use rustc_middle::ty::relate::{
     Relate, RelateResult, TypeRelation, relate_args_with_variances, structurally_relate_consts,
@@ -28,7 +28,7 @@ use rustc_trait_selection::errors::{
 use rustc_trait_selection::regions::OutlivesEnvironmentBuildExt;
 use rustc_trait_selection::traits::ObligationCtxt;
 
-use crate::{LateContext, LateLintPass, fluent_generated as fluent};
+use crate::{LateContext, LateLintPass};
 
 declare_lint! {
     /// The `impl_trait_overcaptures` lint warns against cases where lifetime
@@ -211,7 +211,7 @@ where
         // When we get into a binder, we need to add its own bound vars to the scope.
         let mut added = vec![];
         for arg in t.bound_vars() {
-            let arg: ty::BoundVariableKind = arg;
+            let arg: ty::BoundVariableKind<'tcx> = arg;
             match arg {
                 ty::BoundVariableKind::Region(ty::BoundRegionKind::Named(def_id))
                 | ty::BoundVariableKind::Ty(ty::BoundTyKind::Param(def_id)) => {
@@ -242,16 +242,14 @@ where
             return;
         }
 
-        if let ty::Alias(ty::Projection, opaque_ty) = *t.kind()
-            && self.tcx.is_impl_trait_in_trait(opaque_ty.def_id)
+        if let ty::Alias(opaque_ty @ ty::AliasTy { kind: ty::Projection { def_id }, .. }) =
+            *t.kind()
+            && self.tcx.is_impl_trait_in_trait(def_id)
         {
             // visit the opaque of the RPITIT
-            self.tcx
-                .type_of(opaque_ty.def_id)
-                .instantiate(self.tcx, opaque_ty.args)
-                .visit_with(self)
-        } else if let ty::Alias(ty::Opaque, opaque_ty) = *t.kind()
-            && let Some(opaque_def_id) = opaque_ty.def_id.as_local()
+            self.tcx.type_of(def_id).instantiate(self.tcx, opaque_ty.args).visit_with(self)
+        } else if let ty::Alias(opaque_ty @ ty::AliasTy { kind: ty::Opaque { def_id}, .. }) = *t.kind()
+            && let Some(opaque_def_id) = def_id.as_local()
             // Don't recurse infinitely on an opaque
             && self.seen.insert(opaque_def_id)
             // If it's owned by this function
@@ -308,7 +306,7 @@ where
                         return true;
                     };
                     // We only computed variance of lifetimes...
-                    debug_assert_matches!(self.tcx.def_kind(def_id), DefKind::LifetimeParam);
+                    debug_assert_matches!(self.tcx.def_kind(*def_id), DefKind::LifetimeParam);
                     let uncaptured = match *kind {
                         ParamKind::Early(name, index) => ty::Region::new_early_param(
                             self.tcx,
@@ -342,7 +340,7 @@ where
 
                     let uncaptured_spans: Vec<_> = uncaptured_args
                         .into_iter()
-                        .map(|(def_id, _)| self.tcx.def_span(def_id))
+                        .map(|(&def_id, _)| self.tcx.def_span(def_id))
                         .collect();
 
                     self.tcx.emit_node_span_lint(
@@ -415,9 +413,7 @@ where
             // in this lint as well. Interestingly, one place that I expect this lint to fire
             // is for `impl for<'a> Bound<Out = impl Other>`, since `impl Other` will begin
             // to capture `'a` in e2024 (even though late-bound vars in opaques are not allowed).
-            for clause in
-                self.tcx.item_bounds(opaque_ty.def_id).iter_instantiated(self.tcx, opaque_ty.args)
-            {
+            for clause in self.tcx.item_bounds(def_id).iter_instantiated(self.tcx, opaque_ty.args) {
                 clause.visit_with(self)
             }
         }
@@ -433,23 +429,40 @@ struct ImplTraitOvercapturesLint<'tcx> {
     suggestion: Option<AddPreciseCapturingForOvercapture>,
 }
 
-impl<'a> LintDiagnostic<'a, ()> for ImplTraitOvercapturesLint<'_> {
-    fn decorate_lint<'b>(self, diag: &'b mut rustc_errors::Diag<'a, ()>) {
-        diag.primary_message(fluent::lint_impl_trait_overcaptures);
+impl<'a> Diagnostic<'a, ()> for ImplTraitOvercapturesLint<'_> {
+    fn into_diag(
+        self,
+        dcx: rustc_errors::DiagCtxtHandle<'a>,
+        level: rustc_errors::Level,
+    ) -> rustc_errors::Diag<'a, ()> {
+        let mut diag = rustc_errors::Diag::new(
+            dcx,
+            level,
+            msg!("`{$self_ty}` will capture more lifetimes than possibly intended in edition 2024"),
+        );
         diag.arg("self_ty", self.self_ty.to_string())
             .arg("num_captured", self.num_captured)
-            .span_note(self.uncaptured_spans, fluent::lint_note)
-            .note(fluent::lint_note2);
+            .span_note(
+                self.uncaptured_spans,
+                msg!(
+                    "specifically, {$num_captured ->
+                        [one] this lifetime is
+                        *[other] these lifetimes are
+                    } in scope but not mentioned in the type's bounds"
+                ),
+            )
+            .note(msg!("all lifetimes in scope will be captured by `impl Trait`s in edition 2024"));
         if let Some(suggestion) = self.suggestion {
-            suggestion.add_to_diag(diag);
+            suggestion.add_to_diag(&mut diag);
         }
+        diag
     }
 }
 
-#[derive(LintDiagnostic)]
-#[diag(lint_impl_trait_redundant_captures)]
+#[derive(Diagnostic)]
+#[diag("all possible in-scope parameters are already captured, so `use<...>` syntax is redundant")]
 struct ImplTraitRedundantCapturesLint {
-    #[suggestion(lint_suggestion, code = "", applicability = "machine-applicable")]
+    #[suggestion("remove the `use<...>` syntax", code = "", applicability = "machine-applicable")]
     capturing_span: Span,
 }
 

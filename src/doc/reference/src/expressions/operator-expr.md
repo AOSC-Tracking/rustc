@@ -26,9 +26,7 @@ r[expr.operator.int-overflow]
 ## Overflow
 
 r[expr.operator.int-overflow.intro]
-Integer operators will panic when they overflow when compiled in debug mode.
-The `-C debug-assertions` and `-C overflow-checks` compiler flags can be used to control this more directly.
-The following things are considered to be overflow:
+Integer operators will panic when they overflow when compiled in debug mode. The `-C debug-assertions` and `-C overflow-checks` compiler flags can be used to control this more directly. The following things are considered to be overflow:
 
 r[expr.operator.int-overflow.binary-arith]
 * When `+`, `*` or binary `-` create a value greater than the maximum value, or less than the minimum value that can be stored.
@@ -37,8 +35,7 @@ r[expr.operator.int-overflow.unary-neg]
 * Applying unary `-` to the most negative value of any signed integer type, unless the operand is a [literal expression] (or a literal expression standing alone inside one or more [grouped expressions][grouped expression]).
 
 r[expr.operator.int-overflow.div]
-* Using `/` or `%`, where the left-hand argument is the smallest integer of a signed integer type and the right-hand argument is `-1`.
-  These checks occur even when `-C overflow-checks` is disabled, for legacy reasons.
+* Using `/` or `%`, where the left-hand argument is the smallest integer of a signed integer type and the right-hand argument is `-1`. These checks occur even when `-C overflow-checks` is disabled, for legacy reasons.
 
 r[expr.operator.int-overflow.shift]
 * Using `<<` or `>>` where the right-hand argument is greater than or equal to the number of bits in the type of the left-hand argument, or is negative.
@@ -71,9 +68,7 @@ r[expr.operator.borrow.result]
 When applied to a [place expression], this expressions produces a reference (pointer) to the location that the value refers to.
 
 r[expr.operator.borrow.lifetime]
-The memory location is also placed into a borrowed state for the duration of the reference.
-For a shared borrow (`&`), this implies that the place may not be mutated, but it may be read or shared again.
-For a mutable borrow (`&mut`), the place may not be accessed in any way until the borrow expires.
+The memory location is also placed into a borrowed state for the duration of the reference. For a shared borrow (`&`), this implies that the place may not be mutated, but it may be read or shared again. For a mutable borrow (`&mut`), the place may not be accessed in any way until the borrow expires.
 
 r[expr.operator.borrow.mut]
 `&mut` evaluates its operand in a mutable place expression context.
@@ -123,8 +118,7 @@ r[expr.borrow.raw.result]
 `&raw const expr` then creates a const raw pointer of type `*const T` to the given place, and `&raw mut expr` creates a mutable raw pointer of type `*mut T`.
 
 r[expr.borrow.raw.invalid-ref]
-The raw borrow operators must be used instead of a borrow operator whenever the place expression could evaluate to a place that is not properly aligned or does not store a valid value as determined by its type, or whenever creating a reference would introduce incorrect aliasing assumptions.
-In those situations, using a borrow operator would cause [undefined behavior] by creating an invalid reference, but a raw pointer may still be constructed.
+The raw borrow operators must be used instead of a borrow operator whenever the place expression could evaluate to a place that is not properly aligned or does not store a valid value as determined by its type, or whenever creating a reference would introduce incorrect aliasing assumptions. In those situations, using a borrow operator would cause [undefined behavior] by creating an invalid reference, but a raw pointer may still be constructed.
 
 The following is an example of creating a raw pointer to an unaligned place through a `packed` struct:
 
@@ -170,23 +164,44 @@ r[expr.deref.intro]
 The `*` (dereference) operator is also a unary prefix operator.
 
 r[expr.deref.result]
-When applied to a [pointer](../types/pointer.md) it denotes the pointed-to location.
+When applied to a [pointer](../types/pointer.md) or [`Box`], it denotes the pointed-to location.
 
 r[expr.deref.mut]
-If the expression is of type `&mut T` or `*mut T`, and is either a local variable, a (nested) field of a local variable or is a mutable [place expression], then the resulting memory location can be assigned to.
+If the expression is of type `&mut T`, `*mut T`, or `Box<T>`, and is either a local variable, a (nested) field of a local variable or is a mutable [place expression], then the resulting memory location can be assigned to.
+
+r[expr.deref.box]
+When applied to a [`Box`], the resultant place may be [moved from].
 
 r[expr.deref.safety]
 Dereferencing a raw pointer requires `unsafe`.
 
 r[expr.deref.traits]
-On non-pointer types `*x` is equivalent to `*std::ops::Deref::deref(&x)` in an [immutable place expression context](../expressions.md#mutability) and `*std::ops::DerefMut::deref_mut(&mut x)` in a mutable place expression context.
+On non-pointer types `*x` is equivalent to `*std::ops::Deref::deref(&x)` in an [immutable place expression context](../expressions.md#mutability) and `*std::ops::DerefMut::deref_mut(&mut x)` in a mutable place expression context, except that when `*x` undergoes [temporary lifetime extension], the dereferenced expression `x` also has its [temporary scope] extended.
 
 ```rust
-let x = &7;
-assert_eq!(*x, 7);
-let y = &mut 9;
-*y = 11;
-assert_eq!(*y, 11);
+# struct NoCopy;
+let a = &7;
+assert_eq!(*a, 7);
+let b = &mut 9;
+*b = 11;
+assert_eq!(*b, 11);
+let c = Box::new(NoCopy);
+let d: NoCopy = *c;
+```
+
+```rust
+// The temporary holding the result of `String::new()` is extended
+// to live to the end of the block, so `x` may be used in subsequent
+// statements.
+let x = &*String::new();
+# x;
+```
+
+```rust,compile_fail,E0716
+// The temporary holding the result of `String::new()` is dropped at
+// the end of the statement, so it's an error to use `y` after.
+let y = &*std::ops::Deref::deref(&String::new()); // ERROR
+# y;
 ```
 
 r[expr.try]
@@ -324,9 +339,7 @@ r[expr.negate.intro]
 These are the last two unary operators.
 
 r[expr.negate.results]
-This table summarizes the behavior of them on primitive types and which traits are used to overload these operators for other types.
-Remember that signed integers are always represented using two's complement.
-The operands of all of these operators are evaluated in [value expression context][value expression] so are moved or copied.
+This table summarizes the behavior of them on primitive types and which traits are used to overload these operators for other types. Remember that signed integers are always represented using two's complement. The operands of all of these operators are evaluated in [value expression context][value expression] so are moved or copied.
 
 | Symbol | Integer     | `bool`        | Floating Point | Overloading Trait  |
 |--------|-------------|-------------- |----------------|--------------------|
@@ -366,9 +379,7 @@ r[expr.arith-logic.intro]
 Binary operators expressions are all written with infix notation.
 
 r[expr.arith-logic.behavior]
-This table summarizes the behavior of arithmetic and logical binary operators on primitive types and which traits are used to overload these operators for other types.
-Remember that signed integers are always represented using two's complement.
-The operands of all of these operators are evaluated in [value expression context][value expression] so are moved or copied.
+This table summarizes the behavior of arithmetic and logical binary operators on primitive types and which traits are used to overload these operators for other types. Remember that signed integers are always represented using two's complement. The operands of all of these operators are evaluated in [value expression context][value expression] so are moved or copied.
 
 | Symbol | Integer                 | `bool`        | Floating Point | Overloading Trait  | Overloading Compound Assignment Trait |
 |--------|-------------------------|---------------|----------------|--------------------| ------------------------------------- |
@@ -387,8 +398,7 @@ The operands of all of these operators are evaluated in [value expression contex
 
 \*\* Rust uses a remainder defined with [truncating division](https://en.wikipedia.org/wiki/Modulo_operation#Variants_of_the_definition). Given `remainder = dividend % divisor`, the remainder will have the same sign as the dividend.
 
-\*\*\* Arithmetic right shift on signed integer types, logical right shift on
-unsigned integer types.
+\*\*\* Arithmetic right shift on signed integer types, logical right shift on unsigned integer types.
 
 † For integer types, division by zero panics.
 
@@ -428,8 +438,7 @@ r[expr.cmp.paren-chaining]
 Parentheses are required when chaining comparison operators. For example, the expression `a == b == c` is invalid and may be written as `(a == b) == c`.
 
 r[expr.cmp.trait]
-Unlike arithmetic and logical operators, the traits for overloading these operators are used more generally to show how a type may be compared and will likely be assumed to define actual comparisons by functions that use these traits as bounds.
-Many functions and macros in the standard library can then use that assumption (although not to ensure safety).
+Unlike arithmetic and logical operators, the traits for overloading these operators are used more generally to show how a type may be compared and will likely be assumed to define actual comparisons by functions that use these traits as bounds. Many functions and macros in the standard library can then use that assumption (although not to ensure safety).
 
 r[expr.cmp.place]
 Unlike the arithmetic and logical operators above, these operators implicitly take shared borrows of their operands, evaluating them in [place expression context][place expression]:
@@ -477,12 +486,10 @@ LazyBooleanExpression ->
 ```
 
 r[expr.bool-logic.intro]
-The operators `||` and `&&` may be applied to operands of boolean type.
-The `||` operator denotes logical 'or', and the `&&` operator denotes logical 'and'.
+The operators `||` and `&&` may be applied to operands of boolean type. The `||` operator denotes logical 'or', and the `&&` operator denotes logical 'and'.
 
 r[expr.bool-logic.conditional-evaluation]
-They differ from `|` and `&` in that the right-hand operand is only evaluated when the left-hand operand does not already determine the result of the expression.
-That is, `||` only evaluates its right-hand operand when the left-hand operand evaluates to `false`, and `&&` only when it evaluates to `true`.
+They differ from `|` and `&` in that the right-hand operand is only evaluated when the left-hand operand does not already determine the result of the expression. That is, `||` only evaluates its right-hand operand when the left-hand operand evaluates to `false`, and `&&` only when it evaluates to `true`.
 
 ```rust
 let x = false || true; // true
@@ -516,10 +523,7 @@ fn average(values: &[f64]) -> f64 {
 ```
 
 r[expr.as.coercions]
-`as` can be used to explicitly perform [coercions](../type-coercions.md), as well as the following additional casts.
-Any cast that does not fit either a coercion rule or an entry in the table is a compiler error.
-Here `*T` means either `*const T` or `*mut T`. `m` stands for optional `mut` in
-reference types and `mut` or `const` in pointer types.
+`as` can be used to explicitly perform [coercions](../type-coercions.md), as well as the following additional casts. Any cast that does not fit either a coercion rule or an entry in the table is a compiler error. Here `*T` means either `*const T` or `*mut T`. `m` stands for optional `mut` in reference types and `mut` or `const` in pointer types.
 
 | Type of `e`           | `U`                   | Cast performed by `e as U`                            |
 |-----------------------|-----------------------|-------------------------------------------------------|
@@ -527,7 +531,7 @@ reference types and `mut` or `const` in pointer types.
 | Enumeration           | Integer type          | [Enum cast][expr.as.enum]                             |
 | `bool` or `char`      | Integer type          | [Primitive to integer cast][expr.as.bool-char-as-int] |
 | `u8`                  | `char`                | [`u8` to `char` cast][expr.as.u8-as-char]             |
-| `*T`                  | `*V` [^meta-compat]   | [Pointer to pointer cast][expr.as.pointer]            |
+| `*T`                  | `*V` (when [compatible][expr.as.pointer]) | [Pointer to pointer cast][expr.as.pointer] |
 | `*T` where `T: Sized` | Integer type          | [Pointer to address cast][expr.as.pointer-as-int]     |
 | Integer type          | `*V` where `V: Sized` | [Address to pointer cast][expr.as.int-as-pointer]     |
 | `&m₁ [T; n]`          | `*m₂ T` [^lessmut]    | Array to pointer cast                                 |
@@ -539,15 +543,7 @@ reference types and `mut` or `const` in pointer types.
 | [Function pointer]    | Integer               | Function pointer to address cast                      |
 | Closure [^no-capture] | Function pointer      | Closure to function pointer cast                      |
 
-[^meta-compat]: Where `T` and `V` have compatible metadata:
-      * `V: Sized`, or
-      * Both slice metadata (`*[u16]` -> `*[u8]`, `*str` -> `*(u8, [u32])`), or
-      * Both the same trait object metadata, modulo dropping auto traits (`*dyn Debug` -> `*(u16, dyn Debug)`, `*dyn Debug + Send` -> `*dyn Debug`)
-          * **Note**: *adding* auto traits is only allowed if the principal trait has the auto trait as a super trait (given `trait T: Send {}`, `*dyn T` -> `*dyn T + Send` is valid, but `*dyn Debug` -> `*dyn Debug + Send` is not)
-          * **Note**: Generics (including lifetimes) must match (`*dyn T<'a, A>` -> `*dyn T<'b, B>` requires `'a = 'b` and `A = B`)
-
-[^lessmut]: Only when `m₁` is `mut` or `m₂` is `const`. Casting `mut` reference/pointer to
-`const` pointer is allowed.
+[^lessmut]: Only when `m₁` is `mut` or `m₂` is `const`. Casting `mut` reference/pointer to `const` pointer is allowed.
 
 [^no-capture]: Only closures that do not capture (close over) any local variables can be cast to function pointers.
 
@@ -557,8 +553,7 @@ r[expr.as.numeric]
 #### Numeric cast
 
 r[expr.as.numeric.int-same-size]
-* Casting between two integers of the same size (e.g. i32 -> u32) is a no-op
-  (Rust uses 2's complement for negative values of fixed integers)
+* Casting between two integers of the same size (e.g. i32 -> u32) is a no-op (Rust uses 2's complement for negative values of fixed integers)
 
   ```rust
   assert_eq!(42i8 as u8, 42u8);
@@ -568,8 +563,7 @@ r[expr.as.numeric.int-same-size]
   ```
 
 r[expr.as.numeric.int-truncation]
-* Casting from a larger integer to a smaller integer (e.g. u32 -> u8) will
-  truncate
+* Casting from a larger integer to a smaller integer (e.g. u32 -> u8) will truncate
 
   ```rust
   assert_eq!(42u16 as u8, 42u8);
@@ -613,8 +607,7 @@ r[expr.as.numeric.int-as-float]
 * Casting from an integer to float will produce the closest possible float \*
     * if necessary, rounding is according to `roundTiesToEven` mode \*\*\*
     * on overflow, infinity (of the same sign as the input) is produced
-    * note: with the current set of numeric types, overflow can only happen
-      on `u128 as f32` for values greater or equal to `f32::MAX + (0.5 ULP)`
+    * note: with the current set of numeric types, overflow can only happen on `u128 as f32` for values greater or equal to `f32::MAX + (0.5 ULP)`
 
   ```rust
   assert_eq!(1337i32 as f32, 1337f32);
@@ -643,24 +636,17 @@ r[expr.as.numeric.float-narrowing]
   assert!((std::f64::NAN as f32).is_nan());
   ```
 
-\* if integer-to-float casts with this rounding mode and overflow behavior are
-not supported natively by the hardware, these casts will likely be slower than
-expected.
+\* if integer-to-float casts with this rounding mode and overflow behavior are not supported natively by the hardware, these casts will likely be slower than expected.
 
-\*\* if f64-to-f32 casts with this rounding mode and overflow behavior are not
-supported natively by the hardware, these casts will likely be slower than
-expected.
+\*\* if f64-to-f32 casts with this rounding mode and overflow behavior are not supported natively by the hardware, these casts will likely be slower than expected.
 
-\*\*\* as defined in IEEE 754-2008 &sect;4.3.1: pick the nearest floating point
-number, preferring the one with an even least significant digit if exactly
-halfway between two floating point numbers.
+\*\*\* as defined in IEEE 754-2008 &sect;4.3.1: pick the nearest floating point number, preferring the one with an even least significant digit if exactly halfway between two floating point numbers.
 
 r[expr.as.enum]
 #### Enum cast
 
 r[expr.as.enum.discriminant]
-Casts an enum to its discriminant, then uses a numeric cast if needed.
-Casting is limited to the following kinds of enumerations:
+Casts an enum to its discriminant, then uses a numeric cast if needed. Casting is limited to the following kinds of enumerations:
 
 * [Unit-only enums]
 * [Field-less enums] without [explicit discriminants], or where only unit-variants have explicit discriminants
@@ -701,8 +687,7 @@ assert_eq!(214u8 as char, 'Ö');
 r[expr.as.pointer-as-int]
 #### Pointer to address cast
 
-Casting from a raw pointer to an integer produces the machine address of the referenced memory.
-If the integer type is smaller than the pointer type, the address may be truncated; using `usize` avoids this.
+Casting from a raw pointer to an integer produces the machine address of the referenced memory. If the integer type is smaller than the pointer type, the address may be truncated; using `usize` avoids this.
 
 r[expr.as.int-as-pointer]
 #### Address to pointer cast
@@ -737,18 +722,183 @@ r[expr.as.pointer.behavior]
 r[expr.as.pointer.sized]
 - If `T` and `U` are both sized, the pointer is returned unchanged.
 
-r[expr.as.pointer.unsized]
-- If `T` and `U` are both unsized, the pointer is also returned unchanged.
-  In particular, the metadata is preserved exactly.
-
-  For instance, a cast from `*const [T]` to `*const [U]` preserves the number of elements.
-  Note that, as a consequence, such casts do not necessarily preserve the size of the pointer's referent
-  (e.g., casting `*const [u16]` to `*const [u8]` will result in a raw pointer which refers to an object of half the size of the original).
-  The same holds for `str` and any compound type whose unsized tail is a slice type,
-  such as `struct Foo(i32, [u8])` or `(u64, Foo)`.
+  > [!EXAMPLE]
+  > ```rust
+  > let x: i32 = 42;
+  > let p1: *const i32 = &x;
+  > let p2: *const u8 = p1 as *const u8;
+  > // The pointer address remains the same.
+  > assert_eq!(p1 as usize, p2 as usize);
+  > ```
 
 r[expr.as.pointer.discard-metadata]
 - If `T` is unsized and `U` is sized, the cast discards all metadata that completes the wide pointer `T` and produces a thin pointer `U` consisting of the data part of the unsized pointer.
+
+  > [!EXAMPLE]
+  > ```rust
+  > let slice: &[i32] = &[1, 2, 3];
+  > let ptr: *const [i32] = slice as *const [i32];
+  > // Cast from wide pointer (*const [i32]) to thin pointer (*const i32)
+  > // discarding the length metadata.
+  > let data_ptr: *const i32 = ptr as *const i32;
+  > assert_eq!(unsafe { *data_ptr }, 1);
+  > ```
+
+r[expr.as.pointer.unsized.unchanged]
+- If `T` and `U` are both unsized, the pointer is also returned unchanged. In particular, the metadata is preserved exactly. The cast can only be performed if the metadata is compatible according to the below rules:
+
+r[expr.as.pointer.unsized.slice]
+- When `T` and `U` are unsized with slice metadata, they are always compatible. The metadata of a slice is the number of elements, so casting `*[u16] -> *[u8]` is legal but will result in reducing the number of bytes by half.
+
+  > [!EXAMPLE]
+  > ```rust
+  > let slice: &[u16] = &[1, 2, 3];
+  > let ptr: *const [u16] = slice as *const [u16];
+  > let byte_ptr: *const [u8] = ptr as *const [u8];
+  > assert_eq!(byte_ptr.len(), 3);
+  > ```
+
+r[expr.as.pointer.unsized.trait]
+- When `T` and `U` are unsized with trait object metadata, the metadata is compatible only when all of the following holds:
+  1. The principal trait must be the same.
+
+     > [!EXAMPLE]
+     > ```rust,compile_fail,E0606
+     > trait Foo {}
+     > trait Bar {}
+     > impl Foo for i32 {}
+     > impl Bar for i32 {}
+     >
+     > let x: i32 = 42;
+     > let ptr_foo: *const dyn Foo = &x as *const dyn Foo;
+     > // You can't cast to a different principal trait.
+     > let ptr_bar: *const dyn Bar = ptr_foo as *const dyn Bar; // ERROR
+     > ```
+
+
+  2. Auto traits may be removed.
+
+     > [!EXAMPLE]
+     > ```rust
+     > trait Foo {}
+     > struct S;
+     > impl Foo for S {}
+     > unsafe impl Send for S {}
+     >
+     > let s = S;
+     > let ptr_send: *const (dyn Foo + Send) = &s;
+     > // Removing an auto trait.
+     > let ptr_no_send: *const dyn Foo = ptr_send as *const dyn Foo;
+     > ```
+
+
+  3. Auto traits may be added only if they are a super trait of the principal trait.
+
+     > [!EXAMPLE]
+     > ```rust
+     > trait Foo: Send {}
+     > struct S;
+     > impl Foo for S {}
+     > unsafe impl Send for S {}
+     >
+     > let s = S;
+     > let ptr_no_send: *const dyn Foo = &s;
+     > // Adding an auto trait.
+     > let ptr_send: *const (dyn Foo + Send) = ptr_no_send as *const (dyn Foo + Send);
+     > ```
+     >
+     > ```rust,compile_fail,E0804
+     > trait Foo {}
+     > # struct S;
+     > # impl Foo for S {}
+     > # unsafe impl Send for S {}
+     > #
+     > # let s = S;
+     > # let ptr_no_send: *const dyn Foo = &s;
+     > // Same as above, except trait Foo does not have Send as a super trait.
+     > let ptr_send: *const (dyn Foo + Send) = ptr_no_send as *const (dyn Foo + Send); // ERROR
+     > ```
+
+
+  4. Trailing lifetimes may only be shortened.
+
+     > [!EXAMPLE]
+     > ```rust
+     > trait Foo {}
+     >
+     > fn shorten_lifetime<'long: 'short, 'short>(
+     >     ptr: *const (dyn Foo + 'long),
+     > ) -> *const (dyn Foo + 'short) {
+     >     // Shortening the lifetime is allowed.
+     >     ptr as *const (dyn Foo + 'short)
+     > }
+     > ```
+     >
+     > ```rust,compile_fail
+     > trait Foo {}
+     >
+     > fn lengthen_lifetime<'long: 'short, 'short>(
+     >     ptr: *const (dyn Foo + 'short),
+     > ) -> *const (dyn Foo + 'long) {
+     >     // It is not allowed to cast to a longer lifetime.
+     >     ptr as *const (dyn Foo + 'long) // ERROR
+     > }
+     > ```
+
+  5. Generics (including lifetimes) and associated types must match exactly.
+
+     > [!EXAMPLE]
+     > ```rust,compile_fail,E0606
+     > trait Generic<T> {}
+     > impl Generic<i32> for () {}
+     > impl Generic<u32> for () {}
+     >
+     > let x = ();
+     > let ptr_i32: *const dyn Generic<i32> = &x;
+     > // You can't cast to a different generic parameter.
+     > let ptr_u32: *const dyn Generic<u32> = ptr_i32 as *const dyn Generic<u32>; // ERROR
+     > ```
+     >
+     > ```rust
+     > trait HasType {
+     >     type Output;
+     > }
+     >
+     > trait Generic<'x, T> {}
+     >
+     > fn cast_via_associated<'a, 'b, A, B>(
+     >     ptr: *const dyn Generic<'a, A::Output>,
+     > ) -> *const dyn Generic<'b, B::Output>
+     > where
+     >     'a: 'b,
+     >     'b: 'a,
+     >     A: HasType,
+     >     B: HasType<Output = A::Output>, // Forces equality
+     > {
+     >     ptr as *const dyn Generic<'b, B::Output>
+     > }
+     > ```
+
+
+
+r[expr.as.pointer.unsized.compound]
+- When `T` or `U` is a struct or tuple type whose last field is unsized, it has the same metadata and compatibility rules as its last field.
+
+  > [!EXAMPLE]
+  > ```rust
+  > struct Wrapper(u32, [u8]);
+  >
+  > let slice: &[u8] = &[1, 2, 3];
+  > let ptr: *const [u8] = slice;
+  >
+  > // The metadata (length 3) is preserved when casting to a struct
+  > // where the last field is the unsized type `[u8]`.
+  > let wrapper_ptr: *const Wrapper = ptr as *const Wrapper;
+  >
+  > // And preserved when casting back.
+  > let ptr_back: *const [u8] = wrapper_ptr as *const [u8];
+  > assert_eq!(ptr_back.len(), 3);
+  > ```
 
 r[expr.assign]
 ## Assignment expressions
@@ -774,8 +924,7 @@ r[expr.assign.basic]
 ### Basic assignments
 
 r[expr.assign.evaluation-order]
-Evaluating assignment expressions begins by evaluating its operands.
-The assigned value operand is evaluated first, followed by the assignee expression.
+Evaluating assignment expressions begins by evaluating its operands. The assigned value operand is evaluated first, followed by the assignee expression.
 
 r[expr.assign.destructuring-order]
 For destructuring assignment, subexpressions of the assignee expression are evaluated left-to-right.
@@ -804,8 +953,7 @@ r[expr.assign.destructure]
 ### Destructuring assignments
 
 r[expr.assign.destructure.intro]
-Destructuring assignment is a counterpart to destructuring pattern matches for variable declaration, permitting assignment to complex values, such as tuples or structs.
-For instance, we may swap two mutable variables:
+Destructuring assignment is a counterpart to destructuring pattern matches for variable declaration, permitting assignment to complex values, such as tuples or structs. For instance, we may swap two mutable variables:
 
 ```rust
 let (mut a, mut b) = (0, 1);
@@ -814,9 +962,7 @@ let (mut a, mut b) = (0, 1);
 ```
 
 r[expr.assign.destructure.assignee]
-In contrast to destructuring declarations using `let`, patterns may not appear on the left-hand side of an assignment due to syntactic ambiguities.
-Instead, a group of expressions that correspond to patterns are designated to be [assignee expressions][assignee expression], and permitted on the left-hand side of an assignment.
-Assignee expressions are then desugared to pattern matches followed by sequential assignment.
+In contrast to destructuring declarations using `let`, patterns may not appear on the left-hand side of an assignment due to syntactic ambiguities. Instead, a group of expressions that correspond to patterns are designated to be [assignee expressions][assignee expression], and permitted on the left-hand side of an assignment. Assignee expressions are then desugared to pattern matches followed by sequential assignment.
 
 r[expr.assign.destructure.irrefutable]
 The desugared patterns must be irrefutable: in particular, this means that only slice patterns whose length is known at compile-time, and the trivial slice `[..]`, are permitted for destructuring assignment.
@@ -1083,6 +1229,7 @@ As with normal assignment expressions, compound assignment expressions always pr
 > [!WARNING]
 > Avoid writing code that depends on the evaluation order of operands in compound assignments as it can be unusual and surprising.
 
+[`Box`]: ../special-types-and-traits.md#boxt
 [`Try`]: core::ops::Try
 [autoref]: expr.method.candidate-receivers-refs
 [copies or moves]: ../expressions.md#moved-and-copied-types
@@ -1097,6 +1244,7 @@ As with normal assignment expressions, compound assignment expressions always pr
 [logical not]: ../types/boolean.md#logical-not
 [logical or]: ../types/boolean.md#logical-or
 [logical xor]: ../types/boolean.md#logical-xor
+[moved from]: expr.move.movable-place
 [mutable]: ../expressions.md#mutability
 [place expression]: ../expressions.md#place-expressions-and-value-expressions
 [assignee expression]: ../expressions.md#place-expressions-and-value-expressions

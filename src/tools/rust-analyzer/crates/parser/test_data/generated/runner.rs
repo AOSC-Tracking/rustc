@@ -25,6 +25,8 @@ mod ok {
     #[test]
     fn asm_label() { run_and_expect_no_errors("test_data/parser/inline/ok/asm_label.rs"); }
     #[test]
+    fn asm_sym_paren() { run_and_expect_no_errors("test_data/parser/inline/ok/asm_sym_paren.rs"); }
+    #[test]
     fn assoc_const_eq() {
         run_and_expect_no_errors("test_data/parser/inline/ok/assoc_const_eq.rs");
     }
@@ -789,6 +791,10 @@ mod err {
     #[test]
     fn fn_ret_recovery() {
         run_and_expect_errors("test_data/parser/inline/err/fn_ret_recovery.rs");
+    }
+    #[test]
+    fn function_ret_type_missing_arrow() {
+        run_and_expect_errors("test_data/parser/inline/err/function_ret_type_missing_arrow.rs");
     }
     #[test]
     fn gen_fn() {

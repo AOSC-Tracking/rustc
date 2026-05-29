@@ -79,7 +79,7 @@ Each new feature described below should explain how to use it.
     * [sbom](#sbom) --- Generates SBOM pre-cursor files for compiled artifacts
     * [update-breaking](#update-breaking) --- Allows upgrading to breaking versions with `update --breaking`
     * [feature-unification](#feature-unification) --- Enable new feature unification modes in workspaces
-    * [lockfile-publish-time] --- Limit resolver to packages older than the specified time
+    * [lockfile-publish-time](#lockfile-publish-time) --- Limit resolver to packages older than the specified time
 * Output behavior
     * [artifact-dir](#artifact-dir) --- Adds a directory where artifacts are copied to.
     * [build-dir-new-layout](#build-dir-new-layout) --- Enables the new build-dir filesystem layout
@@ -100,6 +100,7 @@ Each new feature described below should explain how to use it.
     * [panic-immediate-abort](#panic-immediate-abort) --- Passes `-Cpanic=immediate-abort` to the compiler.
     * [compile-time-deps](#compile-time-deps) --- Perma-unstable feature for rust-analyzer
     * [fine-grain-locking](#fine-grain-locking) --- Use fine grain locking instead of locking the entire build cache
+    * [target-spec-json](#target-spec-json) --- Allows the use of `.json` custom target specs.
 * rustdoc
     * [rustdoc-map](#rustdoc-map) --- Provides mappings for documentation to link to external sites like [docs.rs](https://docs.rs/).
     * [scrape-examples](#scrape-examples) --- Shows examples within documentation.
@@ -357,6 +358,7 @@ private_dep = "2.0.0" # Will be 'private' by default
 
 Documentation updates:
 - For workspace's "The `dependencies` table" section, include `public` as an unsupported field for `workspace.dependencies`
+- Required MSRV for use of `public` is 1.83 (see [#14507](https://github.com/rust-lang/cargo/pull/14507))
 
 ## msrv-policy
 - [RFC: MSRV-aware Resolver](https://rust-lang.github.io/rfcs/3537-msrv-resolver.html)
@@ -707,12 +709,17 @@ false` is set in the Cargo configuration file.
 # config.toml
 [host]
 linker = "/path/to/host/linker"
+runner = "host-runner"
 [host.x86_64-unknown-linux-gnu]
 linker = "/path/to/host/arch/linker"
+runner = "host-arch-runner"
 rustflags = ["-Clink-arg=--verbose"]
 [target.x86_64-unknown-linux-gnu]
 linker = "/path/to/target/linker"
 ```
+
+The `host.runner` setting wraps execution of host build targets such as build
+scripts, similar to how `target.<triple>.runner` wraps `cargo run`/`test`/`bench`.
 
 The generic `host` table above will be entirely ignored when building on an
 `x86_64-unknown-linux-gnu` host as the `host.x86_64-unknown-linux-gnu` table
@@ -1780,6 +1787,10 @@ lockfiles should be stored in different directories.
 
 *as a new `resolver.lockfile-path` entry in config.md*
 
+*Keep in mind, the `[resolver]` section has this clarification:*
+
+> *The `[resolver]` table overrides dependency resolution behavior for local development (e.g. excludes `cargo install`).*
+
 #### `resolver.lockfile-path`
 
 * Type: string (path)
@@ -1853,7 +1864,7 @@ in the future.
 Controls how Cargo handles warnings. Allowed values are:
 * `warn`: warnings are emitted as warnings (default).
 * `allow`: warnings are hidden.
-* `deny`: if warnings are emitted, an error will be raised at the end of the operation and the process will exit with a failure exit code. 
+* `deny`: if warnings are emitted, an error will be raised at the end of the current crate and the process. Use `--keep-going` to see all warnings.
 
 ## feature unification
 
@@ -2028,7 +2039,7 @@ cargo +nightly build --compile-time-deps -Z unstable-options
 cargo +nightly check --compile-time-deps --all-targets -Z unstable-options
 ```
 
-# `rustc-unicode`
+## `rustc-unicode`
 * Tracking Issue: [rust#148607](https://github.com/rust-lang/rust/issues/148607)
 
 Enable `rustc`'s unicode error format in Cargo's error messages
@@ -2044,6 +2055,17 @@ so that `cargo doc` can merge cross-crate information
 (like the search index, source files index, etc.)
 from separate output directories,
 and run `rustdoc` in parallel.
+
+## target-spec-json
+* Tracking Issue: [rust-lang/rust#151528](https://github.com/rust-lang/rust/issues/151528)
+
+The `-Z target-spec-json` CLI flag enables the ability to use [custom target spec JSON files](https://doc.rust-lang.org/nightly/rustc/targets/custom.html) as a target.
+
+```console
+cargo +nightly build --target my-target.json -Z target-spec-json
+```
+
+This usually must be combined with [build-std](#build-std).
 
 # Stabilized and removed features
 

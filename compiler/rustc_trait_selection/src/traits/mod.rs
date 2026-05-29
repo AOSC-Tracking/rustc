@@ -16,7 +16,7 @@ pub mod project;
 pub mod query;
 #[allow(hidden_glob_reexports)]
 mod select;
-mod specialize;
+pub mod specialize;
 mod structural_normalize;
 #[allow(hidden_glob_reexports)]
 mod util;
@@ -300,19 +300,14 @@ fn do_normalize_predicates<'tcx>(
         Ok(predicates) => Ok(predicates),
         Err(fixup_err) => {
             // If we encounter a fixup error, it means that some type
-            // variable wound up unconstrained. I actually don't know
-            // if this can happen, and I certainly don't expect it to
-            // happen often, but if it did happen it probably
-            // represents a legitimate failure due to some kind of
-            // unconstrained variable.
-            //
-            // @lcnr: Let's still ICE here for now. I want a test case
-            // for that.
-            span_bug!(
+            // variable wound up unconstrained. That can happen for
+            // ill-formed impls, so we delay a bug here instead of
+            // immediately ICEing and let type checking report the
+            // actual user-facing errors.
+            Err(tcx.dcx().span_delayed_bug(
                 span,
-                "inference variables in normalized parameter environment: {}",
-                fixup_err
-            );
+                format!("inference variables in normalized parameter environment: {fixup_err}"),
+            ))
         }
     }
 }
@@ -681,7 +676,10 @@ pub fn try_evaluate_const<'tcx>(
 
                     (args, typing_env)
                 }
-                Some(ty::AnonConstKind::MCG) | Some(ty::AnonConstKind::NonTypeSystem) | None => {
+                Some(ty::AnonConstKind::GCA)
+                | Some(ty::AnonConstKind::MCG)
+                | Some(ty::AnonConstKind::NonTypeSystem)
+                | None => {
                     // We are only dealing with "truly" generic/uninferred constants here:
                     // - GCEConsts have been handled separately
                     // - Repeat expr count back compat consts have also been handled separately
@@ -772,7 +770,7 @@ fn replace_param_and_infer_args_with_placeholder<'tcx>(
                 self.idx += 1;
                 ty::Const::new_placeholder(
                     self.tcx,
-                    ty::PlaceholderConst::new(ty::UniverseIndex::ROOT, ty::BoundConst { var: idx }),
+                    ty::PlaceholderConst::new(ty::UniverseIndex::ROOT, ty::BoundConst::new(idx)),
                 )
             } else {
                 c.super_fold_with(self)

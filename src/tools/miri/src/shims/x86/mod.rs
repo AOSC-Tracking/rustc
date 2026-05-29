@@ -964,6 +964,52 @@ fn psadbw<'tcx>(
     interp_ok(())
 }
 
+/// Multiply packed signed 16-bit integers in `left` and `right`, producing intermediate signed 32-bit integers.
+/// Horizontally add adjacent pairs of intermediate 32-bit integers, and pack the results in `dest`.
+///
+/// <https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_madd_epi16>
+/// <https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_madd_epi16>
+/// <https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm512_madd_epi16>
+fn pmaddwd<'tcx>(
+    ecx: &mut crate::MiriInterpCx<'tcx>,
+    left: &OpTy<'tcx>,
+    right: &OpTy<'tcx>,
+    dest: &MPlaceTy<'tcx>,
+) -> InterpResult<'tcx, ()> {
+    let (left, left_len) = ecx.project_to_simd(left)?;
+    let (right, right_len) = ecx.project_to_simd(right)?;
+    let (dest, dest_len) = ecx.project_to_simd(dest)?;
+
+    // fn  pmaddwd(a: i16x8,  b: i16x8)  -> i32x4;
+    // fn  pmaddwd(a: i16x16, b: i16x16) -> i32x8;
+    // fn vpmaddwd(a: i16x32, b: i16x32) -> i32x16;
+    assert_eq!(left_len, right_len);
+    assert_eq!(dest_len.strict_mul(2), left_len);
+
+    for i in 0..dest_len {
+        let j1 = i.strict_mul(2);
+        let left1 = ecx.read_scalar(&ecx.project_index(&left, j1)?)?.to_i16()?;
+        let right1 = ecx.read_scalar(&ecx.project_index(&right, j1)?)?.to_i16()?;
+
+        let j2 = j1.strict_add(1);
+        let left2 = ecx.read_scalar(&ecx.project_index(&left, j2)?)?.to_i16()?;
+        let right2 = ecx.read_scalar(&ecx.project_index(&right, j2)?)?.to_i16()?;
+
+        let dest = ecx.project_index(&dest, i)?;
+
+        // Multiplications are i16*i16->i32, which will not overflow.
+        let mul1 = i32::from(left1).strict_mul(right1.into());
+        let mul2 = i32::from(left2).strict_mul(right2.into());
+        // However, this addition can overflow in the most extreme case
+        // (-0x8000)*(-0x8000)+(-0x8000)*(-0x8000) = 0x80000000
+        let res = mul1.wrapping_add(mul2);
+
+        ecx.write_scalar(Scalar::from_i32(res), &dest)?;
+    }
+
+    interp_ok(())
+}
+
 /// Multiplies packed 8-bit unsigned integers from `left` and packed
 /// signed 8-bit integers from `right` into 16-bit signed integers. Then,
 /// the saturating sum of the products with indices `2*i` and `2*i+1`
@@ -1132,21 +1178,7 @@ fn pclmulqdq<'tcx>(
         let index = if (imm8 & 0x10) == 0 { lo } else { hi };
         let right = ecx.read_scalar(&ecx.project_index(&right, index)?)?.to_u64()?;
 
-        // Perform carry-less multiplication.
-        //
-        // This operation is like long multiplication, but ignores all carries.
-        // That idea corresponds to the xor operator, which is used in the implementation.
-        //
-        // Wikipedia has an example https://en.wikipedia.org/wiki/Carry-less_product#Example
-        let mut result: u128 = 0;
-
-        for i in 0..64 {
-            // if the i-th bit in right is set
-            if (right & (1 << i)) != 0 {
-                // xor result with `left` shifted to the left by i positions
-                result ^= u128::from(left) << i;
-            }
-        }
+        let result = left.widening_carryless_mul(right);
 
         let dest = ecx.project_index(&dest, i)?;
         ecx.write_scalar(Scalar::from_u128(result), &dest)?;

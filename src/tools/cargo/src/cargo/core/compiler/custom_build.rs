@@ -47,7 +47,7 @@ use cargo_util_schemas::manifest::RustVersion;
 use std::collections::hash_map::{Entry, HashMap};
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-use std::str::{self, FromStr};
+use std::str;
 use std::sync::{Arc, Mutex};
 
 /// A build script instruction that tells Cargo to display an error after the
@@ -337,15 +337,24 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
         .map(|d| &d.unit)
         .expect("running a script not depending on an actual script");
     let script_dir = build_runner.files().build_script_dir(build_script_unit);
-    let script_out_dir = build_runner.files().build_script_out_dir(unit);
-    let script_run_dir = build_runner.files().build_script_run_dir(unit);
+
+    let script_out_dir = if bcx.gctx.cli_unstable().build_dir_new_layout {
+        build_runner.files().out_dir_new_layout(unit)
+    } else {
+        build_runner.files().build_script_out_dir(unit)
+    };
 
     if let Some(deps) = unit.pkg.manifest().metabuild() {
         prepare_metabuild(build_runner, build_script_unit, deps)?;
     }
 
     // Building the command to execute
-    let to_exec = script_dir.join(unit.target.name());
+    let bin_name = if bcx.gctx.cli_unstable().build_dir_new_layout {
+        unit.target.crate_name()
+    } else {
+        unit.target.name().to_string()
+    };
+    let to_exec = script_dir.join(bin_name);
 
     // Start preparing the process to execute, starting out with some
     // environment variables. Note that the profile-related environment
@@ -426,7 +435,7 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
         }
     }
     for (k, v) in cfg_map {
-        // FIXME: We should handle raw-idents somehow instead of predenting they
+        // FIXME: We should handle raw-idents somehow instead of pretending they
         // don't exist here
         let k = format!("CARGO_CFG_{}", super::envify(k));
         cmd.env(&k, v.join(","));
@@ -485,16 +494,14 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
     let pkg_descr = unit.pkg.to_string();
     let build_script_outputs = Arc::clone(&build_runner.build_script_outputs);
     let id = unit.pkg.package_id();
-    let output_file = script_run_dir.join("output");
-    let err_file = script_run_dir.join("stderr");
-    let root_output_file = script_run_dir.join("root-output");
+    let run_files = BuildScriptRunFiles::for_unit(build_runner, unit);
     let host_target_root = build_runner.files().host_dest().map(|v| v.to_path_buf());
     let all = (
         id,
         library_name.clone(),
         pkg_descr.clone(),
         Arc::clone(&build_script_outputs),
-        output_file.clone(),
+        run_files.stdout.clone(),
         script_out_dir.clone(),
     );
     let build_scripts = build_runner.build_scripts.get(unit).cloned();
@@ -505,6 +512,7 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
 
     paths::create_dir_all(&script_dir)?;
     paths::create_dir_all(&script_out_dir)?;
+    paths::create_dir_all(&run_files.root)?;
 
     let nightly_features_allowed = build_runner.bcx.gctx.nightly_features_allowed;
     let targets: Vec<Target> = unit.pkg.targets().to_vec();
@@ -578,7 +586,7 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
 
         // And now finally, run the build command itself!
         state.running(&cmd);
-        let timestamp = paths::set_invocation_time(&script_run_dir)?;
+        let timestamp = paths::set_invocation_time(&run_files.root)?;
         let prefix = format!("[{} {}] ", id.name(), id.version());
         let mut log_messages_in_case_of_panic = Vec::new();
         let span = tracing::debug_span!("build_script", process = cmd.to_string());
@@ -663,12 +671,12 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
         // This is also the location where we provide feedback into the build
         // state informing what variables were discovered via our script as
         // well.
-        paths::write(&output_file, &output.stdout)?;
+        paths::write(&run_files.stdout, &output.stdout)?;
         // This mtime shift allows Cargo to detect if a source file was
         // modified in the middle of the build.
-        paths::set_file_time_no_err(output_file, timestamp);
-        paths::write(&err_file, &output.stderr)?;
-        paths::write(&root_output_file, paths::path2bytes(&script_out_dir)?)?;
+        paths::set_file_time_no_err(run_files.stdout, timestamp);
+        paths::write(&run_files.stderr, &output.stderr)?;
+        paths::write(&run_files.root_output, paths::path2bytes(&script_out_dir)?)?;
         let parsed_output = BuildOutput::parse(
             &output.stdout,
             library_name,
@@ -840,8 +848,8 @@ impl BuildOutput {
             flag: &str,
         ) -> CargoResult<()> {
             if let Some(msrv) = msrv {
-                let new_syntax_added_in = RustVersion::from_str("1.77.0")?;
-                if !new_syntax_added_in.is_compatible_with(msrv.as_partial()) {
+                let new_syntax_added_in = RustVersion::new(1, 77, 0);
+                if !new_syntax_added_in.is_compatible_with(&msrv.to_partial()) {
                     let old_syntax_suggestion = if has_reserved_prefix(flag) {
                         format!(
                             "Switch to the old `cargo:{flag}` syntax (note the single colon).\n"
@@ -1074,16 +1082,16 @@ impl BuildOutput {
                         if nightly_features_allowed
                             || rustc_bootstrap_allows(library_name.as_deref())
                         {
-                            log_messages.push((Severity::Warning, format!("Cannot set `RUSTC_BOOTSTRAP={}` from {}.\n\
-                                note: Crates cannot set `RUSTC_BOOTSTRAP` themselves, as doing so would subvert the stability guarantees of Rust for your project.",
+                            log_messages.push((Severity::Warning, format!("cannot set `RUSTC_BOOTSTRAP={}` from {}.\n\
+                                note: crates cannot set `RUSTC_BOOTSTRAP` themselves, as doing so would subvert the stability guarantees of Rust for your project.",
                                 val, whence
                             )));
                         } else {
                             // Setting RUSTC_BOOTSTRAP would change the behavior of the crate.
                             // Abort with an error.
                             bail!(
-                                "Cannot set `RUSTC_BOOTSTRAP={}` from {}.\n\
-                                note: Crates cannot set `RUSTC_BOOTSTRAP` themselves, as doing so would subvert the stability guarantees of Rust for your project.\n\
+                                "cannot set `RUSTC_BOOTSTRAP={}` from {}.\n\
+                                note: crates cannot set `RUSTC_BOOTSTRAP` themselves, as doing so would subvert the stability guarantees of Rust for your project.\n\
                                 help: If you're sure you want to do this in your project, set the environment variable `RUSTC_BOOTSTRAP={}` before running cargo instead.",
                                 val,
                                 whence,
@@ -1147,7 +1155,7 @@ impl BuildOutput {
                     value = match flags_iter.next() {
                         Some(v) => v,
                         None => bail! {
-                            "Flag in rustc-flags has no value in {}: {}",
+                            "flag in rustc-flags has no value in {}: {}",
                             whence,
                             value
                         },
@@ -1163,7 +1171,7 @@ impl BuildOutput {
                 };
             } else {
                 bail!(
-                    "Only `-l` and `-L` flags are allowed in {}: `{}`",
+                    "only `-l` and `-L` flags are allowed in {}: `{}`",
                     whence,
                     value
                 )
@@ -1349,10 +1357,9 @@ pub fn build_map(build_runner: &mut BuildRunner<'_, '_>) -> CargoResult<()> {
 
     /// Load any dependency declarations from a previous build script run.
     fn parse_previous_explicit_deps(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) {
-        let script_run_dir = build_runner.files().build_script_run_dir(unit);
-        let output_file = script_run_dir.join("output");
+        let run_files = BuildScriptRunFiles::for_unit(build_runner, unit);
         let (prev_output, _) = prev_build_output(build_runner, unit);
-        let deps = BuildDeps::new(&output_file, prev_output.as_ref());
+        let deps = BuildDeps::new(&run_files.stdout, prev_output.as_ref());
         build_runner.build_explicit_deps.insert(unit.clone(), deps);
     }
 }
@@ -1366,18 +1373,20 @@ fn prev_build_output(
     build_runner: &mut BuildRunner<'_, '_>,
     unit: &Unit,
 ) -> (Option<BuildOutput>, PathBuf) {
-    let script_out_dir = build_runner.files().build_script_out_dir(unit);
-    let script_run_dir = build_runner.files().build_script_run_dir(unit);
-    let root_output_file = script_run_dir.join("root-output");
-    let output_file = script_run_dir.join("output");
+    let script_out_dir = if build_runner.bcx.gctx.cli_unstable().build_dir_new_layout {
+        build_runner.files().out_dir_new_layout(unit)
+    } else {
+        build_runner.files().build_script_out_dir(unit)
+    };
+    let run_files = BuildScriptRunFiles::for_unit(build_runner, unit);
 
-    let prev_script_out_dir = paths::read_bytes(&root_output_file)
+    let prev_script_out_dir = paths::read_bytes(&run_files.root_output)
         .and_then(|bytes| paths::bytes2path(&bytes))
         .unwrap_or_else(|_| script_out_dir.clone());
 
     (
         BuildOutput::parse_file(
-            &output_file,
+            &run_files.stdout,
             unit.pkg.library().map(|t| t.crate_name()),
             &unit.pkg.to_string(),
             &prev_script_out_dir,
@@ -1422,5 +1431,37 @@ impl BuildScriptOutputs {
     /// Returns an iterator over all entries.
     pub fn iter(&self) -> impl Iterator<Item = (&UnitHash, &BuildOutput)> {
         self.outputs.iter()
+    }
+}
+
+/// Files with information about a running build script.
+struct BuildScriptRunFiles {
+    /// The directory containing files related to running a build script.
+    root: PathBuf,
+    /// The stdout produced by the build script
+    stdout: PathBuf,
+    /// The stderr produced by the build script
+    stderr: PathBuf,
+    /// A file that contains the path to the `out` dir of the build script.
+    /// This is used for detect if the directory was moved since the previous run.
+    root_output: PathBuf,
+}
+
+impl BuildScriptRunFiles {
+    pub fn for_unit(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> Self {
+        let root = build_runner.files().build_script_run_dir(unit);
+        let stdout = if build_runner.bcx.gctx.cli_unstable().build_dir_new_layout {
+            root.join("stdout")
+        } else {
+            root.join("output")
+        };
+        let stderr = root.join("stderr");
+        let root_output = root.join("root-output");
+        Self {
+            root,
+            stdout,
+            stderr,
+            root_output,
+        }
     }
 }

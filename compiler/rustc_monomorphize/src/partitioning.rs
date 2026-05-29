@@ -99,7 +99,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
-use rustc_data_structures::sync;
+use rustc_data_structures::sync::par_join;
 use rustc_data_structures::unord::{UnordMap, UnordSet};
 use rustc_hir::LangItem;
 use rustc_hir::attrs::{InlineAttr, Linkage};
@@ -109,7 +109,7 @@ use rustc_hir::definitions::DefPathDataName;
 use rustc_middle::bug;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::middle::exported_symbols::{SymbolExportInfo, SymbolExportLevel};
-use rustc_middle::mir::mono::{
+use rustc_middle::mono::{
     CodegenUnit, CodegenUnitNameBuilder, InstantiationMode, MonoItem, MonoItemData,
     MonoItemPartitions, Visibility,
 };
@@ -286,8 +286,8 @@ where
         codegen_units.insert(cgu_name, CodegenUnit::new(cgu_name));
     }
 
-    let mut codegen_units: Vec<_> = cx.tcx.with_stable_hashing_context(|ref hcx| {
-        codegen_units.into_items().map(|(_, cgu)| cgu).collect_sorted(hcx, true)
+    let mut codegen_units: Vec<_> = cx.tcx.with_stable_hashing_context(|mut hcx| {
+        codegen_units.into_items().map(|(_, cgu)| cgu).collect_sorted(&mut hcx, true)
     });
 
     for cgu in codegen_units.iter_mut() {
@@ -1145,7 +1145,7 @@ fn collect_and_partition_mono_items(tcx: TyCtxt<'_>, (): ()) -> MonoItemPartitio
     tcx.dcx().abort_if_errors();
 
     let (codegen_units, _) = tcx.sess.time("partition_and_assert_distinct_symbols", || {
-        sync::join(
+        par_join(
             || {
                 let mut codegen_units = partition(tcx, items.iter().copied(), &usage_map);
                 codegen_units[0].make_primary();

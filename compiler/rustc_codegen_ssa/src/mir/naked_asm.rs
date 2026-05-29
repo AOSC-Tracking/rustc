@@ -1,7 +1,8 @@
 use rustc_abi::{BackendRepr, Float, Integer, Primitive, RegKind};
 use rustc_hir::attrs::{InstructionSetAttr, Linkage};
-use rustc_middle::mir::mono::{MonoItemData, Visibility};
+use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_middle::mir::{InlineAsmOperand, START_BLOCK};
+use rustc_middle::mono::{MonoItemData, Visibility};
 use rustc_middle::ty::layout::{FnAbiOf, LayoutOf, TyAndLayout};
 use rustc_middle::ty::{Instance, Ty, TyCtxt, TypeVisitableExt};
 use rustc_middle::{bug, ty};
@@ -128,11 +129,26 @@ fn prefix_and_suffix<'tcx>(
     let is_arm = tcx.sess.target.arch == Arch::Arm;
     let is_thumb = tcx.sess.unstable_target_features.contains(&sym::thumb_mode);
 
+    // If we're compiling the compiler-builtins crate, e.g., the equivalent of
+    // compiler-rt, then we want to implicitly compile everything with hidden
+    // visibility as we're going to link this object all over the place but
+    // don't want the symbols to get exported. For naked asm we set the visibility here.
+    let mut visibility = item_data.visibility;
+    if item_data.linkage != Linkage::Internal && tcx.is_compiler_builtins(LOCAL_CRATE) {
+        visibility = Visibility::Hidden;
+    }
+
     let attrs = tcx.codegen_instance_attrs(instance.def);
     let link_section = attrs.link_section.map(|symbol| symbol.as_str().to_string());
 
-    // If no alignment is specified, an alignment of 4 bytes is used.
-    let align_bytes = attrs.alignment.map(|a| a.bytes()).unwrap_or(4);
+    // Pick a default alignment when the alignment is not explicitly specified.
+    let align_bytes = match attrs.alignment {
+        Some(align) => align.bytes(),
+        None => match asm_binary_format {
+            BinaryFormat::Coff => 16,
+            _ => 4,
+        },
+    };
 
     // In particular, `.arm` can also be written `.code 32` and `.thumb` as `.code 16`.
     let (arch_prefix, arch_suffix) = if is_arm {
@@ -217,7 +233,7 @@ fn prefix_and_suffix<'tcx>(
             writeln!(begin, ".pushsection {section},\"ax\", {progbits}").unwrap();
             writeln!(begin, ".balign {align_bytes}").unwrap();
             write_linkage(&mut begin).unwrap();
-            match item_data.visibility {
+            match visibility {
                 Visibility::Default => {}
                 Visibility::Protected => writeln!(begin, ".protected {asm_name}").unwrap(),
                 Visibility::Hidden => writeln!(begin, ".hidden {asm_name}").unwrap(),
@@ -243,7 +259,7 @@ fn prefix_and_suffix<'tcx>(
             writeln!(begin, ".pushsection {},regular,pure_instructions", section).unwrap();
             writeln!(begin, ".balign {align_bytes}").unwrap();
             write_linkage(&mut begin).unwrap();
-            match item_data.visibility {
+            match visibility {
                 Visibility::Default | Visibility::Protected => {}
                 Visibility::Hidden => writeln!(begin, ".private_extern {asm_name}").unwrap(),
             }
@@ -257,19 +273,18 @@ fn prefix_and_suffix<'tcx>(
             }
         }
         BinaryFormat::Coff => {
-            let section = link_section.unwrap_or_else(|| format!(".text.{asm_name}"));
-            writeln!(begin, ".pushsection {},\"xr\"", section).unwrap();
-            writeln!(begin, ".balign {align_bytes}").unwrap();
-            write_linkage(&mut begin).unwrap();
             writeln!(begin, ".def {asm_name}").unwrap();
             writeln!(begin, ".scl 2").unwrap();
             writeln!(begin, ".type 32").unwrap();
             writeln!(begin, ".endef").unwrap();
+
+            let section = link_section.unwrap_or_else(|| format!(".text.{asm_name}"));
+            writeln!(begin, ".pushsection {},\"xr\"", section).unwrap();
+            write_linkage(&mut begin).unwrap();
+            writeln!(begin, ".balign {align_bytes}").unwrap();
             writeln!(begin, "{asm_name}:").unwrap();
 
             writeln!(end).unwrap();
-            writeln!(end, ".Lfunc_end_{asm_name}:").unwrap();
-            writeln!(end, ".popsection").unwrap();
             if !arch_suffix.is_empty() {
                 writeln!(end, "{}", arch_suffix).unwrap();
             }
@@ -280,7 +295,7 @@ fn prefix_and_suffix<'tcx>(
             writeln!(begin, ".section {section},\"\",@").unwrap();
             // wasm functions cannot be aligned, so skip
             write_linkage(&mut begin).unwrap();
-            if let Visibility::Hidden = item_data.visibility {
+            if let Visibility::Hidden = visibility {
                 writeln!(begin, ".hidden {asm_name}").unwrap();
             }
             writeln!(begin, ".type {asm_name}, @function").unwrap();
@@ -313,7 +328,7 @@ fn prefix_and_suffix<'tcx>(
             writeln!(begin, ".align {}", align_bytes).unwrap();
 
             write_linkage(&mut begin).unwrap();
-            if let Visibility::Hidden = item_data.visibility {
+            if let Visibility::Hidden = visibility {
                 // FIXME apparently `.globl {asm_name}, hidden` is valid
                 // but due to limitations with `.weak` (see above) we can't really use that in general yet
             }

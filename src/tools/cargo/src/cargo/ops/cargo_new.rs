@@ -1,4 +1,4 @@
-use crate::core::{Edition, Shell, Workspace};
+use crate::core::{Edition, Workspace};
 use crate::util::errors::CargoResult;
 use crate::util::important_paths::find_root_manifest_for_wd;
 use crate::util::{FossilRepo, GitRepo, HgRepo, PijulRepo, existing_vcs_repo};
@@ -6,6 +6,8 @@ use crate::util::{GlobalContext, restricted_names};
 use anyhow::{Context as _, anyhow};
 use cargo_util::paths::{self, write_atomic};
 use cargo_util_schemas::manifest::PackageName;
+use cargo_util_terminal::Shell;
+use home::home_dir;
 use serde::Deserialize;
 use serde::de;
 use std::collections::BTreeMap;
@@ -480,7 +482,7 @@ pub fn new(opts: &NewOptions, gctx: &GlobalContext) -> CargoResult<()> {
 
     mk(gctx, &mkopts).with_context(|| {
         format!(
-            "Failed to create package `{}` at `{}`",
+            "failed to create package `{}` at `{}`",
             name,
             path.display()
         )
@@ -495,6 +497,15 @@ pub fn init(opts: &NewOptions, gctx: &GlobalContext) -> CargoResult<NewProjectKi
     }
 
     let path = &opts.path;
+
+    if let Some(home) = home_dir() {
+        if path == &home {
+            anyhow::bail!(
+                "cannot create package in the home directory\n\n\
+                 help: use `cargo init <path>` to create a package in a different directory"
+            )
+        }
+    }
     let name = get_name(path, opts)?;
     let mut src_paths_types = vec![];
     detect_source_paths_and_types(path, name, &mut src_paths_types)?;
@@ -503,7 +514,10 @@ pub fn init(opts: &NewOptions, gctx: &GlobalContext) -> CargoResult<NewProjectKi
         .status("Creating", format!("{} package", opts.kind))?;
 
     if path.join("Cargo.toml").exists() {
-        anyhow::bail!("`cargo init` cannot be run on existing Cargo packages")
+        anyhow::bail!(
+            "`cargo init` cannot be run on existing Cargo packages\n\
+             help: use `cargo new` to create a package in a new subdirectory"
+        )
     }
     check_path(path, &mut gctx.shell())?;
 
@@ -583,7 +597,7 @@ pub fn init(opts: &NewOptions, gctx: &GlobalContext) -> CargoResult<NewProjectKi
 
     mk(gctx, &mkopts).with_context(|| {
         format!(
-            "Failed to create package `{}` at `{}`",
+            "failed to create package `{}` at `{}`",
             name,
             path.display()
         )

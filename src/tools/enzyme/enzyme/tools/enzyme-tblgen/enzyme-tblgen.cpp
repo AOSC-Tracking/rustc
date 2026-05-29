@@ -313,19 +313,20 @@ SmallVector<bool, 1> prepareArgs(const Twine &curIndent, raw_ostream &os,
               os << curIndent << INDENT << "for (auto &val : " << argName << "_"
                  << (idx - 1) << ") {\n";
               os << curIndent << INDENT << INDENT
-                 << "val = builder.create<enzyme::BroadcastOp>(op.getLoc(), "
+                 << "val = enzyme::BroadcastOp::create(builder, op.getLoc(), "
                     "val, "
                     "llvm::SmallVector<int64_t>({gutils->width}));\n";
               os << curIndent << INDENT << "}\n";
             } else {
               os << curIndent << " " << argName << "_" << (idx - 1)
-                 << " = builder.create<enzyme::BroadcastOp>(\n"
+                 << " = enzyme::BroadcastOp::create(builder, \n"
                  << curIndent << "   op.getLoc(),\n"
                  << curIndent << "   " << argName << "_" << (idx - 1) << ",\n"
                  << curIndent
                  << "   llvm::SmallVector<int64_t>({gutils->width}));\n";
             }
             os << curIndent << "}";
+            vecValue = true;
           }
         }
 
@@ -591,7 +592,7 @@ bool handle(const Twine &curIndent, const Twine &argPattern, raw_ostream &os,
         } else {
           os << curIndent << INDENT << "if (gutils->width != 1)\n"
              << curIndent << INDENT << INDENT
-             << "imVal = builder.create<enzyme::BroadcastOp>(imVal.getLoc(), "
+             << "imVal = enzyme::BroadcastOp::create(builder, imVal.getLoc(), "
                 "imVal, SmallVector<int64_t>({gutils->width}));\n";
         }
         os << curIndent << INDENT << "}\n";
@@ -611,27 +612,58 @@ bool handle(const Twine &curIndent, const Twine &argPattern, raw_ostream &os,
         if (resultRoot->getNumArgs() > 1)
           PrintFatalError(pattern->getLoc(),
                           "only zero or single op constantfp supported");
-        os << builder << ".create<"
-           << cast<StringInit>(Def->getValueInit("dialect"))->getValue()
+        os << cast<StringInit>(Def->getValueInit("dialect"))->getValue()
            << "::" << cast<StringInit>(Def->getValueInit("opName"))->getValue()
-           << ">(op.getLoc(), ";
+           << "::create(" << builder << ", op.getLoc(), ";
         std::string ord;
+        bool shadowType = false;
         if (resultRoot->getNumArgs() == 0) {
           ord = "op->getResult(0)";
         } else {
-          auto name = resultRoot->getArgName(0)->getAsUnquotedString();
-          auto [ord1, isVec, ext, isva] =
-              nameToOrdinal.lookup(name, pattern, resultTree);
-          assert(!ext.size());
-          assert(!isva);
-          ord = ord1;
+          if (resultRoot->getArgName(0)) {
+            auto name = resultRoot->getArgName(0)->getAsUnquotedString();
+            auto [ord1, isVec, ext, isva] =
+                nameToOrdinal.lookup(name, pattern, resultTree);
+            assert(!ext.size());
+            assert(!isva);
+            ord = ord1;
+          } else {
+            bool handled = false;
+            if (auto argRoot = dyn_cast<DagInit>(resultRoot->getArg(0))) {
+              auto opName = argRoot->getOperator()->getAsString();
+              auto Def = cast<DefInit>(argRoot->getOperator())->getDef();
+              if (opName == "Shadow" || Def->isSubClassOf("Shadow")) {
+                if (argRoot->getArgName(0)) {
+                  auto name = argRoot->getArgName(0)->getAsUnquotedString();
+                  auto [ord1, isVec, ext, isva] =
+                      nameToOrdinal.lookup(name, pattern, resultTree);
+                  assert(!ext.size());
+                  assert(!isva);
+                  ord = "gutils->getShadowType(" + ord1;
+                  shadowType = true;
+                  handled = true;
+                }
+              }
+            }
+            if (!handled) {
+              PrintFatalError(pattern->getLoc(),
+                              "ConstantFP op only supports args with no type "
+                              "specified, an arg type, or shadow of arg type");
+            }
+          }
         }
-        os << ord << ".getType(), ";
+        os << ord << ".getType()";
+        if (shadowType)
+          os << ")";
+        os << ", ";
         auto typeCast =
             dyn_cast<StringInit>(Def->getValueInit("type"))->getValue();
         if (typeCast != "")
           os << "(" << typeCast << ")";
-        os << "mlir::enzyme::getConstantAttr(" << ord << ".getType(), ";
+        os << "mlir::enzyme::getConstantAttr(" << ord << ".getType()";
+        if (shadowType)
+          os << ")";
+        os << ", ";
         os << "\"" << value->getValue() << "\"))";
       } else {
         if (resultRoot->getNumArgs() != 1)
@@ -1118,8 +1150,8 @@ bool handle(const Twine &curIndent, const Twine &argPattern, raw_ostream &os,
           os << preop;
         }
         auto dialect = Def->getValueAsString("dialect");
-        os << builder << ".create<" << dialect << "::" << opName
-           << ">(op.getLoc(), ";
+        os << dialect << "::" << opName << "::create(" << builder
+           << ", op.getLoc(), ";
       } else {
         os << builder << ".Create" << opName << "(";
       }

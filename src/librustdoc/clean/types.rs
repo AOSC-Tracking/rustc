@@ -7,9 +7,11 @@ use std::{fmt, iter};
 use arrayvec::ArrayVec;
 use itertools::Either;
 use rustc_abi::{ExternAbi, VariantIdx};
+use rustc_ast as ast;
 use rustc_ast::attr::AttributeExt;
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_data_structures::thin_vec::ThinVec;
+use rustc_hir as hir;
 use rustc_hir::attrs::{AttributeKind, DeprecatedSince, Deprecation, DocAttribute};
 use rustc_hir::def::{CtorKind, DefKind, Res};
 use rustc_hir::def_id::{CrateNum, DefId, LOCAL_CRATE, LocalDefId};
@@ -28,7 +30,6 @@ use rustc_span::hygiene::MacroKind;
 use rustc_span::symbol::{Symbol, kw, sym};
 use rustc_span::{DUMMY_SP, FileName, Ident, Loc, RemapPathScopeComponents};
 use tracing::{debug, trace};
-use {rustc_ast as ast, rustc_hir as hir};
 
 pub(crate) use self::ItemKind::*;
 pub(crate) use self::Type::{
@@ -59,6 +60,29 @@ pub(crate) enum ItemId {
     Auto { trait_: DefId, for_: DefId },
     /// Identifier that is used for blanket implementations.
     Blanket { impl_id: DefId, for_: DefId },
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum Defaultness {
+    Implicit,
+    Default,
+    Final,
+}
+
+impl Defaultness {
+    pub(crate) fn from_trait_item(defaultness: hir::Defaultness) -> Self {
+        match defaultness {
+            hir::Defaultness::Default { .. } => Self::Implicit,
+            hir::Defaultness::Final => Self::Final,
+        }
+    }
+
+    pub(crate) fn from_impl_item(defaultness: hir::Defaultness) -> Self {
+        match defaultness {
+            hir::Defaultness::Default { .. } => Self::Default,
+            hir::Defaultness::Final => Self::Implicit,
+        }
+    }
 }
 
 impl ItemId {
@@ -152,7 +176,7 @@ impl ExternalCrate {
             FileName::Real(ref p) => {
                 match p
                     .local_path()
-                    .or(Some(p.path(RemapPathScopeComponents::MACRO)))
+                    .or(Some(p.path(RemapPathScopeComponents::DOCUMENTATION)))
                     .unwrap()
                     .parent()
                 {
@@ -180,7 +204,14 @@ impl ExternalCrate {
             if !url.ends_with('/') {
                 url.push('/');
             }
-            Remote(url)
+            let is_absolute = url.starts_with('/')
+                || url.split_once(':').is_some_and(|(scheme, _)| {
+                    scheme.bytes().next().is_some_and(|b| b.is_ascii_alphabetic())
+                        && scheme
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+                });
+            Remote { url, is_absolute }
         }
 
         // See if there's documentation generated into the local directory
@@ -198,12 +229,8 @@ impl ExternalCrate {
         // Failing that, see if there's an attribute specifying where to find this
         // external crate
         let did = self.crate_num.as_def_id();
-        tcx.get_all_attrs(did)
-            .iter()
-            .find_map(|a| match a {
-                Attribute::Parsed(AttributeKind::Doc(d)) => d.html_root_url.map(|(url, _)| url),
-                _ => None,
-            })
+        find_attr!(tcx, did, Doc(d) =>d.html_root_url.map(|(url, _)| url))
+            .flatten()
             .map(to_remote)
             .or_else(|| extern_url.map(to_remote)) // NOTE: only matters if `extern_url_takes_precedence` is false
             .unwrap_or(Unknown) // Well, at least we tried.
@@ -252,13 +279,7 @@ impl ExternalCrate {
         callback: F,
     ) -> impl Iterator<Item = (DefId, Symbol)> {
         let as_target = move |did: DefId, tcx: TyCtxt<'_>| -> Option<(DefId, Symbol)> {
-            tcx.get_all_attrs(did)
-                .iter()
-                .find_map(|attr| match attr {
-                    Attribute::Parsed(AttributeKind::Doc(d)) => callback(d),
-                    _ => None,
-                })
-                .map(|value| (did, value))
+            find_attr!(tcx, did, Doc(d) => callback(d)).flatten().map(|value| (did, value))
         };
         self.mapped_root_modules(tcx, as_target)
     }
@@ -285,17 +306,14 @@ impl ExternalCrate {
         // duplicately for the same primitive. This is handled later on when
         // rendering by delegating everything to a hash map.
         fn as_primitive(def_id: DefId, tcx: TyCtxt<'_>) -> Option<(DefId, PrimitiveType)> {
-            tcx.get_attrs(def_id, sym::rustc_doc_primitive).next().map(|attr| {
-                let attr_value = attr.value_str().expect("syntax should already be validated");
-                let Some(prim) = PrimitiveType::from_symbol(attr_value) else {
-                    span_bug!(
-                        attr.span(),
-                        "primitive `{attr_value}` is not a member of `PrimitiveType`"
-                    );
-                };
-
-                (def_id, prim)
-            })
+            let (attr_span, prim_sym) = find_attr!(
+                tcx, def_id,
+                RustcDocPrimitive(span, prim) => (*span, *prim)
+            )?;
+            let Some(prim) = PrimitiveType::from_symbol(prim_sym) else {
+                span_bug!(attr_span, "primitive `{prim_sym}` is not a member of `PrimitiveType`");
+            };
+            Some((def_id, prim))
         }
 
         self.mapped_root_modules(tcx, as_primitive)
@@ -306,7 +324,7 @@ impl ExternalCrate {
 #[derive(Debug)]
 pub(crate) enum ExternalLocation {
     /// Remote URL root of the external crate
-    Remote(String),
+    Remote { url: String, is_absolute: bool },
     /// This external crate can be found in the local doc/ folder
     Local,
     /// The external crate could not be found.
@@ -427,8 +445,40 @@ impl Item {
         })
     }
 
+    pub(crate) fn is_deprecated(&self, tcx: TyCtxt<'_>) -> bool {
+        self.deprecation(tcx).is_some_and(|deprecation| deprecation.is_in_effect())
+    }
+
+    pub(crate) fn is_unstable(&self) -> bool {
+        self.stability.is_some_and(|x| x.is_unstable())
+    }
+
+    pub(crate) fn is_exported_macro(&self) -> bool {
+        match self.kind {
+            ItemKind::MacroItem(..) => find_attr!(&self.attrs.other_attrs, MacroExport { .. }),
+            _ => false,
+        }
+    }
+
     pub(crate) fn inner_docs(&self, tcx: TyCtxt<'_>) -> bool {
-        self.item_id.as_def_id().map(|did| inner_docs(tcx.get_all_attrs(did))).unwrap_or(false)
+        self.item_id
+            .as_def_id()
+            .map(|did| {
+                inner_docs(
+                    #[allow(deprecated)]
+                    tcx.get_all_attrs(did),
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    /// Returns true if item is an associated function with a `self` parameter.
+    pub(crate) fn has_self_param(&self) -> bool {
+        if let ItemKind::MethodItem(box Function { decl, .. }, _) = &self.inner.kind {
+            decl.receiver_type().is_some()
+        } else {
+            false
+        }
     }
 
     pub(crate) fn span(&self, tcx: TyCtxt<'_>) -> Option<Span> {
@@ -480,9 +530,10 @@ impl Item {
         def_id: DefId,
         name: Option<Symbol>,
         kind: ItemKind,
-        cx: &mut DocContext<'_>,
+        tcx: TyCtxt<'_>,
     ) -> Item {
-        let hir_attrs = cx.tcx.get_all_attrs(def_id);
+        #[allow(deprecated)]
+        let hir_attrs = tcx.get_all_attrs(def_id);
 
         Self::from_def_id_and_attrs_and_parts(
             def_id,
@@ -691,7 +742,7 @@ impl Item {
     }
 
     pub(crate) fn is_non_exhaustive(&self) -> bool {
-        find_attr!(&self.attrs.other_attrs, AttributeKind::NonExhaustive(..))
+        find_attr!(&self.attrs.other_attrs, NonExhaustive(..))
     }
 
     /// Returns a documentation-level item type from the item.
@@ -699,12 +750,12 @@ impl Item {
         ItemType::from(self)
     }
 
-    pub(crate) fn is_default(&self) -> bool {
+    pub(crate) fn defaultness(&self) -> Option<Defaultness> {
         match self.kind {
-            ItemKind::MethodItem(_, Some(defaultness)) => {
-                defaultness.has_value() && !defaultness.is_final()
+            ItemKind::MethodItem(_, defaultness) | ItemKind::RequiredMethodItem(_, defaultness) => {
+                Some(defaultness)
             }
-            _ => false,
+            _ => None,
         }
     }
 
@@ -766,8 +817,8 @@ impl Item {
                 }
             }
             ItemKind::FunctionItem(_)
-            | ItemKind::MethodItem(_, _)
-            | ItemKind::RequiredMethodItem(_) => {
+            | ItemKind::MethodItem(..)
+            | ItemKind::RequiredMethodItem(..) => {
                 let def_id = self.def_id().unwrap();
                 build_fn_header(def_id, tcx, tcx.asyncness(def_id))
             }
@@ -850,12 +901,15 @@ pub(crate) enum ItemKind {
     TraitItem(Box<Trait>),
     TraitAliasItem(TraitAlias),
     ImplItem(Box<Impl>),
+    /// This variant is used only as a placeholder for trait impls in order to correctly compute
+    /// `doc_cfg` as trait impls are added to `clean::Crate` after we went through the whole tree.
+    PlaceholderImplItem,
     /// A required method in a trait declaration meaning it's only a function signature.
-    RequiredMethodItem(Box<Function>),
+    RequiredMethodItem(Box<Function>, Defaultness),
     /// A method in a trait impl or a provided method in a trait declaration.
     ///
     /// Compared to [RequiredMethodItem], it also contains a method body.
-    MethodItem(Box<Function>, Option<hir::Defaultness>),
+    MethodItem(Box<Function>, Defaultness),
     StructFieldItem(Type),
     VariantItem(Variant),
     /// `fn`s from an extern block
@@ -913,8 +967,8 @@ impl ItemKind {
             | StaticItem(_)
             | ConstantItem(_)
             | TraitAliasItem(_)
-            | RequiredMethodItem(_)
-            | MethodItem(_, _)
+            | RequiredMethodItem(..)
+            | MethodItem(..)
             | StructFieldItem(_)
             | ForeignFunctionItem(_, _)
             | ForeignStaticItem(_, _)
@@ -929,7 +983,8 @@ impl ItemKind {
             | AssocTypeItem(..)
             | StrippedItem(_)
             | KeywordItem
-            | AttributeItem => [].iter(),
+            | AttributeItem
+            | PlaceholderImplItem => [].iter(),
         }
     }
 }
@@ -983,13 +1038,11 @@ pub(crate) struct Attributes {
 
 impl Attributes {
     pub(crate) fn has_doc_flag<F: Fn(&DocAttribute) -> bool>(&self, callback: F) -> bool {
-        self.other_attrs
-            .iter()
-            .any(|a| matches!(a, Attribute::Parsed(AttributeKind::Doc(d)) if callback(d)))
+        find_attr!(&self.other_attrs, Doc(d) if callback(d))
     }
 
     pub(crate) fn is_doc_hidden(&self) -> bool {
-        find_attr!(&self.other_attrs, AttributeKind::Doc(d) if d.hidden.is_some())
+        find_attr!(&self.other_attrs, Doc(d) if d.hidden.is_some())
     }
 
     pub(crate) fn from_hir(attrs: &[hir::Attribute]) -> Attributes {
@@ -1082,20 +1135,20 @@ impl GenericBound {
         matches!(self, Self::TraitBound(..))
     }
 
-    pub(crate) fn is_sized_bound(&self, cx: &DocContext<'_>) -> bool {
-        self.is_bounded_by_lang_item(cx, LangItem::Sized)
+    pub(crate) fn is_sized_bound(&self, tcx: TyCtxt<'_>) -> bool {
+        self.is_bounded_by_lang_item(tcx, LangItem::Sized)
     }
 
-    pub(crate) fn is_meta_sized_bound(&self, cx: &DocContext<'_>) -> bool {
-        self.is_bounded_by_lang_item(cx, LangItem::MetaSized)
+    pub(crate) fn is_meta_sized_bound(&self, tcx: TyCtxt<'_>) -> bool {
+        self.is_bounded_by_lang_item(tcx, LangItem::MetaSized)
     }
 
-    fn is_bounded_by_lang_item(&self, cx: &DocContext<'_>, lang_item: LangItem) -> bool {
+    fn is_bounded_by_lang_item(&self, tcx: TyCtxt<'_>, lang_item: LangItem) -> bool {
         if let GenericBound::TraitBound(
             PolyTrait { ref trait_, .. },
             rustc_hir::TraitBoundModifiers::NONE,
         ) = *self
-            && cx.tcx.is_lang_item(trait_.def_id(), lang_item)
+            && tcx.is_lang_item(trait_.def_id(), lang_item)
         {
             return true;
         }
@@ -1270,6 +1323,9 @@ impl Trait {
     pub(crate) fn is_dyn_compatible(&self, tcx: TyCtxt<'_>) -> bool {
         tcx.is_dyn_compatible(self.def_id)
     }
+    pub(crate) fn is_deprecated(&self, tcx: TyCtxt<'_>) -> bool {
+        tcx.lookup_deprecation(self.def_id).is_some_and(|deprecation| deprecation.is_in_effect())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1314,6 +1370,7 @@ pub(crate) enum Type {
     /// The `String` field is a stringified version of the array's length parameter.
     Array(Box<Type>, Box<str>),
     Pat(Box<Type>, Box<str>),
+    FieldOf(Box<Type>, Box<str>),
     /// A raw pointer type: `*const i32`, `*mut i32`
     RawPointer(Mutability, Box<Type>),
     /// A reference type: `&i32`, `&'a mut Foo`
@@ -1365,7 +1422,7 @@ impl Type {
     /// use rustdoc::format::cache::Cache;
     /// use rustdoc::clean::types::{Type, PrimitiveType};
     /// let cache = Cache::new(false);
-    /// let generic = Type::Generic(rustc_span::symbol::sym::Any);
+    /// let generic = Type::Generic(Symbol::intern("T"));
     /// let unit = Type::Primitive(PrimitiveType::Unit);
     /// assert!(!generic.is_doc_subtype_of(&unit, &cache));
     /// assert!(unit.is_doc_subtype_of(&generic, &cache));
@@ -1527,6 +1584,7 @@ impl Type {
             Slice(..) => PrimitiveType::Slice,
             Array(..) => PrimitiveType::Array,
             Type::Pat(..) => PrimitiveType::Pat,
+            Type::FieldOf(..) => PrimitiveType::FieldOf,
             RawPointer(..) => PrimitiveType::RawPointer,
             QPath(box QPathData { self_type, .. }) => return self_type.def_id(cache),
             Generic(_) | SelfTy | Infer | ImplTrait(_) | UnsafeBinder(_) => return None,
@@ -1574,6 +1632,7 @@ pub(crate) enum PrimitiveType {
     Slice,
     Array,
     Pat,
+    FieldOf,
     Tuple,
     Unit,
     RawPointer,
@@ -1729,6 +1788,7 @@ impl PrimitiveType {
             Char => sym::char,
             Array => sym::array,
             Pat => sym::pat,
+            FieldOf => sym::field_of,
             Slice => sym::slice,
             Tuple => sym::tuple,
             Unit => sym::unit,
@@ -2254,6 +2314,7 @@ pub(crate) struct Impl {
     pub(crate) items: Vec<Item>,
     pub(crate) polarity: ty::ImplPolarity,
     pub(crate) kind: ImplKind,
+    pub(crate) is_deprecated: bool,
 }
 
 impl Impl {
@@ -2389,7 +2450,7 @@ mod size_asserts {
     static_assert_size!(GenericParamDef, 40);
     static_assert_size!(Generics, 16);
     static_assert_size!(Item, 8);
-    static_assert_size!(ItemInner, 144);
+    static_assert_size!(ItemInner, 136);
     static_assert_size!(ItemKind, 48);
     static_assert_size!(PathSegment, 32);
     static_assert_size!(Type, 32);

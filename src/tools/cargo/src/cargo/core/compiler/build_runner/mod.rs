@@ -10,9 +10,9 @@ use crate::core::compiler::locking::LockManager;
 use crate::core::compiler::{self, Unit, UserIntent, artifact};
 use crate::util::cache_lock::CacheLockMode;
 use crate::util::errors::CargoResult;
-use annotate_snippets::{Level, Message};
 use anyhow::{Context as _, bail};
 use cargo_util::paths;
+use cargo_util_terminal::report::{Level, Message};
 use filetime::FileTime;
 use itertools::Itertools;
 use jobserver::Client;
@@ -214,17 +214,17 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
         for unit in units_with_build_script {
             for dep in &self.bcx.unit_graph[unit] {
                 if dep.unit.mode.is_run_custom_build() {
-                    let out_dir = self
-                        .files()
-                        .build_script_out_dir(&dep.unit)
-                        .display()
-                        .to_string();
+                    let out_dir = if self.bcx.gctx.cli_unstable().build_dir_new_layout {
+                        self.files().out_dir_new_layout(&dep.unit)
+                    } else {
+                        self.files().build_script_out_dir(&dep.unit)
+                    };
                     let script_meta = self.get_run_build_script_metadata(&dep.unit);
                     self.compilation
                         .extra_env
                         .entry(script_meta)
                         .or_insert_with(Vec::new)
-                        .push(("OUT_DIR".to_string(), out_dir));
+                        .push(("OUT_DIR".to_string(), out_dir.display().to_string()));
                 }
             }
         }
@@ -282,7 +282,10 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
                     unit: unit.clone(),
                     args,
                     unstable_opts,
-                    linker: self.compilation.target_linker(unit.kind).clone(),
+                    linker: self
+                        .compilation
+                        .target_linker(unit.kind)
+                        .map(|p| p.to_path_buf()),
                     script_metas,
                     env: artifact::get_env(&self, unit, self.unit_deps(unit))?,
                 });

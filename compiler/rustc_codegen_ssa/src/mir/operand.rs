@@ -245,10 +245,7 @@ impl<'a, 'tcx, V: CodegenObject> OperandRef<'tcx, V> {
             _ if layout.is_zst() => OperandRef::zero_sized(layout),
             _ => {
                 // Neither a scalar nor scalar pair. Load from a place
-                // FIXME: should we cache `const_data_from_alloc` to avoid repeating this for the
-                // same `ConstAllocation`?
-                let init = bx.const_data_from_alloc(alloc);
-                let base_addr = bx.static_addr_of(init, alloc_align, None);
+                let base_addr = bx.static_addr_of(alloc, None);
 
                 let llval = bx.const_ptr_byte_offset(base_addr, offset);
                 bx.load_operand(PlaceRef::new_sized(llval, layout))
@@ -407,7 +404,7 @@ impl<'a, 'tcx, V: CodegenObject> OperandRef<'tcx, V> {
                 }
                 BackendRepr::ScalarPair(_, _)
                 | BackendRepr::Memory { .. }
-                | BackendRepr::ScalableVector { .. } => bug!(),
+                | BackendRepr::SimdScalableVector { .. } => bug!(),
             })
         };
 
@@ -694,7 +691,7 @@ impl<'a, 'tcx, V: CodegenObject> OperandRefBuilder<'tcx, V> {
             BackendRepr::ScalarPair(a, b) => {
                 OperandValueBuilder::Pair(Either::Right(a), Either::Right(b))
             }
-            BackendRepr::SimdVector { .. } | BackendRepr::ScalableVector { .. } => {
+            BackendRepr::SimdVector { .. } | BackendRepr::SimdScalableVector { .. } => {
                 OperandValueBuilder::Vector(Either::Right(()))
             }
             BackendRepr::Memory { .. } => {
@@ -1074,8 +1071,14 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 if constant_ty.is_simd() {
                     // However, some SIMD types do not actually use the vector ABI
                     // (in particular, packed SIMD types do not). Ensure we exclude those.
+                    //
+                    // We also have to exclude vectors of pointers because `immediate_const_vector`
+                    // does not work for those.
                     let layout = bx.layout_of(constant_ty);
-                    if let BackendRepr::SimdVector { .. } = layout.backend_repr {
+                    let (_, element_ty) = constant_ty.simd_size_and_type(bx.tcx());
+                    if let BackendRepr::SimdVector { .. } = layout.backend_repr
+                        && element_ty.is_numeric()
+                    {
                         let (llval, ty) = self.immediate_const_vector(bx, constant);
                         return OperandRef {
                             val: OperandValue::Immediate(llval),

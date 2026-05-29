@@ -105,7 +105,7 @@ pub struct FnAbiGcc<'gcc> {
 }
 
 pub trait FnAbiGccExt<'gcc, 'tcx> {
-    // TODO(antoyo): return a function pointer type instead?
+    // FIXME(antoyo): return a function pointer type instead?
     fn gcc_type(&self, cx: &CodegenCx<'gcc, 'tcx>) -> FnAbiGcc<'gcc>;
     fn ptr_to_gcc_type(&self, cx: &CodegenCx<'gcc, 'tcx>) -> Type<'gcc>;
     #[cfg(feature = "master")]
@@ -243,6 +243,8 @@ impl<'gcc, 'tcx> FnAbiGccExt<'gcc, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
 pub fn conv_to_fn_attribute<'gcc>(conv: CanonAbi, arch: &Arch) -> Option<FnAttribute<'gcc>> {
     let attribute = match conv {
         CanonAbi::C | CanonAbi::Rust => return None,
+        // gcc/gccjit does not have anything for this.
+        CanonAbi::RustPreserveNone => return None,
         CanonAbi::RustCold => FnAttribute::Cold,
         // Functions with this calling convention can only be called from assembly, but it is
         // possible to declare an `extern "custom"` block, so the backend still needs a calling
@@ -258,7 +260,7 @@ pub fn conv_to_fn_attribute<'gcc>(conv: CanonAbi, arch: &Arch) -> Option<FnAttri
             &Arch::Nvptx64 => FnAttribute::NvptxKernel,
             arch => panic!("Arch {arch} does not support GpuKernel calling convention"),
         },
-        // TODO(antoyo): check if those AVR attributes are mapped correctly.
+        // FIXME(antoyo): check if those AVR attributes are mapped correctly.
         CanonAbi::Interrupt(interrupt_kind) => match interrupt_kind {
             InterruptKind::Avr => FnAttribute::AvrSignal,
             InterruptKind::AvrNonBlocking => FnAttribute::AvrInterrupt,

@@ -49,6 +49,8 @@ declare_clippy_lint! {
     "unnested or-patterns, e.g., `Foo(Bar) | Foo(Baz) instead of `Foo(Bar | Baz)`"
 }
 
+impl_lint_pass!(UnnestedOrPatterns => [UNNESTED_OR_PATTERNS]);
+
 pub struct UnnestedOrPatterns {
     msrv: MsrvStack,
 }
@@ -60,8 +62,6 @@ impl UnnestedOrPatterns {
         }
     }
 }
-
-impl_lint_pass!(UnnestedOrPatterns => [UNNESTED_OR_PATTERNS]);
 
 impl EarlyLintPass for UnnestedOrPatterns {
     fn check_arm(&mut self, cx: &EarlyContext<'_>, a: &ast::Arm) {
@@ -152,7 +152,12 @@ fn insert_necessary_parens(pat: &mut Pat) {
             walk_pat(self, pat);
             let target = match &mut pat.kind {
                 // `i @ a | b`, `box a | b`, and `& mut? a | b`.
-                Ident(.., Some(p)) | Box(p) | Ref(p, _, _) if matches!(&p.kind, Or(ps) if ps.len() > 1) => p,
+                Ident(.., Some(p)) | Box(p) | Ref(p, _, _)
+                    if let Or(ps) = &p.kind
+                        && ps.len() > 1 =>
+                {
+                    p
+                },
                 // `&(mut x)`
                 Ref(p, Pinnedness::Not, Mutability::Not) if matches!(p.kind, Ident(BindingMode::MUT, ..)) => p,
                 _ => return,

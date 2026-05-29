@@ -53,6 +53,7 @@
 
 #include "llvm-c/Core.h"
 
+#include "BlasAttributor.inc"
 #include "LibraryFuncs.h"
 
 using namespace llvm;
@@ -99,9 +100,315 @@ llvm::cl::opt<bool> EnzymeRuntimeError(
     "enzyme-runtime-error", cl::init(false), cl::Hidden,
     cl::desc("Emit Runtime errors instead of compile time ones"));
 
+llvm::cl::opt<bool> EnzymeCheckDerivativeNaN(
+    "enzyme-check-nan", cl::init(false), cl::Hidden,
+    cl::desc("Add NaN checks to all derivative intermediate values"));
+
 llvm::cl::opt<bool> EnzymeNonPower2Cache(
     "enzyme-non-power2-cache", cl::init(false), cl::Hidden,
     cl::desc("Disable caching of integers which are not a power of 2"));
+}
+
+#define addAttribute addAttributeAtIndex
+#define getAttribute getAttributeAtIndex
+bool attributeKnownFunctions(llvm::Function &F) {
+  bool changed = false;
+  if (F.getName() == "fprintf") {
+    for (auto &arg : F.args()) {
+      if (arg.getType()->isPointerTy()) {
+        addFunctionNoCapture(&F, arg.getArgNo());
+        changed = true;
+      }
+    }
+  }
+  if (F.getName().contains("__enzyme_float") ||
+      F.getName().contains("__enzyme_double") ||
+      F.getName().contains("__enzyme_integer") ||
+      F.getName().contains("__enzyme_pointer") ||
+      F.getName().contains("__enzyme_todense") ||
+      F.getName().contains("__enzyme_ignore_derivatives") ||
+      F.getName().contains("__enzyme_iter") ||
+      F.getName().contains("__enzyme_virtualreverse")) {
+    changed = true;
+#if LLVM_VERSION_MAJOR >= 16
+    F.setOnlyReadsMemory();
+    F.setOnlyWritesMemory();
+#else
+    F.addFnAttr(Attribute::ReadNone);
+#endif
+    if (!(F.getName().contains("__enzyme_todense") ||
+          F.getName().contains("__enzyme_ignore_derivatives"))) {
+      for (auto &arg : F.args()) {
+        if (arg.getType()->isPointerTy()) {
+          arg.addAttr(Attribute::ReadNone);
+          addFunctionNoCapture(&F, arg.getArgNo());
+        }
+      }
+    }
+  }
+  if (F.getName() == "memcmp") {
+    changed = true;
+#if LLVM_VERSION_MAJOR >= 16
+    F.setOnlyAccessesArgMemory();
+    F.setOnlyReadsMemory();
+#else
+    F.addFnAttr(Attribute::ArgMemOnly);
+    F.addFnAttr(Attribute::ReadOnly);
+#endif
+    F.addFnAttr(Attribute::NoUnwind);
+    F.addFnAttr(Attribute::NoRecurse);
+    F.addFnAttr(Attribute::WillReturn);
+    F.addFnAttr(Attribute::NoFree);
+    F.addFnAttr(Attribute::NoSync);
+    for (int i = 0; i < 2; i++)
+      if (F.getFunctionType()->getParamType(i)->isPointerTy()) {
+        addFunctionNoCapture(&F, i);
+        F.addParamAttr(i, Attribute::ReadOnly);
+      }
+  }
+
+  if (F.getName() ==
+      "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE9_M_createERmm") {
+    changed = true;
+    F.addFnAttr(Attribute::NoFree);
+  }
+  if (F.getName() == "MPI_Irecv" || F.getName() == "PMPI_Irecv") {
+    auto FT = F.getFunctionType();
+    bool PointerABI = true;
+    changed = true;
+    F.addFnAttr(Attribute::NoUnwind);
+    F.addFnAttr(Attribute::NoRecurse);
+    F.addFnAttr(Attribute::WillReturn);
+    F.addFnAttr(Attribute::NoFree);
+    F.addFnAttr(Attribute::NoSync);
+    if (FT->getParamType(0)->isPointerTy()) {
+      F.addParamAttr(0, Attribute::WriteOnly);
+    } else {
+      PointerABI = false;
+    }
+    // OpenMPI vs MPICH
+    if (FT->getParamType(2)->isPointerTy()) {
+      addFunctionNoCapture(&F, 2);
+      F.addParamAttr(2, Attribute::WriteOnly);
+    }
+    if (FT->getParamType(6)->isPointerTy()) {
+      F.addParamAttr(6, Attribute::WriteOnly);
+    } else {
+      PointerABI = false;
+    }
+    if (PointerABI) {
+#if LLVM_VERSION_MAJOR >= 16
+      F.setOnlyAccessesInaccessibleMemOrArgMem();
+#else
+      F.addFnAttr(Attribute::InaccessibleMemOrArgMemOnly);
+#endif
+    }
+  }
+  auto name = getFuncName(&F);
+  if (name == "MPI_Isend" || name == "PMPI_Isend") {
+    auto FT = F.getFunctionType();
+    bool PointerABI = true;
+    changed = true;
+    F.addFnAttr(Attribute::NoUnwind);
+    F.addFnAttr(Attribute::NoRecurse);
+    F.addFnAttr(Attribute::WillReturn);
+    F.addFnAttr(Attribute::NoFree);
+    F.addFnAttr(Attribute::NoSync);
+    if (FT->getParamType(0)->isPointerTy()) {
+      F.addParamAttr(0, Attribute::ReadOnly);
+    } else {
+      PointerABI = false;
+    }
+    // OpenMPI vs MPICH
+    if (FT->getParamType(2)->isPointerTy()) {
+      addFunctionNoCapture(&F, 2);
+      F.addParamAttr(2, Attribute::ReadOnly);
+    }
+    if (FT->getParamType(6)->isPointerTy()) {
+      F.addParamAttr(6, Attribute::WriteOnly);
+    } else {
+      PointerABI = false;
+    }
+    if (PointerABI) {
+#if LLVM_VERSION_MAJOR >= 16
+      F.setOnlyAccessesInaccessibleMemOrArgMem();
+#else
+      F.addFnAttr(Attribute::InaccessibleMemOrArgMemOnly);
+#endif
+    }
+  }
+  if (name == "MPI_Comm_rank" || name == "PMPI_Comm_rank" ||
+      name == "MPI_Comm_size" || name == "PMPI_Comm_size") {
+    auto FT = F.getFunctionType();
+    bool PointerABI = true;
+    changed = true;
+    F.addFnAttr(Attribute::NoUnwind);
+    F.addFnAttr(Attribute::NoRecurse);
+    F.addFnAttr(Attribute::WillReturn);
+    F.addFnAttr(Attribute::NoFree);
+    F.addFnAttr(Attribute::NoSync);
+
+    // OpenMPI vs MPICH
+    if (FT->getParamType(0)->isPointerTy()) {
+      addFunctionNoCapture(&F, 0);
+      F.addParamAttr(0, Attribute::ReadOnly);
+    }
+    if (FT->getParamType(1)->isPointerTy()) {
+      F.addParamAttr(1, Attribute::WriteOnly);
+      addFunctionNoCapture(&F, 1);
+    } else {
+      PointerABI = false;
+    }
+    if (PointerABI) {
+#if LLVM_VERSION_MAJOR >= 16
+      F.setOnlyAccessesInaccessibleMemOrArgMem();
+#else
+      F.addFnAttr(Attribute::InaccessibleMemOrArgMemOnly);
+#endif
+    }
+  }
+  if (name == "MPI_Wait" || name == "PMPI_Wait") {
+    changed = true;
+    F.addFnAttr(Attribute::NoUnwind);
+    F.addFnAttr(Attribute::NoRecurse);
+    F.addFnAttr(Attribute::WillReturn);
+    F.addFnAttr(Attribute::NoFree);
+    F.addFnAttr(Attribute::NoSync);
+    if (F.getFunctionType()->getParamType(0)->isPointerTy()) {
+      addFunctionNoCapture(&F, 0);
+    }
+    if (F.getFunctionType()->getParamType(1)->isPointerTy()) {
+      F.addParamAttr(1, Attribute::WriteOnly);
+      addFunctionNoCapture(&F, 1);
+    }
+  }
+  if (name == "MPI_Waitall" || name == "PMPI_Waitall") {
+    changed = true;
+    F.addFnAttr(Attribute::NoUnwind);
+    F.addFnAttr(Attribute::NoRecurse);
+    F.addFnAttr(Attribute::WillReturn);
+    F.addFnAttr(Attribute::NoFree);
+    F.addFnAttr(Attribute::NoSync);
+    if (F.getFunctionType()->getParamType(1)->isPointerTy()) {
+      addFunctionNoCapture(&F, 1);
+    }
+    if (F.getFunctionType()->getParamType(2)->isPointerTy()) {
+      F.addParamAttr(2, Attribute::WriteOnly);
+      addFunctionNoCapture(&F, 2);
+    }
+  }
+  // Map of MPI function name to the arg index of its type argument
+  std::map<std::string, int> MPI_TYPE_ARGS = {
+      {"MPI_Send", 2},      {"MPI_Ssend", 2},     {"MPI_Bsend", 2},
+      {"MPI_Recv", 2},      {"MPI_Brecv", 2},     {"PMPI_Send", 2},
+      {"PMPI_Ssend", 2},    {"PMPI_Bsend", 2},    {"PMPI_Recv", 2},
+      {"PMPI_Brecv", 2},
+
+      {"MPI_Isend", 2},     {"MPI_Irecv", 2},     {"PMPI_Isend", 2},
+      {"PMPI_Irecv", 2},
+
+      {"MPI_Reduce", 3},    {"PMPI_Reduce", 3},
+
+      {"MPI_Allreduce", 3}, {"PMPI_Allreduce", 3}};
+  {
+    auto found = MPI_TYPE_ARGS.find(name.str());
+    if (found != MPI_TYPE_ARGS.end()) {
+      for (auto user : F.users()) {
+        if (auto CI = dyn_cast<CallBase>(user))
+          if (CI->getCalledFunction() == &F) {
+            if (Constant *C =
+                    dyn_cast<Constant>(CI->getArgOperand(found->second))) {
+              while (ConstantExpr *CE = dyn_cast<ConstantExpr>(C)) {
+                C = CE->getOperand(0);
+              }
+              if (auto GV = dyn_cast<GlobalVariable>(C)) {
+                if (GV->getName() == "ompi_mpi_cxx_bool") {
+                  changed = true;
+                  CI->addAttribute(
+                      AttributeList::FunctionIndex,
+                      Attribute::get(CI->getContext(), "enzyme_inactive"));
+                }
+              }
+            }
+          }
+      }
+    }
+  }
+
+  if (F.getName() == "omp_get_max_threads" ||
+      F.getName() == "omp_get_thread_num") {
+    changed = true;
+#if LLVM_VERSION_MAJOR >= 16
+    F.setOnlyAccessesInaccessibleMemory();
+    F.setOnlyReadsMemory();
+#else
+    F.addFnAttr(Attribute::InaccessibleMemOnly);
+    F.addFnAttr(Attribute::ReadOnly);
+#endif
+  }
+  if (F.getName() == "frexp" || F.getName() == "frexpf" ||
+      F.getName() == "frexpl") {
+    changed = true;
+#if LLVM_VERSION_MAJOR >= 16
+    F.setOnlyAccessesArgMemory();
+#else
+    F.addFnAttr(Attribute::ArgMemOnly);
+#endif
+    F.addParamAttr(1, Attribute::WriteOnly);
+  }
+  if (F.getName() == "__fd_sincos_1" || F.getName() == "__fd_cos_1" ||
+      F.getName() == "__mth_i_ipowi") {
+    changed = true;
+#if LLVM_VERSION_MAJOR >= 16
+    F.setOnlyReadsMemory();
+    F.setOnlyWritesMemory();
+#else
+    F.addFnAttr(Attribute::ReadNone);
+#endif
+  }
+
+  const char *NonEscapingFns[] = {
+      "julia.ptls_states",
+      "julia.get_pgcstack",
+      "lgamma_r",
+      "memcmp",
+      "_ZNSt6chrono3_V212steady_clock3nowEv",
+      "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE9_M_"
+      "createERmm",
+      "_ZNKSt8__detail20_Prime_rehash_policy14_M_need_rehashEmmm",
+      "fprintf",
+      "fwrite",
+      "fputc",
+      "strtol",
+      "getenv",
+      "memchr",
+      "cublasSetMathMode",
+      "cublasSetStream_v2",
+      "cuMemPoolTrimTo",
+      "cuDeviceGetMemPool",
+      "cuStreamSynchronize",
+      "cuStreamDestroy",
+      "cuStreamQuery",
+      "cuCtxGetCurrent",
+      "cuDeviceGet",
+      "cuDeviceGetName",
+      "cuDriverGetVersion",
+      "cudaRuntimeGetVersion",
+      "cuDeviceGetCount",
+      "cuMemPoolGetAttribute",
+      "cuMemGetInfo_v2",
+      "cuDeviceGetAttribute",
+      "cuDevicePrimaryCtxRetain",
+  };
+  for (auto fname : NonEscapingFns)
+    if (name == fname) {
+      changed = true;
+      F.addAttribute(
+          AttributeList::FunctionIndex,
+          Attribute::get(F.getContext(), "enzyme_no_escaping_allocation"));
+    }
+  changed |= attributeTablegen(F);
+  return changed;
 }
 
 void ZeroMemory(llvm::IRBuilder<> &Builder, llvm::Type *T, llvm::Value *obj,
@@ -149,6 +456,8 @@ Function *getOrInsertExponentialAllocator(Module &M, Function *newFunc,
       custom = F->getName() != "malloc";
     }
     allocType = cast<PointerType>(malloccall->getType());
+    if (ZeroInit && !SubZero)
+      ZeroInit = false;
     BB->eraseFromParent();
   }
 
@@ -161,7 +470,12 @@ Function *getOrInsertExponentialAllocator(Module &M, Function *newFunc,
     name += ".custom@" + std::to_string((size_t)RT);
 
   FunctionType *FT = FunctionType::get(allocType, types, false);
-  Function *F = cast<Function>(M.getOrInsertFunction(name, FT).getCallee());
+  AttributeList AL;
+  if (newFunc->hasFnAttribute("enzymejl_world")) {
+    AL = AL.addFnAttribute(newFunc->getContext(),
+                           newFunc->getFnAttribute("enzymejl_world"));
+  }
+  Function *F = cast<Function>(M.getOrInsertFunction(name, FT, AL).getCallee());
 
   if (!F->empty())
     return F;
@@ -518,6 +832,73 @@ Constant *getString(Module &M, StringRef Str) {
   return ConstantExpr::getInBoundsGetElementPtr(s->getType(), gv, Idxs);
 }
 
+void emit_backtrace(llvm::Instruction *inst, llvm::raw_ostream &ss) {
+  SmallPtrSet<llvm::Instruction *, 8> visited;
+  while (true) {
+    if (visited.contains(inst))
+      break;
+    visited.insert(inst);
+
+    // Print debug info for this instruction
+    if (auto dbgLoc = inst->getDebugLoc()) {
+      auto *loc = dbgLoc.get();
+      while (loc) {
+        if (auto *scope = loc->getScope()) {
+          StringRef name = scope->getName();
+          // Remove trailing semicolons (Julia-style function name decoration)
+          while (!name.empty() && name.back() == ';')
+            name = name.drop_back();
+          if (auto *file = scope->getFile()) {
+            StringRef dir = file->getDirectory();
+            StringRef fn = file->getFilename();
+            ss << " in '" << name << "' at ";
+            if (!dir.empty())
+              ss << dir << "/";
+            ss << fn << ":" << loc->getLine() << "\n";
+          } else {
+            ss << " in '" << name << "' at unknown:" << loc->getLine() << "\n";
+          }
+        }
+        loc = loc->getInlinedAt();
+      }
+    }
+
+    // Move up the call chain
+    Function *f = inst->getParent()->getParent();
+
+    // Collect callers with debug info
+    SmallVector<CallInst *, 4> callersWithDbg;
+    for (auto *U : f->users()) {
+      auto *CI = dyn_cast<CallInst>(U);
+      if (!CI)
+        continue;
+      if (!CI->getDebugLoc())
+        continue;
+      callersWithDbg.push_back(CI);
+    }
+
+    if (callersWithDbg.empty())
+      break;
+
+    // Deduplicate by debug location MDNode
+    SmallVector<CallInst *, 4> uniqueCallSites;
+    SmallPtrSet<const MDNode *, 4> seenMD;
+    for (auto *CI : callersWithDbg) {
+      if (seenMD.insert(CI->getDebugLoc().getAsMDNode()).second)
+        uniqueCallSites.push_back(CI);
+    }
+
+    if (uniqueCallSites.size() > 1) {
+      ss << " (multiple call sites)\n";
+      break;
+    } else if (uniqueCallSites.size() == 1) {
+      inst = uniqueCallSites[0];
+      continue;
+    }
+    break;
+  }
+}
+
 void ErrorIfRuntimeInactive(llvm::IRBuilder<> &B, llvm::Value *primal,
                             llvm::Value *shadow, const char *Message,
                             llvm::DebugLoc &&loc, llvm::Instruction *orig) {
@@ -582,9 +963,17 @@ void ErrorIfRuntimeInactive(llvm::IRBuilder<> &B, llvm::Value *primal,
     EB.CreateRetVoid();
   }
 
+  std::string Message2 = Message;
+  if (!CustomRuntimeInactiveError) {
+    std::string str;
+    raw_string_ostream ss(str);
+    ss << Message << "\n";
+    emit_backtrace(orig, ss);
+    Message2 = ss.str();
+  }
   Value *args[] = {B.CreatePointerCast(primal, getInt8PtrTy(M.getContext())),
                    B.CreatePointerCast(shadow, getInt8PtrTy(M.getContext())),
-                   getString(M, Message)};
+                   getString(M, Message2)};
   auto call = B.CreateCall(F, args);
   call->setDebugLoc(loc);
 }
@@ -766,7 +1155,7 @@ Value *lookup_with_layout(IRBuilder<> &B, Type *fpType, Value *layout,
 
   Value *ptr = base;
   if (base->getType()->isIntegerTy())
-    ptr = B.CreateIntToPtr(ptr, PointerType::getUnqual(fpType));
+    ptr = B.CreateIntToPtr(ptr, getUnqual(fpType));
 
 #if LLVM_VERSION_MAJOR < 17
 #if LLVM_VERSION_MAJOR >= 15
@@ -907,9 +1296,9 @@ void copy_lower_to_upper(llvm::IRBuilder<> &B, llvm::Type *fpType,
                    (cublasv2 ? "" : blas.suffix);
 
   auto copyfn = M.getOrInsertFunction(copy_name, FT);
-  if (Function *copyF = dyn_cast<Function>(copyfn.getCallee()))
-    attributeKnownFunctions(*copyF);
   LB.CreateCall(copyfn, copyArgs);
+  if (auto F = GetFunctionFromValue(copyfn.getCallee()))
+    attributeKnownFunctions(*F);
   LB.CreateCondBr(LB.CreateICmpEQ(i_plus_one, N_minus_1), end, loop);
 
   EB.CreateCondBr(EB.CreateICmpSLE(N_minus_1, zero), end, loop);
@@ -939,27 +1328,9 @@ void callMemcpyStridedBlas(llvm::IRBuilder<> &B, llvm::Module &M, BlasInfo blas,
 
   FunctionType *FT = FunctionType::get(copy_retty, tys, false);
   auto fn = M.getOrInsertFunction(copy_name, FT);
-  Value *callVal = fn.getCallee();
-  Function *called = nullptr;
-  while (!called) {
-    if (auto castinst = dyn_cast<ConstantExpr>(callVal))
-      if (castinst->isCast()) {
-        callVal = castinst->getOperand(0);
-        continue;
-      }
-    if (auto fn = dyn_cast<Function>(callVal)) {
-      called = fn;
-      break;
-    }
-    if (auto alias = dyn_cast<GlobalAlias>(callVal)) {
-      callVal = alias->getAliasee();
-      continue;
-    }
-    break;
-  }
-  attributeKnownFunctions(*called);
-
   B.CreateCall(fn, args, bundles);
+  if (auto F = GetFunctionFromValue(fn.getCallee()))
+    attributeKnownFunctions(*F);
 }
 
 void callMemcpyStridedLapack(llvm::IRBuilder<> &B, llvm::Module &M,
@@ -974,10 +1345,10 @@ void callMemcpyStridedLapack(llvm::IRBuilder<> &B, llvm::Module &M,
 
   auto FT = FunctionType::get(Type::getVoidTy(M.getContext()), tys, false);
   auto fn = M.getOrInsertFunction(copy_name, FT);
+  B.CreateCall(fn, args, bundles);
+
   if (auto F = GetFunctionFromValue(fn.getCallee()))
     attributeKnownFunctions(*F);
-
-  B.CreateCall(fn, args, bundles);
 }
 
 void callSPMVDiagUpdate(IRBuilder<> &B, Module &M, BlasInfo blas,
@@ -1190,8 +1561,6 @@ getorInsertInnerProd(llvm::IRBuilder<> &B, llvm::Module &M, BlasInfo blas,
   auto FDotT =
       FunctionType::get(fpTy, {BlasIT, BlasPT, BlasIT, BlasPT, BlasIT}, false);
   auto FDot = M.getOrInsertFunction(dot_name, FDotT);
-  if (auto F = GetFunctionFromValue(FDot.getCallee()))
-    attributeKnownFunctions(*F);
 
   // now add the implementation for the inner_prod call
   F->setLinkage(Function::LinkageTypes::InternalLinkage);
@@ -1313,7 +1682,10 @@ getorInsertInnerProd(llvm::IRBuilder<> &B, llvm::Module &M, BlasInfo blas,
     B5.CreateRet(res);
   }
 
-  return B.CreateCall(F, args, bundles);
+  auto res = B.CreateCall(F, args, bundles);
+  if (auto F = GetFunctionFromValue(FDot.getCallee()))
+    attributeKnownFunctions(*F);
+  return res;
 }
 
 Function *getOrInsertMemcpyStrided(Module &M, Type *elementType, PointerType *T,
@@ -1478,9 +1850,10 @@ Function *getOrInsertMemcpyMat(Module &Mod, Type *elementType, PointerType *PT,
 
   {
     IRBuilder<> B(entry);
-    Value *l = B.CreateAdd(M, N, "mul", true, true);
+    Value *l0 = B.CreateICmpEQ(M, ConstantInt::get(IT, 0));
+    Value *l1 = B.CreateICmpEQ(N, ConstantInt::get(IT, 0));
     // Don't copy a 0*0 matrix
-    B.CreateCondBr(B.CreateICmpEQ(l, ConstantInt::get(IT, 0)), end, init);
+    B.CreateCondBr(B.CreateOr(l0, l1), end, init);
   }
 
   PHINode *j;
@@ -1527,6 +1900,164 @@ Function *getOrInsertMemcpyMat(Module &Mod, Type *elementType, PointerType *PT,
         B.CreateAdd(j, ConstantInt::get(IT, 1), "j.next", true, true);
     j->addIncoming(nextj, initend);
     B.CreateCondBr(B.CreateICmpEQ(nextj, N), end, init);
+  }
+
+  {
+    IRBuilder<> B(end);
+    B.CreateRetVoid();
+  }
+
+  return F;
+}
+
+Function *getOrInsertDifferentialFloatMemcpyMat(
+    Module &Mod, Type *elementType, PointerType *PT, IntegerType *IT,
+    IntegerType *CT, unsigned dstalign, unsigned srcalign, bool zeroSrc) {
+  assert(elementType->isFPOrFPVectorTy());
+#if LLVM_VERSION_MAJOR < 17
+#if LLVM_VERSION_MAJOR >= 15
+  if (Mod.getContext().supportsTypedPointers()) {
+#endif
+#if LLVM_VERSION_MAJOR >= 13
+    if (!PT->isOpaquePointerTy())
+#endif
+      assert(PT->getPointerElementType() == elementType);
+#if LLVM_VERSION_MAJOR >= 15
+  }
+#endif
+#endif
+  std::string name = "__enzyme_dmemcpy_" + tofltstr(elementType) + "_mat_" +
+                     std::to_string(cast<IntegerType>(IT)->getBitWidth()) +
+                     (zeroSrc ? "_zero" : "");
+  FunctionType *FT = FunctionType::get(Type::getVoidTy(Mod.getContext()),
+                                       {CT, IT, IT, PT, IT, PT, IT}, false);
+
+  Function *F = cast<Function>(Mod.getOrInsertFunction(name, FT).getCallee());
+
+  if (!F->empty())
+    return F;
+
+  F->setLinkage(Function::LinkageTypes::InternalLinkage);
+#if LLVM_VERSION_MAJOR >= 16
+  F->setOnlyAccessesArgMemory();
+#else
+  F->addFnAttr(Attribute::ArgMemOnly);
+#endif
+  F->addFnAttr(Attribute::NoUnwind);
+  F->addFnAttr(Attribute::AlwaysInline);
+  F->addParamAttr(3, Attribute::NoAlias);
+  F->addParamAttr(5, Attribute::NoAlias);
+
+  BasicBlock *entry = BasicBlock::Create(F->getContext(), "entry", F);
+  BasicBlock *swtch = BasicBlock::Create(F->getContext(), "swtch", F);
+  BasicBlock *Ginit = BasicBlock::Create(F->getContext(), "Ginit.idx", F);
+  BasicBlock *Uinit = BasicBlock::Create(F->getContext(), "Uinit.idx", F);
+  BasicBlock *Linit = BasicBlock::Create(F->getContext(), "Linit.idx", F);
+  BasicBlock *end = BasicBlock::Create(F->getContext(), "for.end", F);
+
+  auto uplo = F->arg_begin();
+  uplo->setName("uplo");
+  auto M = uplo + 1;
+  M->setName("M");
+  auto N = M + 1;
+  N->setName("N");
+
+  auto dst = N + 1;
+  dst->setName("dst");
+  auto ldst = dst + 1;
+  ldst->setName("ldst");
+  auto src = ldst + 1;
+  src->setName("src");
+  auto lsrc = src + 1;
+  lsrc->setName("lsrc");
+
+  {
+    IRBuilder<> B(entry);
+    Value *l0 = B.CreateICmpEQ(M, ConstantInt::get(IT, 0));
+    Value *l1 = B.CreateICmpEQ(N, ConstantInt::get(IT, 0));
+    // Don't copy a 0*0 matrix
+    B.CreateCondBr(B.CreateOr(l0, l1), end, swtch);
+  }
+
+  {
+    IRBuilder<> B(swtch);
+    auto swtchT = B.CreateSwitch(uplo, Ginit);
+    swtchT->addCase(ConstantInt::get(CT, 'U'), Uinit);
+    swtchT->addCase(ConstantInt::get(CT, 'L'), Linit);
+  }
+
+  std::pair<char, BasicBlock *> todo[] = {
+      {'G', Ginit}, {'U', Uinit}, {'L', Linit}};
+  for (auto &&[direction, init] : todo) {
+
+    std::string dir(1, direction);
+    BasicBlock *body = BasicBlock::Create(F->getContext(), dir + "for.body", F);
+    BasicBlock *initend =
+        BasicBlock::Create(F->getContext(), dir + "init.end", F);
+
+    Value *istart = ConstantInt::get(IT, 0);
+    Value *iend = M;
+
+    PHINode *j;
+    {
+      IRBuilder<> B(init);
+      j = B.CreatePHI(IT, 2, dir + "j");
+      j->addIncoming(ConstantInt::get(IT, 0), swtch);
+
+      if (direction == 'L') {
+        istart = j;
+      } else if (direction == 'U') {
+        auto jp1 = B.CreateAdd(j, ConstantInt::get(IT, 1), "", true, true);
+        iend = B.CreateSelect(B.CreateICmpULT(jp1, M), jp1, M);
+      }
+
+      B.CreateBr(body);
+    }
+
+    {
+      IRBuilder<> B(body);
+      PHINode *i = B.CreatePHI(IT, 2, dir + "i");
+      i->addIncoming(istart, init);
+
+      Value *srci = B.CreateInBoundsGEP(
+          elementType, src,
+          B.CreateAdd(i, B.CreateMul(j, lsrc, "", true, true), "", true, true),
+          dir + "src.i");
+
+      Value *dsti = B.CreateInBoundsGEP(
+          elementType, dst,
+          B.CreateAdd(i, B.CreateMul(j, ldst, "", true, true), "", true, true),
+          dir + "dst.i");
+      LoadInst *srcl = B.CreateLoad(elementType, srci, dir + "src.i.l");
+      LoadInst *dstl = B.CreateLoad(elementType, dsti, dir + "dst.i.l");
+      auto res = B.CreateFAdd(srcl, dstl);
+      StoreInst *dsts = B.CreateStore(res, dsti);
+      StoreInst *srcs = nullptr;
+      if (zeroSrc)
+        srcs = B.CreateStore(Constant::getNullValue(res->getType()), srci);
+      if (dstalign) {
+        dsts->setAlignment(Align(dstalign));
+        dstl->setAlignment(Align(dstalign));
+      }
+      if (srcalign) {
+        if (zeroSrc)
+          srcs->setAlignment(Align(srcalign));
+        srcl->setAlignment(Align(srcalign));
+      }
+
+      Value *nexti =
+          B.CreateAdd(i, ConstantInt::get(IT, 1), dir + "i.next", true, true);
+      i->addIncoming(nexti, body);
+      B.CreateCondBr(B.CreateICmpEQ(nexti, iend), initend, body);
+    }
+
+    {
+      IRBuilder<> B(initend);
+      Value *nextj =
+          B.CreateAdd(j, ConstantInt::get(IT, 1), dir + "j.next", true, true);
+      j->addIncoming(nextj, initend);
+      B.CreateCondBr(B.CreateICmpEQ(nextj, N), end, init);
+    }
   }
 
   {
@@ -1673,8 +2204,7 @@ llvm::Function *getOrInsertDifferentialWaitallSave(llvm::Module &M,
                                                    ArrayRef<llvm::Type *> T,
                                                    PointerType *reqType) {
   std::string name = "__enzyme_differential_waitall_save";
-  FunctionType *FT =
-      FunctionType::get(PointerType::getUnqual(reqType), T, false);
+  FunctionType *FT = FunctionType::get(getUnqual(reqType), T, false);
   Function *F = cast<Function>(M.getOrInsertFunction(name, FT).getCallee());
 
   if (!F->empty())
@@ -1718,13 +2248,12 @@ llvm::Function *getOrInsertDifferentialWaitallSave(llvm::Module &M,
   Value *iout = B.CreateInBoundsGEP(reqType, ret, idxs);
   Value *isNull = nullptr;
   if (auto GV = M.getNamedValue("ompi_request_null")) {
-    Value *reql =
-        B.CreatePointerCast(ireq, PointerType::getUnqual(GV->getType()));
+    Value *reql = B.CreatePointerCast(ireq, getUnqual(GV->getType()));
     reql = B.CreateLoad(GV->getType(), reql);
     isNull = B.CreateICmpEQ(reql, GV);
   }
 
-  idreq = B.CreatePointerCast(idreq, PointerType::getUnqual(reqType));
+  idreq = B.CreatePointerCast(idreq, getUnqual(reqType));
   Value *d_reqp = B.CreateLoad(reqType, idreq);
   if (isNull)
     d_reqp = B.CreateSelect(isNull, Constant::getNullValue(d_reqp->getType()),
@@ -1741,10 +2270,17 @@ llvm::Function *getOrInsertDifferentialWaitallSave(llvm::Module &M,
 
 llvm::Function *getOrInsertDifferentialMPI_Wait(llvm::Module &M,
                                                 ArrayRef<llvm::Type *> T,
-                                                Type *reqType) {
+                                                Type *reqType,
+                                                StringRef caller) {
   llvm::SmallVector<llvm::Type *, 4> types(T.begin(), T.end());
   types.push_back(reqType);
+
+  auto &&[prefix, _, postfix] = tripleSplitDollar(caller);
+
   std::string name = "__enzyme_differential_mpi_wait";
+  if (prefix.size() != 0 || postfix.size() != 0) {
+    name = (Twine(name) + "$" + prefix + "$" + postfix).str();
+  }
   FunctionType *FT =
       FunctionType::get(Type::getVoidTy(M.getContext()), types, false);
   Function *F = cast<Function>(M.getOrInsertFunction(name, FT).getCallee());
@@ -1788,21 +2324,14 @@ llvm::Function *getOrInsertDifferentialMPI_Wait(llvm::Module &M,
   Value *d_req = buff + 7;
   d_req->setName("d_req");
 
-  bool pmpi = true;
-  auto isendfn = M.getFunction("PMPI_Isend");
-  if (!isendfn) {
-    isendfn = M.getFunction("MPI_Isend");
-    pmpi = false;
-  }
+  auto isendfn = M.getFunction(getRenamedPerCallingConv(caller, "MPI_Isend"));
   assert(isendfn);
-  auto irecvfn = M.getFunction("PMPI_Irecv");
-  if (!irecvfn)
-    irecvfn = M.getFunction("MPI_Irecv");
-  if (!irecvfn) {
-    FunctionType *FuT = isendfn->getFunctionType();
-    std::string name = pmpi ? "PMPI_Irecv" : "MPI_Irecv";
-    irecvfn = cast<Function>(M.getOrInsertFunction(name, FuT).getCallee());
-  }
+  // TODO: what if Isend not defined, but Irecv is?
+  FunctionType *FuT = isendfn->getFunctionType();
+
+  auto irecvfn = cast<Function>(
+      M.getOrInsertFunction(getRenamedPerCallingConv(caller, "MPI_Irecv"), FuT)
+          .getCallee());
   assert(irecvfn);
 
   IRBuilder<> B(entry);
@@ -1857,9 +2386,8 @@ llvm::Value *getOrInsertOpFloatSum(llvm::Module &M, llvm::Type *OpPtr,
     return B2.CreateLoad(Glob->getValueType(), Glob);
   }
 
-  llvm::Type *types[] = {PointerType::getUnqual(FlT),
-                         PointerType::getUnqual(FlT),
-                         PointerType::getUnqual(intType), OpPtr};
+  llvm::Type *types[] = {getUnqual(FlT), getUnqual(FlT), getUnqual(intType),
+                         OpPtr};
   FunctionType *FuT =
       FunctionType::get(Type::getVoidTy(M.getContext()), types, false);
   Function *F =
@@ -1934,7 +2462,7 @@ llvm::Value *getOrInsertOpFloatSum(llvm::Module &M, llvm::Type *OpPtr,
     RF =
         cast<Function>(M.getOrInsertFunction("MPI_Op_create", RFT).getCallee());
   } else {
-    RF = ConstantExpr::getBitCast(RF, PointerType::getUnqual(RFT));
+    RF = ConstantExpr::getBitCast(RF, getUnqual(RFT));
   }
 
   GlobalVariable *GV =
@@ -2914,8 +3442,7 @@ Value *simplifyLoad(Value *V, size_t valSz, size_t preOffset) {
         vec.push_back(
             ConstantInt::get(Type::getInt32Ty(EVI->getContext()), ind));
       }
-      auto ud = UndefValue::get(
-          PointerType::getUnqual(EVI->getOperand(0)->getType()));
+      auto ud = UndefValue::get(getUnqual(EVI->getOperand(0)->getType()));
       auto g2 =
           GetElementPtrInst::Create(EVI->getOperand(0)->getType(), ud, vec);
       APInt ai(DL.getIndexSizeInBits(g2->getPointerAddressSpace()), 0);
@@ -3021,6 +3548,15 @@ Function *GetFunctionFromValue(Value *fn) {
   return dyn_cast<Function>(GetFunctionValFromValue(fn));
 }
 
+Function *getFirstFunctionDefinition(Module &M) {
+  for (auto &F : M) {
+    if (!F.isDeclaration()) {
+      return &F;
+    }
+  }
+  return nullptr;
+}
+
 #if LLVM_VERSION_MAJOR >= 16
 std::optional<BlasInfo> extractBLAS(llvm::StringRef in)
 #else
@@ -3028,9 +3564,9 @@ llvm::Optional<BlasInfo> extractBLAS(llvm::StringRef in)
 #endif
 {
   const char *extractable[] = {
-      "dot",   "scal",  "axpy",  "gemv",  "gemm",  "spmv", "syrk", "nrm2",
-      "trmm",  "trmv",  "symm",  "potrf", "potrs", "copy", "spmv", "syr2k",
-      "potrs", "getrf", "getrs", "trtrs", "getri", "symv",
+      "dot",   "scal",  "axpy",  "gemv",  "gemm",  "spmv", "syrk",  "nrm2",
+      "trmm",  "trmv",  "symm",  "potrf", "potrs", "copy", "spmv",  "syr2k",
+      "potrs", "getrf", "getrs", "trtrs", "getri", "symv", "lacpy", "trsv",
   };
   const char *floatType[] = {"s", "d", "c", "z"};
   const char *prefixes[] = {"" /*Fortran*/, "cblas_"};
@@ -3098,6 +3634,94 @@ llvm::Constant *getUndefinedValueForType(llvm::Module &M, llvm::Type *T,
 llvm::Value *SanitizeDerivatives(llvm::Value *val, llvm::Value *toset,
                                  llvm::IRBuilder<> &BuilderM,
                                  llvm::Value *mask) {
+  if (EnzymeCheckDerivativeNaN && toset->getType()->isFPOrFPVectorTy()) {
+    auto current_bb = BuilderM.GetInsertBlock();
+    auto fn = current_bb->getParent();
+    auto mod = fn->getParent();
+    auto &Context = mod->getContext();
+
+    std::string type_str;
+    llvm::raw_string_ostream type_ss(type_str);
+    toset->getType()->print(type_ss);
+    std::string fn_name = "__enzyme_sanitize_nan_" + type_str;
+
+    llvm::FunctionType *SanitizeFT = llvm::FunctionType::get(
+        llvm::Type::getVoidTy(Context),
+        {toset->getType(), getInt8PtrTy(Context)}, false);
+
+    auto SanitizeFCallee = mod->getOrInsertFunction(fn_name, SanitizeFT);
+    llvm::Function *SanitizeF =
+        llvm::cast<llvm::Function>(SanitizeFCallee.getCallee());
+
+    if (SanitizeF->empty()) {
+      SanitizeF->setLinkage(Function::LinkageTypes::InternalLinkage);
+      llvm::BasicBlock *entry =
+          llvm::BasicBlock::Create(Context, "entry", SanitizeF);
+      llvm::BasicBlock *good =
+          llvm::BasicBlock::Create(Context, "good", SanitizeF);
+      llvm::BasicBlock *bad =
+          llvm::BasicBlock::Create(Context, "bad", SanitizeF);
+
+      llvm::IRBuilder<> B(entry);
+      llvm::Value *inp = SanitizeF->getArg(0);
+      llvm::Value *msg_ptr = SanitizeF->getArg(1);
+
+      llvm::Value *cmp = B.CreateFCmpUNO(inp, inp);
+      if (auto VT = llvm::dyn_cast<llvm::VectorType>(inp->getType())) {
+#if LLVM_VERSION_MAJOR >= 12
+        unsigned len = VT->getElementCount().getKnownMinValue();
+#else
+        unsigned len = VT->getNumElements();
+#endif
+        llvm::Value *res = B.CreateExtractElement(cmp, (uint64_t)0);
+        for (unsigned i = 1; i < len; ++i) {
+          res = B.CreateOr(res, B.CreateExtractElement(cmp, (uint64_t)i));
+        }
+        cmp = res;
+      }
+      B.CreateCondBr(cmp, bad, good);
+
+      B.SetInsertPoint(good);
+      B.CreateRetVoid();
+
+      B.SetInsertPoint(bad);
+      if (CustomErrorHandler) {
+        CustomErrorHandler("NaN Error", wrap(inp), ErrorType::NaNError, nullptr,
+                           wrap(msg_ptr), wrap(&B));
+      } else {
+        llvm::FunctionType *PutsFT = llvm::FunctionType::get(
+            llvm::Type::getInt32Ty(Context), {getInt8PtrTy(Context)}, false);
+        auto PutsF = mod->getOrInsertFunction("puts", PutsFT);
+        B.CreateCall(PutsF, msg_ptr);
+
+        llvm::FunctionType *ExitFT =
+            llvm::FunctionType::get(llvm::Type::getVoidTy(Context),
+                                    {llvm::Type::getInt32Ty(Context)}, false);
+        auto ExitF = mod->getOrInsertFunction("exit", ExitFT);
+        B.CreateCall(
+            ExitF, llvm::ConstantInt::get(llvm::Type::getInt32Ty(Context), 1));
+      }
+      B.CreateUnreachable();
+    }
+
+    std::string stringv = "Enzyme: Found nan while computing derivative of ";
+    if (val) {
+      std::string str;
+      llvm::raw_string_ostream ss(str);
+      if (auto inst = llvm::dyn_cast<llvm::Instruction>(val)) {
+        ss << *inst << "\n";
+        emit_backtrace(inst, ss);
+      } else {
+        ss << *val << "\n";
+      }
+      stringv += ss.str();
+    } else {
+      stringv += "\n";
+    }
+
+    BuilderM.CreateCall(SanitizeFCallee, {toset, getString(*mod, stringv)});
+  }
+
   if (EnzymeSanitizeDerivatives)
     return unwrap(EnzymeSanitizeDerivatives(wrap(val), wrap(toset),
                                             wrap(&BuilderM), wrap(mask)));
@@ -3454,7 +4078,7 @@ llvm::Value *load_if_ref(llvm::IRBuilder<> &B, llvm::Type *intType,
     return V;
 
   if (V->getType()->isIntegerTy())
-    V = B.CreateIntToPtr(V, PointerType::getUnqual(intType));
+    V = B.CreateIntToPtr(V, getUnqual(intType));
   else
     V = B.CreatePointerCast(
         V, PointerType::get(
@@ -3681,7 +4305,12 @@ llvm::Value *EmitNoDerivativeError(const std::string &message,
     auto &M = *inst.getParent()->getParent()->getParent();
     FunctionType *FT = FunctionType::get(Type::getInt32Ty(M.getContext()),
                                          {getInt8PtrTy(M.getContext())}, false);
-    auto msg = getString(M, message);
+    std::string str;
+    raw_string_ostream ss(str);
+    ss << message << "\n";
+    emit_backtrace(&inst, ss);
+    auto msg = getString(M, ss.str());
+    ;
     auto PutsF = M.getOrInsertFunction("puts", FT);
     Builder2.CreateCall(PutsF, msg);
 
@@ -3716,7 +4345,12 @@ bool EmitNoDerivativeError(const std::string &message, Value *todiff,
     auto &M = *context.ip->GetInsertBlock()->getParent()->getParent();
     FunctionType *FT = FunctionType::get(Type::getInt32Ty(M.getContext()),
                                          {getInt8PtrTy(M.getContext())}, false);
-    auto msg = getString(M, message);
+    std::string str;
+    raw_string_ostream ss(str);
+    ss << message << "\n";
+    if (auto inst = dyn_cast<Instruction>(todiff))
+      emit_backtrace(inst, ss);
+    auto msg = getString(M, ss.str());
     auto PutsF = M.getOrInsertFunction("puts", FT);
     context.ip->CreateCall(PutsF, msg);
 
@@ -3749,7 +4383,11 @@ void EmitNoTypeError(const std::string &message, llvm::Instruction &inst,
     auto &M = *inst.getParent()->getParent()->getParent();
     FunctionType *FT = FunctionType::get(Type::getInt32Ty(M.getContext()),
                                          {getInt8PtrTy(M.getContext())}, false);
-    auto msg = getString(M, message);
+    std::string str;
+    raw_string_ostream ss(str);
+    ss << message << "\n";
+    emit_backtrace(&inst, ss);
+    auto msg = getString(M, ss.str());
     auto PutsF = M.getOrInsertFunction("puts", FT);
     Builder2.CreateCall(PutsF, msg);
 
@@ -3893,6 +4531,7 @@ bool notCapturedBefore(llvm::Value *V, Instruction *inst,
     auto pair = todo.pop_back_val();
     if (seen.count(pair))
       continue;
+    seen.insert(pair);
     auto UI = std::get<0>(pair);
     auto level = std::get<1>(pair);
     auto prev = std::get<2>(pair);
@@ -4061,11 +4700,257 @@ arePointersGuaranteedNoAlias(TargetLibraryInfo &TLI, llvm::AAResults &AA,
   return {};
 }
 
-bool isTargetNVPTX(llvm::Module &M) {
-#if LLVM_VERSION_MAJOR > 20
-  return M.getTargetTriple().getArch() == Triple::ArchType::nvptx ||
-         M.getTargetTriple().getArch() == Triple::ArchType::nvptx64;
-#else
-  return M.getTargetTriple().find("nvptx") != std::string::npos;
-#endif
+static Value *constantInBoundsGEPHelper(llvm::IRBuilder<> &B, llvm::Type *type,
+                                        llvm::Value *value,
+                                        ArrayRef<unsigned> path) {
+  SmallVector<Value *, 2> vals;
+  vals.push_back(ConstantInt::get(B.getInt64Ty(), 0));
+  for (auto v : path) {
+    vals.push_back(ConstantInt::get(B.getInt32Ty(), v));
+  }
+  return B.CreateInBoundsGEP(type, value, vals);
+}
+
+llvm::Value *moveSRetToFromRoots(llvm::IRBuilder<> &B, llvm::Type *jltype,
+                                 llvm::Value *sret, llvm::Type *root_ty,
+                                 llvm::Value *rootRet, size_t rootOffset,
+                                 SRetRootMovement direction) {
+  std::deque<std::pair<llvm::Type *, std::vector<unsigned>>> todo = {
+      {jltype, {}}};
+  SmallVector<Value *> extracted;
+  Value *val = sret;
+  auto rootOffset0 = rootOffset;
+  while (!todo.empty()) {
+    auto cur = std::move(todo[0]);
+    todo.pop_front();
+    auto path = std::move(cur.second);
+    auto ty = cur.first;
+
+    if (auto PT = dyn_cast<PointerType>(ty)) {
+      if (!isSpecialPtr(PT))
+        continue;
+
+      Value *loc = nullptr;
+      switch (direction) {
+      case SRetRootMovement::SRetPointerToRootPointer:
+      case SRetRootMovement::SRetValueToRootPointer:
+      case SRetRootMovement::RootPointerToSRetPointer:
+      case SRetRootMovement::RootPointerToSRetValue:
+        loc = constantInBoundsGEPHelper(B, root_ty, rootRet, rootOffset);
+        break;
+      default:
+        llvm_unreachable("Unhandled");
+      }
+
+      switch (direction) {
+      case SRetRootMovement::SRetPointerToRootPointer: {
+        Value *outloc = constantInBoundsGEPHelper(B, jltype, sret, path);
+        outloc = B.CreateLoad(ty, outloc);
+        B.CreateStore(outloc, loc);
+        break;
+      }
+      case SRetRootMovement::SRetValueToRootPointer: {
+        Value *outloc = GradientUtils::extractMeta(B, sret, path);
+        outloc = B.CreatePointerCast(
+            outloc, PointerType::get(StructType::get(outloc->getContext(), {}),
+                                     Tracked));
+        B.CreateStore(outloc, loc);
+        break;
+      }
+      case SRetRootMovement::RootPointerToSRetValue: {
+        loc = B.CreateLoad(ty, loc);
+        val = B.CreateInsertValue(val, loc, path);
+        break;
+      }
+      case SRetRootMovement::NullifySRetValue: {
+        loc = getUndefinedValueForType(
+            *B.GetInsertBlock()->getParent()->getParent(), ty, false);
+        val = B.CreateInsertValue(val, loc, path);
+        break;
+      }
+      case SRetRootMovement::RootPointerToSRetPointer: {
+        Value *outloc = constantInBoundsGEPHelper(B, jltype, sret, path);
+        loc = B.CreateLoad(ty, loc);
+        extracted.push_back(loc);
+        B.CreateStore(loc, outloc);
+        break;
+      }
+      default:
+        llvm_unreachable("Unhandled");
+        break;
+      }
+
+      rootOffset += 1;
+      continue;
+    }
+
+    if (auto AT = dyn_cast<ArrayType>(ty)) {
+      for (size_t i = 0, E = AT->getNumElements(); i < E; i++) {
+        std::vector<unsigned> path2(path);
+        path2.push_back(E - 1 - i);
+        todo.emplace_front(AT->getElementType(), path2);
+      }
+      continue;
+    }
+
+    if (auto VT = dyn_cast<VectorType>(ty)) {
+      for (size_t i = 0, E = VT->getElementCount().getKnownMinValue(); i < E;
+           i++) {
+        std::vector<unsigned> path2(path);
+        path2.push_back(E - 1 - i);
+        todo.emplace_front(VT->getElementType(), path2);
+      }
+      continue;
+    }
+
+    if (auto ST = dyn_cast<StructType>(ty)) {
+      for (size_t i = 0, E = ST->getNumElements(); i < E; i++) {
+        std::vector<unsigned> path2(path);
+        path2.push_back(E - 1 - i);
+        todo.emplace_front(ST->getTypeAtIndex(E - 1 - i), path2);
+      }
+      continue;
+    }
+  }
+
+  if (direction == SRetRootMovement::RootPointerToSRetPointer) {
+    auto obj = getBaseObject(sret);
+    auto PT = cast<PointerType>(obj->getType());
+    assert(PT->getAddressSpace() == 0 || PT->getAddressSpace() == 10);
+    if (PT->getAddressSpace() == 10 && extracted.size()) {
+      extracted.insert(extracted.begin(), obj);
+      auto JLT = PointerType::get(StructType::get(PT->getContext(), {}), 10);
+      auto FT = FunctionType::get(JLT, {}, true);
+      auto wb =
+          B.GetInsertBlock()->getParent()->getParent()->getOrInsertFunction(
+              "julia.write_barrier", FT);
+      assert(obj->getType() == JLT);
+      B.CreateCall(wb, extracted);
+    }
+  }
+
+  CountTrackedPointers tracked(jltype);
+  assert(rootOffset - rootOffset0 == tracked.count);
+
+  return val;
+}
+
+void copyNonJLValueInto(llvm::IRBuilder<> &B, llvm::Type *curType,
+                        llvm::Type *dstType, llvm::Value *dst,
+                        llvm::ArrayRef<unsigned> dstPrefix0,
+                        llvm::Type *srcType, llvm::Value *src,
+                        llvm::ArrayRef<unsigned> srcPrefix0, bool shouldZero) {
+  std::deque<
+      std::tuple<llvm::Type *, std::vector<unsigned>, std::vector<unsigned>>>
+      todo = {{curType,
+               std::vector<unsigned>(dstPrefix0.begin(), dstPrefix0.end()),
+               std::vector<unsigned>(srcPrefix0.begin(), srcPrefix0.end())}};
+
+  auto &M = *B.GetInsertBlock()->getParent()->getParent();
+
+  size_t numRootsSeen = 0;
+
+  while (!todo.empty()) {
+    auto cur = std::move(todo[0]);
+    auto &&[ty, dstPrefix, srcPrefix] = cur;
+    todo.pop_front();
+
+    if (auto PT = dyn_cast<PointerType>(ty)) {
+      if (PT->getAddressSpace() == 10) {
+        numRootsSeen++;
+        if (shouldZero) {
+          Value *out = dst;
+          if (dstPrefix.size() > 0)
+            out = constantInBoundsGEPHelper(B, dstType, out, dstPrefix);
+          B.CreateStore(getUndefinedValueForType(M, ty), out);
+        }
+      }
+      // We don't actually need pointers either here
+      continue;
+    }
+
+    if (auto AT = dyn_cast<ArrayType>(ty)) {
+      for (size_t i = 0, E = AT->getNumElements(); i < E; i++) {
+        std::vector<unsigned> nextDst(dstPrefix);
+        std::vector<unsigned> nextSrc(srcPrefix);
+        nextDst.push_back(E - 1 - i);
+        nextSrc.push_back(E - 1 - i);
+        todo.emplace_front(AT->getElementType(), std::move(nextDst),
+                           std::move(nextSrc));
+      }
+      continue;
+    }
+
+    if (auto ST = dyn_cast<StructType>(ty)) {
+      for (size_t i = 0, E = ST->getNumElements(); i < E; i++) {
+        std::vector<unsigned> nextDst(dstPrefix);
+        std::vector<unsigned> nextSrc(srcPrefix);
+        nextDst.push_back(E - 1 - i);
+        nextSrc.push_back(E - 1 - i);
+        todo.emplace_front(ST->getElementType(E - 1 - i), std::move(nextDst),
+                           std::move(nextSrc));
+      }
+      continue;
+    }
+
+    Value *out = dst;
+    if (dstPrefix.size() > 0)
+      out = constantInBoundsGEPHelper(B, dstType, out, dstPrefix);
+
+    Value *in = src;
+    if (srcPrefix.size() > 0)
+      in = constantInBoundsGEPHelper(B, srcType, in, srcPrefix);
+
+    auto ld = B.CreateLoad(ty, in);
+    B.CreateStore(ld, out);
+  }
+
+  CountTrackedPointers tracked(curType);
+  assert(numRootsSeen == tracked.count);
+  (void)tracked;
+  (void)numRootsSeen;
+}
+
+llvm::SmallVector<llvm::Value *, 1> getJuliaObjects(llvm::Value *v,
+                                                    llvm::IRBuilder<> &B) {
+  std::deque<Value *> todo = {v};
+  SmallVector<Value *, 1> done;
+  while (todo.size()) {
+    auto cur = todo.front();
+    todo.pop_front();
+    auto T = cur->getType();
+    if (!anyJuliaObjects(T)) {
+      continue;
+    }
+    if (isSpecialPtr(T)) {
+      done.push_back(cur);
+      continue;
+    }
+    if (auto ST = dyn_cast<StructType>(T)) {
+      for (size_t i = 0, E = ST->getNumElements(); i < E; i++) {
+        auto T2 = ST->getElementType(E - 1 - i);
+        if (anyJuliaObjects(T2)) {
+          auto V2 = B.CreateExtractValue(cur, E - 1 - i);
+          todo.push_front(V2);
+        }
+      }
+      continue;
+    }
+    if (auto AT = dyn_cast<ArrayType>(T)) {
+      for (size_t i = 0, E = AT->getNumElements(); i < E; i++) {
+        todo.push_front(B.CreateExtractValue(cur, E - 1 - i));
+      }
+      continue;
+    }
+    if (auto VT = dyn_cast<VectorType>(T)) {
+      assert(!VT->getElementCount().isScalable());
+      size_t numElems = VT->getElementCount().getKnownMinValue();
+      for (size_t i = 0; i < numElems; i++) {
+        todo.push_front(B.CreateExtractElement(cur, numElems - 1 - i));
+      }
+      continue;
+    }
+    llvm_unreachable("unknown source of julia type");
+  }
+  return done;
 }

@@ -133,7 +133,7 @@ public:
   }
 
   llvm::Value *MPI_TYPE_SIZE(llvm::Value *DT, llvm::IRBuilder<> &B,
-                             llvm::Type *intType) {
+                             llvm::Type *intType, llvm::Function *caller) {
     using namespace llvm;
 
     if (DT->getType()->isIntegerTy())
@@ -151,8 +151,7 @@ public:
         }
       }
     }
-    Type *pargs[] = {getInt8PtrTy(DT->getContext()),
-                     PointerType::getUnqual(intType)};
+    Type *pargs[] = {getInt8PtrTy(DT->getContext()), getUnqual(intType)};
     auto FT = FunctionType::get(intType, pargs, false);
     auto alloc = IRBuilder<>(gutils->inversionAllocs).CreateAlloca(intType);
     llvm::Value *args[] = {DT, alloc};
@@ -183,7 +182,8 @@ public:
                                 Attribute::AttrKind::WillReturn);
     auto CI = B.CreateCall(
         B.GetInsertBlock()->getParent()->getParent()->getOrInsertFunction(
-            "MPI_Type_size", FT, AL),
+            getRenamedPerCallingConv(caller->getName(), "MPI_Type_size"), FT,
+            AL),
         args);
 #if LLVM_VERSION_MAJOR >= 16
     CI->setOnlyAccessesArgMemory();
@@ -197,10 +197,10 @@ public:
   // To be double-checked against the functionality needed and the respective
   // implementation in Adjoint-MPI
   llvm::Value *MPI_COMM_RANK(llvm::Value *comm, llvm::IRBuilder<> &B,
-                             llvm::Type *rankTy) {
+                             llvm::Type *rankTy, llvm::Function *caller) {
     using namespace llvm;
 
-    Type *pargs[] = {comm->getType(), PointerType::getUnqual(rankTy)};
+    Type *pargs[] = {comm->getType(), getUnqual(rankTy)};
     auto FT = FunctionType::get(rankTy, pargs, false);
     auto &context = comm->getContext();
     auto alloc = IRBuilder<>(gutils->inversionAllocs).CreateAlloca(rankTy);
@@ -224,16 +224,17 @@ public:
     llvm::Value *args[] = {comm, alloc};
     B.CreateCall(
         B.GetInsertBlock()->getParent()->getParent()->getOrInsertFunction(
-            "MPI_Comm_rank", FT, AL),
+            getRenamedPerCallingConv(caller->getName(), "MPI_Comm_rank"), FT,
+            AL),
         args);
     return B.CreateLoad(rankTy, alloc);
   }
 
   llvm::Value *MPI_COMM_SIZE(llvm::Value *comm, llvm::IRBuilder<> &B,
-                             llvm::Type *rankTy) {
+                             llvm::Type *rankTy, llvm::Function *caller) {
     using namespace llvm;
 
-    Type *pargs[] = {comm->getType(), PointerType::getUnqual(rankTy)};
+    Type *pargs[] = {comm->getType(), getUnqual(rankTy)};
     auto FT = FunctionType::get(rankTy, pargs, false);
     auto &context = comm->getContext();
     auto alloc = IRBuilder<>(gutils->inversionAllocs).CreateAlloca(rankTy);
@@ -257,7 +258,8 @@ public:
     llvm::Value *args[] = {comm, alloc};
     B.CreateCall(
         B.GetInsertBlock()->getParent()->getParent()->getOrInsertFunction(
-            "MPI_Comm_size", FT, AL),
+            getRenamedPerCallingConv(caller->getName(), "MPI_Comm_size"), FT,
+            AL),
         args);
     return B.CreateLoad(rankTy, alloc);
   }
@@ -272,6 +274,13 @@ public:
 #include "InstructionDerivatives.inc"
     default:
       break;
+    }
+
+    if (gutils->isConstantInstruction(&inst)) {
+      if (Mode == DerivativeMode::ReverseModePrimal)
+        return;
+      eraseIfUnused(inst);
+      return;
     }
 
     std::string s;
@@ -584,7 +593,7 @@ public:
         inst = gutils->cacheForReverse(BuilderZ, newi,
                                        getIndex(&I, CacheType::Self, BuilderZ));
         (void)inst;
-        assert(inst->getType() == type);
+        assert(inst->getType() == I.getType());
 
         if (Mode == DerivativeMode::ReverseModeGradient ||
             Mode == DerivativeMode::ForwardModeSplit ||
@@ -1004,6 +1013,7 @@ public:
         }
 
       Value *diff = nullptr;
+      bool needs_writebarrier = false;
       if (!gutils->runtimeActivity && constantval) {
         if (dt.isPossiblePointer() && vd[{-1, -1}] != BaseType::Integer) {
           if (!isa<UndefValue>(orig_val) &&
@@ -1012,11 +1022,13 @@ public:
             raw_string_ostream ss(str);
             ss << "Mismatched activity for: " << I
                << " const val: " << *orig_val;
-            if (CustomErrorHandler)
+            if (CustomErrorHandler) {
               diff = unwrap(CustomErrorHandler(
                   str.c_str(), wrap(&I), ErrorType::MixedActivityError, gutils,
                   wrap(orig_val), wrap(&BuilderZ)));
-            else
+              if (diff)
+                needs_writebarrier = true;
+            } else
               EmitWarning("MixedActivityError", I, ss.str());
           }
         }
@@ -1038,12 +1050,18 @@ public:
 
       gutils->setPtrDiffe(&I, orig_ptr, diff, BuilderZ, prevalign, 0, storeSize,
                           isVolatile, ordering, syncScope, mask, prevNoAlias,
-                          prevScopes);
+                          prevScopes, needs_writebarrier);
 
       return;
     }
 
     unsigned start = 0;
+
+    IRBuilder<> Builder2(&I);
+    BasicBlock *merge = nullptr;
+    if (Mode == DerivativeMode::ReverseModeGradient ||
+        Mode == DerivativeMode::ReverseModeCombined)
+      getReverseBuilder(Builder2);
 
     while (1) {
       unsigned nextStart = storeSize;
@@ -1090,8 +1108,34 @@ public:
           break;
         case DerivativeMode::ReverseModeGradient:
         case DerivativeMode::ReverseModeCombined: {
-          IRBuilder<> Builder2(&I);
-          getReverseBuilder(Builder2);
+
+          if (!merge && gutils->runtimeActivity) {
+            auto basePtr = getBaseObject(orig_ptr);
+
+            // If runtime activity, first see if we can prove that the
+            // shadow/primal are distinct statically as they are
+            // allocas/mallocs, if not compare the pointers and conditionally
+            // execute.
+            if (!isa<AllocaInst>(basePtr) &&
+                !isAllocationCall(basePtr, gutils->TLI)) {
+              auto shadow_ptr =
+                  lookup(gutils->invertPointerM(orig_ptr, Builder2), Builder2);
+              auto primal_ptr =
+                  lookup(gutils->getNewFromOriginal(orig_ptr), Builder2);
+              if (gutils->getWidth() != 1) {
+                shadow_ptr = gutils->extractMeta(Builder2, shadow_ptr, 0);
+              }
+              Value *shadow = Builder2.CreateICmpNE(primal_ptr, shadow_ptr);
+
+              BasicBlock *current = Builder2.GetInsertBlock();
+              BasicBlock *conditional = gutils->addReverseBlock(
+                  current, current->getName() + "_active");
+              merge = gutils->addReverseBlock(conditional,
+                                              current->getName() + "_amerge");
+              Builder2.CreateCondBr(shadow, conditional, merge);
+              Builder2.SetInsertPoint(conditional);
+            }
+          }
 
           if (constantval) {
             gutils->setPtrDiffe(
@@ -1176,16 +1220,14 @@ public:
         case DerivativeMode::ForwardModeSplit:
         case DerivativeMode::ForwardModeError:
         case DerivativeMode::ForwardMode: {
-          IRBuilder<> Builder2(&I);
-          getForwardBuilder(Builder2);
 
           Type *diffeTy = gutils->getShadowType(valType);
 
           Value *diff = constantval
                             ? Constant::getNullValue(diffeTy)
-                            : gutils->invertPointerM(orig_val, Builder2,
+                            : gutils->invertPointerM(orig_val, BuilderZ,
                                                      /*nullShadow*/ true);
-          gutils->setPtrDiffe(&I, orig_ptr, diff, Builder2, align, start, size,
+          gutils->setPtrDiffe(&I, orig_ptr, diff, BuilderZ, align, start, size,
                               isVolatile, ordering, syncScope, mask,
                               prevNoAlias, prevScopes);
 
@@ -1233,6 +1275,7 @@ public:
 
           Value *valueop = nullptr;
 
+          bool needs_writebarrier = false;
           if (constantval) {
             if (!gutils->runtimeActivity) {
               if (dt.isPossiblePointer() && vd[{-1, -1}] != BaseType::Integer) {
@@ -1242,11 +1285,13 @@ public:
                   raw_string_ostream ss(str);
                   ss << "Mismatched activity for: " << I
                      << " const val: " << *orig_val;
-                  if (CustomErrorHandler)
+                  if (CustomErrorHandler) {
                     valueop = unwrap(CustomErrorHandler(
                         str.c_str(), wrap(&I), ErrorType::MixedActivityError,
                         gutils, wrap(orig_val), wrap(&BuilderZ)));
-                  else
+                    if (valueop)
+                      needs_writebarrier = true;
+                  } else
                     EmitWarning("MixedActivityError", I, ss.str());
                 }
               }
@@ -1267,13 +1312,18 @@ public:
           }
           gutils->setPtrDiffe(&I, orig_ptr, valueop, BuilderZ, align, start,
                               size, isVolatile, ordering, syncScope, mask,
-                              prevNoAlias, prevScopes);
+                              prevNoAlias, prevScopes, needs_writebarrier);
         }
       }
 
       if (nextStart == storeSize)
         break;
       start = nextStart;
+    }
+
+    if (merge) {
+      Builder2.CreateBr(merge);
+      Builder2.SetInsertPoint(merge);
     }
   }
 
@@ -2376,6 +2426,15 @@ public:
       }
       goto def;
     }
+    case Instruction::AShr: {
+      if (looseTypeAnalysis) {
+        llvm::errs() << "warning: binary operator is integer and constant: "
+                     << BO << "\n";
+        // if loose type analysis, assume this integer and is constant
+        return;
+      }
+      goto def;
+    }
     case Instruction::And: {
       // If & against 0b10000000000 and a float the result is 0
       auto &dl = gutils->oldFunc->getParent()->getDataLayout();
@@ -2544,6 +2603,9 @@ public:
       }
       goto def;
     }
+    case Instruction::UDiv:
+    case Instruction::URem:
+    case Instruction::SRem:
     case Instruction::SDiv:
     case Instruction::Shl:
     case Instruction::Mul:
@@ -2773,6 +2835,48 @@ public:
       }
       goto def;
     }
+    case Instruction::LShr: {
+      if (!gutils->isConstantValue(orig_op0)) {
+        if (auto ci = dyn_cast<ConstantInt>(orig_op1)) {
+          size_t size = 1;
+          if (orig_op0->getType()->isSized())
+            size = (gutils->newFunc->getParent()
+                        ->getDataLayout()
+                        .getTypeSizeInBits(orig_op0->getType()) +
+                    7) /
+                   8;
+
+          if (Type *flt = TR.addingType(size, orig_op0)) {
+            auto bits = gutils->newFunc->getParent()
+                            ->getDataLayout()
+                            .getTypeAllocSizeInBits(flt);
+            if (ci->getSExtValue() >= (int64_t)bits &&
+                ci->getSExtValue() % bits == 0) {
+              auto rule = [&](Value *idiff) {
+                return Builder2.CreateLShr(idiff, ci);
+              };
+              auto dif = applyChainRule(orig_op0->getType(), Builder2, rule,
+                                        diffe(orig_op0, Builder2));
+              setDiffe(&BO, dif, Builder2);
+              return;
+            }
+          }
+        }
+      }
+      if (looseTypeAnalysis) {
+        forwardModeInvertedPointerFallback(BO);
+        llvm::errs() << "warning: binary operator is integer and constant: "
+                     << BO << "\n";
+        // if loose type analysis, assume this integer or is constant
+        return;
+      }
+      goto def;
+    }
+    case Instruction::AShr:
+    case Instruction::SDiv:
+    case Instruction::UDiv:
+    case Instruction::SRem:
+    case Instruction::URem:
     case Instruction::Shl:
     case Instruction::Mul:
     case Instruction::Sub:
@@ -3631,7 +3735,7 @@ public:
         if (floatTy && gutils->isConstantValue(orig_src)) {
           call = BuilderZ.CreateMemSet(
               ddst, ConstantInt::get(Type::getInt8Ty(ddst->getContext()), 0),
-              length, salign, isVolatile);
+              length, dalign, isVolatile);
         } else {
           if (dsrc->getType()->isIntegerTy())
             dsrc =
@@ -3830,10 +3934,20 @@ public:
       case Intrinsic::nvvm_barrier0:
 #else
       case Intrinsic::nvvm_barrier_cta_sync_aligned_all:
+      case Intrinsic::nvvm_barrier_cta_sync_aligned_count:
 #endif
+#if LLVM_VERSION_MAJOR < 22
       case Intrinsic::nvvm_barrier0_popc:
       case Intrinsic::nvvm_barrier0_and:
       case Intrinsic::nvvm_barrier0_or:
+#else
+      case Intrinsic::nvvm_barrier_cta_red_and_aligned_all:
+      case Intrinsic::nvvm_barrier_cta_red_and_aligned_count:
+      case Intrinsic::nvvm_barrier_cta_red_or_aligned_all:
+      case Intrinsic::nvvm_barrier_cta_red_or_aligned_count:
+      case Intrinsic::nvvm_barrier_cta_red_popc_aligned_all:
+      case Intrinsic::nvvm_barrier_cta_red_popc_aligned_count:
+#endif
       case Intrinsic::nvvm_membar_cta:
       case Intrinsic::nvvm_membar_gl:
       case Intrinsic::nvvm_membar_sys:
@@ -3882,10 +3996,19 @@ public:
       (void)vdiff;
 
       switch (ID) {
-
+#if LLVM_VERSION_MAJOR < 22
       case Intrinsic::nvvm_barrier0_popc:
       case Intrinsic::nvvm_barrier0_and:
-      case Intrinsic::nvvm_barrier0_or: {
+      case Intrinsic::nvvm_barrier0_or:
+#else
+      case Intrinsic::nvvm_barrier_cta_red_and_aligned_all:
+      case Intrinsic::nvvm_barrier_cta_red_and_aligned_count:
+      case Intrinsic::nvvm_barrier_cta_red_or_aligned_all:
+      case Intrinsic::nvvm_barrier_cta_red_or_aligned_count:
+      case Intrinsic::nvvm_barrier_cta_red_popc_aligned_all:
+      case Intrinsic::nvvm_barrier_cta_red_popc_aligned_count:
+#endif
+      {
         SmallVector<Value *, 1> args = {};
 #if LLVM_VERSION_MAJOR > 20
         auto cal = cast<CallInst>(Builder2.CreateCall(
@@ -3909,6 +4032,7 @@ public:
       case Intrinsic::nvvm_barrier0:
 #else
       case Intrinsic::nvvm_barrier_cta_sync_aligned_all:
+      case Intrinsic::nvvm_barrier_cta_sync_aligned_count:
 #endif
       case Intrinsic::amdgcn_s_barrier:
       case Intrinsic::nvvm_membar_cta:
@@ -4053,6 +4177,11 @@ public:
         return false;
       }
       default:
+        if (!gutils->isConstantValue(&I)) {
+          auto toset =
+              Constant::getNullValue(gutils->getShadowType(I.getType()));
+          setDiffe(&I, toset, Builder2);
+        }
         if (gutils->isConstantInstruction(&I))
           return false;
         if (ID == Intrinsic::umax || ID == Intrinsic::smax ||
@@ -4080,10 +4209,6 @@ public:
              << Intrinsic::getName(ID) << "\n"
              << I;
         EmitNoDerivativeError(ss.str(), I, gutils, Builder2);
-        if (!gutils->isConstantValue(&I))
-          setDiffe(&I,
-                   Constant::getNullValue(gutils->getShadowType(I.getType())),
-                   Builder2);
         return false;
       }
       return false;
@@ -4345,16 +4470,17 @@ public:
                 if (F->getName() == "malloc") {
                   const_cast<AugmentedReturn *>(subdata)
                       ->tapeIndiciesToFree.emplace(pair.first);
-                  Value *Idxs[] = {
-                      ConstantInt::get(Type::getInt64Ty(tapeArg->getContext()),
-                                       0),
-                      ConstantInt::get(Type::getInt32Ty(tapeArg->getContext()),
-                                       pair.first)};
-                  op->replaceAllUsesWith(ph.CreateLoad(
-                      op->getType(),
-                      pair.first == -1
-                          ? tapeArg
-                          : ph.CreateInBoundsGEP(tapeElemType, tapeArg, Idxs)));
+                  Value *toload = tapeArg;
+                  if (pair.first != -1) {
+                    Value *Idxs[] = {
+                        ConstantInt::get(
+                            Type::getInt64Ty(tapeArg->getContext()), 0),
+                        ConstantInt::get(
+                            Type::getInt32Ty(tapeArg->getContext()),
+                            pair.first)};
+                    toload = ph.CreateInBoundsGEP(tapeElemType, toload, Idxs);
+                  }
+                  op->replaceAllUsesWith(ph.CreateLoad(op->getType(), toload));
                   cast<Instruction>(op)->eraseFromParent();
                   if (op != alloc)
                     ci->eraseFromParent();
@@ -4480,8 +4606,7 @@ public:
                 .width = gutils->getWidth(),
                 .freeMemory = true,
                 .AtomicAdd = true,
-                .additionalType =
-                    tape ? PointerType::getUnqual(tape->getType()) : nullptr,
+                .additionalType = tape ? getUnqual(tape->getType()) : nullptr,
                 .forceAnonymousTape = false,
                 .typeInfo = nextTypeInfo,
                 .runtimeActivity = gutils->runtimeActivity,
@@ -4571,7 +4696,7 @@ public:
                cast<Function>(newcalled)->getFunctionType()->params()) {
             MetaTypes.push_back(P);
           }
-          MetaTypes.push_back(PointerType::getUnqual(ST));
+          MetaTypes.push_back(getUnqual(ST));
           auto FT = FunctionType::get(Type::getVoidTy(newcalled->getContext()),
                                       MetaTypes, false);
           Function *F =
@@ -4598,7 +4723,7 @@ public:
 
               ptr = B.CreateBitCast(
                   ptr,
-                  PointerType::get(
+                  getPointerType(
                       IntToFloatTy(dif->getType()),
                       cast<PointerType>(ptr->getType())->getAddressSpace()));
               dif = B.CreateBitCast(dif, IntToFloatTy(dif->getType()));
@@ -4745,7 +4870,7 @@ public:
               Builder2.CreateIntToPtr(dsto, getInt8PtrTy(dsto->getContext()));
         unsigned dstaddr =
             cast<PointerType>(dsto->getType())->getAddressSpace();
-        auto secretpt = PointerType::get(secretty, dstaddr);
+        auto secretpt = getPointerType(secretty, dstaddr);
         if (offset != 0) {
           dsto = Builder2.CreateConstInBoundsGEP1_64(
               Type::getInt8Ty(dsto->getContext()), dsto, offset);
@@ -4755,7 +4880,7 @@ public:
               Builder2.CreateIntToPtr(srco, getInt8PtrTy(dsto->getContext()));
         unsigned srcaddr =
             cast<PointerType>(srco->getType())->getAddressSpace();
-        secretpt = PointerType::get(secretty, srcaddr);
+        secretpt = getPointerType(secretty, srcaddr);
 
         if (offset != 0) {
           srco = Builder2.CreateConstInBoundsGEP1_64(
@@ -4837,15 +4962,14 @@ public:
       for (unsigned i = 0; i < call.arg_size(); ++i) {
 
         if (call.paramHasAttr(i, Attribute::StructRet)) {
-          structAttrs[args.size()].push_back(
-              Attribute::get(call.getContext(), "enzyme_sret"));
-          // TODO
-          // structAttrs[args.size()].push_back(Attribute::get(
-          //     call.getContext(), Attribute::AttrKind::ElementType,
-          //     call.getParamAttr(i, Attribute::StructRet).getValueAsType()));
+          structAttrs[args.size()].push_back(Attribute::get(
+              call.getContext(), "enzyme_sret",
+              convertSRetTypeToString(call.getParamAttr(i, Attribute::StructRet)
+                                          .getValueAsType())));
         }
         for (auto attr : {"enzymejl_returnRoots", "enzymejl_parmtype",
-                          "enzymejl_parmtype_ref", "enzyme_type"})
+                          "enzymejl_parmtype_ref", "enzyme_type",
+                          "enzymejl_sret_union_bytes", "enzymejl_rooted_typ"})
           if (call.getAttributes().hasParamAttr(i, attr)) {
             structAttrs[args.size()].push_back(call.getParamAttr(i, attr));
           }
@@ -4904,35 +5028,44 @@ public:
             }
 
         for (auto attr : {"enzymejl_returnRoots", "enzymejl_parmtype",
-                          "enzymejl_parmtype_ref", "enzyme_type"})
+                          "enzymejl_parmtype_ref", "enzyme_type",
+                          "enzymejl_sret_union_bytes", "enzymejl_rooted_typ"})
           if (call.getAttributes().hasParamAttr(i, attr)) {
             if (gutils->getWidth() == 1) {
               structAttrs[args.size()].push_back(call.getParamAttr(i, attr));
             } else if (attr == std::string("enzymejl_returnRoots")) {
               structAttrs[args.size()].push_back(
-                  Attribute::get(call.getContext(), "enzymejl_returnRoots_v"));
+                  Attribute::get(call.getContext(), "enzymejl_returnRoots_v",
+                                 call.getAttributes()
+                                     .getParamAttr(i, "enzymejl_returnRoots")
+                                     .getValueAsString()));
+            } else if (attr == std::string("enzymejl_sret_union_bytes")) {
+              structAttrs[args.size()].push_back(Attribute::get(
+                  call.getContext(), "enzymejl_sret_union_bytes_v",
+                  call.getAttributes()
+                      .getParamAttr(i, "enzymejl_sret_union_bytes")
+                      .getValueAsString()));
+            } else if (attr == std::string("enzymejl_rooted_typ")) {
+              structAttrs[args.size()].push_back(
+                  Attribute::get(call.getContext(), "enzymejl_rooted_typ_v",
+                                 call.getAttributes()
+                                     .getParamAttr(i, "enzymejl_rooted_typ")
+                                     .getValueAsString()));
             }
           }
         if (call.paramHasAttr(i, Attribute::StructRet)) {
           if (gutils->getWidth() == 1) {
             structAttrs[args.size()].push_back(
-                Attribute::get(call.getContext(), "enzyme_sret")
-                // orig->getParamAttr(i,
-                // Attribute::StructRet).getValueAsType());
-            );
-            // TODO
-            // structAttrs[args.size()].push_back(Attribute::get(
-            //     call.getContext(), Attribute::AttrKind::ElementType,
-            //     call.getParamAttr(i,
-            //     Attribute::StructRet).getValueAsType()));
+                Attribute::get(call.getContext(), "enzyme_sret",
+                               convertSRetTypeToString(
+                                   call.getParamAttr(i, Attribute::StructRet)
+                                       .getValueAsType())));
           } else {
             structAttrs[args.size()].push_back(
-                Attribute::get(call.getContext(), "enzyme_sret_v"));
-            // TODO
-            // structAttrs[args.size()].push_back(Attribute::get(
-            //     call.getContext(), Attribute::AttrKind::ElementType,
-            //     call.getParamAttr(i,
-            //     Attribute::StructRet).getValueAsType()));
+                Attribute::get(call.getContext(), "enzyme_sret_v",
+                               convertSRetTypeToString(
+                                   call.getParamAttr(i, Attribute::StructRet)
+                                       .getValueAsType())));
           }
         }
 
@@ -5009,9 +5142,8 @@ public:
             ft, Mode, gutils->getWidth(), tape ? tape->getType() : nullptr,
             argsInverted, false, /*returnTape*/ false,
             /*returnPrimal*/ subretused, /*returnShadow*/ retActive);
-        PointerType *fptype = PointerType::getUnqual(FT);
-        newcalled = BuilderZ.CreatePointerCast(newcalled,
-                                               PointerType::getUnqual(fptype));
+        PointerType *fptype = getUnqual(FT);
+        newcalled = BuilderZ.CreatePointerCast(newcalled, getUnqual(fptype));
         newcalled = BuilderZ.CreateLoad(fptype, newcalled);
       }
 
@@ -5125,17 +5257,16 @@ public:
         preByVal[pre_args.size()] = call.getParamByValType(i);
       }
       for (auto attr : {"enzymejl_returnRoots", "enzymejl_parmtype",
-                        "enzymejl_parmtype_ref", "enzyme_type"})
+                        "enzymejl_parmtype_ref", "enzyme_type",
+                        "enzymejl_sret_union_bytes", "enzymejl_rooted_typ"})
         if (call.getAttributes().hasParamAttr(i, attr)) {
           structAttrs[pre_args.size()].push_back(call.getParamAttr(i, attr));
         }
       if (call.paramHasAttr(i, Attribute::StructRet)) {
-        structAttrs[pre_args.size()].push_back(
-            // TODO persist types
-            Attribute::get(call.getContext(), "enzyme_sret")
-            // Attribute::get(orig->getContext(), "enzyme_sret",
-            // orig->getParamAttr(ii, Attribute::StructRet).getValueAsType());
-        );
+        structAttrs[pre_args.size()].push_back(Attribute::get(
+            call.getContext(), "enzyme_sret",
+            convertSRetTypeToString(
+                call.getParamAttr(i, Attribute::StructRet).getValueAsType())));
       }
       for (auto ty : PrimalParamAttrsToPreserve)
         if (call.getAttributes().hasParamAttr(i, ty)) {
@@ -5216,33 +5347,45 @@ public:
             }
 
         for (auto attr : {"enzymejl_returnRoots", "enzymejl_parmtype",
-                          "enzymejl_parmtype_ref", "enzyme_type"})
+                          "enzymejl_parmtype_ref", "enzyme_type",
+                          "enzymejl_sret_union_bytes", "enzymejl_rooted_typ"})
           if (call.getAttributes().hasParamAttr(i, attr)) {
             if (gutils->getWidth() == 1) {
               structAttrs[pre_args.size()].push_back(
                   call.getParamAttr(i, attr));
             } else if (attr == std::string("enzymejl_returnRoots")) {
               structAttrs[pre_args.size()].push_back(
-                  Attribute::get(call.getContext(), "enzymejl_returnRoots_v"));
+                  Attribute::get(call.getContext(), "enzymejl_returnRoots_v",
+                                 call.getAttributes()
+                                     .getParamAttr(i, attr)
+                                     .getValueAsString()));
+            } else if (attr == std::string("enzymejl_sret_union_bytes")) {
+              structAttrs[pre_args.size()].push_back(Attribute::get(
+                  call.getContext(), "enzymejl_sret_union_bytes_v",
+                  call.getAttributes()
+                      .getParamAttr(i, attr)
+                      .getValueAsString()));
+            } else if (attr == std::string("enzymejl_rooted_typ")) {
+              structAttrs[pre_args.size()].push_back(
+                  Attribute::get(call.getContext(), "enzymejl_rooted_typ_v",
+                                 call.getAttributes()
+                                     .getParamAttr(i, attr)
+                                     .getValueAsString()));
             }
           }
         if (call.paramHasAttr(i, Attribute::StructRet)) {
           if (gutils->getWidth() == 1) {
             structAttrs[pre_args.size()].push_back(
-                // TODO persist types
-                Attribute::get(call.getContext(), "enzyme_sret")
-                // Attribute::get(orig->getContext(), "enzyme_sret",
-                // orig->getParamAttr(ii,
-                // Attribute::StructRet).getValueAsType());
-            );
+                Attribute::get(call.getContext(), "enzyme_sret",
+                               convertSRetTypeToString(
+                                   call.getParamAttr(i, Attribute::StructRet)
+                                       .getValueAsType())));
           } else {
             structAttrs[pre_args.size()].push_back(
-                // TODO persist types
-                Attribute::get(call.getContext(), "enzyme_sret_v")
-                // Attribute::get(orig->getContext(), "enzyme_sret_v",
-                // gutils->getShadowType(orig->getParamAttr(ii,
-                // Attribute::StructRet).getValueAsType()));
-            );
+                Attribute::get(call.getContext(), "enzyme_sret_v",
+                               convertSRetTypeToString(
+                                   call.getParamAttr(i, Attribute::StructRet)
+                                       .getValueAsType())));
           }
         }
         if (Mode != DerivativeMode::ReverseModePrimal) {
@@ -5275,9 +5418,21 @@ public:
 
         // Note sometimes whattype mistakenly says something should be
         // constant [because composed of integer pointers alone]
-        (void)argType;
-        assert(whatType(argType, Mode) == DIFFE_TYPE::DUP_ARG ||
-               whatType(argType, Mode) == DIFFE_TYPE::CONSTANT);
+        auto wt = whatType(argType, Mode);
+        if (wt != DIFFE_TYPE::DUP_ARG && wt != DIFFE_TYPE::CONSTANT) {
+          std::string str;
+          raw_string_ostream ss(str);
+          ss << "Mismatched estimated activity type for " << *argType
+             << " expected DUP_ARG or CONSTANT found " << wt
+             << ", call = " << call << "\n";
+          if (CustomErrorHandler) {
+            CustomErrorHandler(str.c_str(), wrap(&call),
+                               ErrorType::InternalError, nullptr, nullptr,
+                               nullptr);
+          } else {
+            EmitFailure("MismatchArgType", call.getDebugLoc(), &call, ss.str());
+          }
+        }
       } else {
         if (foreignFunction)
           assert(!argType->isIntOrIntVectorTy());
@@ -5356,9 +5511,8 @@ public:
         FT = FunctionType::get(
             StructType::get(newcalled->getContext(), res.second), res.first,
             ft->isVarArg());
-        auto fptype = PointerType::getUnqual(FT);
-        newcalled = BuilderZ.CreatePointerCast(newcalled,
-                                               PointerType::getUnqual(fptype));
+        auto fptype = getUnqual(FT);
+        newcalled = BuilderZ.CreatePointerCast(newcalled, getUnqual(fptype));
         newcalled = BuilderZ.CreateLoad(fptype, newcalled);
         tapeIdx = 0;
 
@@ -5741,7 +5895,7 @@ public:
           shouldFree()) {
         assert(tape);
         auto tapep = BuilderZ.CreatePointerCast(
-            tape, PointerType::get(
+            tape, getPointerType(
                       fnandtapetype->tapeType,
                       cast<PointerType>(tape->getType())->getAddressSpace()));
         auto truetape =
@@ -5872,9 +6026,8 @@ public:
       FT = FunctionType::get(
           StructType::get(newcalled->getContext(), res.second), res.first,
           ft->isVarArg());
-      auto fptype = PointerType::getUnqual(FT);
-      newcalled =
-          Builder2.CreatePointerCast(newcalled, PointerType::getUnqual(fptype));
+      auto fptype = getUnqual(FT);
+      newcalled = Builder2.CreatePointerCast(newcalled, getUnqual(fptype));
       newcalled = Builder2.CreateLoad(
           fptype, Builder2.CreateConstGEP1_64(fptype, newcalled, 1));
     }
@@ -6393,7 +6546,8 @@ public:
       return;
 
     bool useConstantFallback =
-        DifferentialUseAnalysis::callShouldNotUseDerivative(gutils, call);
+        DifferentialUseAnalysis::callShouldNotUseDerivative(
+            gutils, call, QueryType::Primal, nullptr);
     if (!useConstantFallback) {
       if (gutils->isConstantInstruction(&call) &&
           gutils->isConstantValue(&call)) {

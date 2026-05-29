@@ -6,13 +6,13 @@ use std::sync::Arc;
 
 use rustc_ast::attr::AttrIdGenerator;
 use rustc_ast::node_id::NodeId;
-use rustc_data_structures::fx::{FxHashMap, FxIndexMap, FxIndexSet};
-use rustc_data_structures::sync::{AppendOnlyVec, Lock};
-use rustc_errors::emitter::{EmitterWithNote, HumanEmitter, stderr_destination};
-use rustc_errors::translation::Translator;
+use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
+use rustc_data_structures::sync::{AppendOnlyVec, DynSend, DynSync, Lock};
+use rustc_errors::annotate_snippet_emitter_writer::AnnotateSnippetEmitter;
+use rustc_errors::emitter::{EmitterWithNote, stderr_destination};
 use rustc_errors::{
     BufferedEarlyLint, ColorConfig, DecorateDiagCompat, Diag, DiagCtxt, DiagCtxtHandle,
-    DiagMessage, EmissionGuarantee, MultiSpan, StashKey,
+    DiagMessage, EmissionGuarantee, Level, MultiSpan, StashKey,
 };
 use rustc_feature::{GateIssue, UnstableFeatures, find_feature_issue};
 use rustc_span::edition::Edition;
@@ -79,7 +79,7 @@ impl SymbolGallery {
     }
 }
 
-// todo: this function now accepts `Session` instead of `ParseSess` and should be relocated
+// FIXME: this function now accepts `Session` instead of `ParseSess` and should be relocated
 /// Construct a diagnostic for a language feature error due to the given `span`.
 /// The `feature`'s `Symbol` is the one you used in `unstable.rs` and `rustc_span::symbol`.
 #[track_caller]
@@ -132,8 +132,6 @@ pub fn feature_warn(sess: &Session, feature: Symbol, span: Span, explain: &'stat
 ///
 /// This variant allows you to control whether it is a library or language feature.
 /// Almost always, you want to use this for a language feature. If so, prefer `feature_warn`.
-#[allow(rustc::diagnostic_outside_of_impl)]
-#[allow(rustc::untranslatable_diagnostic)]
 #[track_caller]
 pub fn feature_warn_issue(
     sess: &Session,
@@ -171,7 +169,6 @@ pub fn add_feature_diagnostics<G: EmissionGuarantee>(
 /// This variant allows you to control whether it is a library or language feature.
 /// Almost always, you want to use this for a language feature. If so, prefer
 /// `add_feature_diagnostics`.
-#[allow(rustc::diagnostic_outside_of_impl)] // FIXME
 pub fn add_feature_diagnostics_for_issue<G: EmissionGuarantee>(
     err: &mut Diag<'_, G>,
     sess: &Session,
@@ -267,10 +264,6 @@ pub struct ParseSess {
     pub ambiguous_block_expr_parse: Lock<FxIndexMap<Span, Span>>,
     pub gated_spans: GatedSpans,
     pub symbol_gallery: SymbolGallery,
-    /// Environment variables accessed during the build and their values when they exist.
-    pub env_depinfo: Lock<FxIndexSet<(Symbol, Option<Symbol>)>>,
-    /// File paths accessed during the build.
-    pub file_depinfo: Lock<FxIndexSet<Symbol>>,
     /// Whether cfg(version) should treat the current release as incomplete
     pub assume_incomplete_release: bool,
     /// Spans passed to `proc_macro::quote_span`. Each span has a numerical
@@ -282,11 +275,10 @@ pub struct ParseSess {
 
 impl ParseSess {
     /// Used for testing.
-    pub fn new(locale_resources: Vec<&'static str>) -> Self {
-        let translator = Translator::with_fallback_bundle(locale_resources, false);
+    pub fn new() -> Self {
         let sm = Arc::new(SourceMap::new(FilePathMapping::empty()));
         let emitter = Box::new(
-            HumanEmitter::new(stderr_destination(ColorConfig::Auto), translator)
+            AnnotateSnippetEmitter::new(stderr_destination(ColorConfig::Auto))
                 .sm(Some(Arc::clone(&sm))),
         );
         let dcx = DiagCtxt::new(emitter);
@@ -307,19 +299,15 @@ impl ParseSess {
             ambiguous_block_expr_parse: Lock::new(Default::default()),
             gated_spans: GatedSpans::default(),
             symbol_gallery: SymbolGallery::default(),
-            env_depinfo: Default::default(),
-            file_depinfo: Default::default(),
             assume_incomplete_release: false,
             proc_macro_quoted_spans: Default::default(),
             attr_id_generator: AttrIdGenerator::new(),
         }
     }
 
-    pub fn emitter_with_note(locale_resources: Vec<&'static str>, note: String) -> Self {
-        let translator = Translator::with_fallback_bundle(locale_resources, false);
+    pub fn emitter_with_note(note: String) -> Self {
         let sm = Arc::new(SourceMap::new(FilePathMapping::empty()));
-        let emitter =
-            Box::new(HumanEmitter::new(stderr_destination(ColorConfig::Auto), translator));
+        let emitter = Box::new(AnnotateSnippetEmitter::new(stderr_destination(ColorConfig::Auto)));
         let dcx = DiagCtxt::new(Box::new(EmitterWithNote { emitter, note }));
         ParseSess::with_dcx(dcx, sm)
     }
@@ -341,6 +329,23 @@ impl ParseSess {
         diagnostic: impl Into<DecorateDiagCompat>,
     ) {
         self.opt_span_buffer_lint(lint, Some(span.into()), node_id, diagnostic.into())
+    }
+
+    pub fn dyn_buffer_lint<
+        F: for<'a> FnOnce(DiagCtxtHandle<'a>, Level) -> Diag<'a, ()> + DynSync + DynSend + 'static,
+    >(
+        &self,
+        lint: &'static Lint,
+        span: impl Into<MultiSpan>,
+        node_id: NodeId,
+        callback: F,
+    ) {
+        self.opt_span_buffer_lint(
+            lint,
+            Some(span.into()),
+            node_id,
+            DecorateDiagCompat::Dynamic(Box::new(|dcx, level, _| callback(dcx, level))),
+        )
     }
 
     pub(crate) fn opt_span_buffer_lint(

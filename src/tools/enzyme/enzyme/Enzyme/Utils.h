@@ -86,6 +86,8 @@ enum class ErrorType {
   IllegalReplaceFicticiousPHIs = 8,
   GetIndexError = 9,
   NoTruncate = 10,
+  GCRewrite = 11,
+  NaNError = 12,
 };
 
 extern "C" {
@@ -194,6 +196,9 @@ public:
                 const llvm::Function *CodeRegion);
 };
 
+// Forward declaration needed for EmitFailure template
+llvm::Function *getFirstFunctionDefinition(llvm::Module &M);
+
 template <typename... Args>
 void EmitFailure(llvm::StringRef RemarkName,
                  const llvm::DiagnosticLocation &Loc,
@@ -214,6 +219,21 @@ void EmitFailure(llvm::StringRef RemarkName,
   (ss << ... << args);
   CodeRegion->getContext().diagnose(
       (EnzymeFailure("Enzyme: " + ss.str(), Loc, CodeRegion)));
+}
+
+template <typename... Args>
+void EmitFailure(llvm::StringRef RemarkName, llvm::Module &M, Args &...args) {
+  // Use the first function definition in the module as context for the
+  // diagnostic
+  if (llvm::Function *FirstFunc = getFirstFunctionDefinition(M)) {
+    EmitFailure(RemarkName, FirstFunc->getSubprogram(), FirstFunc, args...);
+  } else {
+    // Fallback if no functions in module
+    std::string *str = new std::string();
+    llvm::raw_string_ostream ss(*str);
+    (ss << ... << args);
+    llvm::report_fatal_error(llvm::StringRef(*str));
+  }
 }
 
 static inline llvm::Function *isCalledFunction(llvm::Value *val) {
@@ -386,6 +406,7 @@ enum class MProbProgMode {
   Call = 0,
   Simulate = 1,
   Generate = 2,
+  Regenerate = 3,
 };
 
 /// Classification of value as an original program
@@ -418,6 +439,11 @@ static inline std::string to_string(ValueType mode) {
   llvm_unreachable("illegal valuetype");
 }
 
+static inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
+                                            ValueType mode) {
+  return os << to_string(mode);
+}
+
 static inline std::string to_string(DerivativeMode mode) {
   switch (mode) {
   case DerivativeMode::ForwardMode:
@@ -436,6 +462,11 @@ static inline std::string to_string(DerivativeMode mode) {
   llvm_unreachable("illegal derivative mode");
 }
 
+static inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
+                                            DerivativeMode mode) {
+  return os << to_string(mode);
+}
+
 /// Convert DIFFE_TYPE to a string
 static inline std::string to_string(DIFFE_TYPE t) {
   switch (t) {
@@ -451,6 +482,11 @@ static inline std::string to_string(DIFFE_TYPE t) {
     assert(0 && "illegal diffetype");
     return "";
   }
+}
+
+static inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
+                                            DIFFE_TYPE mode) {
+  return os << to_string(mode);
 }
 
 /// Convert ReturnType to a string
@@ -476,6 +512,11 @@ static inline std::string to_string(ReturnType t) {
     return "Void";
   }
   llvm_unreachable("illegal ReturnType");
+}
+
+static inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
+                                            ReturnType mode) {
+  return os << to_string(mode);
 }
 
 #include <set>
@@ -772,6 +813,11 @@ llvm::Function *getOrInsertMemcpyMat(llvm::Module &M, llvm::Type *elementType,
                                      llvm::IntegerType *IT, unsigned dstalign,
                                      unsigned srcalign);
 
+llvm::Function *getOrInsertDifferentialFloatMemcpyMat(
+    llvm::Module &M, llvm::Type *elementType, llvm::PointerType *PT,
+    llvm::IntegerType *IT, llvm::IntegerType *CT, unsigned dstalign,
+    unsigned srcalign, bool zeroSrc);
+
 /// Create function for type that performs the derivative memmove on floating
 /// point memory
 llvm::Function *getOrInsertDifferentialFloatMemmove(
@@ -784,7 +830,8 @@ llvm::Function *getOrInsertCheckedFree(llvm::Module &M, llvm::CallInst *call,
 /// Create function for type that performs the derivative MPI_Wait
 llvm::Function *getOrInsertDifferentialMPI_Wait(llvm::Module &M,
                                                 llvm::ArrayRef<llvm::Type *> T,
-                                                llvm::Type *reqType);
+                                                llvm::Type *reqType,
+                                                llvm::StringRef caller);
 
 /// Create function to computer nearest power of two
 llvm::Value *nextPowerOfTwo(llvm::IRBuilder<> &B, llvm::Value *V);
@@ -1122,13 +1169,22 @@ enum class MPI_Elem {
   Old = 7
 };
 
+static inline llvm::PointerType *getPointerType(llvm::Type *T,
+                                                unsigned AddressSpace = 0) {
+#if LLVM_VERSION_MAJOR >= 17
+  return llvm::PointerType::get(T->getContext(), AddressSpace);
+#else
+  return llvm::PointerType::get(T, AddressSpace);
+#endif
+}
+
 static inline llvm::PointerType *getInt8PtrTy(llvm::LLVMContext &Context,
                                               unsigned AddressSpace = 0) {
-#if LLVM_VERSION_MAJOR >= 21
-  return llvm::PointerType::get(Context, AddressSpace);
-#else
-  return llvm::PointerType::get(llvm::Type::getInt8Ty(Context), AddressSpace);
-#endif
+  return getPointerType(llvm::Type::getInt8Ty(Context), AddressSpace);
+}
+
+static inline llvm::PointerType *getUnqual(llvm::Type *T) {
+  return getPointerType(T);
 }
 
 static inline llvm::StructType *getMPIHelper(llvm::LLVMContext &Context) {
@@ -1237,6 +1293,9 @@ static inline bool hasNoCache(llvm::Value *op) {
     if (auto called = getFunctionFromCall(CB)) {
       if (called->hasFnAttribute("enzyme_nocache"))
         return true;
+    }
+    if (EnzymeJuliaAddrLoad && getFuncNameFromCall(CB) == "julia.gc_loaded") {
+      return true;
     }
   }
   if (auto I = dyn_cast<Instruction>(op))
@@ -1362,6 +1421,8 @@ void ErrorIfRuntimeInactive(llvm::IRBuilder<> &B, llvm::Value *primal,
                             llvm::DebugLoc &&loc, llvm::Instruction *orig);
 
 llvm::Function *GetFunctionFromValue(llvm::Value *fn);
+
+llvm::Function *getFirstFunctionDefinition(llvm::Module &M);
 
 llvm::Value *simplifyLoad(llvm::Value *LI, size_t valSz = 0,
                           size_t preOffset = 0);
@@ -1852,10 +1913,20 @@ static inline bool isNoEscapingAllocation(const llvm::Function *F) {
   case Intrinsic::nvvm_barrier0:
 #else
   case Intrinsic::nvvm_barrier_cta_sync_aligned_all:
+  case Intrinsic::nvvm_barrier_cta_sync_aligned_count:
 #endif
+#if LLVM_VERSION_MAJOR < 22
   case Intrinsic::nvvm_barrier0_popc:
   case Intrinsic::nvvm_barrier0_and:
   case Intrinsic::nvvm_barrier0_or:
+#else
+  case Intrinsic::nvvm_barrier_cta_red_and_aligned_all:
+  case Intrinsic::nvvm_barrier_cta_red_and_aligned_count:
+  case Intrinsic::nvvm_barrier_cta_red_or_aligned_all:
+  case Intrinsic::nvvm_barrier_cta_red_or_aligned_count:
+  case Intrinsic::nvvm_barrier_cta_red_popc_aligned_all:
+  case Intrinsic::nvvm_barrier_cta_red_popc_aligned_count:
+#endif
   case Intrinsic::nvvm_membar_cta:
   case Intrinsic::nvvm_membar_gl:
   case Intrinsic::nvvm_membar_sys:
@@ -2336,8 +2407,112 @@ arePointersGuaranteedNoAlias(llvm::TargetLibraryInfo &TLI, llvm::AAResults &AA,
                              llvm::LoopInfo &LI, llvm::Value *op0,
                              llvm::Value *op1, bool offsetAllowed = false);
 
-// Return true if the module has a triple indicating an nvptx target, false
-// otherwise.
-bool isTargetNVPTX(llvm::Module &M);
+static inline std::tuple<llvm::StringRef, llvm::StringRef, llvm::StringRef>
+tripleSplitDollar(llvm::StringRef caller) {
+  if (!startsWith(caller, "ejl")) {
+    return {"", caller, ""};
+  }
+  auto &&[prefix, todo] = caller.split("$");
+  auto &&[name, postfix] = todo.split("$");
+  return std::make_tuple(prefix, name, postfix);
+}
+
+static inline std::string getRenamedPerCallingConv(llvm::StringRef caller,
+                                                   llvm::StringRef callee) {
+  if (startsWith(caller, "ejl")) {
+    auto &&[prefix, name, postfix] = tripleSplitDollar(caller);
+    return (prefix + "$" + getRenamedPerCallingConv(name, callee) + "$" +
+            postfix)
+        .str();
+  }
+  if (startsWith(caller, "PMPI_")) {
+    assert(startsWith(callee, "MPI"));
+    return ("P" + callee).str();
+  }
+  return callee.str();
+}
+
+static inline std::string convertSRetTypeToString(llvm::Type *T) {
+  return std::to_string((size_t)T);
+}
+
+static inline llvm::Type *convertSRetTypeFromString(llvm::StringRef str) {
+  size_t idx;
+  bool failed = str.consumeInteger(10, idx);
+  (void)failed;
+  assert(!failed);
+  return (llvm::Type *)idx;
+}
+
+static inline size_t convertRRootCountFromString(llvm::StringRef str) {
+  size_t idx;
+  bool failed = str.consumeInteger(10, idx);
+  (void)failed;
+  assert(!failed);
+  return idx;
+}
+
+static inline bool hasSRetRRootsOrUnionSRet(llvm::CallBase *CB) {
+  if (CB->hasStructRetAttr())
+    return true;
+  for (size_t i = 0; i < CB->arg_size(); i++) {
+    if (CB->getAttributeAtIndex(llvm::AttributeList::FirstArgIndex + i,
+                                "enzymejl_sret_union_bytes")
+            .isValid())
+      return true;
+    if (CB->getAttributeAtIndex(llvm::AttributeList::FirstArgIndex + i,
+                                "enzymejl_returnRoots")
+            .isValid())
+      return true;
+  }
+  return false;
+}
+
+enum class SRetRootMovement {
+  SRetPointerToRootPointer = 0,
+  SRetValueToRootPointer = 1,
+  RootPointerToSRetValue = 2,
+  RootPointerToSRetPointer = 3,
+  NullifySRetValue = 4,
+};
+
+llvm::Value *moveSRetToFromRoots(llvm::IRBuilder<> &B, llvm::Type *jltype,
+                                 llvm::Value *sret, llvm::Type *root_ty,
+                                 llvm::Value *rootRet, size_t rootOffset,
+                                 SRetRootMovement direction);
+
+void copyNonJLValueInto(llvm::IRBuilder<> &B, llvm::Type *curType,
+                        llvm::Type *dstType, llvm::Value *dst,
+                        llvm::ArrayRef<unsigned> dstPrefix, llvm::Type *srcType,
+                        llvm::Value *src, llvm::ArrayRef<unsigned> srcPrefix,
+                        bool shouldZero);
+
+static bool anyJuliaObjects(llvm::Type *T) {
+  if (isSpecialPtr(T))
+    return true;
+  if (auto ST = llvm::dyn_cast<llvm::StructType>(T)) {
+    for (auto elem : ST->elements()) {
+      if (anyJuliaObjects(elem))
+        return true;
+    }
+    return false;
+  }
+  if (auto AT = llvm::dyn_cast<llvm::ArrayType>(T)) {
+    return anyJuliaObjects(AT->getElementType());
+  }
+  if (auto VT = llvm::dyn_cast<llvm::VectorType>(T)) {
+    return anyJuliaObjects(VT->getElementType());
+  }
+  return false;
+}
+
+llvm::SmallVector<llvm::Value *, 1> getJuliaObjects(llvm::Value *v,
+                                                    llvm::IRBuilder<> &B);
+
+// Find all user instructions of AI, returning tuples of <instruction, value,
+// byte offet from AI> Unlike a simple get users, this will recurse through any
+// constant gep offsets and casts
+llvm::SmallVector<std::tuple<llvm::Instruction *, llvm::Value *, size_t>, 1>
+findAllUsersOf(llvm::Value *AI);
 
 #endif // ENZYME_UTILS_H

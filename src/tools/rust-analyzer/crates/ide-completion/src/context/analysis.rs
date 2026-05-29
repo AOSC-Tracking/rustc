@@ -1,7 +1,7 @@
 //! Module responsible for analyzing the code surrounding the cursor for completion.
 use std::iter;
 
-use hir::{ExpandResult, InFile, Semantics, Type, TypeInfo, Variant};
+use hir::{EnumVariant, ExpandResult, InFile, Semantics, Type, TypeInfo};
 use ide_db::{
     RootDatabase, active_parameter::ActiveParameter, syntax_helpers::node_ext::find_loops,
 };
@@ -778,6 +778,16 @@ fn expected_type_and_name<'db>(
                     let ty = sema.type_of_pat(&ast::Pat::from(it)).map(TypeInfo::original);
                     (ty, None)
                 },
+                ast::TupleStructPat(it) => {
+                    let fields = it.path().and_then(|path| match sema.resolve_path(&path)? {
+                        hir::PathResolution::Def(hir::ModuleDef::Adt(adt)) => Some(adt.as_struct()?.fields(sema.db)),
+                        hir::PathResolution::Def(hir::ModuleDef::EnumVariant(variant)) => Some(variant.fields(sema.db)),
+                        _ => None,
+                    });
+                    let nr = it.fields().take_while(|it| it.syntax().text_range().end() <= token.text_range().start()).count();
+                    let ty = fields.and_then(|fields| Some(fields.get(nr)?.ty(sema.db).to_type(sema.db)));
+                    (ty, None)
+                },
                 ast::Fn(it) => {
                     cov_mark::hit!(expected_type_fn_ret_with_leading_char);
                     cov_mark::hit!(expected_type_fn_ret_without_leading_char);
@@ -816,6 +826,19 @@ fn expected_type_and_name<'db>(
                     ty.and_then(|ty| ty.original.as_callable(sema.db))
                         .map(|c| (Some(c.return_type()), None))
                         .unwrap_or((None, None))
+                },
+                ast::Variant(it) => {
+                    let is_simple_field = |field: ast::TupleField| {
+                        let Some(ty) = field.ty() else { return true };
+                        matches!(ty, ast::Type::PathType(_)) && ty.generic_arg_list().is_none()
+                    };
+                    let is_simple_variant = matches!(
+                        it.field_list(),
+                        Some(ast::FieldList::TupleFieldList(list))
+                        if list.syntax().children_with_tokens().all(|it| it.kind() != T![,])
+                            && list.fields().next().is_none_or(is_simple_field)
+                    );
+                    (None, it.name().filter(|_| is_simple_variant).map(NameOrNameRef::Name))
                 },
                 ast::Stmt(_) => (None, None),
                 ast::Item(_) => (None, None),
@@ -944,10 +967,10 @@ fn classify_name_ref<'db>(
     let field_expr_handle = |receiver, node| {
         let receiver = find_opt_node_in_file(original_file, receiver);
         let receiver_is_ambiguous_float_literal = match &receiver {
-            Some(ast::Expr::Literal(l)) => matches! {
-                l.kind(),
-                ast::LiteralKind::FloatNumber { .. } if l.syntax().last_token().is_some_and(|it| it.text().ends_with('.'))
-            },
+            Some(ast::Expr::Literal(l)) => {
+                matches!(l.kind(), ast::LiteralKind::FloatNumber { .. })
+                    && l.syntax().last_token().is_some_and(|it| it.text().ends_with('.'))
+            }
             _ => false,
         };
 
@@ -1139,7 +1162,7 @@ fn classify_name_ref<'db>(
                                     hir::ModuleDef::Adt(adt) => {
                                         sema.source(adt)?.value.generic_param_list()
                                     }
-                                    hir::ModuleDef::Variant(variant) => {
+                                    hir::ModuleDef::EnumVariant(variant) => {
                                         sema.source(variant.parent_enum(sema.db))?.value.generic_param_list()
                                     }
                                     hir::ModuleDef::Trait(trait_) => {
@@ -1250,15 +1273,19 @@ fn classify_name_ref<'db>(
                     let original = ast::Const::cast(name.syntax().parent()?)?;
                     TypeLocation::TypeAscription(TypeAscriptionTarget::Const(original.body()))
                 },
-                ast::RetType(it) => {
-                    it.thin_arrow_token()?;
+                ast::Static(it) => {
+                    let name = find_opt_node_in_file(original_file, it.name())?;
+                    let original = ast::Static::cast(name.syntax().parent()?)?;
+                    TypeLocation::TypeAscription(TypeAscriptionTarget::Const(original.body()))
+                },
+                ast::RetType(_) => {
                     let parent = match ast::Fn::cast(parent.parent()?) {
                         Some(it) => it.param_list(),
                         None => ast::ClosureExpr::cast(parent.parent()?)?.param_list(),
                     };
 
                     let parent = find_opt_node_in_file(original_file, parent)?.syntax().parent()?;
-                    TypeLocation::TypeAscription(TypeAscriptionTarget::RetType(match_ast! {
+                    let body = match_ast! {
                         match parent {
                             ast::ClosureExpr(it) => {
                                 it.body()
@@ -1268,7 +1295,9 @@ fn classify_name_ref<'db>(
                             },
                             _ => return None,
                         }
-                    }))
+                    };
+                    let item = ast::Fn::cast(parent);
+                    TypeLocation::TypeAscription(TypeAscriptionTarget::RetType { body, item })
                 },
                 ast::Param(it) => {
                     it.colon_token()?;
@@ -1305,14 +1334,14 @@ fn classify_name_ref<'db>(
 
     let make_path_kind_expr = |expr: ast::Expr| {
         let it = expr.syntax();
+        let prev_token = iter::successors(it.first_token(), |it| it.prev_token())
+            .skip(1)
+            .find(|it| !it.kind().is_trivia());
         let in_block_expr = is_in_block(it);
         let (in_loop_body, innermost_breakable) = is_in_breakable(it).unzip();
         let after_if_expr = is_after_if_expr(it.clone());
-        let ref_expr_parent =
-            path.as_single_name_ref().and_then(|_| it.parent()).and_then(ast::RefExpr::cast);
-        let after_amp = non_trivia_sibling(it.clone().into(), Direction::Prev)
-            .map(|it| it.kind() == SyntaxKind::AMP)
-            .unwrap_or(false);
+        let after_amp = prev_token.as_ref().is_some_and(|it| it.kind() == SyntaxKind::AMP);
+        let ref_expr_parent = prev_token.and_then(|it| it.parent()).and_then(ast::RefExpr::cast);
         let (innermost_ret_ty, self_param) = {
             let find_ret_ty = |it: SyntaxNode| {
                 if let Some(item) = ast::Item::cast(it.clone()) {
@@ -1496,7 +1525,7 @@ fn classify_name_ref<'db>(
                         | SyntaxKind::RECORD_FIELD
                 )
             })
-            .and_then(|_| nameref.as_ref()?.syntax().ancestors().find_map(ast::Adt::cast))
+            .and_then(|_| find_node_at_offset::<ast::Adt>(original_file, original_offset))
             .and_then(|adt| sema.derive_helpers_in_scope(&adt))
             .unwrap_or_default();
         Some(PathKind::Attr { attr_ctx: AttrCtx { kind, annotated_item_kind, derive_helpers } })
@@ -1810,7 +1839,7 @@ fn pattern_context_for(
                                         });
 
                                         (!variant_already_present).then_some(*variant)
-                                    }).collect::<Vec<Variant>>())
+                                    }).collect::<Vec<EnumVariant>>())
                         });
 
                         if let Some(missing_variants_) = missing_variants_opt {
@@ -2030,9 +2059,10 @@ fn is_after_if_expr(node: SyntaxNode) -> bool {
         Some(stmt) => stmt.syntax().clone(),
         None => node,
     };
-    let prev_sibling =
-        non_trivia_sibling(node.into(), Direction::Prev).and_then(NodeOrToken::into_node);
-    iter::successors(prev_sibling, |it| it.last_child_or_token()?.into_node())
+    let Some(prev_token) = previous_non_trivia_token(node) else { return false };
+    prev_token
+        .parent_ancestors()
+        .take_while(|it| it.text_range().end() == prev_token.text_range().end())
         .find_map(ast::IfExpr::cast)
         .is_some()
 }

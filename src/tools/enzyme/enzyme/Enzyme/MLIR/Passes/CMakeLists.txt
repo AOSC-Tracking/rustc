@@ -4,17 +4,23 @@ add_public_tablegen_target(MLIREnzymePassIncGen)
 add_mlir_doc(Passes EnzymePasses ./ -gen-pass-doc)
 
 add_mlir_dialect_library(MLIREnzymeTransforms
+    LowerAffineAtomicRmwPass.cpp
     EnzymeMLIRPass.cpp
     ProbProgMLIRPass.cpp
     EnzymeBatchPass.cpp
+    EnzymeBatchDiffPass.cpp
+    EnzymeBatchToTensorPass.cpp
     EnzymeWrapPass.cpp
     InlineEnzymeRegions.cpp
+    HoistEnzymeRegions.cpp
+    LowerLLVMExtPass.cpp
     PrintActivityAnalysis.cpp
     PrintAliasAnalysis.cpp
     EnzymeToMemRef.cpp
     SimplifyMath.cpp
     AddToOpToIndexAndLoad.cpp
     AddToOpToSplit.cpp
+    RaiseLLVMExtPass.cpp
     RemovalUtils.cpp
     RemoveUnusedEnzymeOps.cpp
     SimplifyMemrefCache.cpp
@@ -25,6 +31,7 @@ add_mlir_dialect_library(MLIREnzymeTransforms
 
   DEPENDS
   MLIREnzymePassIncGen
+  MLIREnzymeEnumsIncGen
 
   LINK_LIBS PUBLIC
   MLIRAffineDialect

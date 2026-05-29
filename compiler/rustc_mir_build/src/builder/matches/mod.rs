@@ -5,13 +5,12 @@
 //! This also includes code for pattern bindings in `let` statements and
 //! function parameters.
 
-use std::assert_matches::debug_assert_matches;
 use std::borrow::Borrow;
-use std::mem;
 use std::sync::Arc;
+use std::{debug_assert_matches, mem};
 
 use itertools::{Itertools, Position};
-use rustc_abi::{FIRST_VARIANT, VariantIdx};
+use rustc_abi::{FIRST_VARIANT, FieldIdx, VariantIdx};
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_hir::{BindingMode, ByRef, LangItem, LetStmt, LocalSource, Node};
@@ -909,7 +908,11 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             | PatKind::Never
             | PatKind::Error(_) => {}
 
-            PatKind::Deref { ref subpattern } => {
+            PatKind::Deref { pin: Pinnedness::Pinned, ref subpattern } => {
+                // Project into the `Pin(_)` struct, then deref the inner `&` or `&mut`.
+                visit_subpat(self, subpattern, &user_tys.leaf(FieldIdx::ZERO).deref(), f);
+            }
+            PatKind::Deref { pin: Pinnedness::Not, ref subpattern } => {
                 visit_subpat(self, subpattern, &user_tys.deref(), f);
             }
 
@@ -940,6 +943,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 for subpattern in pats.iter() {
                     visit_subpat(self, subpattern, user_tys, f);
                 }
+            }
+            PatKind::Guard { ref subpattern, .. } => {
+                visit_subpat(self, subpattern, user_tys, f);
             }
         }
     }
@@ -1271,7 +1277,7 @@ enum PatConstKind {
 /// tested, and a test to perform on that place.
 ///
 /// Each node also has a list of subpairs (possibly empty) that must also match,
-/// and a reference to the THIR pattern it represents.
+/// and some additional information from the THIR pattern it represents.
 #[derive(Debug, Clone)]
 pub(crate) struct MatchPairTree<'tcx> {
     /// This place...
@@ -1295,9 +1301,7 @@ pub(crate) struct MatchPairTree<'tcx> {
     /// that tests its field for the value `3`.
     subpairs: Vec<Self>,
 
-    /// Type field of the pattern this node was created from.
-    pattern_ty: Ty<'tcx>,
-    /// Span field of the pattern this node was created from.
+    /// Span field of the THIR pattern this node was created from.
     pattern_span: Span,
 }
 
@@ -2937,12 +2941,13 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
         match pat.ctor() {
             Constructor::Variant(variant_index) => {
-                let ValTreeKind::Branch(box [actual_variant_idx]) = *valtree else {
+                let ValTreeKind::Branch(branch) = *valtree else {
                     bug!("malformed valtree for an enum")
                 };
-
-                let ValTreeKind::Leaf(actual_variant_idx) = *actual_variant_idx.to_value().valtree
-                else {
+                if branch.len() != 1 {
+                    bug!("malformed valtree for an enum")
+                };
+                let ValTreeKind::Leaf(actual_variant_idx) = **branch[0].to_value().valtree else {
                     bug!("malformed valtree for an enum")
                 };
 

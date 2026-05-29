@@ -11,6 +11,9 @@ use std::thread::{self, JoinHandle};
 
 use anyhow::{Context as _, Error};
 use cargo_util::ProcessBuilder;
+use cargo_util_terminal::report::Group;
+use cargo_util_terminal::report::Level;
+use cargo_util_terminal::report::Origin;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -112,7 +115,7 @@ impl<'a> DiagnosticPrinter<'a> {
                 }
                 self.gctx.shell().status(
                     "Migrating",
-                    &format!("{} from {} edition to {}", file, from_edition, to_edition),
+                    &format!("{file} from {from_edition} edition to {to_edition}"),
                 )
             }
             Message::Fixing { file } => self
@@ -121,23 +124,21 @@ impl<'a> DiagnosticPrinter<'a> {
                 .verbose(|shell| shell.status("Fixing", file)),
             Message::Fixed { file, fixes } => {
                 let msg = if *fixes == 1 { "fix" } else { "fixes" };
-                let msg = format!("{} ({} {})", file, fixes, msg);
+                let msg = format!("{file} ({fixes} {msg})");
                 self.gctx.shell().status("Fixed", msg)
             }
             Message::ReplaceFailed { file, message } => {
-                let msg = format!("error applying suggestions to `{}`\n", file);
-                self.gctx.shell().warn(&msg)?;
-                write!(
-                    self.gctx.shell().err(),
-                    "The full error message was:\n\n> {}\n\n",
-                    message,
-                )?;
                 let issue_link = get_bug_report_url(self.workspace_wrapper);
-                write!(
-                    self.gctx.shell().err(),
-                    "{}",
-                    gen_please_report_this_bug_text(issue_link)
-                )?;
+
+                let report = &[
+                    Level::ERROR
+                        .secondary_title("error applying suggestions")
+                        .element(Origin::path(file))
+                        .element(Level::ERROR.with_name("cause").message(message)),
+                    gen_please_report_this_bug_group(issue_link),
+                    gen_suggest_broken_code_group(),
+                ];
+                self.gctx.shell().print_report(report, false)?;
                 Ok(())
             }
             Message::FixFailed {
@@ -146,53 +147,41 @@ impl<'a> DiagnosticPrinter<'a> {
                 errors,
                 abnormal_exit,
             } => {
-                if let Some(ref krate) = *krate {
-                    self.gctx.shell().warn(&format!(
-                        "failed to automatically apply fixes suggested by rustc \
-                         to crate `{}`",
-                        krate,
-                    ))?;
+                let to_crate = if let Some(ref krate) = *krate {
+                    format!(" to crate `{krate}`",)
                 } else {
-                    self.gctx
-                        .shell()
-                        .warn("failed to automatically apply fixes suggested by rustc")?;
-                }
-                if !files.is_empty() {
-                    writeln!(
-                        self.gctx.shell().err(),
-                        "\nafter fixes were automatically applied the compiler \
-                         reported errors within these files:\n"
-                    )?;
-                    for file in files {
-                        writeln!(self.gctx.shell().err(), "  * {}", file)?;
-                    }
-                    writeln!(self.gctx.shell().err())?;
-                }
+                    "".to_owned()
+                };
                 let issue_link = get_bug_report_url(self.workspace_wrapper);
-                write!(
-                    self.gctx.shell().err(),
-                    "{}",
-                    gen_please_report_this_bug_text(issue_link)
-                )?;
-                if !errors.is_empty() {
-                    writeln!(
-                        self.gctx.shell().err(),
-                        "The following errors were reported:"
-                    )?;
-                    for error in errors {
-                        write!(self.gctx.shell().err(), "{}", error)?;
-                        if !error.ends_with('\n') {
-                            writeln!(self.gctx.shell().err())?;
-                        }
-                    }
-                }
-                if let Some(exit) = abnormal_exit {
-                    writeln!(self.gctx.shell().err(), "rustc exited abnormally: {}", exit)?;
-                }
-                writeln!(
-                    self.gctx.shell().err(),
-                    "Original diagnostics will follow.\n"
-                )?;
+
+                let cause_message = if !errors.is_empty() {
+                    Some(errors.join("\n").trim().to_owned())
+                } else {
+                    None
+                };
+
+                let report = &[
+                    Level::ERROR
+                        .secondary_title(format!("errors present after applying fixes{to_crate}"))
+                        .elements(files.iter().map(|f| Origin::path(f)))
+                        .elements(
+                            cause_message
+                                .into_iter()
+                                .map(|err| Level::ERROR.with_name("cause").message(err)),
+                        )
+                        .elements(abnormal_exit.iter().map(|exit| {
+                            Level::ERROR
+                                .with_name("cause")
+                                .message(format!("rustc exited abnormally: {exit}"))
+                        })),
+                    gen_please_report_this_bug_group(issue_link),
+                    gen_suggest_broken_code_group(),
+                    Group::with_title(
+                        Level::NOTE.secondary_title("original diagnostics will follow:"),
+                    ),
+                ];
+
+                self.gctx.shell().print_report(report, false)?;
                 Ok(())
             }
             Message::EditionAlreadyEnabled { message, edition } => {
@@ -205,7 +194,7 @@ impl<'a> DiagnosticPrinter<'a> {
                     edition: *edition,
                 }) {
                     self.gctx.shell().warn(&format!("\
-{}
+{message}
 
 If you are trying to migrate from the previous edition ({prev_edition}), the
 process requires following these steps:
@@ -218,7 +207,7 @@ process requires following these steps:
 More details may be found at
 https://doc.rust-lang.org/edition-guide/editions/transitioning-an-existing-project-to-a-new-edition.html
 ",
-                        message, this_edition=edition, prev_edition=edition.previous().unwrap()
+                        this_edition=edition, prev_edition=edition.previous().unwrap()
                     ))
                 } else {
                     self.gctx.shell().warn(message)
@@ -228,18 +217,16 @@ https://doc.rust-lang.org/edition-guide/editions/transitioning-an-existing-proje
     }
 }
 
-fn gen_please_report_this_bug_text(url: &str) -> String {
-    format!(
-        "This likely indicates a bug in either rustc or cargo itself,\n\
-     and we would appreciate a bug report! You're likely to see\n\
-     a number of compiler warnings after this message which cargo\n\
-     attempted to fix but failed. If you could open an issue at\n\
-     {}\n\
-     quoting the full output of this command we'd be very appreciative!\n\
-     Note that you may be able to make some more progress in the near-term\n\
-     fixing code with the `--broken-code` flag\n\n\
-     ",
-        url
+fn gen_please_report_this_bug_group(url: &str) -> Group<'static> {
+    Group::with_title(Level::HELP.secondary_title(format!(
+        "to report this as a bug, open an issue at {url}, quoting the full output of this command"
+    )))
+}
+
+fn gen_suggest_broken_code_group() -> Group<'static> {
+    Group::with_title(
+        Level::HELP
+            .secondary_title("to possibly apply more fixes, pass in the `--broken-code` flag"),
     )
 }
 
@@ -304,11 +291,11 @@ impl RustfixDiagnosticServer {
             let mut client = BufReader::new(client);
             let mut s = String::new();
             if let Err(e) = client.read_to_string(&mut s) {
-                warn!("diagnostic server failed to read: {}", e);
+                warn!("diagnostic server failed to read: {e}");
             } else {
                 match serde_json::from_str(&s) {
                     Ok(message) => on_message(message),
-                    Err(e) => warn!("invalid diagnostics message: {}", e),
+                    Err(e) => warn!("invalid diagnostics message: {e}"),
                 }
             }
             // The client should be kept alive until after `on_message` is

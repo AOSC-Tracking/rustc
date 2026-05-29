@@ -54,9 +54,9 @@ def ControlFlowAutoDiffOpInterface
         terminators.
   }];
   let cppNamespace = "::mlir::enzyme";
-  let methods = [
-    InterfaceMethod<
-      /*desc=*/[{
+  let methods =
+      [InterfaceMethod<
+           /*desc=*/[{
         Creates a copy of this operation additionally carrying required shadow
         values along control flow edges using the given builder. The `original`
         is the operation in the original primal code prior to differentiation,
@@ -65,15 +65,29 @@ def ControlFlowAutoDiffOpInterface
         operands usable in the cloned function and can be fed to the Adaptor
         constructor.
       }],
-      /*retTy=*/"::mlir::Operation *",
-      /*methodName=*/"createWithShadows",
-      /*args=*/(ins "::mlir::OpBuilder &":$builder,
-                    "::mlir::enzyme::MGradientUtils *":$gutils,
-                    "::mlir::Operation *":$original, 
-                    "::mlir::ValueRange":$remappedOperands,
-                    "::mlir::TypeRange":$returnTypes)
-    >
-  ];
+           /*retTy=*/"::mlir::Operation *",
+           /*methodName=*/"createWithShadows",
+           /*args=*/
+           (ins "::mlir::OpBuilder &":$builder,
+               "::mlir::enzyme::MGradientUtils *":$gutils,
+               "::mlir::Operation *":$original,
+               "::mlir::ValueRange":$remappedOperands,
+               "::mlir::TypeRange":$returnTypes)>,
+
+       InterfaceMethod<
+           /*desc=*/[{
+      Return entry successor operands for the given RegionBranchOpInterface and RegionSuccessor.
+      The default implementation here should work for most implementations of RegionBranchOpInterface,
+      but there are some that don't implement this method.
+    }],
+           /*retTy=*/"::mlir::OperandRange",
+           /*methodName=*/"getSuccessorOperands",
+           /*args=*/
+           (ins "::mlir::RegionBranchOpInterface &":$regionBranchOp,
+               "::mlir::RegionSuccessor const&":$successor),
+           /*methodBody=*/[{}],
+           /*defaultImplementation*/
+           [{return regionBranchOp.getEntrySuccessorOperands(successor);}]>];
 }
 
 def ReverseAutoDiffOpInterface : OpInterface<"ReverseAutoDiffOpInterface"> {
@@ -215,6 +229,64 @@ def MathSimplifyInterface : OpInterface<"MathSimplifyInterface"> {
     /*retTy=*/"::mlir::LogicalResult",
     /*methodName=*/"simplifyMath",
     /*args=*/(ins "::mlir::PatternRewriter &": $rewriter)
+    >
+  ];
+}
+
+def AutoDiffFunctionInterface : OpInterface<"AutoDiffFunctionInterface"> {
+  let description = [{
+    A function operation which can be automatically differentiated.
+  }];
+  let cppNamespace = "::mlir::enzyme";
+
+  let methods = [
+    InterfaceMethod<
+    /*desc=*/[{
+      Transform result types.
+    }],
+    /*retTy=*/"void",
+    /*methodName=*/"transformResultTypes",
+    /*args=*/(ins "SmallVectorImpl<::mlir::Type> &" : $resultTypes)
+    >,
+    InterfaceMethod<
+    /*desc=*/[{
+      Get function type attr name.
+    }],
+    /*retTy=*/"StringRef",
+    /*methodName=*/"getFunctionTypeAttrName",
+    /*args=*/(ins),
+    /*methodBody=*/"",
+    /*defaultImplementation=*/[{
+      return $_op.getFunctionTypeAttrName();
+    }]
+    >,
+    InterfaceMethod<
+    /*desc=*/[{
+      Get arg attrs type attr name.
+    }],
+    /*retTy=*/"StringRef",
+    /*methodName=*/"getArgAttrsAttrName",
+    /*args=*/(ins),
+    /*methodBody=*/"",
+    /*defaultImplementation=*/[{
+      return $_op.getArgAttrsAttrName();
+    }]
+    >,
+    InterfaceMethod<
+    /*desc=*/[{
+      Generate call.
+    }],
+    /*retTy=*/"::mlir::Operation *",
+    /*methodName=*/"createCall",
+    /*args=*/(ins "::mlir::OpBuilder &" : $builder, "::mlir::Location" : $loc, "::mlir::ValueRange" : $args)
+    >,
+    InterfaceMethod<
+    /*desc=*/[{
+      Create return.
+    }],
+    /*retTy=*/"::mlir::Operation *",
+    /*methodName=*/"createReturn",
+    /*args=*/(ins "::mlir::OpBuilder &" : $builder, "::mlir::Location" : $loc, "::mlir::ValueRange" : $args)
     >
   ];
 }

@@ -46,15 +46,12 @@ use crate::pin::UnsafePinned;
 /// marker_impls! {
 ///     MarkerTrait for
 ///         u8, i8,
-///         {T: ?Sized} *const T,
-///         {T: ?Sized} *mut T,
+///         {T: PointeeSized} *const T,
+///         {T: PointeeSized} *mut T,
 ///         {T: MarkerTrait} PhantomData<T>,
 ///         u32,
 /// }
 /// ```
-#[unstable(feature = "internal_impls_macro", issue = "none")]
-// Allow implementations of `UnsizedConstParamTy` even though std cannot use that feature.
-#[allow_internal_unstable(unsized_const_params)]
 macro marker_impls {
     ( $(#[$($meta:tt)*])* $Trait:ident for $({$($bounds:tt)*})? $T:ty $(, $($rest:tt)*)? ) => {
         $(#[$($meta)*])* impl< $($($bounds)*)? > $Trait for $T {}
@@ -153,7 +150,7 @@ unsafe impl<T: Sync + PointeeSized> Send for &T {}
 #[fundamental] // for Default, for example, which requires that `[T]: !Default` be evaluatable
 #[rustc_specialization_trait]
 #[rustc_deny_explicit_impl]
-#[rustc_do_not_implement_via_object]
+#[rustc_dyn_incompatible_trait]
 // `Sized` being coinductive, despite having supertraits, is okay as there are no user-written impls,
 // and we know that the supertraits are always implemented if the subtrait is just by looking at
 // the builtin impls.
@@ -172,7 +169,6 @@ pub trait Sized: MetaSized {
 #[fundamental]
 #[rustc_specialization_trait]
 #[rustc_deny_explicit_impl]
-#[rustc_do_not_implement_via_object]
 // `MetaSized` being coinductive, despite having supertraits, is okay for the same reasons as
 // `Sized` above.
 #[rustc_coinductive]
@@ -190,7 +186,6 @@ pub trait MetaSized: PointeeSized {
 #[fundamental]
 #[rustc_specialization_trait]
 #[rustc_deny_explicit_impl]
-#[rustc_do_not_implement_via_object]
 #[rustc_coinductive]
 pub trait PointeeSized {
     // Empty
@@ -236,7 +231,7 @@ pub trait PointeeSized {
 #[unstable(feature = "unsize", issue = "18598")]
 #[lang = "unsize"]
 #[rustc_deny_explicit_impl]
-#[rustc_do_not_implement_via_object]
+#[rustc_dyn_incompatible_trait]
 pub trait Unsize<T: PointeeSized>: PointeeSized {
     // Empty.
 }
@@ -455,9 +450,6 @@ marker_impls! {
 /// [impls]: #implementors
 #[stable(feature = "rust1", since = "1.0.0")]
 #[lang = "copy"]
-// This is unsound, but required by `hashbrown`
-// FIXME(joboet): change `hashbrown` to use `TrivialClone`
-#[rustc_unsafe_specialization_marker]
 #[rustc_diagnostic_item = "Copy"]
 pub trait Copy: Clone {
     // Empty.
@@ -512,7 +504,7 @@ impl<T: PointeeSized> Copy for &T {}
 #[unstable(feature = "bikeshed_guaranteed_no_drop", issue = "none")]
 #[lang = "bikeshed_guaranteed_no_drop"]
 #[rustc_deny_explicit_impl]
-#[rustc_do_not_implement_via_object]
+#[rustc_dyn_incompatible_trait]
 #[doc(hidden)]
 pub trait BikeshedGuaranteedNoDrop {}
 
@@ -887,7 +879,7 @@ impl<T: PointeeSized> StructuralPartialEq for PhantomData<T> {}
 )]
 #[lang = "discriminant_kind"]
 #[rustc_deny_explicit_impl]
-#[rustc_do_not_implement_via_object]
+#[rustc_dyn_incompatible_trait]
 pub trait DiscriminantKind {
     /// The type of the discriminant, which must satisfy the trait
     /// bounds required by `mem::Discriminant`.
@@ -932,14 +924,20 @@ marker_impls! {
 /// This is part of [RFC 3467](https://rust-lang.github.io/rfcs/3467-unsafe-pinned.html), and is
 /// tracked by [#125735](https://github.com/rust-lang/rust/issues/125735).
 #[lang = "unsafe_unpin"]
-pub(crate) unsafe auto trait UnsafeUnpin {}
+#[unstable(feature = "unsafe_unpin", issue = "125735")]
+pub unsafe auto trait UnsafeUnpin {}
 
-impl<T: ?Sized> !UnsafeUnpin for UnsafePinned<T> {}
-unsafe impl<T: ?Sized> UnsafeUnpin for PhantomData<T> {}
-unsafe impl<T: ?Sized> UnsafeUnpin for *const T {}
-unsafe impl<T: ?Sized> UnsafeUnpin for *mut T {}
-unsafe impl<T: ?Sized> UnsafeUnpin for &T {}
-unsafe impl<T: ?Sized> UnsafeUnpin for &mut T {}
+#[unstable(feature = "unsafe_unpin", issue = "125735")]
+impl<T: PointeeSized> !UnsafeUnpin for UnsafePinned<T> {}
+marker_impls! {
+#[unstable(feature = "unsafe_unpin", issue = "125735")]
+    unsafe UnsafeUnpin for
+        {T: PointeeSized} PhantomData<T>,
+        {T: PointeeSized} *const T,
+        {T: PointeeSized} *mut T,
+        {T: PointeeSized} &T,
+        {T: PointeeSized} &mut T,
+}
 
 /// Types that do not require any pinning guarantees.
 ///
@@ -1032,6 +1030,7 @@ impl !Unpin for PhantomPinned {}
 // continue working. Ideally PhantomPinned could just wrap an `UnsafePinned<()>` to get the same
 // effect, but we can't add a new field to an already stable unit struct -- that would be a breaking
 // change.
+#[unstable(feature = "unsafe_unpin", issue = "125735")]
 impl !UnsafeUnpin for PhantomPinned {}
 
 marker_impls! {
@@ -1055,9 +1054,9 @@ marker_impls! {
 #[unstable(feature = "const_destruct", issue = "133214")]
 #[rustc_const_unstable(feature = "const_destruct", issue = "133214")]
 #[lang = "destruct"]
-#[rustc_on_unimplemented(message = "can't drop `{Self}`", append_const_msg)]
+#[diagnostic::on_unimplemented(message = "can't drop `{Self}`")]
 #[rustc_deny_explicit_impl]
-#[rustc_do_not_implement_via_object]
+#[rustc_dyn_incompatible_trait]
 pub const trait Destruct: PointeeSized {}
 
 /// A marker for tuple types.
@@ -1068,7 +1067,7 @@ pub const trait Destruct: PointeeSized {}
 #[lang = "tuple_trait"]
 #[diagnostic::on_unimplemented(message = "`{Self}` is not a tuple")]
 #[rustc_deny_explicit_impl]
-#[rustc_do_not_implement_via_object]
+#[rustc_dyn_incompatible_trait]
 pub trait Tuple {}
 
 /// A marker for types which can be used as types of `const` generic parameters.
@@ -1078,7 +1077,7 @@ pub trait Tuple {}
 /// that all fields are also `ConstParamTy`, which implies that recursively, all fields
 /// are `StructuralPartialEq`.
 #[lang = "const_param_ty"]
-#[unstable(feature = "unsized_const_params", issue = "95174")]
+#[unstable(feature = "const_param_ty_trait", issue = "95174", implied_by = "unsized_const_params")]
 #[diagnostic::on_unimplemented(message = "`{Self}` can't be used as a const parameter type")]
 #[allow(multiple_supertrait_upcastable)]
 // We name this differently than the derive macro so that the `adt_const_params` can
@@ -1088,8 +1087,8 @@ pub trait ConstParamTy_: StructuralPartialEq + Eq {}
 
 /// Derive macro generating an impl of the trait `ConstParamTy`.
 #[rustc_builtin_macro]
-#[allow_internal_unstable(unsized_const_params)]
-#[unstable(feature = "adt_const_params", issue = "95174")]
+#[allow_internal_unstable(const_param_ty_trait)]
+#[unstable(feature = "min_adt_const_params", issue = "154042", implied_by = "adt_const_params")]
 pub macro ConstParamTy($item:item) {
     /* compiler built-in */
 }
@@ -1126,7 +1125,7 @@ marker_impls! {
 )]
 #[lang = "fn_ptr_trait"]
 #[rustc_deny_explicit_impl]
-#[rustc_do_not_implement_via_object]
+#[rustc_dyn_incompatible_trait]
 pub trait FnPtr: Copy + Clone {
     /// Returns the address of the function pointer.
     #[lang = "fn_ptr_addr"]

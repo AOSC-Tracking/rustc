@@ -19,7 +19,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 if (NOT DEFINED ENZYME_CONFIGURED_WITH_PRESETS)
-  set(CMAKE_CXX_FLAGS "-Wall -fno-rtti ${CMAKE_CXX_FLAGS} -Werror=unused-variable -Werror=dangling-else -Werror=unused-but-set-variable -Werror=return-type -Werror=nonnull -Werror=unused-result -Werror=reorder -Werror=switch")
+  set(CMAKE_CXX_FLAGS "-Wall -fno-rtti ${CMAKE_CXX_FLAGS} -Werror=implicit-fallthrough -Werror=unused-variable -Werror=dangling-else -Werror=unused-but-set-variable -Werror=return-type -Werror=nonnull -Werror=unused-result -Werror=reorder -Werror=switch")
   set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g -ggdb")
   set(CMAKE_CXX_FLAGS_RELEASE "-O2")
   set(CMAKE_CXX_FLAGS_DEBUG  "-O0 -g -ggdb -fno-omit-frame-pointer")
@@ -32,14 +32,19 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(ENZYME_ENABLE_PLUGINS "Enable Clang/LLD/Opt plugins" ON)
+option(ENZYME_ENABLE_BENCHMARKS "Enable benchmarks" OFF)
 option(ENZYME_BC_LOADER "Enable bitcode loader" ON)
 option(ENZYME_CLANG "Build enzyme clang plugin" ON)
 option(ENZYME_FLANG "Build enzyme flang symlink" OFF)
 option(ENZYME_MLIR "Build enzyme mlir plugin" OFF)
 option(ENZYME_IFX "Enable enzyme support for the Intel Fortran compiler IFX" OFF)
 option(ENZYME_EXTERNAL_SHARED_LIB "Build external shared library" OFF)
+option(ENZYME_APPLE_DYNAMIC_LOOKUP
+  "On Apple, link Enzyme shared library with -flat_namespace/-undefined,dynamic_lookup instead of linking LLVM"
+  OFF)
 option(ENZYME_STATIC_LIB "Build static library" OFF)
 option(ENZYME_WARN_COMPILER "Warn if enzyme detects potentially incompatible compiler" ON)
+option(ENZYME_ENABLE_REACTANT "Build support library for Reactant C++ frontend" OFF)
 set(ENZYME_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(ENZYME_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
 list(APPEND CMAKE_MODULE_PATH "${ENZYME_SOURCE_DIR}/cmake/modules")
@@ -79,10 +84,11 @@ if (NOT LLVM_ENABLE_PLUGINS)
   set(ENZYME_ENABLE_PLUGINS OFF)
 endif()
 
-if ((NOT ENZYME_EXTERNAL_SHARED_LIB) AND (NOT ENZYME_ENABLE_PLUGINS))
+if ((NOT ENZYME_EXTERNAL_SHARED_LIB) AND (NOT ENZYME_ENABLE_PLUGINS) AND (NOT ENZYME_ENABLE_REACTANT))
   message("ENZYME_EXTERNAL_SHARED_LIB OFF")
   message("ENZYME_ENABLE_PLUGINS OFF")
-  message(SEND_ERROR "You have selected a build without creating the Enzyme plugin, nor Enzyme as a shared library -- and nothing will be built.")
+  message("ENZYME_ENABLE_REACTANT OFF")
+  message(SEND_ERROR "You have selected a build without creating the Enzyme plugin, nor Enzyme as a shared library, nor the support library for Reactant C++ -- and nothing will be built.")
 endif()
 
 if (NOT DEFINED LLVM_EXTERNAL_LIT)
@@ -296,8 +302,18 @@ endif()
 
 # The benchmarks data are not in git-exported source archives to minimize size.
 # Only add the benchmarks if the directory exists.
-if (ENZYME_ENABLE_PLUGINS AND (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks"))
-    add_subdirectory(benchmarks)
+if (ENZYME_ENABLE_PLUGINS AND ENZYME_ENABLE_BENCHMARKS)
+	include (FetchContent)
+	FetchContent_Declare(cpu_benchmarks
+	    GIT_REPOSITORY https://github.com/EnzymeAD/enzyme-benchmarks
+	    GIT_TAG        "9fa1579296b28d9642f8b69a6fffb753211c3f88"
+	)
+
+	if(NOT cpu_benchmarks_POPULATED)
+	  FetchContent_Populate(cpu_benchmarks)
+
+	  add_subdirectory(${cpu_benchmarks_SOURCE_DIR} ${cpu_benchmarks_BINARY_DIR} EXCLUDE_FROM_ALL)
+	endif()
 endif()
 
 # Make relative paths absolute (needed later on)
@@ -360,6 +376,11 @@ export(TARGETS LLDEnzymePrintFlags
     APPEND FILE "${PROJECT_BINARY_DIR}/EnzymeTargets.cmake")
 export(TARGETS LLDEnzymeNoStrictAliasingFlags
     APPEND FILE "${PROJECT_BINARY_DIR}/EnzymeTargets.cmake")
+
+if (ENZYME_ENABLE_REACTANT)
+  export(TARGETS EnzymeReactantSupport-${LLVM_VERSION_MAJOR}
+    APPEND FILE "${PROJECT_BINARY_DIR}/EnzymeTargets.cmake")
+endif()
 
 export(PACKAGE Enzyme)
 

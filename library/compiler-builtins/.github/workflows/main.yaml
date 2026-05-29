@@ -13,7 +13,7 @@ env:
   RUSTDOCFLAGS: -Dwarnings
   RUSTFLAGS: -Dwarnings
   RUST_BACKTRACE: full
-  BENCHMARK_RUSTC: nightly-2025-12-01 # Pin the toolchain for reproducable results
+  BENCHMARK_RUSTC: nightly-2026-02-10 # Pin the toolchain for reproducable results
 
 jobs:
   # Determine which tests should be run based on changed files.
@@ -228,7 +228,27 @@ jobs:
         # poorly with build scripts)
         cargo build -p compiler_builtins -p libm \
           --target etc/thumbv7em-none-eabi-renamed.json \
-          -Zbuild-std=core
+          -Zbuild-std=core \
+          -Zjson-target-spec
+
+  # FIXME: move this target to test job once https://github.com/rust-lang/rust/pull/150138 merged.
+  build-thumbv6k:
+    name: Build thumbv6k
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust
+      run: |
+        rustup update nightly --no-self-update
+        rustup default nightly
+        rustup component add rust-src
+    - uses: Swatinem/rust-cache@v2
+    - run: |
+        cargo build -p compiler_builtins -p libm \
+          --target etc/thumbv6-none-eabi.json \
+          -Zbuild-std=core \
+          -Zjson-target-spec
 
   benchmarks:
     name: Benchmarks
@@ -267,7 +287,7 @@ jobs:
         path: ${{ env.BASELINE_NAME }}.tar.xz
 
     - name: Run wall time benchmarks
-      run: ./ci/bench-runtime.sh
+      run: ./ci/bench-walltime.sh
 
     - name: Print test logs if available
       if: always()
@@ -281,7 +301,9 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Install Rust (rustup)
-      run: rustup update nightly --no-self-update && rustup default nightly
+      # FIXME(ci): not working in the 2026-02-11 nightly
+      # https://rust-lang.zulipchat.com/#narrow/channel/269128-miri/topic/build-script-build.20contains.20outdated.20or.20invalid.20JSON/with/573426109
+      run: rustup update nightly-2026-02-10 --no-self-update && rustup default nightly-2026-02-10
       shell: bash
     - run: rustup component add miri
     - run: cargo miri setup
@@ -354,6 +376,7 @@ jobs:
     needs:
       - benchmarks
       - build-custom
+      - build-thumbv6k
       - clippy
       - extensive
       - miri

@@ -1,13 +1,13 @@
 r[const-eval]
 # Constant evaluation
 
-r[const-eval.general]
+r[const-eval.intro]
 Constant evaluation is the process of computing the result of [expressions] during compilation. Only a subset of all expressions can be evaluated at compile-time.
 
 r[const-eval.const-expr]
 ## Constant expressions
 
-r[const-eval.const-expr.general]
+r[const-eval.const-expr.intro]
 Certain forms of expressions, called constant expressions, can be evaluated at compile time.
 
 r[const-eval.const-expr.const-context]
@@ -59,10 +59,10 @@ r[const-eval.const-expr.block]
     * [expression statements]
 
 r[const-eval.const-expr.field]
-* [Field] expressions.
+* [Field expressions].
 
 r[const-eval.const-expr.index]
-* Index expressions, [array indexing] or [slice] with a `usize`.
+* [Array and slice indexing expressions][array indexing], where the index is a `usize`.
 
 r[const-eval.const-expr.range]
 * [Range expressions].
@@ -236,7 +236,7 @@ r[const-eval.const-context]
 ## Const context
 [const context]: #const-context
 
-r[const-eval.const-context.general]
+r[const-eval.const-context.def]
 A _const context_ is one of the following:
 
 r[const-eval.const-context.array-length]
@@ -258,7 +258,7 @@ r[const-eval.const-context.block]
 * A [const block]
 
 r[const-eval.const-context.outer-generics]
-Const contexts that are used as parts of types (array type and repeat length expressions as well as const generic arguments) can only make restricted use of surrounding generic parameters: such an expression must either be a single bare const generic parameter, or an arbitrary expression not making use of any generics.
+Array type length expressions, array repeat length expressions, and const generic arguments are restricted in their use of outer generic parameters: such an expression must either be a single const generic parameter, or an expression that does not reference any generic parameters.
 
 r[const-eval.const-fn]
 ## Const functions
@@ -292,7 +292,6 @@ The types of a const function's parameters and return type are restricted to tho
 [arithmetic]:           expressions/operator-expr.md#arithmetic-and-logical-binary-operators
 [array expressions]:    expressions/array-expr.md
 [array indexing]:       expressions/array-expr.md#array-and-slice-indexing-expressions
-[array indexing]:       expressions/array-expr.md#array-and-slice-indexing-expressions
 [array type length expressions]: types/array.md
 [assignment expressions]: expressions/operator-expr.md#assignment-expressions
 [async]:                items/functions.md#async-functions
@@ -316,7 +315,7 @@ The types of a const function's parameters and return type are restricted to tho
 [expression statements]: statements.md#expression-statements
 [expressions]:          expressions.md
 [`extern` statics]:     items/external-blocks.md#statics
-[field]:                expressions/field-expr.md
+[field expressions]:    expressions/field-expr.md
 [functions]:            items/functions.md
 [grouped]:              expressions/grouped-expr.md
 [interior mutability]:  interior-mutability.md
@@ -335,7 +334,6 @@ The types of a const function's parameters and return type are restricted to tho
 [promoted expression]:  destructors.md#constant-promotion
 [promoted]:             destructors.md#constant-promotion
 [range expressions]:    expressions/range-expr.md
-[slice]:                types/slice.md
 [statics]:              items/static-items.md
 [Struct expressions]:   expressions/struct-expr.md
 [temporary lifetime extension]: destructors.scope.lifetime-extension

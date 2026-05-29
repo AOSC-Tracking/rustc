@@ -733,6 +733,19 @@ impl Features {
 
     /// Checks if the given feature is enabled.
     pub fn require(&self, feature: &Feature) -> CargoResult<()> {
+        self.require_with_hint(feature, None)
+    }
+
+    /// Like [`require`][Self::require], but appends an optional help message
+    /// to the error, placed just before the documentation link.
+    ///
+    /// Use this when the call site has additional context (e.g. the package's
+    /// `rust-version`) that can make the error more actionable.
+    pub(crate) fn require_with_hint(
+        &self,
+        feature: &Feature,
+        hint: Option<&str>,
+    ) -> CargoResult<()> {
         if feature.is_enabled(self) {
             return Ok(());
         }
@@ -773,6 +786,9 @@ impl Features {
              about the status of this feature.",
             feature.docs
         );
+        if let Some(hint) = hint {
+            let _ = writeln!(msg, "{hint}");
+        }
 
         bail!("{}", msg);
     }
@@ -870,6 +886,7 @@ unstable_cli_options!(
     #[serde(deserialize_with = "deserialize_gitoxide_features")]
     gitoxide: Option<GitoxideFeatures> = ("Use gitoxide for the given git interactions, or all of them if no argument is given"),
     host_config: bool = ("Enable the `[host]` section in the .cargo/config.toml file"),
+    json_target_spec: bool = ("Enable `.json` target spec files"),
     lockfile_path: bool = ("Enable the `resolver.lockfile-path` config option"),
     minimal_versions: bool = ("Resolve minimal dependency versions instead of maximum"),
     msrv_policy: bool = ("Enable rust-version aware policy within cargo"),
@@ -1409,6 +1426,7 @@ impl CliUnstable {
                 )?
             }
             "host-config" => self.host_config = parse_empty(k, v)?,
+            "json-target-spec" => self.json_target_spec = parse_empty(k, v)?,
             "lockfile-path" => self.lockfile_path = parse_empty(k, v)?,
             "next-lockfile-bump" => self.next_lockfile_bump = parse_empty(k, v)?,
             "minimal-versions" => self.minimal_versions = parse_empty(k, v)?,

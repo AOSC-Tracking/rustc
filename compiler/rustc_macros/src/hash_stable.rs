@@ -84,7 +84,7 @@ fn hash_stable_derive_with_mode(
     match mode {
         HashStableMode::Normal => {}
         HashStableMode::Generic => {
-            s.add_where_predicate(parse_quote! { __CTX: crate::HashStableContext });
+            s.add_where_predicate(parse_quote! { __CTX: ::rustc_span::HashStableContext });
         }
         HashStableMode::NoContext => {}
     }
@@ -96,7 +96,7 @@ fn hash_stable_derive_with_mode(
 
     let context: syn::Type = match mode {
         HashStableMode::Normal => {
-            parse_quote!(::rustc_query_system::ich::StableHashingContext<'__ctx>)
+            parse_quote!(::rustc_middle::ich::StableHashingContext<'__ctx>)
         }
         HashStableMode::Generic | HashStableMode::NoContext => parse_quote!(__CTX),
     };

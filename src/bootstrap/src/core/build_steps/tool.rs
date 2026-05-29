@@ -133,7 +133,7 @@ impl Step for ToolBuild {
                 RustcLto::ThinLocal => None,
             };
             if let Some(lto) = lto {
-                cargo.env(cargo_profile_var("LTO", &builder.config), lto);
+                cargo.env(cargo_profile_var("LTO", &builder.config, self.mode), lto);
             }
         }
 
@@ -600,6 +600,12 @@ impl Step for ErrorIndex {
     }
 
     fn run(self, builder: &Builder<'_>) -> ToolBuildResult {
+        builder.require_submodule(
+            "src/doc/reference",
+            Some("error_index_generator requires mdbook-spec"),
+        );
+        builder
+            .require_submodule("src/doc/book", Some("error_index_generator requires mdbook-trpl"));
         builder.ensure(ToolBuild {
             build_compiler: self.compilers.build_compiler,
             target: self.compilers.target(),

@@ -61,8 +61,12 @@ pub trait Interner:
     type GenericArg: GenericArg<Self>;
     type Term: Term<Self>;
 
-    type BoundVarKinds: Copy + Debug + Hash + Eq + SliceLike<Item = Self::BoundVarKind> + Default;
-    type BoundVarKind: Copy + Debug + Hash + Eq;
+    type BoundVarKinds: Copy
+        + Debug
+        + Hash
+        + Eq
+        + SliceLike<Item = ty::BoundVariableKind<Self>>
+        + Default;
 
     type PredefinedOpaques: Copy
         + Debug
@@ -120,9 +124,7 @@ pub trait Interner:
     type Tys: Tys<Self>;
     type FnInputTys: Copy + Debug + Hash + Eq + SliceLike<Item = Self::Ty> + TypeVisitable<Self>;
     type ParamTy: ParamLike;
-    type BoundTy: BoundVarLike<Self>;
-    type PlaceholderTy: PlaceholderLike<Self, Bound = Self::BoundTy>;
-    type Symbol: Copy + Hash + PartialEq + Eq + Debug;
+    type Symbol: Symbol<Self>;
 
     // Things stored inside of tys
     type ErrorGuaranteed: Copy + Debug + Hash + Eq;
@@ -148,20 +150,17 @@ pub trait Interner:
 
     // Kinds of consts
     type Const: Const<Self>;
+    type Consts: Copy + Debug + Hash + Eq + SliceLike<Item = Self::Const> + Default;
     type ParamConst: Copy + Debug + Hash + Eq + ParamLike;
-    type BoundConst: BoundVarLike<Self>;
-    type PlaceholderConst: PlaceholderConst<Self>;
     type ValueConst: ValueConst<Self>;
     type ExprConst: ExprConst<Self>;
-    type ValTree: ValTree<Self>;
+    type ValTree: Copy + Debug + Hash + Eq + IntoKind<Kind = ty::ValTreeKind<Self>>;
     type ScalarInt: Copy + Debug + Hash + Eq;
 
     // Kinds of regions
     type Region: Region<Self>;
     type EarlyParamRegion: ParamLike;
     type LateParamRegion: Copy + Debug + Hash + Eq;
-    type BoundRegion: BoundVarLike<Self>;
-    type PlaceholderRegion: PlaceholderLike<Self, Bound = Self::BoundRegion>;
 
     type RegionAssumptions: Copy
         + Debug
@@ -197,6 +196,7 @@ pub trait Interner:
     type VariancesOf: Copy + Debug + SliceLike<Item = ty::Variance>;
     fn variances_of(self, def_id: Self::DefId) -> Self::VariancesOf;
 
+    // FIXME: remove `def_id` param after `AliasTermKind` contains `def_id` within
     fn opt_alias_variances(
         self,
         kind: impl Into<ty::AliasTermKind>,
@@ -207,11 +207,12 @@ pub trait Interner:
     fn type_of_opaque_hir_typeck(self, def_id: Self::LocalDefId)
     -> ty::EarlyBinder<Self, Self::Ty>;
     fn const_of_item(self, def_id: Self::DefId) -> ty::EarlyBinder<Self, Self::Const>;
+    fn anon_const_kind(self, def_id: Self::DefId) -> ty::AnonConstKind;
 
     type AdtDef: AdtDef<Self>;
     fn adt_def(self, adt_def_id: Self::AdtId) -> Self::AdtDef;
 
-    fn alias_ty_kind(self, alias: ty::AliasTy<Self>) -> ty::AliasTyKind;
+    fn alias_ty_kind_from_def_id(self, def_id: Self::DefId) -> ty::AliasTyKind<Self>;
 
     fn alias_term_kind(self, alias: ty::AliasTerm<Self>) -> ty::AliasTermKind;
 
@@ -308,6 +309,7 @@ pub trait Interner:
 
     fn impl_is_const(self, def_id: Self::ImplId) -> bool;
     fn fn_is_const(self, def_id: Self::FunctionId) -> bool;
+    fn closure_is_const(self, def_id: Self::ClosureId) -> bool;
     fn alias_has_const_conditions(self, def_id: Self::DefId) -> bool;
     fn const_conditions(
         self,
@@ -378,8 +380,6 @@ pub trait Interner:
 
     fn trait_is_fundamental(self, def_id: Self::TraitId) -> bool;
 
-    fn trait_may_be_implemented_via_object(self, trait_def_id: Self::TraitId) -> bool;
-
     /// Returns `true` if this is an `unsafe trait`.
     fn trait_is_unsafe(self, trait_def_id: Self::TraitId) -> bool;
 
@@ -413,6 +413,8 @@ pub trait Interner:
         self,
         canonical_goal: CanonicalInput<Self>,
     ) -> (QueryResult<Self>, Self::Probe);
+
+    fn item_name(self, item_index: Self::DefId) -> Self::Symbol;
 }
 
 /// Imagine you have a function `F: FnOnce(&[T]) -> R`, plus an iterator `iter`

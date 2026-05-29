@@ -10,9 +10,7 @@ use crate::sync::atomic::{Atomic, AtomicBool, Ordering};
 
 pub mod abi;
 mod libunwind_integration;
-pub mod os;
 pub mod thread_parking;
-pub mod time;
 pub mod waitqueue;
 
 // SAFETY: must be called only once during runtime initialization.

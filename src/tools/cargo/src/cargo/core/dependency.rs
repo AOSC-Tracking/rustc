@@ -293,6 +293,18 @@ impl Dependency {
         self.inner.explicit_name_in_toml
     }
 
+    /// The keys to this entry in a `Cargo.toml` file
+    pub fn toml_path(&self) -> Vec<String> {
+        let mut path = Vec::new();
+        if let Some(platform) = self.platform() {
+            path.push("target".to_owned());
+            path.push(platform.to_string());
+        }
+        path.push(self.kind().kind_table().to_owned());
+        path.push((&*self.name_in_toml()).to_owned());
+        path
+    }
+
     pub fn set_kind(&mut self, kind: DepKind) -> &mut Dependency {
         if self.is_public() {
             // Setting 'public' only makes sense for normal dependencies
@@ -496,6 +508,7 @@ impl Artifact {
         artifacts: &[impl AsRef<str>],
         is_lib: bool,
         target: Option<&str>,
+        unstable_json: bool,
     ) -> CargoResult<Self> {
         let kinds = ArtifactKind::validate(
             artifacts
@@ -506,7 +519,9 @@ impl Artifact {
         Ok(Artifact {
             inner: Arc::new(kinds),
             is_lib,
-            target: target.map(ArtifactTarget::parse).transpose()?,
+            target: target
+                .map(|name| ArtifactTarget::parse(name, unstable_json))
+                .transpose()?,
         })
     }
 
@@ -536,10 +551,10 @@ pub enum ArtifactTarget {
 }
 
 impl ArtifactTarget {
-    pub fn parse(target: &str) -> CargoResult<ArtifactTarget> {
+    pub fn parse(target: &str, unstable_json: bool) -> CargoResult<ArtifactTarget> {
         Ok(match target {
             "target" => ArtifactTarget::BuildDependencyAssumeTarget,
-            name => ArtifactTarget::Force(CompileTarget::new(name)?),
+            name => ArtifactTarget::Force(CompileTarget::new(name, unstable_json)?),
         })
     }
 
@@ -668,14 +683,14 @@ impl ArtifactKind {
 }
 
 /// Patch is a dependency override that knows where it has been defined.
-/// See [PatchLocation] for possible locations.
+/// See [`PatchLocation`] for possible locations.
 #[derive(Clone, Debug)]
 pub struct Patch {
     pub dep: Dependency,
     pub loc: PatchLocation,
 }
 
-/// Place where a patch has been defined.
+/// Place where a [`Patch`] has been defined.
 #[derive(Clone, Debug)]
 pub enum PatchLocation {
     /// Defined in a manifest.

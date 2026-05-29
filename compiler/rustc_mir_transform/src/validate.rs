@@ -440,7 +440,7 @@ impl<'a, 'tcx> Visitor<'tcx> for CfgChecker<'a, 'tcx> {
                     }
                 }
 
-                if let ty::FnDef(did, ..) = func.ty(&self.body.local_decls, self.tcx).kind()
+                if let ty::FnDef(did, ..) = *func.ty(&self.body.local_decls, self.tcx).kind()
                     && self.body.phase >= MirPhase::Runtime(RuntimePhase::Optimized)
                     && matches!(self.tcx.codegen_fn_attrs(did).inline, InlineAttr::Force { .. })
                 {
@@ -685,7 +685,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                 };
 
                 let kind = match parent_ty.ty.kind() {
-                    &ty::Alias(ty::Opaque, ty::AliasTy { def_id, args, .. }) => {
+                    &ty::Alias(ty::AliasTy { kind: ty::Opaque { def_id }, args, .. }) => {
                         self.tcx.type_of(def_id).instantiate(self.tcx, args).kind()
                     }
                     kind => kind,
@@ -1259,14 +1259,6 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                     }
                 }
             }
-            Rvalue::ShallowInitBox(operand, _) => {
-                if self.body.phase >= MirPhase::Runtime(RuntimePhase::Initial) {
-                    self.fail(location, format!("ShallowInitBox after ElaborateBoxDerefs"))
-                }
-
-                let a = operand.ty(&self.body.local_decls, self.tcx);
-                check_kinds!(a, "Cannot shallow init type {:?}", ty::RawPtr(..));
-            }
             Rvalue::Cast(kind, operand, target_type) => {
                 let op_ty = operand.ty(self.body, self.tcx);
                 match kind {
@@ -1555,7 +1547,9 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                 let pty = place.ty(&self.body.local_decls, self.tcx).ty;
                 if !matches!(
                     pty.kind(),
-                    ty::Adt(..) | ty::Coroutine(..) | ty::Alias(ty::Opaque, ..)
+                    ty::Adt(..)
+                        | ty::Coroutine(..)
+                        | ty::Alias(ty::AliasTy { kind: ty::Opaque { .. }, .. })
                 ) {
                     self.fail(
                         location,

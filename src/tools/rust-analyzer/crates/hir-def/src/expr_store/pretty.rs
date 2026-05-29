@@ -16,7 +16,8 @@ use crate::{
     attrs::AttrFlags,
     expr_store::path::{GenericArg, GenericArgs},
     hir::{
-        Array, BindingAnnotation, CaptureBy, ClosureKind, Literal, Movability, Statement,
+        Array, BindingAnnotation, CaptureBy, ClosureKind, Literal, Movability, RecordSpread,
+        Statement,
         generics::{GenericParams, WherePredicate},
     },
     lang_item::LangItemTarget,
@@ -104,7 +105,7 @@ pub fn print_body_hir(
         p.buf.push(')');
         p.buf.push(' ');
     }
-    p.print_expr(body.body_expr);
+    p.print_expr(body.root_expr());
     if matches!(owner, DefWithBodyId::StaticId(_) | DefWithBodyId::ConstId(_)) {
         p.buf.push(';');
     }
@@ -139,7 +140,7 @@ pub fn print_variant_body_hir(db: &dyn DefDatabase, owner: VariantId, edition: E
     }
 
     for (_, data) in fields.fields().iter() {
-        let FieldData { name, type_ref, visibility, is_unsafe } = data;
+        let FieldData { name, type_ref, visibility, is_unsafe, default_value: _ } = data;
         match visibility {
             crate::item_tree::RawVisibility::Module(interned, _visibility_explicitness) => {
                 w!(p, "pub(in {})", interned.display(db, p.edition))
@@ -167,8 +168,8 @@ pub fn print_signature(db: &dyn DefDatabase, owner: GenericDefId, edition: Editi
     match owner {
         GenericDefId::AdtId(id) => match id {
             AdtId::StructId(id) => {
-                let signature = db.struct_signature(id);
-                print_struct(db, id, &signature, edition)
+                let signature = StructSignature::of(db, id);
+                print_struct(db, id, signature, edition)
             }
             AdtId::UnionId(id) => {
                 format!("unimplemented {id:?}")
@@ -179,8 +180,8 @@ pub fn print_signature(db: &dyn DefDatabase, owner: GenericDefId, edition: Editi
         },
         GenericDefId::ConstId(id) => format!("unimplemented {id:?}"),
         GenericDefId::FunctionId(id) => {
-            let signature = db.function_signature(id);
-            print_function(db, id, &signature, edition)
+            let signature = FunctionSignature::of(db, id);
+            print_function(db, id, signature, edition)
         }
         GenericDefId::ImplId(id) => format!("unimplemented {id:?}"),
         GenericDefId::StaticId(id) => format!("unimplemented {id:?}"),
@@ -679,10 +680,17 @@ impl Printer<'_> {
                         p.print_expr(field.expr);
                         wln!(p, ",");
                     }
-                    if let Some(spread) = spread {
-                        w!(p, "..");
-                        p.print_expr(*spread);
-                        wln!(p);
+                    match spread {
+                        RecordSpread::None => {}
+                        RecordSpread::FieldDefaults => {
+                            w!(p, "..");
+                            wln!(p);
+                        }
+                        RecordSpread::Expr(spread_expr) => {
+                            w!(p, "..");
+                            p.print_expr(*spread_expr);
+                            wln!(p);
+                        }
                     }
                 });
                 w!(self, "}}");
@@ -1204,7 +1212,7 @@ impl Printer<'_> {
     }
 
     pub(crate) fn print_type_param(&mut self, param: TypeParamId) {
-        let generic_params = self.db.generic_params(param.parent());
+        let generic_params = GenericParams::of(self.db, param.parent());
 
         match generic_params[param.local_id()].name() {
             Some(name) => w!(self, "{}", name.display(self.db, self.edition)),
@@ -1213,7 +1221,7 @@ impl Printer<'_> {
     }
 
     pub(crate) fn print_lifetime_param(&mut self, param: LifetimeParamId) {
-        let generic_params = self.db.generic_params(param.parent);
+        let generic_params = GenericParams::of(self.db, param.parent);
         w!(self, "{}", generic_params[param.local_id].name.display(self.db, self.edition))
     }
 

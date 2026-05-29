@@ -35,6 +35,16 @@ def AutoDiffTypeInterface : TypeInterface<"AutoDiffTypeInterface"> {
     >,
     InterfaceMethod<
       /*desc=*/[{
+        Constructs the canonical null (zero) attr for the given type. The
+        provided builder should be used to construct the const-like operation.
+        Null can be emitted by the differentiation pass.
+      }],
+      /*retTy=*/"::mlir::Attribute",
+      /*methodName=*/"createNullAttr",
+      /*args=*/(ins)
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
         Construct addition operation for the given type.
       }],
       /*retTy=*/"::mlir::Value",
@@ -112,6 +122,36 @@ def AutoDiffTypeInterface : TypeInterface<"AutoDiffTypeInterface"> {
       return $_type.getShadowType(/*width=*/1);
     }
   }];
+}
+
+def ClonableTypeInterface : TypeInterface<"ClonableTypeInterface"> {
+  let description = [{
+    An MLIR type values of which can be cloned.
+    Used for mutable types which needs to allocate and copy their content, specifically
+    for things like checkpointing where the underlying memory needs to be preserved.
+  }];
+  let cppNamespace = "::mlir::enzyme";
+
+  let methods = [
+    InterfaceMethod<
+      /*desc=*/[{
+        Clone a value.
+      }],
+      /*retTy=*/"::mlir::Value",
+      /*methodName=*/"cloneValue",
+      /*args=*/(ins "::mlir::OpBuilder &":$builder, "::mlir::Value":$value)
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Free the clone.
+      }],
+      /*retTy=*/"void",
+      /*methodName=*/"freeClonedValue",
+      /*args=*/(ins "::mlir::OpBuilder &":$builder, "::mlir::Value":$clone)
+    >
+  ];
+
+  let extraSharedClassDeclaration = [{}];
 }
 
 #endif // ENZYME_MLIR_INTERFACES_AUTODIFFTYPEINTERFACE

@@ -18,6 +18,7 @@ use hir_expand::{
 };
 use intern::{Symbol, sym};
 use rustc_hash::FxHashMap;
+use smallvec::smallvec;
 use stdx::never;
 use syntax::{
     AstNode, AstPtr, SyntaxNodePtr,
@@ -28,18 +29,17 @@ use syntax::{
     },
 };
 use thin_vec::ThinVec;
-use triomphe::Arc;
 use tt::TextRange;
 
 use crate::{
-    AdtId, BlockId, BlockLoc, DefWithBodyId, FunctionId, GenericDefId, ImplId, MacroId,
-    ModuleDefId, ModuleId, TraitId, TypeAliasId, UnresolvedMacro,
+    AdtId, BlockId, BlockLoc, DefWithBodyId, FunctionId, GenericDefId, ImplId, ItemContainerId,
+    MacroId, ModuleDefId, ModuleId, TraitId, TypeAliasId, UnresolvedMacro,
     attrs::AttrFlags,
     db::DefDatabase,
     expr_store::{
         Body, BodySourceMap, ExprPtr, ExpressionStore, ExpressionStoreBuilder,
         ExpressionStoreDiagnostics, ExpressionStoreSourceMap, HygieneId, LabelPtr, LifetimePtr,
-        PatPtr, TypePtr,
+        PatPtr, RootExprOrigin, TypePtr,
         expander::Expander,
         lower::generics::ImplTraitLowerFn,
         path::{AssociatedTypeBinding, GenericArg, GenericArgs, GenericArgsParentheses, Path},
@@ -47,12 +47,13 @@ use crate::{
     hir::{
         Array, Binding, BindingAnnotation, BindingId, BindingProblems, CaptureBy, ClosureKind,
         Expr, ExprId, Item, Label, LabelId, Literal, MatchArm, Movability, OffsetOf, Pat, PatId,
-        RecordFieldPat, RecordLitField, Statement, generics::GenericParams,
+        RecordFieldPat, RecordLitField, RecordSpread, Statement, generics::GenericParams,
     },
     item_scope::BuiltinShadowMode,
     item_tree::FieldsShape,
     lang_item::{LangItemTarget, LangItems},
     nameres::{DefMap, LocalDefMap, MacroSubNs, block_def_map},
+    signatures::StructSignature,
     type_ref::{
         ArrayType, ConstRef, FnType, LifetimeRef, LifetimeRefId, Mutability, PathId, Rawness,
         RefType, TraitBoundModifier, TraitRef, TypeBound, TypeRef, TypeRefId, UseArgRef,
@@ -79,7 +80,7 @@ pub(super) fn lower_body(
     let mut self_param = None;
     let mut source_map_self_param = None;
     let mut params = vec![];
-    let mut collector = ExprCollector::new(db, module, current_file_id);
+    let mut collector = ExprCollector::body(db, module, current_file_id);
 
     let skip_body = AttrFlags::query(
         db,
@@ -117,9 +118,10 @@ pub(super) fn lower_body(
             params = (0..count).map(|_| collector.missing_pat()).collect();
         };
         let body_expr = collector.missing_expr();
+        collector.store.inference_roots = Some(smallvec![(body_expr, RootExprOrigin::BodyRoot)]);
         let (store, source_map) = collector.store.finish();
         return (
-            Body { store, params: params.into_boxed_slice(), self_param, body_expr },
+            Body { store, params: params.into_boxed_slice(), self_param },
             BodySourceMap { self_param: source_map_self_param, store: source_map },
         );
     }
@@ -141,15 +143,26 @@ pub(super) fn lower_body(
             source_map_self_param = Some(collector.expander.in_file(AstPtr::new(&self_param_syn)));
         }
 
+        let is_extern = matches!(
+            owner,
+            DefWithBodyId::FunctionId(id)
+                if matches!(id.loc(db).container, ItemContainerId::ExternBlockId(_)),
+        );
+
         for param in param_list.params() {
             if collector.check_cfg(&param) {
-                let param_pat = collector.collect_pat_top(param.pat());
+                let param_pat = if is_extern {
+                    collector.collect_extern_fn_param(param.pat())
+                } else {
+                    collector.collect_pat_top(param.pat())
+                };
                 params.push(param_pat);
             }
         }
     };
 
     let body_expr = collector.collect(
+        &mut params,
         body,
         if is_async_fn {
             Awaitable::Yes
@@ -162,10 +175,11 @@ pub(super) fn lower_body(
             }
         },
     );
+    collector.store.inference_roots = Some(smallvec![(body_expr, RootExprOrigin::BodyRoot)]);
 
     let (store, source_map) = collector.store.finish();
     (
-        Body { store, params: params.into_boxed_slice(), self_param, body_expr },
+        Body { store, params: params.into_boxed_slice(), self_param },
         BodySourceMap { self_param: source_map_self_param, store: source_map },
     )
 }
@@ -175,7 +189,7 @@ pub(crate) fn lower_type_ref(
     module: ModuleId,
     type_ref: InFile<Option<ast::Type>>,
 ) -> (ExpressionStore, ExpressionStoreSourceMap, TypeRefId) {
-    let mut expr_collector = ExprCollector::new(db, module, type_ref.file_id);
+    let mut expr_collector = ExprCollector::signature(db, module, type_ref.file_id);
     let type_ref =
         expr_collector.lower_type_ref_opt(type_ref.value, &mut ExprCollector::impl_trait_allocator);
     let (store, source_map) = expr_collector.store.finish();
@@ -189,13 +203,13 @@ pub(crate) fn lower_generic_params(
     file_id: HirFileId,
     param_list: Option<ast::GenericParamList>,
     where_clause: Option<ast::WhereClause>,
-) -> (Arc<ExpressionStore>, Arc<GenericParams>, ExpressionStoreSourceMap) {
-    let mut expr_collector = ExprCollector::new(db, module, file_id);
+) -> (ExpressionStore, GenericParams, ExpressionStoreSourceMap) {
+    let mut expr_collector = ExprCollector::signature(db, module, file_id);
     let mut collector = generics::GenericParamsCollector::new(def);
     collector.lower(&mut expr_collector, param_list, where_clause);
     let params = collector.finish();
     let (store, source_map) = expr_collector.store.finish();
-    (Arc::new(store), params, source_map)
+    (store, params, source_map)
 }
 
 pub(crate) fn lower_impl(
@@ -203,8 +217,8 @@ pub(crate) fn lower_impl(
     module: ModuleId,
     impl_syntax: InFile<ast::Impl>,
     impl_id: ImplId,
-) -> (ExpressionStore, ExpressionStoreSourceMap, TypeRefId, Option<TraitRef>, Arc<GenericParams>) {
-    let mut expr_collector = ExprCollector::new(db, module, impl_syntax.file_id);
+) -> (ExpressionStore, ExpressionStoreSourceMap, TypeRefId, Option<TraitRef>, GenericParams) {
+    let mut expr_collector = ExprCollector::signature(db, module, impl_syntax.file_id);
     let self_ty =
         expr_collector.lower_type_ref_opt_disallow_impl_trait(impl_syntax.value.self_ty());
     let trait_ = impl_syntax.value.trait_().and_then(|it| match &it {
@@ -231,8 +245,8 @@ pub(crate) fn lower_trait(
     module: ModuleId,
     trait_syntax: InFile<ast::Trait>,
     trait_id: TraitId,
-) -> (ExpressionStore, ExpressionStoreSourceMap, Arc<GenericParams>) {
-    let mut expr_collector = ExprCollector::new(db, module, trait_syntax.file_id);
+) -> (ExpressionStore, ExpressionStoreSourceMap, GenericParams) {
+    let mut expr_collector = ExprCollector::signature(db, module, trait_syntax.file_id);
     let mut collector = generics::GenericParamsCollector::with_self_param(
         &mut expr_collector,
         trait_id.into(),
@@ -253,14 +267,9 @@ pub(crate) fn lower_type_alias(
     module: ModuleId,
     alias: InFile<ast::TypeAlias>,
     type_alias_id: TypeAliasId,
-) -> (
-    ExpressionStore,
-    ExpressionStoreSourceMap,
-    Arc<GenericParams>,
-    Box<[TypeBound]>,
-    Option<TypeRefId>,
-) {
-    let mut expr_collector = ExprCollector::new(db, module, alias.file_id);
+) -> (ExpressionStore, ExpressionStoreSourceMap, GenericParams, Box<[TypeBound]>, Option<TypeRefId>)
+{
+    let mut expr_collector = ExprCollector::signature(db, module, alias.file_id);
     let bounds = alias
         .value
         .type_bound_list()
@@ -296,13 +305,13 @@ pub(crate) fn lower_function(
 ) -> (
     ExpressionStore,
     ExpressionStoreSourceMap,
-    Arc<GenericParams>,
+    GenericParams,
     Box<[TypeRefId]>,
     Option<TypeRefId>,
     bool,
     bool,
 ) {
-    let mut expr_collector = ExprCollector::new(db, module, fn_.file_id);
+    let mut expr_collector = ExprCollector::signature(db, module, fn_.file_id);
     let mut collector = generics::GenericParamsCollector::new(function_id.into());
     collector.lower(&mut expr_collector, fn_.value.generic_param_list(), fn_.value.where_clause());
     let mut params = vec![];
@@ -408,7 +417,7 @@ pub(crate) fn lower_function(
 pub struct ExprCollector<'db> {
     db: &'db dyn DefDatabase,
     cfg_options: &'db CfgOptions,
-    expander: Expander,
+    expander: Expander<'db>,
     def_map: &'db DefMap,
     local_def_map: &'db LocalDefMap,
     module: ModuleId,
@@ -425,7 +434,7 @@ pub struct ExprCollector<'db> {
     /// and we need to find the current definition. So we track the number of definitions we saw.
     current_block_legacy_macro_defs_count: FxHashMap<Name, usize>,
 
-    current_try_block_label: Option<LabelId>,
+    current_try_block: Option<TryBlock>,
 
     label_ribs: Vec<LabelRib>,
     unowned_bindings: Vec<BindingId>,
@@ -471,6 +480,13 @@ enum Awaitable {
     No(&'static str),
 }
 
+enum TryBlock {
+    // `try { ... }`
+    Homogeneous { label: LabelId },
+    // `try bikeshed Ty { ... }`
+    Heterogeneous { label: LabelId },
+}
+
 #[derive(Debug, Default)]
 struct BindingList {
     map: FxHashMap<(Name, HygieneId), BindingId>,
@@ -514,7 +530,20 @@ impl BindingList {
 }
 
 impl<'db> ExprCollector<'db> {
-    pub fn new(
+    /// Creates a collector for a signature store, this will populate `const_expr_origins` to any
+    /// top level const arg roots.
+    pub fn signature(
+        db: &dyn DefDatabase,
+        module: ModuleId,
+        current_file_id: HirFileId,
+    ) -> ExprCollector<'_> {
+        let mut this = Self::body(db, module, current_file_id);
+        this.store.inference_roots = Some(Default::default());
+        this
+    }
+
+    /// Creates a collector for a bidy store.
+    pub fn body(
         db: &dyn DefDatabase,
         module: ModuleId,
         current_file_id: HirFileId,
@@ -531,7 +560,7 @@ impl<'db> ExprCollector<'db> {
             lang_items: OnceCell::new(),
             store: ExpressionStoreBuilder::default(),
             expander,
-            current_try_block_label: None,
+            current_try_block: None,
             is_lowering_coroutine: false,
             label_ribs: Vec::new(),
             unowned_bindings: Vec::new(),
@@ -559,7 +588,10 @@ impl<'db> ExprCollector<'db> {
         self.expander.span_map()
     }
 
-    pub fn lower_lifetime_ref(&mut self, lifetime: ast::Lifetime) -> LifetimeRefId {
+    pub(in crate::expr_store) fn lower_lifetime_ref(
+        &mut self,
+        lifetime: ast::Lifetime,
+    ) -> LifetimeRefId {
         // FIXME: Keyword check?
         let lifetime_ref = match &*lifetime.text() {
             "" | "'" => LifetimeRef::Error,
@@ -570,7 +602,10 @@ impl<'db> ExprCollector<'db> {
         self.alloc_lifetime_ref(lifetime_ref, AstPtr::new(&lifetime))
     }
 
-    pub fn lower_lifetime_ref_opt(&mut self, lifetime: Option<ast::Lifetime>) -> LifetimeRefId {
+    pub(in crate::expr_store) fn lower_lifetime_ref_opt(
+        &mut self,
+        lifetime: Option<ast::Lifetime>,
+    ) -> LifetimeRefId {
         match lifetime {
             Some(lifetime) => self.lower_lifetime_ref(lifetime),
             None => self.alloc_lifetime_ref_desugared(LifetimeRef::Placeholder),
@@ -578,7 +613,7 @@ impl<'db> ExprCollector<'db> {
     }
 
     /// Converts an `ast::TypeRef` to a `hir::TypeRef`.
-    pub fn lower_type_ref(
+    pub(in crate::expr_store) fn lower_type_ref(
         &mut self,
         node: ast::Type,
         impl_trait_lower_fn: ImplTraitLowerFn<'_>,
@@ -603,6 +638,9 @@ impl<'db> ExprCollector<'db> {
             }
             ast::Type::ArrayType(inner) => {
                 let len = self.lower_const_arg_opt(inner.const_arg());
+                if let Some(const_expr_origins) = &mut self.store.inference_roots {
+                    const_expr_origins.push((len.expr, RootExprOrigin::ArrayLength));
+                }
                 TypeRef::Array(ArrayType {
                     ty: self.lower_type_ref_opt(inner.ty(), impl_trait_lower_fn),
                     len,
@@ -792,7 +830,7 @@ impl<'db> ExprCollector<'db> {
 
     /// Collect `GenericArgs` from the parts of a fn-like path, i.e. `Fn(X, Y)
     /// -> Z` (which desugars to `Fn<(X, Y), Output=Z>`).
-    pub fn lower_generic_args_from_fn_path(
+    pub(in crate::expr_store) fn lower_generic_args_from_fn_path(
         &mut self,
         args: Option<ast::ParenthesizedArgList>,
         ret_type: Option<ast::RetType>,
@@ -887,6 +925,9 @@ impl<'db> ExprCollector<'db> {
                 }
                 ast::GenericArg::ConstArg(arg) => {
                     let arg = self.lower_const_arg(arg);
+                    if let Some(const_expr_origins) = &mut self.store.inference_roots {
+                        const_expr_origins.push((arg.expr, RootExprOrigin::GenericArgsPath));
+                    }
                     args.push(GenericArg::Const(arg))
                 }
             }
@@ -903,24 +944,57 @@ impl<'db> ExprCollector<'db> {
         })
     }
 
-    fn collect(&mut self, expr: Option<ast::Expr>, awaitable: Awaitable) -> ExprId {
+    /// An `async fn` needs to capture all parameters in the generated `async` block, even if they have
+    /// non-captured patterns such as wildcards (to ensure consistent drop order).
+    fn lower_async_fn(&mut self, params: &mut Vec<PatId>, body: ExprId) -> ExprId {
+        let mut statements = Vec::new();
+        for param in params {
+            let name = match self.store.pats[*param] {
+                Pat::Bind { id, .. }
+                    if matches!(
+                        self.store.bindings[id].mode,
+                        BindingAnnotation::Unannotated | BindingAnnotation::Mutable
+                    ) =>
+                {
+                    // If this is a direct binding, we can leave it as-is, as it'll always be captured anyway.
+                    continue;
+                }
+                Pat::Bind { id, .. } => {
+                    // If this is a `ref` binding, we can't leave it as is but we can at least reuse the name, for better display.
+                    self.store.bindings[id].name.clone()
+                }
+                _ => self.generate_new_name(),
+            };
+            let binding_id =
+                self.alloc_binding(name.clone(), BindingAnnotation::Mutable, HygieneId::ROOT);
+            let pat_id = self.alloc_pat_desugared(Pat::Bind { id: binding_id, subpat: None });
+            let expr = self.alloc_expr_desugared(Expr::Path(name.into()));
+            statements.push(Statement::Let {
+                pat: *param,
+                type_ref: None,
+                initializer: Some(expr),
+                else_branch: None,
+            });
+            *param = pat_id;
+        }
+
+        self.alloc_expr_desugared(Expr::Async {
+            id: None,
+            statements: statements.into_boxed_slice(),
+            tail: Some(body),
+        })
+    }
+
+    fn collect(
+        &mut self,
+        params: &mut Vec<PatId>,
+        expr: Option<ast::Expr>,
+        awaitable: Awaitable,
+    ) -> ExprId {
         self.awaitable_context.replace(awaitable);
         self.with_label_rib(RibKind::Closure, |this| {
-            if awaitable == Awaitable::Yes {
-                match expr {
-                    Some(e) => {
-                        let syntax_ptr = AstPtr::new(&e);
-                        let expr = this.collect_expr(e);
-                        this.alloc_expr_desugared_with_ptr(
-                            Expr::Async { id: None, statements: Box::new([]), tail: Some(expr) },
-                            syntax_ptr,
-                        )
-                    }
-                    None => this.missing_expr(),
-                }
-            } else {
-                this.collect_expr_opt(expr)
-            }
+            let body = this.collect_expr_opt(expr);
+            if awaitable == Awaitable::Yes { this.lower_async_fn(params, body) } else { body }
         })
     }
 
@@ -994,15 +1068,28 @@ impl<'db> ExprCollector<'db> {
     }
 
     fn lower_const_arg_opt(&mut self, arg: Option<ast::ConstArg>) -> ConstRef {
-        ConstRef { expr: self.collect_expr_opt(arg.and_then(|it| it.expr())) }
+        let const_expr_origins = self.store.inference_roots.take();
+        let r = ConstRef { expr: self.collect_expr_opt(arg.and_then(|it| it.expr())) };
+        self.store.inference_roots = const_expr_origins;
+        r
     }
 
-    fn lower_const_arg(&mut self, arg: ast::ConstArg) -> ConstRef {
-        ConstRef { expr: self.collect_expr_opt(arg.expr()) }
+    pub fn lower_const_arg(&mut self, arg: ast::ConstArg) -> ConstRef {
+        let const_expr_origins = self.store.inference_roots.take();
+        let r = ConstRef { expr: self.collect_expr_opt(arg.expr()) };
+        self.store.inference_roots = const_expr_origins;
+        r
     }
 
     fn collect_expr(&mut self, expr: ast::Expr) -> ExprId {
         self.maybe_collect_expr(expr).unwrap_or_else(|| self.missing_expr())
+    }
+
+    pub(in crate::expr_store) fn collect_expr_opt(&mut self, expr: Option<ast::Expr>) -> ExprId {
+        match expr {
+            Some(expr) => self.collect_expr(expr),
+            None => self.missing_expr(),
+        }
     }
 
     /// Returns `None` if and only if the expression is `#[cfg]`d out.
@@ -1035,7 +1122,9 @@ impl<'db> ExprCollector<'db> {
                 self.alloc_expr(Expr::Let { pat, expr }, syntax_ptr)
             }
             ast::Expr::BlockExpr(e) => match e.modifier() {
-                Some(ast::BlockModifier::Try(_)) => self.desugar_try_block(e),
+                Some(ast::BlockModifier::Try { try_token: _, bikeshed_token: _, result_type }) => {
+                    self.desugar_try_block(e, result_type)
+                }
                 Some(ast::BlockModifier::Unsafe(_)) => {
                     self.collect_block_(e, |id, statements, tail| Expr::Unsafe {
                         id,
@@ -1232,10 +1321,16 @@ impl<'db> ExprCollector<'db> {
                             Some(RecordLitField { name, expr })
                         })
                         .collect();
-                    let spread = nfl.spread().map(|s| self.collect_expr(s));
+                    let spread_expr = nfl.spread().map(|s| self.collect_expr(s));
+                    let has_spread_syntax = nfl.dotdot_token().is_some();
+                    let spread = match (spread_expr, has_spread_syntax) {
+                        (None, false) => RecordSpread::None,
+                        (None, true) => RecordSpread::FieldDefaults,
+                        (Some(expr), _) => RecordSpread::Expr(expr),
+                    };
                     Expr::RecordLit { path, fields, spread }
                 } else {
-                    Expr::RecordLit { path, fields: Box::default(), spread: None }
+                    Expr::RecordLit { path, fields: Box::default(), spread: RecordSpread::None }
                 };
 
                 self.alloc_expr(record_lit, syntax_ptr)
@@ -1304,7 +1399,7 @@ impl<'db> ExprCollector<'db> {
                         .map(|it| this.lower_type_ref_disallow_impl_trait(it));
 
                     let prev_is_lowering_coroutine = mem::take(&mut this.is_lowering_coroutine);
-                    let prev_try_block_label = this.current_try_block_label.take();
+                    let prev_try_block = this.current_try_block.take();
 
                     let awaitable = if e.async_token().is_some() {
                         Awaitable::Yes
@@ -1329,7 +1424,7 @@ impl<'db> ExprCollector<'db> {
                     let capture_by =
                         if e.move_token().is_some() { CaptureBy::Value } else { CaptureBy::Ref };
                     this.is_lowering_coroutine = prev_is_lowering_coroutine;
-                    this.current_try_block_label = prev_try_block_label;
+                    this.current_try_block = prev_try_block;
                     this.alloc_expr(
                         Expr::Closure {
                             args: args.into(),
@@ -1370,7 +1465,15 @@ impl<'db> ExprCollector<'db> {
 
                 match kind {
                     ArrayExprKind::ElementList(e) => {
-                        let elements = e.map(|expr| self.collect_expr(expr)).collect();
+                        let elements = e
+                            .filter_map(|expr| {
+                                if self.check_cfg(&expr) {
+                                    Some(self.collect_expr(expr))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
                         self.alloc_expr(Expr::Array(Array::ElementList { elements }), syntax_ptr)
                     }
                     ArrayExprKind::Repeat { initializer, repeat } => {
@@ -1646,11 +1749,15 @@ impl<'db> ExprCollector<'db> {
     /// Desugar `try { <stmts>; <expr> }` into `'<new_label>: { <stmts>; ::std::ops::Try::from_output(<expr>) }`,
     /// `try { <stmts>; }` into `'<new_label>: { <stmts>; ::std::ops::Try::from_output(()) }`
     /// and save the `<new_label>` to use it as a break target for desugaring of the `?` operator.
-    fn desugar_try_block(&mut self, e: BlockExpr) -> ExprId {
+    fn desugar_try_block(&mut self, e: BlockExpr, result_type: Option<ast::Type>) -> ExprId {
         let try_from_output = self.lang_path(self.lang_items().TryTraitFromOutput);
         let label = self.generate_new_name();
         let label = self.alloc_label_desugared(Label { name: label }, AstPtr::new(&e).wrap_right());
-        let old_label = self.current_try_block_label.replace(label);
+        let try_block_info = match result_type {
+            Some(_) => TryBlock::Heterogeneous { label },
+            None => TryBlock::Homogeneous { label },
+        };
+        let old_try_block = self.current_try_block.replace(try_block_info);
 
         let ptr = AstPtr::new(&e).upcast();
         let (btail, expr_id) = self.with_labeled_rib(label, HygieneId::ROOT, |this| {
@@ -1680,8 +1787,38 @@ impl<'db> ExprCollector<'db> {
             unreachable!("block was lowered to non-block");
         };
         *tail = Some(next_tail);
-        self.current_try_block_label = old_label;
-        expr_id
+        self.current_try_block = old_try_block;
+        match result_type {
+            Some(ty) => {
+                // `{ let <name>: <ty> = <expr>; <name> }`
+                let name = self.generate_new_name();
+                let type_ref = self.lower_type_ref_disallow_impl_trait(ty);
+                let binding = self.alloc_binding(
+                    name.clone(),
+                    BindingAnnotation::Unannotated,
+                    HygieneId::ROOT,
+                );
+                let pat = self.alloc_pat_desugared(Pat::Bind { id: binding, subpat: None });
+                self.add_definition_to_binding(binding, pat);
+                let tail_expr =
+                    self.alloc_expr_desugared_with_ptr(Expr::Path(Path::from(name)), ptr);
+                self.alloc_expr_desugared_with_ptr(
+                    Expr::Block {
+                        id: None,
+                        statements: Box::new([Statement::Let {
+                            pat,
+                            type_ref: Some(type_ref),
+                            initializer: Some(expr_id),
+                            else_branch: None,
+                        }]),
+                        tail: Some(tail_expr),
+                        label: None,
+                    },
+                    ptr,
+                )
+            }
+            None => expr_id,
+        }
     }
 
     /// Desugar `ast::WhileExpr` from: `[opt_ident]: while <cond> <body>` into:
@@ -1823,6 +1960,8 @@ impl<'db> ExprCollector<'db> {
     ///     ControlFlow::Continue(val) => val,
     ///     ControlFlow::Break(residual) =>
     ///         // If there is an enclosing `try {...}`:
+    ///         break 'catch_target Residual::into_try_type(residual),
+    ///         // If there is an enclosing `try bikeshed Ty {...}`:
     ///         break 'catch_target Try::from_residual(residual),
     ///         // Otherwise:
     ///         return Try::from_residual(residual),
@@ -1833,7 +1972,6 @@ impl<'db> ExprCollector<'db> {
         let try_branch = self.lang_path(lang_items.TryTraitBranch);
         let cf_continue = self.lang_path(lang_items.ControlFlowContinue);
         let cf_break = self.lang_path(lang_items.ControlFlowBreak);
-        let try_from_residual = self.lang_path(lang_items.TryTraitFromResidual);
         let operand = self.collect_expr_opt(e.expr());
         let try_branch = self.alloc_expr(try_branch.map_or(Expr::Missing, Expr::Path), syntax_ptr);
         let expr = self
@@ -1870,13 +2008,23 @@ impl<'db> ExprCollector<'db> {
             guard: None,
             expr: {
                 let it = self.alloc_expr(Expr::Path(Path::from(break_name)), syntax_ptr);
-                let callee = self
-                    .alloc_expr(try_from_residual.map_or(Expr::Missing, Expr::Path), syntax_ptr);
+                let convert_fn = match self.current_try_block {
+                    Some(TryBlock::Homogeneous { .. }) => {
+                        self.lang_path(lang_items.ResidualIntoTryType)
+                    }
+                    Some(TryBlock::Heterogeneous { .. }) | None => {
+                        self.lang_path(lang_items.TryTraitFromResidual)
+                    }
+                };
+                let callee =
+                    self.alloc_expr(convert_fn.map_or(Expr::Missing, Expr::Path), syntax_ptr);
                 let result =
                     self.alloc_expr(Expr::Call { callee, args: Box::new([it]) }, syntax_ptr);
                 self.alloc_expr(
-                    match self.current_try_block_label {
-                        Some(label) => Expr::Break { expr: Some(result), label: Some(label) },
+                    match self.current_try_block {
+                        Some(
+                            TryBlock::Heterogeneous { label } | TryBlock::Homogeneous { label },
+                        ) => Expr::Break { expr: Some(result), label: Some(label) },
                         None => Expr::Return { expr: Some(result) },
                     },
                     syntax_ptr,
@@ -1958,13 +2106,6 @@ impl<'db> ExprCollector<'db> {
                 id
             }
             None => collector(self, None),
-        }
-    }
-
-    fn collect_expr_opt(&mut self, expr: Option<ast::Expr>) -> ExprId {
-        match expr {
-            Some(expr) => self.collect_expr(expr),
-            None => self.missing_expr(),
         }
     }
 
@@ -2154,6 +2295,32 @@ impl<'db> ExprCollector<'db> {
         }
     }
 
+    fn collect_extern_fn_param(&mut self, pat: Option<ast::Pat>) -> PatId {
+        // `extern` functions cannot have pattern-matched parameters, and furthermore, the identifiers
+        // in their parameters are always interpreted as bindings, even if in a normal function they
+        // won't be, because they would refer to a path pattern.
+        let Some(pat) = pat else { return self.missing_pat() };
+
+        match &pat {
+            ast::Pat::IdentPat(bp) => {
+                // FIXME: Emit an error if `!bp.is_simple_ident()`.
+
+                let name = bp.name().map(|nr| nr.as_name()).unwrap_or_else(Name::missing);
+                let hygiene = bp
+                    .name()
+                    .map(|name| self.hygiene_id_for(name.syntax().text_range()))
+                    .unwrap_or(HygieneId::ROOT);
+                let binding = self.alloc_binding(name, BindingAnnotation::Unannotated, hygiene);
+                let pat =
+                    self.alloc_pat(Pat::Bind { id: binding, subpat: None }, AstPtr::new(&pat));
+                self.add_definition_to_binding(binding, pat);
+                pat
+            }
+            // FIXME: Emit an error.
+            _ => self.missing_pat(),
+        }
+    }
+
     // region: patterns
 
     fn collect_pat_top(&mut self, pat: Option<ast::Pat>) -> PatId {
@@ -2202,7 +2369,7 @@ impl<'db> ExprCollector<'db> {
                         }
                         Some(ModuleDefId::AdtId(AdtId::StructId(s)))
                         // FIXME: This can cause a cycle if the user is writing invalid code
-                            if self.db.struct_signature(s).shape != FieldsShape::Record =>
+                            if StructSignature::of(self.db, s).shape != FieldsShape::Record =>
                         {
                             (None, Pat::Path(name.into()))
                         }

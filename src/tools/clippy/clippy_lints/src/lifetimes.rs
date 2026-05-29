@@ -1,7 +1,7 @@
 use clippy_config::Conf;
 use clippy_utils::diagnostics::{span_lint, span_lint_and_then};
 use clippy_utils::msrvs::{self, Msrv};
-use clippy_utils::trait_ref_of_method;
+use clippy_utils::{is_from_proc_macro, trait_ref_of_method};
 use itertools::Itertools;
 use rustc_ast::visit::{try_visit, walk_list};
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
@@ -26,41 +26,6 @@ use rustc_span::Span;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::symbol::{Ident, kw};
 use std::ops::ControlFlow;
-
-declare_clippy_lint! {
-    /// ### What it does
-    /// Checks for lifetime annotations which can be removed by
-    /// relying on lifetime elision.
-    ///
-    /// ### Why is this bad?
-    /// The additional lifetimes make the code look more
-    /// complicated, while there is nothing out of the ordinary going on. Removing
-    /// them leads to more readable code.
-    ///
-    /// ### Known problems
-    /// This lint ignores functions with `where` clauses that reference
-    /// lifetimes to prevent false positives.
-    ///
-    /// ### Example
-    /// ```no_run
-    /// // Unnecessary lifetime annotations
-    /// fn in_and_out<'a>(x: &'a u8, y: u8) -> &'a u8 {
-    ///     x
-    /// }
-    /// ```
-    ///
-    /// Use instead:
-    /// ```no_run
-    /// fn elided(x: &u8, y: u8) -> &u8 {
-    ///     x
-    /// }
-    /// ```
-    #[clippy::version = "pre 1.29.0"]
-    pub NEEDLESS_LIFETIMES,
-    complexity,
-    "using explicit lifetimes for references in function arguments when elision rules \
-     would allow omitting them"
-}
 
 declare_clippy_lint! {
     /// ### What it does
@@ -124,6 +89,47 @@ declare_clippy_lint! {
     "unused lifetimes in function definitions"
 }
 
+declare_clippy_lint! {
+    /// ### What it does
+    /// Checks for lifetime annotations which can be removed by
+    /// relying on lifetime elision.
+    ///
+    /// ### Why is this bad?
+    /// The additional lifetimes make the code look more
+    /// complicated, while there is nothing out of the ordinary going on. Removing
+    /// them leads to more readable code.
+    ///
+    /// ### Known problems
+    /// This lint ignores functions with `where` clauses that reference
+    /// lifetimes to prevent false positives.
+    ///
+    /// ### Example
+    /// ```no_run
+    /// // Unnecessary lifetime annotations
+    /// fn in_and_out<'a>(x: &'a u8, y: u8) -> &'a u8 {
+    ///     x
+    /// }
+    /// ```
+    ///
+    /// Use instead:
+    /// ```no_run
+    /// fn elided(x: &u8, y: u8) -> &u8 {
+    ///     x
+    /// }
+    /// ```
+    #[clippy::version = "pre 1.29.0"]
+    pub NEEDLESS_LIFETIMES,
+    complexity,
+    "using explicit lifetimes for references in function arguments when elision rules \
+     would allow omitting them"
+}
+
+impl_lint_pass!(Lifetimes => [
+    ELIDABLE_LIFETIME_NAMES,
+    EXTRA_UNUSED_LIFETIMES,
+    NEEDLESS_LIFETIMES,
+]);
+
 pub struct Lifetimes {
     msrv: Msrv,
 }
@@ -134,12 +140,6 @@ impl Lifetimes {
     }
 }
 
-impl_lint_pass!(Lifetimes => [
-    NEEDLESS_LIFETIMES,
-    ELIDABLE_LIFETIME_NAMES,
-    EXTRA_UNUSED_LIFETIMES,
-]);
-
 impl<'tcx> LateLintPass<'tcx> for Lifetimes {
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'_>) {
         if let ItemKind::Fn {
@@ -149,9 +149,12 @@ impl<'tcx> LateLintPass<'tcx> for Lifetimes {
             ..
         } = item.kind
         {
-            check_fn_inner(cx, sig, Some(id), None, generics, item.span, true, self.msrv);
+            check_fn_inner(cx, sig, Some(id), None, generics, item.span, true, self.msrv, || {
+                is_from_proc_macro(cx, item)
+            });
         } else if let ItemKind::Impl(impl_) = &item.kind
             && !item.span.from_expansion()
+            && !is_from_proc_macro(cx, item)
         {
             report_extra_impl_lifetimes(cx, impl_);
         }
@@ -169,6 +172,7 @@ impl<'tcx> LateLintPass<'tcx> for Lifetimes {
                 item.span,
                 report_extra_lifetimes,
                 self.msrv,
+                || is_from_proc_macro(cx, item),
             );
         }
     }
@@ -179,7 +183,17 @@ impl<'tcx> LateLintPass<'tcx> for Lifetimes {
                 TraitFn::Required(sig) => (None, Some(sig)),
                 TraitFn::Provided(id) => (Some(id), None),
             };
-            check_fn_inner(cx, sig, body, trait_sig, item.generics, item.span, true, self.msrv);
+            check_fn_inner(
+                cx,
+                sig,
+                body,
+                trait_sig,
+                item.generics,
+                item.span,
+                true,
+                self.msrv,
+                || is_from_proc_macro(cx, item),
+            );
         }
     }
 }
@@ -194,6 +208,7 @@ fn check_fn_inner<'tcx>(
     span: Span,
     report_extra_lifetimes: bool,
     msrv: Msrv,
+    is_from_proc_macro: impl FnOnce() -> bool,
 ) {
     if span.in_external_macro(cx.sess().source_map()) || has_where_lifetimes(cx, generics) {
         return;
@@ -245,10 +260,19 @@ fn check_fn_inner<'tcx>(
         }
     }
 
-    if let Some((elidable_lts, usages)) = could_use_elision(cx, sig.decl, body, trait_sig, generics.params, msrv) {
-        if usages.iter().any(|usage| !usage.ident.span.eq_ctxt(span)) {
-            return;
-        }
+    let elidable = could_use_elision(cx, sig.decl, body, trait_sig, generics.params, msrv);
+    let has_elidable_lts = elidable
+        .as_ref()
+        .is_some_and(|(_, usages)| !usages.iter().any(|usage| !usage.ident.span.eq_ctxt(span)));
+
+    // Only check is_from_proc_macro if we're about to emit a lint (it's an expensive check)
+    if (has_elidable_lts || report_extra_lifetimes) && is_from_proc_macro() {
+        return;
+    }
+
+    if let Some((elidable_lts, usages)) = elidable
+        && has_elidable_lts
+    {
         // async functions have usages whose spans point at the lifetime declaration which messes up
         // suggestions
         let include_suggestions = !sig.header.is_async();

@@ -13,10 +13,10 @@
 use hir::ChangeWithProcMacros;
 use ide::{
     AnalysisHost, CallableSnippets, CompletionConfig, CompletionFieldsToResolve, DiagnosticsConfig,
-    FilePosition, TextSize,
+    FilePosition, RaFixtureConfig, TextSize,
 };
 use ide_db::{
-    MiniCore, SnippetCap,
+    SnippetCap,
     imports::insert_use::{ImportGranularity, InsertUseConfig},
 };
 use project_model::CargoConfig;
@@ -53,6 +53,8 @@ fn integrated_highlighting_benchmark() {
         load_out_dirs_from_check: true,
         with_proc_macro_server: ProcMacroServerChoice::Sysroot,
         prefill_caches: false,
+        num_worker_threads: 1,
+        proc_macro_processes: 1,
     };
 
     let (db, vfs, _proc_macro) = {
@@ -121,6 +123,8 @@ fn integrated_completion_benchmark() {
         load_out_dirs_from_check: true,
         with_proc_macro_server: ProcMacroServerChoice::Sysroot,
         prefill_caches: true,
+        num_worker_threads: 1,
+        proc_macro_processes: 1,
     };
 
     let (db, vfs, _proc_macro) = {
@@ -186,7 +190,7 @@ fn integrated_completion_benchmark() {
             exclude_traits: &[],
             enable_auto_await: true,
             enable_auto_iter: true,
-            minicore: MiniCore::default(),
+            ra_fixture: RaFixtureConfig::default(),
         };
         let position =
             FilePosition { file_id, offset: TextSize::try_from(completion_offset).unwrap() };
@@ -241,7 +245,7 @@ fn integrated_completion_benchmark() {
             exclude_traits: &[],
             enable_auto_await: true,
             enable_auto_iter: true,
-            minicore: MiniCore::default(),
+            ra_fixture: RaFixtureConfig::default(),
         };
         let position =
             FilePosition { file_id, offset: TextSize::try_from(completion_offset).unwrap() };
@@ -294,7 +298,7 @@ fn integrated_completion_benchmark() {
             exclude_traits: &[],
             enable_auto_await: true,
             enable_auto_iter: true,
-            minicore: MiniCore::default(),
+            ra_fixture: RaFixtureConfig::default(),
         };
         let position =
             FilePosition { file_id, offset: TextSize::try_from(completion_offset).unwrap() };
@@ -322,6 +326,8 @@ fn integrated_diagnostics_benchmark() {
         load_out_dirs_from_check: true,
         with_proc_macro_server: ProcMacroServerChoice::Sysroot,
         prefill_caches: true,
+        num_worker_threads: 1,
+        proc_macro_processes: 1,
     };
 
     let (db, vfs, _proc_macro) = {

@@ -8,9 +8,10 @@ use hir_def::{
     expr_store::path::{GenericArgs as HirGenericArgs, Path},
     hir::{
         Array, AsmOperand, AsmOptions, BinaryOp, BindingAnnotation, Expr, ExprId, ExprOrPatId,
-        LabelId, Literal, Pat, PatId, Statement, UnaryOp,
+        InlineAsmKind, LabelId, Literal, Pat, PatId, RecordSpread, Statement, UnaryOp,
     },
     resolver::ValueNs,
+    signatures::{FunctionSignature, VariantFields},
 };
 use hir_def::{FunctionId, hir::ClosureKind};
 use hir_expand::name::Name;
@@ -155,7 +156,7 @@ impl<'db> InferenceContext<'_, 'db> {
     /// it is matching against. This is used to determine whether we should
     /// perform `NeverToAny` coercions.
     fn pat_guaranteed_to_constitute_read_for_never(&self, pat: PatId) -> bool {
-        match &self.body[pat] {
+        match &self.store[pat] {
             // Does not constitute a read.
             Pat::Wild => false,
 
@@ -197,25 +198,25 @@ impl<'db> InferenceContext<'_, 'db> {
     // FIXME(tschottdorf): this is problematic as the HIR is being scraped, but
     // ref bindings are be implicit after #42640 (default match binding modes). See issue #44848.
     fn contains_explicit_ref_binding(&self, pat: PatId) -> bool {
-        if let Pat::Bind { id, .. } = self.body[pat]
-            && matches!(self.body[id].mode, BindingAnnotation::Ref | BindingAnnotation::RefMut)
+        if let Pat::Bind { id, .. } = self.store[pat]
+            && matches!(self.store[id].mode, BindingAnnotation::Ref | BindingAnnotation::RefMut)
         {
             return true;
         }
 
         let mut result = false;
-        self.body.walk_pats_shallow(pat, |pat| result |= self.contains_explicit_ref_binding(pat));
+        self.store.walk_pats_shallow(pat, |pat| result |= self.contains_explicit_ref_binding(pat));
         result
     }
 
     fn is_syntactic_place_expr(&self, expr: ExprId) -> bool {
-        match &self.body[expr] {
+        match &self.store[expr] {
             // Lang item paths cannot currently be local variables or statics.
             Expr::Path(Path::LangItem(_, _)) => false,
             Expr::Path(Path::Normal(path)) => path.type_anchor.is_none(),
             Expr::Path(path) => self
                 .resolver
-                .resolve_path_in_value_ns_fully(self.db, path, self.body.expr_path_hygiene(expr))
+                .resolve_path_in_value_ns_fully(self.db, path, self.store.expr_path_hygiene(expr))
                 .is_none_or(|res| matches!(res, ValueNs::LocalBinding(_) | ValueNs::StaticId(_))),
             Expr::Underscore => true,
             Expr::UnaryOp { op: UnaryOp::Deref, .. } => true,
@@ -311,7 +312,7 @@ impl<'db> InferenceContext<'_, 'db> {
     ) -> Ty<'db> {
         self.db.unwind_if_revision_cancelled();
 
-        let expr = &self.body[tgt_expr];
+        let expr = &self.store[tgt_expr];
         tracing::trace!(?expr);
         let ty = match expr {
             Expr::Missing => self.err_ty(),
@@ -608,7 +609,7 @@ impl<'db> InferenceContext<'_, 'db> {
                     Some(def) => {
                         let field_types = self.db.field_types(def);
                         let variant_data = def.fields(self.db);
-                        let visibilities = self.db.field_visibilities(def);
+                        let visibilities = VariantFields::field_visibilities(self.db, def);
                         for field in fields.iter() {
                             let field_def = {
                                 match variant_data.field(&field.name) {
@@ -657,8 +658,8 @@ impl<'db> InferenceContext<'_, 'db> {
                         }
                     }
                 }
-                if let Some(expr) = spread {
-                    self.infer_expr(*expr, &Expectation::has_type(ty), ExprIsRead::Yes);
+                if let RecordSpread::Expr(expr) = *spread {
+                    self.infer_expr_coerce_never(expr, &Expectation::has_type(ty), ExprIsRead::Yes);
                 }
                 ty
             }
@@ -717,7 +718,7 @@ impl<'db> InferenceContext<'_, 'db> {
                 // instantiations in RHS can be coerced to it. Note that this
                 // cannot happen in destructuring assignments because of how
                 // they are desugared.
-                let lhs_ty = match &self.body[target] {
+                let lhs_ty = match &self.store[target] {
                     // LHS of assignment doesn't constitute reads.
                     &Pat::Expr(expr) => {
                         Some(self.infer_expr(expr, &Expectation::none(), ExprIsRead::No))
@@ -728,7 +729,7 @@ impl<'db> InferenceContext<'_, 'db> {
                         let resolution = self.resolver.resolve_path_in_value_ns_fully(
                             self.db,
                             path,
-                            self.body.pat_path_hygiene(target),
+                            self.store.pat_path_hygiene(target),
                         );
                         self.resolver.reset_to_guard(resolver_guard);
 
@@ -751,7 +752,7 @@ impl<'db> InferenceContext<'_, 'db> {
 
                 if let Some(lhs_ty) = lhs_ty {
                     self.write_pat_ty(target, lhs_ty);
-                    self.infer_expr_coerce(value, &Expectation::has_type(lhs_ty), ExprIsRead::No);
+                    self.infer_expr_coerce(value, &Expectation::has_type(lhs_ty), ExprIsRead::Yes);
                 } else {
                     let rhs_ty = self.infer_expr(value, &Expectation::none(), ExprIsRead::Yes);
                     let resolver_guard =
@@ -1037,7 +1038,11 @@ impl<'db> InferenceContext<'_, 'db> {
                     // FIXME: `sym` should report for things that are not functions or statics.
                     AsmOperand::Sym(_) => (),
                 });
-                if diverge { self.types.types.never } else { self.types.types.unit }
+                if diverge || asm.kind == InlineAsmKind::NakedAsm {
+                    self.types.types.never
+                } else {
+                    self.types.types.unit
+                }
             }
         };
         // use a new type variable if we got unknown here
@@ -1347,7 +1352,7 @@ impl<'db> InferenceContext<'_, 'db> {
                     ExprIsRead::Yes,
                 );
                 let usize = self.types.types.usize;
-                let len = match self.body[repeat] {
+                let len = match self.store[repeat] {
                     Expr::Underscore => {
                         self.write_expr_ty(repeat, usize);
                         self.table.next_const_var()
@@ -1487,7 +1492,7 @@ impl<'db> InferenceContext<'_, 'db> {
                                     } else {
                                         ExprIsRead::No
                                     };
-                                let ty = if contains_explicit_ref_binding(this.body, *pat) {
+                                let ty = if contains_explicit_ref_binding(this.store, *pat) {
                                     this.infer_expr(
                                         *expr,
                                         &Expectation::has_type(decl_ty),
@@ -1620,7 +1625,8 @@ impl<'db> InferenceContext<'_, 'db> {
                 },
                 _ => return None,
             };
-            let is_visible = self.db.field_visibilities(field_id.parent)[field_id.local_id]
+            let is_visible = VariantFields::field_visibilities(self.db, field_id.parent)
+                [field_id.local_id]
                 .is_visible_from(self.db, self.resolver.module());
             if !is_visible {
                 if private_field.is_none() {
@@ -1704,7 +1710,7 @@ impl<'db> InferenceContext<'_, 'db> {
                 });
                 match resolved {
                     Ok((func, _is_visible)) => {
-                        self.check_method_call(tgt_expr, &[], func.sig, receiver_ty, expected)
+                        self.check_method_call(tgt_expr, &[], func.sig, expected)
                     }
                     Err(_) => self.err_ty(),
                 }
@@ -1844,7 +1850,7 @@ impl<'db> InferenceContext<'_, 'db> {
                         item: func.def_id.into(),
                     })
                 }
-                self.check_method_call(tgt_expr, args, func.sig, receiver_ty, expected)
+                self.check_method_call(tgt_expr, args, func.sig, expected)
             }
             // Failed to resolve, report diagnostic and try to resolve as call to field access or
             // assoc function
@@ -1934,16 +1940,14 @@ impl<'db> InferenceContext<'_, 'db> {
         tgt_expr: ExprId,
         args: &[ExprId],
         sig: FnSig<'db>,
-        receiver_ty: Ty<'db>,
         expected: &Expectation<'db>,
     ) -> Ty<'db> {
-        let (formal_receiver_ty, param_tys) = if !sig.inputs_and_output.inputs().is_empty() {
-            (sig.inputs_and_output.as_slice()[0], &sig.inputs_and_output.inputs()[1..])
+        let param_tys = if !sig.inputs_and_output.inputs().is_empty() {
+            &sig.inputs_and_output.inputs()[1..]
         } else {
-            (self.types.types.error, &[] as _)
+            &[]
         };
         let ret_ty = sig.output();
-        self.table.unify(formal_receiver_ty, receiver_ty);
 
         self.check_call_arguments(tgt_expr, param_tys, ret_ty, expected, args, &[], sig.c_variadic);
         ret_ty
@@ -2115,7 +2119,7 @@ impl<'db> InferenceContext<'_, 'db> {
                 // the return value of an argument-position async block to an argument-position
                 // closure wrapped in a block.
                 // See <https://github.com/rust-lang/rust/issues/112225>.
-                let is_closure = if let Expr::Closure { closure_kind, .. } = self.body[*arg] {
+                let is_closure = if let Expr::Closure { closure_kind, .. } = self.store[*arg] {
                     !matches!(closure_kind, ClosureKind::Coroutine(_))
                 } else {
                     false
@@ -2154,7 +2158,7 @@ impl<'db> InferenceContext<'_, 'db> {
             );
             let param_env = self.table.param_env;
             self.table.register_predicates(clauses_as_obligations(
-                generic_predicates.iter_instantiated_copied(self.interner(), parameters.as_slice()),
+                generic_predicates.iter_instantiated(self.interner(), parameters.as_slice()),
                 ObligationCause::new(),
                 param_env,
             ));
@@ -2192,7 +2196,7 @@ impl<'db> InferenceContext<'_, 'db> {
             _ => return Default::default(),
         };
 
-        let data = self.db.function_signature(func);
+        let data = FunctionSignature::of(self.db, func);
         let Some(legacy_const_generics_indices) = data.legacy_const_generics_indices(self.db, func)
         else {
             return Default::default();

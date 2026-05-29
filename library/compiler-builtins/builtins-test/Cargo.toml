@@ -6,23 +6,22 @@ publish = false
 license = "MIT AND Apache-2.0 WITH LLVM-exception AND (MIT OR Apache-2.0)"
 
 [dependencies]
+compiler_builtins = { workspace = true, features = ["unstable-public-internals"] }
+
 # For fuzzing tests we want a deterministic seedable RNG. We also eliminate potential
 # problems with system RNGs on the variety of platforms this crate is tested on.
 # `xoshiro128**` is used for its quality, size, and speed at generating `u32` shift amounts.
-rand_xoshiro = "0.7"
-# To compare float builtins against
-rustc_apfloat = "0.2.3"
-# Really a dev dependency, but dev dependencies can't be optional
-gungraun = { version = "0.17.0", optional = true }
+rand_xoshiro.workspace = true
 
-[dependencies.compiler_builtins]
-path = "../builtins-shim"
-default-features = false
-features = ["unstable-public-internals"]
+# To compare float builtins against
+rustc_apfloat.workspace = true
+
+# Really dev dependencies, but those can't be optional
+criterion = { workspace = true, optional = true }
+gungraun = { workspace = true, optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.6.0", default-features = false, features = ["cargo_bench_support"] }
-paste = "1.0.15"
+paste.workspace = true
 
 [target.'cfg(all(target_arch = "arm", not(any(target_env = "gnu", target_env = "musl")), target_os = "linux"))'.dev-dependencies]
 test = { git = "https://github.com/japaric/utest" }
@@ -33,7 +32,6 @@ utest-macros = { git = "https://github.com/japaric/utest" }
 default = ["mangled-names"]
 c = ["compiler_builtins/c"]
 no-asm = ["compiler_builtins/no-asm"]
-no-f16-f128 = ["compiler_builtins/no-f16-f128"]
 mem = ["compiler_builtins/mem"]
 mangled-names = ["compiler_builtins/mangled-names"]
 # Skip tests that rely on f128 symbols being available on the system
@@ -48,8 +46,10 @@ no-sys-f16 = ["no-sys-f16-f64-convert"]
 # Enable icount benchmarks (requires gungraun-runner and valgrind locally)
 icount = ["dep:gungraun"]
 
-# Enable report generation without bringing in more dependencies by default
-benchmarking-reports = ["criterion/plotters", "criterion/html_reports"]
+# Config for wall time benchmarks. Plotters and html_reports bring in extra
+# deps so are off by default for CI.
+benchmarking-reports = ["walltime", "criterion/plotters", "criterion/html_reports"]
+walltime = ["dep:criterion"]
 
 # NOTE: benchmarks must be run with `--no-default-features` or with
 # `-p builtins-test`, otherwise the default `compiler-builtins` feature
@@ -59,38 +59,47 @@ benchmarking-reports = ["criterion/plotters", "criterion/html_reports"]
 [[bench]]
 name = "float_add"
 harness = false
+required-features = ["walltime"]
 
 [[bench]]
 name = "float_sub"
 harness = false
+required-features = ["walltime"]
 
 [[bench]]
 name = "float_mul"
 harness = false
+required-features = ["walltime"]
 
 [[bench]]
 name = "float_div"
 harness = false
+required-features = ["walltime"]
 
 [[bench]]
 name = "float_cmp"
 harness = false
+required-features = ["walltime"]
 
 [[bench]]
 name = "float_conv"
 harness = false
+required-features = ["walltime"]
 
 [[bench]]
 name = "float_extend"
 harness = false
+required-features = ["walltime"]
 
 [[bench]]
 name = "float_trunc"
 harness = false
+required-features = ["walltime"]
 
 [[bench]]
 name = "float_pow"
 harness = false
+required-features = ["walltime"]
 
 [[bench]]
 name = "mem_icount"

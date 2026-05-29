@@ -103,13 +103,10 @@ impl Qualif for HasMutInterior {
         // FIXME(#132279): Once we've got a typing mode which reveals opaque types using the HIR
         // typeck results without causing query cycles, we should use this here instead of defining
         // opaque types.
-        let typing_env = ty::TypingEnv {
-            typing_mode: ty::TypingMode::analysis_in_body(
-                cx.tcx,
-                cx.body.source.def_id().expect_local(),
-            ),
-            param_env: cx.typing_env.param_env,
-        };
+        let typing_env = ty::TypingEnv::new(
+            cx.typing_env.param_env,
+            ty::TypingMode::analysis_in_body(cx.tcx, cx.body.source.def_id().expect_local()),
+        );
         let (infcx, param_env) = cx.tcx.infer_ctxt().build_with_typing_env(typing_env);
         let ocx = ObligationCtxt::new(&infcx);
         let obligation = Obligation::new(
@@ -237,8 +234,7 @@ where
         Rvalue::Use(operand)
         | Rvalue::Repeat(operand, _)
         | Rvalue::UnaryOp(_, operand)
-        | Rvalue::Cast(_, operand, _)
-        | Rvalue::ShallowInitBox(operand, _) => in_operand::<Q, _>(cx, in_local, operand),
+        | Rvalue::Cast(_, operand, _) => in_operand::<Q, _>(cx, in_local, operand),
 
         Rvalue::BinaryOp(_, box (lhs, rhs)) => {
             in_operand::<Q, _>(cx, in_local, lhs) || in_operand::<Q, _>(cx, in_local, rhs)
@@ -343,17 +339,18 @@ where
 
     // Check the qualifs of the value of `const` items.
     let uneval = match constant.const_ {
-        Const::Ty(_, ct)
-            if matches!(
-                ct.kind(),
-                ty::ConstKind::Param(_) | ty::ConstKind::Error(_) | ty::ConstKind::Value(_)
-            ) =>
-        {
-            None
-        }
-        Const::Ty(_, c) => {
-            bug!("expected ConstKind::Param or ConstKind::Value here, found {:?}", c)
-        }
+        Const::Ty(_, ct) => match ct.kind() {
+            ty::ConstKind::Param(_) | ty::ConstKind::Error(_) => None,
+            // Unevaluated consts in MIR bodies don't have associated MIR (e.g. `type const`).
+            ty::ConstKind::Unevaluated(_) => None,
+            // FIXME(mgca): Investigate whether using `None` for `ConstKind::Value` is overly
+            // strict, and if instead we should be doing some kind of value-based analysis.
+            ty::ConstKind::Value(_) => None,
+            _ => bug!(
+                "expected ConstKind::Param, ConstKind::Value, ConstKind::Unevaluated, or ConstKind::Error here, found {:?}",
+                ct
+            ),
+        },
         Const::Unevaluated(uv, _) => Some(uv),
         Const::Val(..) => None,
     };
@@ -364,10 +361,8 @@ where
         // check performed after the promotion. Verify that with an assertion.
         assert!(promoted.is_none() || Q::ALLOW_PROMOTED);
 
-        // Don't peak inside trait associated constants, also `#[type_const] const` items
-        // don't have bodies so there's nothing to look at
-        if promoted.is_none() && cx.tcx.trait_of_assoc(def).is_none() && !cx.tcx.is_type_const(def)
-        {
+        // Don't peak inside trait associated constants.
+        if promoted.is_none() && cx.tcx.trait_of_assoc(def).is_none() {
             let qualifs = cx.tcx.at(constant.span).mir_const_qualif(def);
 
             if !Q::in_qualifs(&qualifs) {

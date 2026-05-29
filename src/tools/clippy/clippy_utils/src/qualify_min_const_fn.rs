@@ -82,7 +82,10 @@ fn check_ty<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>, span: Span, msrv: Msrv) 
             ty::Ref(_, _, hir::Mutability::Mut) if !msrv.meets(cx, msrvs::CONST_MUT_REFS) => {
                 return Err((span, "mutable references in const fn are unstable".into()));
             },
-            ty::Alias(ty::Opaque, ..) => return Err((span, "`impl Trait` in const fn is unstable".into())),
+            ty::Alias(ty::AliasTy {
+                kind: ty::Opaque { .. },
+                ..
+            }) => return Err((span, "`impl Trait` in const fn is unstable".into())),
             ty::FnPtr(..) => {
                 return Err((span, "function pointers in const fn are unstable".into()));
             },
@@ -194,7 +197,6 @@ fn check_rvalue<'tcx>(
                 ))
             }
         },
-        Rvalue::ShallowInitBox(_, _) => Ok(()),
         Rvalue::UnaryOp(_, operand) => {
             let ty = operand.ty(body, cx.tcx);
             if ty.is_integral() || ty.is_bool() {

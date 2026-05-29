@@ -1,9 +1,8 @@
-use std::assert_matches::assert_matches;
+use std::assert_matches;
 
 use hir::Node;
 use rustc_data_structures::fx::FxIndexSet;
 use rustc_hir as hir;
-use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::find_attr;
@@ -108,7 +107,7 @@ fn gather_explicit_predicates_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::Gen
             );
 
             return ty::GenericPredicates {
-                parent: Some(tcx.parent(def_id.to_def_id())),
+                parent: Some(tcx.local_parent(def_id).to_def_id()),
                 predicates: tcx.arena.alloc_from_iter(predicates),
             };
         }
@@ -332,9 +331,7 @@ fn gather_explicit_predicates_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::Gen
     // first we would need a way to let std/core use APIs with unstable feature bounds from
     // within stable APIs.
     let allow_unstable_feature_attr =
-        find_attr!(attrs, AttributeKind::UnstableFeatureBound(i) => i)
-            .map(|i| i.as_slice())
-            .unwrap_or_default();
+        find_attr!(attrs, UnstableFeatureBound(i) => i).map(|i| i.as_slice()).unwrap_or_default();
 
     for (feat_name, span) in allow_unstable_feature_attr {
         predicates.insert((ty::ClauseKind::UnstableFeature(*feat_name).upcast(tcx), *span));
@@ -442,6 +439,11 @@ fn const_evaluatable_predicates_of<'tcx>(
                     return;
                 }
 
+                // Skip type consts as mGCA doesn't support evaluatable clauses.
+                if self.tcx.is_type_const(uv.def) {
+                    return;
+                }
+
                 let span = self.tcx.def_span(uv.def);
                 self.preds.insert((ty::ClauseKind::ConstEvaluatable(c).upcast(self.tcx), span));
             }
@@ -511,11 +513,16 @@ pub(super) fn explicit_predicates_of<'tcx>(
             //     identity args of the trait.
             // * It must be an associated type for this trait (*not* a
             //   supertrait).
-            if let ty::Alias(ty::Projection, projection) = ty.kind() {
+            if let &ty::Alias(
+                projection @ ty::AliasTy {
+                    kind: ty::Projection { def_id: projection_def_id }, ..
+                },
+            ) = ty.kind()
+            {
                 projection.args == trait_identity_args
                     // FIXME(return_type_notation): This check should be more robust
-                    && !tcx.is_impl_trait_in_trait(projection.def_id)
-                    && tcx.parent(projection.def_id) == def_id.to_def_id()
+                    && !tcx.is_impl_trait_in_trait(projection_def_id)
+                    && tcx.parent(projection_def_id) == def_id.to_def_id()
             } else {
                 false
             }
@@ -1067,6 +1074,9 @@ pub(super) fn const_conditions<'tcx>(
         },
         // N.B. Tuple ctors are unconditionally constant.
         Node::Ctor(hir::VariantData::Tuple { .. }) => return Default::default(),
+        Node::Expr(hir::Expr { kind: hir::ExprKind::Closure(_), .. }) => {
+            (hir::Generics::empty(), None, tcx.is_conditionally_const(tcx.local_parent(def_id)))
+        }
         _ => bug!("const_conditions called on wrong item: {def_id:?}"),
     };
 

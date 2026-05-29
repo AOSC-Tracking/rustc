@@ -10,6 +10,7 @@ use std::{iter, thread};
 
 use rustc_abi::ExternAbi;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_errors::FatalErrorMarker;
 use rustc_hir::def::Namespace;
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::layout::{HasTyCtxt, HasTypingEnv, LayoutCx};
@@ -113,7 +114,7 @@ pub struct MiriConfig {
     pub float_nondet: bool,
     /// Whether floating-point operations can have a non-deterministic rounding error.
     pub float_rounding_error: FloatRoundingErrorMode,
-    /// Whether Miri artifically introduces short reads/writes on file descriptors.
+    /// Whether Miri artificially introduces short reads/writes on file descriptors.
     pub short_fd_operations: bool,
     /// A list of crates that are considered user-relevant.
     pub user_relevant_crates: Vec<String>,
@@ -477,7 +478,11 @@ pub fn eval_entry<'tcx>(
     let res: thread::Result<InterpResult<'_, !>> =
         panic::catch_unwind(AssertUnwindSafe(|| ecx.run_threads()));
     let res = res.unwrap_or_else(|panic_payload| {
-        ecx.handle_ice();
+        // rustc "handles" some errors by unwinding with FatalErrorMarker
+        // (after emitting suitable diagnostics), so do not treat those as ICEs.
+        if !panic_payload.is::<FatalErrorMarker>() {
+            ecx.handle_ice();
+        }
         panic::resume_unwind(panic_payload)
     });
     // Obtain the result of the execution. This is always an `Err`, but that doesn't necessarily

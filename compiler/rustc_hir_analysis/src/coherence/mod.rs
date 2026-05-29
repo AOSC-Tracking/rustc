@@ -160,7 +160,7 @@ fn coherent_trait(tcx: TyCtxt<'_>, def_id: DefId) -> Result<(), ErrorGuaranteed>
     }
     // Trigger building the specialization graph for the trait. This will detect and report any
     // overlap errors.
-    let mut res = tcx.ensure_ok().specialization_graph_of(def_id);
+    let mut res = tcx.ensure_result().specialization_graph_of(def_id);
 
     for &impl_def_id in impls {
         let impl_header = tcx.impl_trait_header(impl_def_id);
@@ -171,7 +171,7 @@ fn coherent_trait(tcx: TyCtxt<'_>, def_id: DefId) -> Result<(), ErrorGuaranteed>
             .and(check_impl(tcx, impl_def_id, trait_ref, trait_def, impl_header.polarity))
             .and(check_object_overlap(tcx, impl_def_id, trait_ref))
             .and(unsafety::check_item(tcx, impl_def_id, impl_header, trait_def))
-            .and(tcx.ensure_ok().orphan_check_impl(impl_def_id))
+            .and(tcx.ensure_result().orphan_check_impl(impl_def_id))
             .and(builtin::check_trait(tcx, def_id, impl_def_id, impl_header));
     }
 
@@ -211,9 +211,7 @@ fn check_object_overlap<'tcx>(
                 // This is a WF error tested by `coherence-impl-trait-for-trait-dyn-compatible.rs`.
             } else {
                 let mut supertrait_def_ids = elaborate::supertrait_def_ids(tcx, component_def_id);
-                if supertrait_def_ids
-                    .any(|d| d == trait_def_id && tcx.trait_def(d).implement_via_object)
-                {
+                if supertrait_def_ids.any(|d| d == trait_def_id) {
                     let span = tcx.def_span(impl_def_id);
                     return Err(struct_span_code_err!(
                         tcx.dcx(),

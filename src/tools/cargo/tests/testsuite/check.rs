@@ -1552,6 +1552,16 @@ fn check_fixable_warning_for_clippy() {
 ...
 "#]])
         .run();
+
+    foo.cargo("check")
+        .env("RUSTC_WORKSPACE_WRAPPER", tools::wrapped_clippy_driver())
+        .env("CLIPPY_ARGS", "-Wclippy::pedantic__CLIPPY_HACKERY__-Aclippy::allow_attributes__CLIPPY_HACKERY__") // Set -Wclippy::pedantic
+        .with_stderr_data(str![[r#"
+...
+[WARNING] `foo` (lib) generated 1 warning (run `cargo clippy --fix --lib -p foo -- -Wclippy::pedantic -Aclippy::allow_attributes` to apply 1 suggestion)
+...
+"#]])
+        .run();
 }
 
 #[cargo_test]
@@ -1705,6 +1715,7 @@ fn check_build_should_not_output_files_to_artifact_dir() {
         .join("target-dir")
         .assert_build_dir_layout(str![[r#"
 [ROOT]/foo/target-dir/CACHEDIR.TAG
+[ROOT]/foo/target-dir/debug/.cargo-lock
 
 "#]]);
 }
@@ -1716,7 +1727,7 @@ fn check_build_should_lock_target_dir_when_artifact_dir_is_same_as_build_dir() {
         .build();
 
     p.cargo("check").enable_mac_dsym().run();
-    assert!(p.root().join("target/debug/.cargo-lock").exists());
+    assert!(p.root().join("target/debug/.cargo-build-lock").exists());
 }
 
 #[cargo_test]
@@ -1735,10 +1746,14 @@ fn check_build_should_not_lock_artifact_dir_when_build_dir_is_not_same_dir() {
 
     p.cargo("check").enable_mac_dsym().run();
 
-    // Verify we did NOT take the build-dir lock
-    assert!(!p.root().join("target-dir/debug/.cargo-lock").exists());
+    // Verify we did NOT take the artifact-dir lock
+    assert!(
+        !p.root()
+            .join("target-dir/debug/.cargo-artifact-lock")
+            .exists()
+    );
     // Verify we did take the build-dir lock
-    assert!(p.root().join("build-dir/debug/.cargo-lock").exists());
+    assert!(p.root().join("build-dir/debug/.cargo-build-lock").exists());
 }
 
 // Regression test for #16305
@@ -1828,6 +1843,7 @@ fn check_build_should_not_uplift_proc_macro_dylib_deps() {
         .join("target-dir")
         .assert_build_dir_layout(str![[r#"
 [ROOT]/foo/target-dir/CACHEDIR.TAG
+[ROOT]/foo/target-dir/debug/.cargo-lock
 
 "#]]);
 }

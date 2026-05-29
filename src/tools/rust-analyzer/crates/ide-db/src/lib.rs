@@ -60,12 +60,12 @@ use salsa::Durability;
 use std::{fmt, mem::ManuallyDrop};
 
 use base_db::{
-    CrateGraphBuilder, CratesMap, FileSourceRootInput, FileText, Files, Nonce, RootQueryDb,
-    SourceDatabase, SourceRoot, SourceRootId, SourceRootInput, query_group,
+    CrateGraphBuilder, CratesMap, FileSourceRootInput, FileText, Files, Nonce, SourceDatabase,
+    SourceRoot, SourceRootId, SourceRootInput, query_group, set_all_crates_with_durability,
 };
 use hir::{
     FilePositionWrapper, FileRangeWrapper,
-    db::{DefDatabase, ExpandDatabase},
+    db::{DefDatabase, ExpandDatabase, HirDatabase},
 };
 use triomphe::Arc;
 
@@ -197,7 +197,7 @@ impl RootDatabase {
             nonce: Nonce::new(),
         };
         // This needs to be here otherwise `CrateGraphBuilder` will panic.
-        db.set_all_crates(Arc::new(Box::new([])));
+        set_all_crates_with_durability(&mut db, std::iter::empty(), Durability::HIGH);
         CrateGraphBuilder::default().set_in_db(&mut db);
         db.set_proc_macros_with_durability(Default::default(), Durability::MEDIUM);
         _ = base_db::LibraryRoots::builder(Default::default())
@@ -253,7 +253,7 @@ impl RootDatabase {
 }
 
 #[query_group::query_group]
-pub trait LineIndexDatabase: base_db::RootQueryDb {
+pub trait LineIndexDatabase: base_db::SourceDatabase {
     #[salsa::invoke_interned(line_index)]
     fn line_index(&self, file_id: FileId) -> Arc<LineIndex>;
 }
@@ -269,6 +269,7 @@ pub enum SymbolKind {
     BuiltinAttr,
     Const,
     ConstParam,
+    CrateRoot,
     Derive,
     DeriveHelper,
     Enum,
@@ -307,14 +308,15 @@ impl From<hir::MacroKind> for SymbolKind {
     }
 }
 
-impl From<hir::ModuleDef> for SymbolKind {
-    fn from(it: hir::ModuleDef) -> Self {
+impl SymbolKind {
+    pub fn from_module_def(db: &dyn HirDatabase, it: hir::ModuleDef) -> Self {
         match it {
             hir::ModuleDef::Const(..) => SymbolKind::Const,
-            hir::ModuleDef::Variant(..) => SymbolKind::Variant,
+            hir::ModuleDef::EnumVariant(..) => SymbolKind::Variant,
             hir::ModuleDef::Function(..) => SymbolKind::Function,
             hir::ModuleDef::Macro(mac) if mac.is_proc_macro() => SymbolKind::ProcMacro,
             hir::ModuleDef::Macro(..) => SymbolKind::Macro,
+            hir::ModuleDef::Module(m) if m.is_crate_root(db) => SymbolKind::CrateRoot,
             hir::ModuleDef::Module(..) => SymbolKind::Module,
             hir::ModuleDef::Static(..) => SymbolKind::Static,
             hir::ModuleDef::Adt(hir::Adt::Struct(..)) => SymbolKind::Struct,

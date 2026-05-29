@@ -181,8 +181,8 @@ struct DifferentiatePass
       return failure();
 
     OpBuilder builder(CI);
-    auto dCI = builder.create<func::CallOp>(CI.getLoc(), newFunc.getName(),
-                                            newFunc.getResultTypes(), args);
+    auto dCI = func::CallOp::create(builder, CI.getLoc(), newFunc.getName(),
+                                    newFunc.getResultTypes(), args);
     if (dCI.getNumResults() != CI.getNumResults()) {
       CI.emitError() << "Incorrect number of results for enzyme operation: "
                      << *CI << " expected " << *dCI;
@@ -338,13 +338,15 @@ struct DifferentiatePass
       return failure();
 
     OpBuilder builder(CI);
-    if (auto llvmNewFn = dyn_cast<LLVM::LLVMFuncOp>(newFunc.getOperation())) {
-      auto dCI = builder.create<LLVM::CallOp>(CI.getLoc(), llvmNewFn, args);
+    if (auto iface =
+            dyn_cast<AutoDiffFunctionInterface>(newFunc.getOperation())) {
+      auto dCI = iface.createCall(builder, CI.getLoc(), args);
       CI.replaceAllUsesWith(dCI);
     } else {
-      auto dCI = builder.create<func::CallOp>(CI.getLoc(), newFunc.getName(),
-                                              newFunc.getResultTypes(), args);
-      CI.replaceAllUsesWith(dCI);
+      newFunc.getOperation()->emitError()
+          << "this function operation does not implement "
+             "AutoDiffFunctionInterface";
+      return failure();
     }
     CI->erase();
     return success();

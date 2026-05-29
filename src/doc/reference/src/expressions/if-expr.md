@@ -31,19 +31,16 @@ LetChainCondition ->
 -->
 
 r[expr.if.intro]
-The syntax of an `if` expression is a sequence of one or more condition operands separated by `&&`,
-followed by a consequent block, any number of `else if` conditions and blocks, and an optional trailing `else` block.
+The syntax of an `if` expression is a sequence of one or more condition operands separated by `&&`, followed by a consequent block, any number of `else if` conditions and blocks, and an optional trailing `else` block.
 
 r[expr.if.condition]
 Condition operands must be either an [Expression] with a [boolean type] or a conditional `let` match.
 
 r[expr.if.condition-true]
-If all of the condition operands evaluate to `true` and all of the `let` patterns successfully match their [scrutinee]s,
-the consequent block is executed and any subsequent `else if` or `else` block is skipped.
+If all of the condition operands evaluate to `true` and all of the `let` patterns successfully match their [scrutinee]s, the consequent block is executed and any subsequent `else if` or `else` block is skipped.
 
 r[expr.if.else-if]
-If any condition operand evaluates to `false` or any `let` pattern does not match its scrutinee,
-the consequent block is skipped and any subsequent `else if` condition is evaluated.
+If any condition operand evaluates to `false` or any `let` pattern does not match its scrutinee, the consequent block is skipped and any subsequent `else if` condition is evaluated.
 
 r[expr.if.else]
 If all `if` and `else if` conditions evaluate to `false` then any `else` block is executed.
@@ -71,6 +68,34 @@ let y = if 12 * 15 > 150 {
     "Smaller"
 };
 assert_eq!(y, "Bigger");
+```
+
+r[expr.if.diverging]
+An `if` expression [diverges] if either the condition expression diverges or if all arms diverge.
+
+```rust,no_run
+fn diverging_condition() -> ! {
+    // Diverges because the condition expression diverges
+    if loop {} {
+        ()
+    } else {
+        ()
+    };
+    // The semicolon above is important: The type of the `if` expression is
+    // `()`, despite being diverging. When the final body expression is
+    // elided, the type of the body is inferred to ! because the function body
+    // diverges. Without the semicolon, the `if` would be the tail expression
+    // with type `()`, which would fail to match the return type `!`.
+}
+
+fn diverging_arms() -> ! {
+    // Diverges because all arms diverge
+    if true {
+        loop {}
+    } else {
+        loop {}
+    }
+}
 ```
 
 r[expr.if.let]
@@ -103,8 +128,7 @@ if let _ = 5 {
 ```
 
 r[expr.if.let.or-pattern]
-Multiple patterns may be specified with the `|` operator.
-This has the same semantics as with `|` in [`match` expressions]:
+Multiple patterns may be specified with the `|` operator. This has the same semantics as with `|` in [`match` expressions]:
 
 ```rust
 enum E {
@@ -125,8 +149,7 @@ r[expr.if.chains.intro]
 Multiple condition operands can be separated with `&&`.
 
 r[expr.if.chains.order]
-Similar to a `&&` [LazyBooleanExpression], each operand is evaluated from left-to-right until an operand evaluates as `false` or a `let` match fails,
-in which case the subsequent operands are not evaluated.
+Similar to a `&&` [LazyBooleanExpression], each operand is evaluated from left-to-right until an operand evaluates as `false` or a `let` match fails, in which case the subsequent operands are not evaluated.
 
 r[expr.if.chains.bindings]
 The bindings of each pattern are put into scope to be available for the next condition operand and the consequent block.
@@ -163,8 +186,7 @@ fn nested() {
 ```
 
 r[expr.if.chains.or]
-If any condition operand is a `let` pattern, then none of the condition operands can be a `||` [lazy boolean operator expression][expr.bool-logic] due to ambiguity and precedence with the `let` scrutinee.
-If a `||` expression is needed, then parentheses can be used. For example:
+If any condition operand is a `let` pattern, then none of the condition operands can be a `||` [lazy boolean operator expression][expr.bool-logic] due to ambiguity and precedence with the `let` scrutinee. If a `||` expression is needed, then parentheses can be used. For example:
 
 ```rust
 # let foo = Some(123);
@@ -180,4 +202,5 @@ r[expr.if.edition2024]
 
 [`match` expressions]: match-expr.md
 [boolean type]: ../types/boolean.md
+[diverges]: divergence
 [scrutinee]: ../glossary.md#scrutinee

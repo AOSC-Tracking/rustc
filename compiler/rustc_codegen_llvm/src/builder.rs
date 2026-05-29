@@ -7,8 +7,7 @@ pub(crate) mod autodiff;
 pub(crate) mod gpu_offload;
 
 use libc::{c_char, c_uint};
-use rustc_abi as abi;
-use rustc_abi::{Align, Size, WrappingRange};
+use rustc_abi::{self as abi, Align, Size, WrappingRange};
 use rustc_codegen_ssa::MemFlags;
 use rustc_codegen_ssa::common::{IntPredicate, RealPredicate, SynchronizationScope, TypeKind};
 use rustc_codegen_ssa::mir::operand::{OperandRef, OperandValue};
@@ -97,6 +96,21 @@ impl<'a, 'll, CX: Borrow<SCx<'ll>>> GenericBuilder<'a, 'll, CX> {
         GenericBuilder { llbuilder, cx: scx }
     }
 
+    pub(crate) fn append_block(
+        cx: &'a GenericCx<'ll, CX>,
+        llfn: &'ll Value,
+        name: &str,
+    ) -> &'ll BasicBlock {
+        unsafe {
+            let name = SmallCStr::new(name);
+            llvm::LLVMAppendBasicBlockInContext(cx.llcx(), llfn, name.as_ptr())
+        }
+    }
+
+    pub(crate) fn trunc(&mut self, val: &'ll Value, dest_ty: &'ll Type) -> &'ll Value {
+        unsafe { llvm::LLVMBuildTrunc(self.llbuilder, val, dest_ty, UNNAMED) }
+    }
+
     pub(crate) fn bitcast(&mut self, val: &'ll Value, dest_ty: &'ll Type) -> &'ll Value {
         unsafe { llvm::LLVMBuildBitCast(self.llbuilder, val, dest_ty, UNNAMED) }
     }
@@ -173,19 +187,6 @@ impl<'a, 'll, CX: Borrow<SCx<'ll>>> GenericBuilder<'a, 'll, CX> {
             load
         }
     }
-
-    fn memset(&mut self, ptr: &'ll Value, fill_byte: &'ll Value, size: &'ll Value, align: Align) {
-        unsafe {
-            llvm::LLVMRustBuildMemSet(
-                self.llbuilder,
-                ptr,
-                align.bytes() as c_uint,
-                fill_byte,
-                size,
-                false,
-            );
-        }
-    }
 }
 
 /// Empty string, to be used where LLVM expects an instruction name, indicating
@@ -194,12 +195,13 @@ impl<'a, 'll, CX: Borrow<SCx<'ll>>> GenericBuilder<'a, 'll, CX> {
 pub(crate) const UNNAMED: *const c_char = c"".as_ptr();
 
 impl<'ll, CX: Borrow<SCx<'ll>>> BackendTypes for GenericBuilder<'_, 'll, CX> {
-    type Value = <GenericCx<'ll, CX> as BackendTypes>::Value;
-    type Metadata = <GenericCx<'ll, CX> as BackendTypes>::Metadata;
     type Function = <GenericCx<'ll, CX> as BackendTypes>::Function;
     type BasicBlock = <GenericCx<'ll, CX> as BackendTypes>::BasicBlock;
-    type Type = <GenericCx<'ll, CX> as BackendTypes>::Type;
     type Funclet = <GenericCx<'ll, CX> as BackendTypes>::Funclet;
+
+    type Value = <GenericCx<'ll, CX> as BackendTypes>::Value;
+    type Type = <GenericCx<'ll, CX> as BackendTypes>::Type;
+    type FunctionSignature = <GenericCx<'ll, CX> as BackendTypes>::FunctionSignature;
 
     type DIScope = <GenericCx<'ll, CX> as BackendTypes>::DIScope;
     type DILocation = <GenericCx<'ll, CX> as BackendTypes>::DILocation;
@@ -613,21 +615,14 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         }
     }
 
-    fn scalable_alloca(&mut self, elt: u64, align: Align, element_ty: Ty<'_>) -> Self::Value {
+    fn alloca_with_ty(&mut self, layout: TyAndLayout<'tcx>) -> Self::Value {
         let mut bx = Builder::with_cx(self.cx);
         bx.position_at_start(unsafe { llvm::LLVMGetFirstBasicBlock(self.llfn()) });
-        let llvm_ty = match element_ty.kind() {
-            ty::Bool => bx.type_i1(),
-            ty::Int(int_ty) => self.cx.type_int_from_ty(*int_ty),
-            ty::Uint(uint_ty) => self.cx.type_uint_from_ty(*uint_ty),
-            ty::Float(float_ty) => self.cx.type_float_from_ty(*float_ty),
-            _ => unreachable!("scalable vectors can only contain a bool, int, uint or float"),
-        };
+        let scalable_vector_ty = layout.llvm_type(self.cx);
 
         unsafe {
-            let ty = llvm::LLVMScalableVectorType(llvm_ty, elt.try_into().unwrap());
-            let alloca = llvm::LLVMBuildAlloca(&bx.llbuilder, ty, UNNAMED);
-            llvm::LLVMSetAlignment(alloca, align.bytes() as c_uint);
+            let alloca = llvm::LLVMBuildAlloca(&bx.llbuilder, scalable_vector_ty, UNNAMED);
+            llvm::LLVMSetAlignment(alloca, layout.align.abi.bytes() as c_uint);
             alloca
         }
     }
@@ -712,7 +707,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
                     }
 
                     if let Some(pointee) = layout.pointee_info_at(bx, offset)
-                        && let Some(_) = pointee.safe
+                        && pointee.align > Align::ONE
                     {
                         bx.align_metadata(load, pointee.align);
                     }
@@ -1382,12 +1377,12 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
     fn call(
         &mut self,
         llty: &'ll Type,
-        fn_call_attrs: Option<&CodegenFnAttrs>,
+        caller_attrs: Option<&CodegenFnAttrs>,
         fn_abi: Option<&FnAbi<'tcx, Ty<'tcx>>>,
         llfn: &'ll Value,
         args: &[&'ll Value],
         funclet: Option<&Funclet<'ll>>,
-        instance: Option<Instance<'tcx>>,
+        callee_instance: Option<Instance<'tcx>>,
     ) -> &'ll Value {
         debug!("call {:?} with args ({:?})", llfn, args);
 
@@ -1399,10 +1394,10 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         }
 
         // Emit CFI pointer type membership test
-        self.cfi_type_test(fn_call_attrs, fn_abi, instance, llfn);
+        self.cfi_type_test(caller_attrs, fn_abi, callee_instance, llfn);
 
         // Emit KCFI operand bundle
-        let kcfi_bundle = self.kcfi_operand_bundle(fn_call_attrs, fn_abi, instance, llfn);
+        let kcfi_bundle = self.kcfi_operand_bundle(caller_attrs, fn_abi, callee_instance, llfn);
         if let Some(kcfi_bundle) = kcfi_bundle.as_ref().map(|b| b.as_ref()) {
             bundles.push(kcfi_bundle);
         }
@@ -1420,17 +1415,17 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
             )
         };
 
-        if let Some(instance) = instance {
+        if let Some(callee_instance) = callee_instance {
             // Attributes on the function definition being called
-            let fn_defn_attrs = self.cx.tcx.codegen_fn_attrs(instance.def_id());
-            if let Some(fn_call_attrs) = fn_call_attrs
+            let callee_attrs = self.cx.tcx.codegen_fn_attrs(callee_instance.def_id());
+            if let Some(caller_attrs) = caller_attrs
                 // If there is an inline attribute and a target feature that matches
                 // we will add the attribute to the callsite otherwise we'll omit
                 // this and not add the attribute to prevent soundness issues.
-                && let Some(inlining_rule) = attributes::inline_attr(&self.cx, self.cx.tcx, instance)
+                && let Some(inlining_rule) = attributes::inline_attr(&self.cx, self.cx.tcx, callee_instance)
                 && self.cx.tcx.is_target_feature_call_safe(
-                    &fn_defn_attrs.target_features,
-                    &fn_call_attrs.target_features.iter().cloned().chain(
+                    &callee_attrs.target_features,
+                    &caller_attrs.target_features.iter().cloned().chain(
                         self.cx.tcx.sess.target_features.iter().map(|feat| TargetFeature {
                             name: *feat,
                             kind: TargetFeatureKind::Implied,
@@ -1455,14 +1450,15 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
     fn tail_call(
         &mut self,
         llty: Self::Type,
-        fn_attrs: Option<&CodegenFnAttrs>,
+        caller_attrs: Option<&CodegenFnAttrs>,
         fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
         llfn: Self::Value,
         args: &[Self::Value],
         funclet: Option<&Self::Funclet>,
-        instance: Option<Instance<'tcx>>,
+        callee_instance: Option<Instance<'tcx>>,
     ) {
-        let call = self.call(llty, fn_attrs, Some(fn_abi), llfn, args, funclet, instance);
+        let call =
+            self.call(llty, caller_attrs, Some(fn_abi), llfn, args, funclet, callee_instance);
         llvm::LLVMSetTailCallKind(call, llvm::TailCallKind::MustTail);
 
         match &fn_abi.ret.mode {
@@ -1597,12 +1593,16 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
         *self = Self::build(self.cx, next_bb);
     }
 
-    pub(crate) fn minnum(&mut self, lhs: &'ll Value, rhs: &'ll Value) -> &'ll Value {
-        self.call_intrinsic("llvm.minnum", &[self.val_ty(lhs)], &[lhs, rhs])
+    pub(crate) fn minimum_number_nsz(&mut self, lhs: &'ll Value, rhs: &'ll Value) -> &'ll Value {
+        let call = self.call_intrinsic("llvm.minimumnum", &[self.val_ty(lhs)], &[lhs, rhs]);
+        unsafe { llvm::LLVMRustSetNoSignedZeros(call) };
+        call
     }
 
-    pub(crate) fn maxnum(&mut self, lhs: &'ll Value, rhs: &'ll Value) -> &'ll Value {
-        self.call_intrinsic("llvm.maxnum", &[self.val_ty(lhs)], &[lhs, rhs])
+    pub(crate) fn maximum_number_nsz(&mut self, lhs: &'ll Value, rhs: &'ll Value) -> &'ll Value {
+        let call = self.call_intrinsic("llvm.maximumnum", &[self.val_ty(lhs)], &[lhs, rhs]);
+        unsafe { llvm::LLVMRustSetNoSignedZeros(call) };
+        call
     }
 
     pub(crate) fn insert_element(
@@ -1773,6 +1773,9 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
         }
 
         if crate::llvm_util::get_version() >= (22, 0, 0) {
+            // LLVM 22 requires the lifetime intrinsic to act directly on the alloca,
+            // there can't be an addrspacecast in between.
+            let ptr = unsafe { llvm::LLVMRustStripPointerCasts(ptr) };
             self.call_intrinsic(intrinsic, &[self.val_ty(ptr)], &[ptr]);
         } else {
             self.call_intrinsic(intrinsic, &[self.val_ty(ptr)], &[self.cx.const_u64(size), ptr]);

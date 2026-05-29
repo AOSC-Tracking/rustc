@@ -410,6 +410,7 @@ impl<'v> hir_visit::Visitor<'v> for StatCollector<'v> {
                 TraitObject,
                 Infer,
                 Pat,
+                FieldOf,
                 Err
             ]
         );
@@ -572,6 +573,7 @@ impl<'v> ast_visit::Visitor<'v> for StatCollector<'v> {
                 Use,
                 Static,
                 Const,
+                ConstBlock,
                 Fn,
                 Mod,
                 ForeignMod,
@@ -687,6 +689,7 @@ impl<'v> ast_visit::Visitor<'v> for StatCollector<'v> {
                 MacCall,
                 CVarArgs,
                 Dummy,
+                FieldOf,
                 Err
             ]
         );

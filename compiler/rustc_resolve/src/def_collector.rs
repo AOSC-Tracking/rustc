@@ -131,7 +131,11 @@ impl<'a, 'ra, 'tcx> visit::Visitor<'a> for DefCollector<'a, 'ra, 'tcx> {
                 mutability: s.mutability,
                 nested: false,
             },
-            ItemKind::Const(..) => DefKind::Const,
+            ItemKind::Const(citem) => {
+                let is_type_const = matches!(citem.rhs_kind, ConstItemRhsKind::TypeConst { .. });
+                DefKind::Const { is_type_const }
+            }
+            ItemKind::ConstBlock(..) => DefKind::Const { is_type_const: false },
             ItemKind::Fn(..) | ItemKind::Delegation(..) => DefKind::Fn,
             ItemKind::MacroDef(ident, def) => {
                 let edition = i.span.edition();
@@ -165,8 +169,8 @@ impl<'a, 'ra, 'tcx> visit::Visitor<'a> for DefCollector<'a, 'ra, 'tcx> {
                 DefKind::Macro(macro_kinds)
             }
             ItemKind::GlobalAsm(..) => DefKind::GlobalAsm,
-            ItemKind::Use(use_tree) => {
-                self.create_def(i.id, None, DefKind::Use, use_tree.span);
+            ItemKind::Use(_) => {
+                self.create_def(i.id, None, DefKind::Use, i.span);
                 return visit::walk_item(self, i);
             }
             ItemKind::MacCall(..) | ItemKind::DelegationMac(..) => {
@@ -205,12 +209,15 @@ impl<'a, 'ra, 'tcx> visit::Visitor<'a> for DefCollector<'a, 'ra, 'tcx> {
     fn visit_fn(&mut self, fn_kind: FnKind<'a>, _: &AttrVec, span: Span, _: NodeId) {
         match fn_kind {
             FnKind::Fn(
-                _ctxt,
+                ctxt,
                 _vis,
                 Fn {
                     sig: FnSig { header, decl, span: _ }, ident, generics, contract, body, ..
                 },
-            ) if let Some(coroutine_kind) = header.coroutine_kind => {
+            ) if let Some(coroutine_kind) = header.coroutine_kind
+                // Foreign ones are denied, so don't create them here.
+                && ctxt != visit::FnCtxt::Foreign =>
+            {
                 self.visit_ident(ident);
                 self.visit_fn_header(header);
                 self.visit_generics(generics);
@@ -254,7 +261,7 @@ impl<'a, 'ra, 'tcx> visit::Visitor<'a> for DefCollector<'a, 'ra, 'tcx> {
     }
 
     fn visit_nested_use_tree(&mut self, use_tree: &'a UseTree, id: NodeId) {
-        self.create_def(id, None, DefKind::Use, use_tree.span);
+        self.create_def(id, None, DefKind::Use, use_tree.span());
         visit::walk_use_tree(self, use_tree);
     }
 
@@ -347,10 +354,18 @@ impl<'a, 'ra, 'tcx> visit::Visitor<'a> for DefCollector<'a, 'ra, 'tcx> {
         let (ident, def_kind) = match &i.kind {
             AssocItemKind::Fn(box Fn { ident, .. })
             | AssocItemKind::Delegation(box Delegation { ident, .. }) => (*ident, DefKind::AssocFn),
-            AssocItemKind::Const(box ConstItem { ident, .. }) => (*ident, DefKind::AssocConst),
+            AssocItemKind::Const(box ConstItem { ident, rhs_kind, .. }) => (
+                *ident,
+                DefKind::AssocConst {
+                    is_type_const: matches!(rhs_kind, ConstItemRhsKind::TypeConst { .. }),
+                },
+            ),
             AssocItemKind::Type(box TyAlias { ident, .. }) => (*ident, DefKind::AssocTy),
-            AssocItemKind::MacCall(..) | AssocItemKind::DelegationMac(..) => {
+            AssocItemKind::MacCall(..) => {
                 return self.visit_macro_invoc(i.id);
+            }
+            AssocItemKind::DelegationMac(..) => {
+                span_bug!(i.span, "degation mac invoc should have already been handled")
             }
         };
 

@@ -1,10 +1,11 @@
+use std::fmt::Debug;
 use std::ops::Deref;
 
 use rustc_hir as hir;
 use rustc_hir::GenericArg;
 use rustc_hir::def_id::DefId;
 use rustc_hir_analysis::hir_ty_lowering::generics::{
-    check_generic_arg_count_for_call, lower_generic_args,
+    check_generic_arg_count_for_value_path, lower_generic_args,
 };
 use rustc_hir_analysis::hir_ty_lowering::{
     GenericArgsLowerer, HirTyLowerer, IsMethodCall, RegionInferReason,
@@ -12,10 +13,13 @@ use rustc_hir_analysis::hir_ty_lowering::{
 use rustc_infer::infer::{
     BoundRegionConversionTime, DefineOpaqueTypes, InferOk, RegionVariableOrigin,
 };
-use rustc_lint::builtin::RESOLVING_TO_ITEMS_SHADOWING_SUPERTRAIT_ITEMS;
+use rustc_lint::builtin::{
+    AMBIGUOUS_GLOB_IMPORTED_TRAITS, RESOLVING_TO_ITEMS_SHADOWING_SUPERTRAIT_ITEMS,
+};
 use rustc_middle::traits::ObligationCauseCode;
 use rustc_middle::ty::adjustment::{
-    Adjust, Adjustment, AllowTwoPhase, AutoBorrow, AutoBorrowMutability, PointerCoercion,
+    Adjust, Adjustment, AllowTwoPhase, AutoBorrow, AutoBorrowMutability, DerefAdjustKind,
+    PointerCoercion,
 };
 use rustc_middle::ty::{
     self, AssocContainer, GenericArgs, GenericArgsRef, GenericParamDefKind, Ty, TyCtxt,
@@ -149,6 +153,9 @@ impl<'a, 'tcx> ConfirmContext<'a, 'tcx> {
         // Lint when an item is shadowing a supertrait item.
         self.lint_shadowed_supertrait_items(pick, segment);
 
+        // Lint when a trait is ambiguously imported
+        self.lint_ambiguously_glob_imported_traits(pick, segment);
+
         // Add any trait/regions obligations specified on the method's type parameters.
         // We won't add these if we encountered an illegal sized bound, so that we can use
         // a custom error in that case.
@@ -237,12 +244,16 @@ impl<'a, 'tcx> ConfirmContext<'a, 'tcx> {
                             ty::Ref(_, ty, _) => *ty,
                             _ => bug!("Expected a reference type for argument to Pin"),
                         };
+                        adjustments.push(Adjustment {
+                            kind: Adjust::Deref(DerefAdjustKind::Pin),
+                            target: inner_ty,
+                        });
                         Ty::new_pinned_ref(self.tcx, region, inner_ty, mutbl)
                     }
                     _ => bug!("Cannot adjust receiver type for reborrowing pin of {target:?}"),
                 };
-
-                adjustments.push(Adjustment { kind: Adjust::ReborrowPin(mutbl), target });
+                adjustments
+                    .push(Adjustment { kind: Adjust::Borrow(AutoBorrow::Pin(mutbl)), target });
             }
             None => {}
         }
@@ -322,7 +333,7 @@ impl<'a, 'tcx> ConfirmContext<'a, 'tcx> {
                 })
             }
 
-            probe::TraitPick => {
+            probe::TraitPick(_) => {
                 let trait_def_id = pick.item.container_id(self.tcx);
 
                 // Make a trait reference `$0 : Trait<$1...$n>`
@@ -392,7 +403,7 @@ impl<'a, 'tcx> ConfirmContext<'a, 'tcx> {
         // variables.
         let generics = self.tcx.generics_of(pick.item.def_id);
 
-        let arg_count_correct = check_generic_arg_count_for_call(
+        let arg_count_correct = check_generic_arg_count_for_value_path(
             self.fcx,
             pick.item.def_id,
             generics,
@@ -716,6 +727,31 @@ impl<'a, 'tcx> ConfirmContext<'a, 'tcx> {
             segment.hir_id,
             segment.ident.span,
             SupertraitItemShadowing { shadower, shadowee, item: segment.ident.name, subtrait },
+        );
+    }
+
+    fn lint_ambiguously_glob_imported_traits(
+        &self,
+        pick: &probe::Pick<'_>,
+        segment: &hir::PathSegment<'tcx>,
+    ) {
+        if pick.kind != probe::PickKind::TraitPick(true) {
+            return;
+        }
+        let trait_name = self.tcx.item_name(pick.item.container_id(self.tcx));
+        let import_span = self.tcx.hir_span_if_local(pick.import_ids[0].to_def_id()).unwrap();
+
+        self.tcx.emit_node_lint(
+            AMBIGUOUS_GLOB_IMPORTED_TRAITS,
+            segment.hir_id,
+            rustc_errors::DiagDecorator(|diag| {
+                diag.primary_message(format!(
+                    "Use of ambiguously glob imported trait `{trait_name}`"
+                ))
+                .span(segment.ident.span)
+                .span_label(import_span, format!("`{trait_name}` imported ambiguously here"))
+                .help(format!("Import `{trait_name}` explicitly"));
+            }),
         );
     }
 

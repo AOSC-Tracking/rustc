@@ -2,14 +2,13 @@ pub mod ambiguity;
 pub mod call_kind;
 pub mod fulfillment_errors;
 pub mod on_unimplemented;
-pub mod on_unimplemented_condition;
-pub mod on_unimplemented_format;
 mod overflow;
 pub mod suggestions;
 
 use std::{fmt, iter};
 
 use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
+use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_data_structures::unord::UnordSet;
 use rustc_errors::{Applicability, Diag, E0038, E0276, MultiSpan, struct_span_code_err};
 use rustc_hir::def_id::{DefId, LOCAL_CRATE, LocalDefId};
@@ -76,18 +75,20 @@ impl<'v> Visitor<'v> for FindExprBySpan<'v> {
     }
 
     fn visit_expr(&mut self, ex: &'v hir::Expr<'v>) {
-        if self.span == ex.span {
-            self.result = Some(ex);
-        } else {
-            if let hir::ExprKind::Closure(..) = ex.kind
-                && self.include_closures
-                && let closure_header_sp = self.span.with_hi(ex.span.hi())
-                && closure_header_sp == ex.span
-            {
+        ensure_sufficient_stack(|| {
+            if self.span == ex.span {
                 self.result = Some(ex);
+            } else {
+                if let hir::ExprKind::Closure(..) = ex.kind
+                    && self.include_closures
+                    && let closure_header_sp = self.span.with_hi(ex.span.hi())
+                    && closure_header_sp == ex.span
+                {
+                    self.result = Some(ex);
+                }
+                hir::intravisit::walk_expr(self, ex);
             }
-            hir::intravisit::walk_expr(self, ex);
-        }
+        });
     }
 
     fn visit_ty(&mut self, ty: &'v hir::Ty<'v, AmbigArg>) {
@@ -373,12 +374,12 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
             self.tcx.extern_crate(trait_def_id.krate),
         ) {
             (
-                Some(ExternCrate {
+                Some(&ExternCrate {
                     src: ExternCrateSource::Extern(expected_def_id),
                     dependency_of: LOCAL_CRATE,
                     ..
                 }),
-                Some(ExternCrate {
+                Some(&ExternCrate {
                     src: ExternCrateSource::Extern(trait_def_id),
                     dependency_of: LOCAL_CRATE,
                     ..
@@ -402,9 +403,9 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         let krate = self.tcx.crate_name(expected_did.krate);
         let name = self.tcx.item_name(expected_did);
         let definitions_with_same_path: UnordSet<_> = found_dids
-            .filter(|def_id| {
+            .filter(|&def_id| {
                 def_id.krate != expected_did.krate
-                    && (self.extern_crates_with_the_same_name(expected_did, *def_id)
+                    && (self.extern_crates_with_the_same_name(expected_did, def_id)
                         || self.tcx.crate_name(def_id.krate) == krate)
                     && self.tcx.item_name(def_id) == name
             })

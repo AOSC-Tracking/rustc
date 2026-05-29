@@ -1,10 +1,10 @@
 use cargo::core::features;
-use cargo::core::shell::Shell;
 use cargo::util::network::http::http_handle;
 use cargo::util::network::http::needs_custom_http_transport;
 use cargo::util::{self, CargoResult, closest_msg, command_prelude};
 use cargo_util::{ProcessBuilder, ProcessError};
 use cargo_util_schemas::manifest::StringOrVec;
+use cargo_util_terminal::Shell;
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsStr;
@@ -281,7 +281,7 @@ fn execute_external_subcommand(gctx: &GlobalContext, cmd: &str, args: &[&OsStr])
             {
                 let sep = std::path::MAIN_SEPARATOR;
                 format!(
-                    "\nhelp: To run the file `{cmd}`, provide a relative path like `.{sep}{cmd}`"
+                    "\nhelp: to run the file `{cmd}`, provide a relative path like `.{sep}{cmd}`"
                 )
             } else {
                 "".to_owned()

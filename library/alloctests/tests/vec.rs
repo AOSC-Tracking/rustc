@@ -3,12 +3,10 @@ use core::num::NonZero;
 use core::ptr::NonNull;
 use core::{assert_eq, assert_ne};
 use std::alloc::System;
-use std::assert_matches::assert_matches;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::TryReserveErrorKind::*;
 use std::fmt::Debug;
-use std::hint;
 use std::iter::InPlaceIterable;
 use std::mem::swap;
 use std::ops::Bound::*;
@@ -16,6 +14,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::vec::{Drain, IntoIter, PeekMut};
+use std::{assert_matches, hint};
 
 use crate::testing::macros::struct_with_counted_drop;
 
@@ -1652,13 +1651,17 @@ fn extract_if_unconsumed() {
 
 #[test]
 fn extract_if_debug() {
-    let mut vec = vec![1, 2];
-    let mut drain = vec.extract_if(.., |&mut x| x % 2 != 0);
-    assert!(format!("{drain:?}").contains("Some(1)"));
-    drain.next();
-    assert!(format!("{drain:?}").contains("Some(2)"));
-    drain.next();
-    assert!(format!("{drain:?}").contains("None"));
+    let mut vec = vec![1, 2, 3, 4, 5, 6, 7, 8];
+    let mut drain = vec.extract_if(1..5, |&mut x| x % 2 != 0);
+    assert_eq!(
+        format!("{drain:?}"),
+        "ExtractIf { retained: [1], remainder: [2, 3, 4, 5], skipped_tail: [6, 7, 8], .. }"
+    );
+    drain.next().unwrap();
+    assert_eq!(
+        format!("{drain:?}"),
+        "ExtractIf { retained: [1, 2], remainder: [4, 5], skipped_tail: [6, 7, 8], .. }"
+    );
 }
 
 #[test]
@@ -2764,4 +2767,26 @@ fn const_heap() {
     };
 
     assert_eq!([1, 2, 4, 8, 16, 32], X);
+}
+
+// regression test for issue #153158. `const_make_global` previously assumed `Vec<T>`'s buf
+// always has a heap allocation, which lead to compilation errors.
+#[test]
+fn const_make_global_empty_or_zst_regression() {
+    const EMPTY_SLICE: &'static [i32] = {
+        let empty_vec: Vec<i32> = Vec::new();
+        empty_vec.const_make_global()
+    };
+
+    assert_eq!(EMPTY_SLICE, &[]);
+
+    const ZST_SLICE: &'static [()] = {
+        let mut zst_vec: Vec<()> = Vec::new();
+        zst_vec.push(());
+        zst_vec.push(());
+        zst_vec.push(());
+        zst_vec.const_make_global()
+    };
+
+    assert_eq!(ZST_SLICE, &[(), (), ()]);
 }

@@ -1,11 +1,11 @@
 use std::path::Path;
 
-use annotate_snippets::AnnotationKind;
-use annotate_snippets::Group;
-use annotate_snippets::Level;
-use annotate_snippets::Origin;
-use annotate_snippets::Snippet;
 use cargo_util_schemas::manifest::TomlToolLints;
+use cargo_util_terminal::report::AnnotationKind;
+use cargo_util_terminal::report::Group;
+use cargo_util_terminal::report::Level;
+use cargo_util_terminal::report::Origin;
+use cargo_util_terminal::report::Snippet;
 
 use crate::CargoResult;
 use crate::GlobalContext;
@@ -18,11 +18,11 @@ use crate::lints::get_key_value_span;
 use crate::lints::rel_cwd_manifest_path;
 
 /// This lint is only to be used for testing purposes
-pub const LINT: Lint = Lint {
+pub static LINT: &Lint = &Lint {
     name: "im_a_teapot",
     desc: "`im_a_teapot` is specified",
     primary_group: &TEST_DUMMY_UNSTABLE,
-    edition_lint_opts: None,
+    msrv: None,
     feature_gate: Some(Feature::test_dummy_unstable()),
     docs: None,
 };
@@ -36,7 +36,7 @@ pub fn check_im_a_teapot(
 ) -> CargoResult<()> {
     let manifest = pkg.manifest();
     let (lint_level, reason) =
-        LINT.level(pkg_lints, manifest.edition(), manifest.unstable_features());
+        LINT.level(pkg_lints, pkg.rust_version(), manifest.unstable_features());
 
     if lint_level == LintLevel::Allow {
         return Ok(());

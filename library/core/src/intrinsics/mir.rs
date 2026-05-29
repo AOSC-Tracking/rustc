@@ -62,7 +62,9 @@
 //!
 //! # Examples
 //!
-//! ```rust
+#![cfg_attr(panic = "unwind", doc = "```rust")]
+// This test can't support panic=abort because it generates an UnwindContinue MIR terminator.
+#![cfg_attr(panic = "abort", doc = "```ignore")]
 //! #![feature(core_intrinsics, custom_mir)]
 //! #![allow(internal_features)]
 //! #![allow(unused_assignments)]
@@ -289,7 +291,7 @@
     reason = "MIR is an implementation detail and extremely unstable",
     issue = "none"
 )]
-#![allow(unused_variables, non_snake_case, missing_debug_implementations)]
+#![allow(unused_variables, non_snake_case, missing_debug_implementations, missing_docs)]
 
 /// Type representing basic blocks.
 ///

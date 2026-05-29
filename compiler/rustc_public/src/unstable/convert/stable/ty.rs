@@ -12,14 +12,14 @@ use crate::ty::{
 };
 use crate::unstable::Stable;
 
-impl<'tcx> Stable<'tcx> for ty::AliasTyKind {
+impl<'tcx> Stable<'tcx> for ty::AliasTyKind<'tcx> {
     type T = crate::ty::AliasKind;
     fn stable(&self, _: &mut Tables<'_, BridgeTys>, _: &CompilerCtxt<'_, BridgeTys>) -> Self::T {
         match self {
-            ty::Projection => crate::ty::AliasKind::Projection,
-            ty::Inherent => crate::ty::AliasKind::Inherent,
-            ty::Opaque => crate::ty::AliasKind::Opaque,
-            ty::Free => crate::ty::AliasKind::Free,
+            ty::Projection { .. } => crate::ty::AliasKind::Projection,
+            ty::Inherent { .. } => crate::ty::AliasKind::Inherent,
+            ty::Opaque { .. } => crate::ty::AliasKind::Opaque,
+            ty::Free { .. } => crate::ty::AliasKind::Free,
         }
     }
 }
@@ -31,8 +31,11 @@ impl<'tcx> Stable<'tcx> for ty::AliasTy<'tcx> {
         tables: &mut Tables<'cx, BridgeTys>,
         cx: &CompilerCtxt<'cx, BridgeTys>,
     ) -> Self::T {
-        let ty::AliasTy { args, def_id, .. } = self;
-        crate::ty::AliasTy { def_id: tables.alias_def(*def_id), args: args.stable(tables, cx) }
+        let ty::AliasTy { args, kind, .. } = self;
+        crate::ty::AliasTy {
+            def_id: tables.alias_def(kind.def_id()),
+            args: args.stable(tables, cx),
+        }
     }
 }
 
@@ -271,7 +274,7 @@ impl<'tcx> Stable<'tcx> for ty::FnSig<'tcx> {
     }
 }
 
-impl<'tcx> Stable<'tcx> for ty::BoundTyKind {
+impl<'tcx> Stable<'tcx> for ty::BoundTyKind<'tcx> {
     type T = crate::ty::BoundTyKind;
 
     fn stable<'cx>(
@@ -290,7 +293,7 @@ impl<'tcx> Stable<'tcx> for ty::BoundTyKind {
     }
 }
 
-impl<'tcx> Stable<'tcx> for ty::BoundRegionKind {
+impl<'tcx> Stable<'tcx> for ty::BoundRegionKind<'tcx> {
     type T = crate::ty::BoundRegionKind;
 
     fn stable<'cx>(
@@ -307,12 +310,12 @@ impl<'tcx> Stable<'tcx> for ty::BoundRegionKind {
                 cx.tcx.item_name(*def_id).to_string(),
             ),
             ty::BoundRegionKind::ClosureEnv => BoundRegionKind::BrEnv,
-            ty::BoundRegionKind::NamedAnon(_) => bug!("only used for pretty printing"),
+            ty::BoundRegionKind::NamedForPrinting(_) => bug!("only used for pretty printing"),
         }
     }
 }
 
-impl<'tcx> Stable<'tcx> for ty::BoundVariableKind {
+impl<'tcx> Stable<'tcx> for ty::BoundVariableKind<'tcx> {
     type T = crate::ty::BoundVariableKind;
 
     fn stable<'cx>(
@@ -451,8 +454,8 @@ impl<'tcx> Stable<'tcx> for ty::TyKind<'tcx> {
             ty::Tuple(fields) => TyKind::RigidTy(RigidTy::Tuple(
                 fields.iter().map(|ty| ty.stable(tables, cx)).collect(),
             )),
-            ty::Alias(alias_kind, alias_ty) => {
-                TyKind::Alias(alias_kind.stable(tables, cx), alias_ty.stable(tables, cx))
+            ty::Alias(_alias_ty) => {
+                todo!()
             }
             ty::Param(param_ty) => TyKind::Param(param_ty.stable(tables, cx)),
             ty::Bound(ty::BoundVarIndexKind::Canonical, _) => {
@@ -546,7 +549,7 @@ impl<'tcx> Stable<'tcx> for ty::ParamTy {
     }
 }
 
-impl<'tcx> Stable<'tcx> for ty::BoundTy {
+impl<'tcx> Stable<'tcx> for ty::BoundTy<'tcx> {
     type T = crate::ty::BoundTy;
     fn stable<'cx>(
         &self,
@@ -597,7 +600,7 @@ impl<'tcx> Stable<'tcx> for ty::TraitDef {
                 .must_implement_one_of
                 .as_ref()
                 .map(|idents| idents.iter().map(|ident| opaque(ident)).collect()),
-            implement_via_object: self.implement_via_object,
+            force_dyn_incompatible: self.force_dyn_incompatible.stable(tables, cx),
             deny_explicit_impl: self.deny_explicit_impl,
         }
     }
@@ -1020,6 +1023,7 @@ impl<'tcx> Stable<'tcx> for rustc_abi::ExternAbi {
             ExternAbi::RustCall => Abi::RustCall,
             ExternAbi::Unadjusted => Abi::Unadjusted,
             ExternAbi::RustCold => Abi::RustCold,
+            ExternAbi::RustPreserveNone => Abi::RustPreserveNone,
             ExternAbi::RustInvalid => Abi::RustInvalid,
             ExternAbi::RiscvInterruptM => Abi::RiscvInterruptM,
             ExternAbi::RiscvInterruptS => Abi::RiscvInterruptS,
@@ -1053,7 +1057,7 @@ impl<'tcx> Stable<'tcx> for ty::AssocKind {
     ) -> Self::T {
         use crate::ty::{AssocKind, AssocTypeData};
         match *self {
-            ty::AssocKind::Const { name } => AssocKind::Const { name: name.to_string() },
+            ty::AssocKind::Const { name, .. } => AssocKind::Const { name: name.to_string() },
             ty::AssocKind::Fn { name, has_self } => {
                 AssocKind::Fn { name: name.to_string(), has_self }
             }
@@ -1136,5 +1140,27 @@ impl<'tcx> Stable<'tcx> for rustc_middle::ty::util::Discr<'tcx> {
         cx: &CompilerCtxt<'cx, BridgeTys>,
     ) -> Self::T {
         crate::ty::Discr { val: self.val, ty: self.ty.stable(tables, cx) }
+    }
+}
+
+impl<'tcx> Stable<'tcx> for rustc_middle::ty::VtblEntry<'tcx> {
+    type T = crate::ty::VtblEntry;
+
+    fn stable<'cx>(
+        &self,
+        tables: &mut Tables<'cx, BridgeTys>,
+        cx: &CompilerCtxt<'cx, BridgeTys>,
+    ) -> Self::T {
+        use crate::ty::VtblEntry;
+        match self {
+            ty::VtblEntry::MetadataDropInPlace => VtblEntry::MetadataDropInPlace,
+            ty::VtblEntry::MetadataSize => VtblEntry::MetadataSize,
+            ty::VtblEntry::MetadataAlign => VtblEntry::MetadataAlign,
+            ty::VtblEntry::Vacant => VtblEntry::Vacant,
+            ty::VtblEntry::Method(instance) => VtblEntry::Method(instance.stable(tables, cx)),
+            ty::VtblEntry::TraitVPtr(trait_ref) => {
+                VtblEntry::TraitVPtr(trait_ref.stable(tables, cx))
+            }
+        }
     }
 }

@@ -5,7 +5,8 @@ use std::{cell::RefCell, convert::Infallible, ops::ControlFlow};
 
 use hir_def::{
     AssocItemId, FunctionId, GenericParamId, ImplId, ItemContainerId, TraitId,
-    signatures::TraitFlags,
+    hir::generics::GenericParams,
+    signatures::{FunctionSignature, TraitFlags, TraitSignature},
 };
 use hir_expand::name::Name;
 use rustc_ast_ir::Mutability;
@@ -285,11 +286,15 @@ impl<'a, 'db> MethodResolutionContext<'a, 'db> {
                 let infcx = self.infcx;
                 let (self_ty, var_values) = infcx.instantiate_canonical(&query_input);
                 debug!(?self_ty, ?query_input, "probe_op: Mode::Path");
+                let prev_opaque_entries =
+                    self.infcx.inner.borrow_mut().opaque_types().num_entries();
                 MethodAutoderefStepsResult {
                     steps: smallvec![CandidateStep {
-                        self_ty: self
-                            .infcx
-                            .make_query_response_ignoring_pending_obligations(var_values, self_ty),
+                        self_ty: self.infcx.make_query_response_ignoring_pending_obligations(
+                            var_values,
+                            self_ty,
+                            prev_opaque_entries
+                        ),
                         self_ty_is_opaque: false,
                         autoderefs: 0,
                         from_unsafe_deref: false,
@@ -376,6 +381,8 @@ impl<'a, 'db> MethodResolutionContext<'a, 'db> {
             // infer var is not an opaque.
             let infcx = self.infcx;
             let (self_ty, inference_vars) = infcx.instantiate_canonical(self_ty);
+            let prev_opaque_entries = infcx.inner.borrow_mut().opaque_types().num_entries();
+
             let self_ty_is_opaque = |ty: Ty<'_>| {
                 if let TyKind::Infer(InferTy::TyVar(vid)) = ty.kind() {
                     infcx.has_opaques_with_sub_unified_hidden_type(vid)
@@ -414,6 +421,7 @@ impl<'a, 'db> MethodResolutionContext<'a, 'db> {
                             self_ty: infcx.make_query_response_ignoring_pending_obligations(
                                 inference_vars,
                                 ty,
+                                prev_opaque_entries,
                             ),
                             self_ty_is_opaque: self_ty_is_opaque(ty),
                             autoderefs: d,
@@ -437,6 +445,7 @@ impl<'a, 'db> MethodResolutionContext<'a, 'db> {
                             self_ty: infcx.make_query_response_ignoring_pending_obligations(
                                 inference_vars,
                                 ty,
+                                prev_opaque_entries,
                             ),
                             self_ty_is_opaque: self_ty_is_opaque(ty),
                             autoderefs: d,
@@ -461,13 +470,17 @@ impl<'a, 'db> MethodResolutionContext<'a, 'db> {
                         ty: infcx.make_query_response_ignoring_pending_obligations(
                             inference_vars,
                             final_ty,
+                            prev_opaque_entries,
                         ),
                     })
                 }
                 TyKind::Error(_) => Some(MethodAutoderefBadTy {
                     reached_raw_pointer,
-                    ty: infcx
-                        .make_query_response_ignoring_pending_obligations(inference_vars, final_ty),
+                    ty: infcx.make_query_response_ignoring_pending_obligations(
+                        inference_vars,
+                        final_ty,
+                        prev_opaque_entries,
+                    ),
                 }),
                 TyKind::Array(elem_ty, _) => {
                     let autoderefs = steps.iter().filter(|s| s.reachable_via_deref).count() - 1;
@@ -475,6 +488,7 @@ impl<'a, 'db> MethodResolutionContext<'a, 'db> {
                         self_ty: infcx.make_query_response_ignoring_pending_obligations(
                             inference_vars,
                             Ty::new_slice(infcx.interner, elem_ty),
+                            prev_opaque_entries,
                         ),
                         self_ty_is_opaque: false,
                         autoderefs,
@@ -1246,9 +1260,9 @@ impl<'a, 'db, Choice: ProbeChoice<'db>> ProbeContext<'a, 'db, Choice> {
             .filter(|step| step.reachable_via_deref)
             .filter(|step| {
                 debug!("pick_all_method: step={:?}", step);
-                // skip types that are from a type error or that would require dereferencing
-                // a raw pointer
-                !step.self_ty.value.value.references_non_lt_error() && !step.from_unsafe_deref
+                // Skip types with type errors (but not const/lifetime errors, which are
+                // often spurious due to incomplete const evaluation) and raw pointer derefs.
+                !step.self_ty.value.value.references_only_ty_error() && !step.from_unsafe_deref
             })
             .try_for_each(|step| {
                 let InferOk { value: self_ty, obligations: instantiate_self_ty_obligations } = self
@@ -1581,7 +1595,7 @@ impl<'a, 'db, Choice: ProbeChoice<'db>> ProbeContext<'a, 'db, Choice> {
                     // Check whether the impl imposes obligations we have to worry about.
                     let impl_bounds = GenericPredicates::query_all(self.db(), impl_def_id.into());
                     let impl_bounds = clauses_as_obligations(
-                        impl_bounds.iter_instantiated_copied(self.interner(), impl_args.as_slice()),
+                        impl_bounds.iter_instantiated(self.interner(), impl_args.as_slice()),
                         ObligationCause::new(),
                         self.param_env(),
                     );
@@ -1592,7 +1606,8 @@ impl<'a, 'db, Choice: ProbeChoice<'db>> ProbeContext<'a, 'db, Choice> {
                     // Some trait methods are excluded for arrays before 2021.
                     // (`array.into_iter()` wants a slice iterator for compatibility.)
                     if self_ty.is_array() && !self.ctx.edition.at_least_2021() {
-                        let trait_signature = self.db().trait_signature(poly_trait_ref.def_id().0);
+                        let trait_signature =
+                            TraitSignature::of(self.db(), poly_trait_ref.def_id().0);
                         if trait_signature
                             .flags
                             .contains(TraitFlags::SKIP_ARRAY_DURING_METHOD_DISPATCH)
@@ -1606,7 +1621,8 @@ impl<'a, 'db, Choice: ProbeChoice<'db>> ProbeContext<'a, 'db, Choice> {
                     if self_ty.boxed_ty().is_some_and(Ty::is_slice)
                         && !self.ctx.edition.at_least_2024()
                     {
-                        let trait_signature = self.db().trait_signature(poly_trait_ref.def_id().0);
+                        let trait_signature =
+                            TraitSignature::of(self.db(), poly_trait_ref.def_id().0);
                         if trait_signature
                             .flags
                             .contains(TraitFlags::SKIP_BOXED_SLICE_DURING_METHOD_DISPATCH)
@@ -1740,7 +1756,7 @@ impl<'a, 'db, Choice: ProbeChoice<'db>> ProbeContext<'a, 'db, Choice> {
     /// We want to only accept trait methods if they were hold even if the
     /// opaque types were rigid. To handle this, we both check that for trait
     /// candidates the goal were to hold even when treating opaques as rigid,
-    /// see [OpaqueTypesJank](rustc_trait_selection::solve::OpaqueTypesJank).
+    /// see `rustc_trait_selection::solve::OpaqueTypesJank`.
     ///
     /// We also check that all opaque types encountered as self types in the
     /// autoderef chain don't get constrained when applying the candidate.
@@ -1950,7 +1966,7 @@ impl<'a, 'db, Choice: ProbeChoice<'db>> ProbeContext<'a, 'db, Choice> {
         // associated value (i.e., methods, constants).
         match item {
             CandidateId::FunctionId(id) if self.mode == Mode::MethodCall => {
-                self.db().function_signature(id).has_self_param()
+                FunctionSignature::of(self.db(), id).has_self_param()
             }
             _ => true,
         }
@@ -1995,7 +2011,7 @@ impl<'a, 'db, Choice: ProbeChoice<'db>> ProbeContext<'a, 'db, Choice> {
         // we are given do not include type/lifetime parameters for the
         // method yet. So create fresh variables here for those too,
         // if there are any.
-        let generics = self.db().generic_params(method.into());
+        let generics = GenericParams::of(self.db(), method.into());
 
         let xform_fn_sig = if generics.is_empty() {
             fn_sig.instantiate(self.interner(), args)

@@ -7,7 +7,18 @@ mod blanket_hint_mostly_unused;
 mod error;
 mod implicit_minimum_version_req;
 mod inherited;
+mod missing_lints_inheritance;
+mod non_kebab_case_bins;
+mod non_kebab_case_features;
+mod non_kebab_case_packages;
+mod non_snake_case_features;
+mod non_snake_case_packages;
+mod redundant_homepage;
+mod redundant_readme;
 mod unknown_lints;
+mod unused_dependencies;
+mod unused_workspace_dependencies;
+mod unused_workspace_package_fields;
 mod warning;
 
 #[cargo_test]
@@ -167,6 +178,20 @@ im-a-teapot = true
     p.cargo("check -Zcargo-lints")
         .masquerade_as_nightly_cargo(&["cargo-lints"])
         .with_stderr_data(str![[r#"
+[WARNING] missing `[lints]` to inherit `[workspace.lints]`
+  --> foo/Cargo.toml
+   = [NOTE] `cargo::missing_lints_inheritance` is set to `warn` by default
+[HELP] to inherit `workspace.lints, add:
+   |
+ 9 ~ im-a-teapot = true
+10 + [lints]
+11 + workspace = true
+   |
+[HELP] to clarify your intent to not inherit, add:
+   |
+ 9 ~ im-a-teapot = true
+10 + [lints]
+   |
 [CHECKING] foo v0.0.1 ([ROOT]/foo/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -223,6 +248,17 @@ bar = "0.1.0"
 [DOWNLOADED] bar v0.1.0 (registry `dummy-registry`)
 [CHECKING] bar v0.1.0
 [CHECKING] foo v0.1.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:8:1
+  |
+8 | bar = "0.1.0"
+  | ^^^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+8 - bar = "0.1.0"
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -364,6 +400,20 @@ authors = []
   | ^^^^^^^^^^^^^^^^^^^ this is behind `test-dummy-unstable`, which is not enabled
   |
   = [HELP] consider adding `cargo-features = ["test-dummy-unstable"]` to the top of the manifest
+[WARNING] missing `[lints]` to inherit `[workspace.lints]`
+ --> foo/Cargo.toml
+  = [NOTE] `cargo::missing_lints_inheritance` is set to `warn` by default
+[HELP] to inherit `workspace.lints, add:
+  |
+7 ~             
+8 + [lints]
+9 + workspace = true
+  |
+[HELP] to clarify your intent to not inherit, add:
+  |
+7 ~             
+8 + [lints]
+  |
 [ERROR] encountered 2 errors while verifying lints
 
 "#]])

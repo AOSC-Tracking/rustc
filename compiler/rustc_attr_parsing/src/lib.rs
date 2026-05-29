@@ -78,8 +78,8 @@
 
 // tidy-alphabetical-start
 #![feature(decl_macro)]
-#![feature(if_let_guard)]
 #![feature(iter_intersperse)]
+#![feature(try_blocks)]
 #![recursion_limit = "256"]
 // tidy-alphabetical-end
 
@@ -100,6 +100,7 @@ mod interface;
 pub mod parser;
 
 mod early_parsed;
+mod errors;
 mod safety;
 mod session_diagnostics;
 mod target_checking;
@@ -113,5 +114,3 @@ pub use attributes::util::{is_builtin_attr, parse_version};
 pub use context::{Early, Late, OmitDoc, ShouldEmit};
 pub use interface::AttributeParser;
 pub use session_diagnostics::ParsedDescription;
-
-rustc_fluent_macro::fluent_messages! { "../messages.ftl" }

@@ -15,7 +15,7 @@ mod validations;
 
 use self::pattern::{DoubleEndedSearcher, Pattern, ReverseSearcher, Searcher};
 use crate::char::{self, EscapeDebugExtArgs};
-use crate::ops::Range;
+use crate::range::Range;
 use crate::slice::{self, SliceIndex};
 use crate::ub_checks::assert_unsafe_precondition;
 use crate::{ascii, mem};
@@ -81,38 +81,50 @@ const fn slice_error_fail_ct(_: &str, _: usize, _: usize) -> ! {
 
 #[track_caller]
 fn slice_error_fail_rt(s: &str, begin: usize, end: usize) -> ! {
-    const MAX_DISPLAY_LENGTH: usize = 256;
-    let trunc_len = s.floor_char_boundary(MAX_DISPLAY_LENGTH);
-    let s_trunc = &s[..trunc_len];
-    let ellipsis = if trunc_len < s.len() { "[...]" } else { "" };
+    let len = s.len();
 
-    // 1. out of bounds
-    if begin > s.len() || end > s.len() {
-        let oob_index = if begin > s.len() { begin } else { end };
-        panic!("byte index {oob_index} is out of bounds of `{s_trunc}`{ellipsis}");
+    // 1. begin is OOB.
+    if begin > len {
+        panic!("start byte index {begin} is out of bounds for string of length {len}");
     }
 
-    // 2. begin <= end
-    assert!(
-        begin <= end,
-        "begin <= end ({} <= {}) when slicing `{}`{}",
-        begin,
-        end,
-        s_trunc,
-        ellipsis
-    );
+    // 2. end is OOB.
+    if end > len {
+        panic!("end byte index {end} is out of bounds for string of length {len}");
+    }
 
-    // 3. character boundary
-    let index = if !s.is_char_boundary(begin) { begin } else { end };
-    // find the character
-    let char_start = s.floor_char_boundary(index);
-    // `char_start` must be less than len and a char boundary
-    let ch = s[char_start..].chars().next().unwrap();
-    let char_range = char_start..char_start + ch.len_utf8();
-    panic!(
-        "byte index {} is not a char boundary; it is inside {:?} (bytes {:?}) of `{}`{}",
-        index, ch, char_range, s_trunc, ellipsis
-    );
+    // 3. range is backwards.
+    if begin > end {
+        panic!("byte range starts at {begin} but ends at {end}");
+    }
+
+    // 4. begin is inside a character.
+    if !s.is_char_boundary(begin) {
+        let floor = s.floor_char_boundary(begin);
+        let ceil = s.ceil_char_boundary(begin);
+        let range = floor..ceil;
+        let ch = s[floor..ceil].chars().next().unwrap();
+        panic!(
+            "start byte index {begin} is not a char boundary; it is inside {ch:?} (bytes {range:?} of string)"
+        )
+    }
+
+    // 5. end is inside a character.
+    if !s.is_char_boundary(end) {
+        let floor = s.floor_char_boundary(end);
+        let ceil = s.ceil_char_boundary(end);
+        let range = floor..ceil;
+        let ch = s[floor..ceil].chars().next().unwrap();
+        panic!(
+            "end byte index {end} is not a char boundary; it is inside {ch:?} (bytes {range:?} of string)"
+        )
+    }
+
+    // 6. end is OOB and range is inclusive (end == len).
+    // This test cannot be combined with 2. above because for cases like
+    // `"abcαβγ"[4..9]` the error is that 4 is inside 'α', not that 9 is OOB.
+    debug_assert_eq!(end, len);
+    panic!("end byte index {end} is out of bounds for string of length {len}");
 }
 
 impl str {
@@ -3100,14 +3112,15 @@ impl str {
     /// # Examples
     /// ```
     /// #![feature(substr_range)]
+    /// use core::range::Range;
     ///
     /// let data = "a, b, b, a";
     /// let mut iter = data.split(", ").map(|s| data.substr_range(s).unwrap());
     ///
-    /// assert_eq!(iter.next(), Some(0..1));
-    /// assert_eq!(iter.next(), Some(3..4));
-    /// assert_eq!(iter.next(), Some(6..7));
-    /// assert_eq!(iter.next(), Some(9..10));
+    /// assert_eq!(iter.next(), Some(Range { start: 0, end: 1 }));
+    /// assert_eq!(iter.next(), Some(Range { start: 3, end: 4 }));
+    /// assert_eq!(iter.next(), Some(Range { start: 6, end: 7 }));
+    /// assert_eq!(iter.next(), Some(Range { start: 9, end: 10 }));
     /// ```
     #[must_use]
     #[unstable(feature = "substr_range", issue = "126769")]

@@ -3,8 +3,8 @@ use core::panic;
 use rustc_type_ir::data_structures::IndexMap;
 use rustc_type_ir::inherent::*;
 use rustc_type_ir::{
-    self as ty, InferCtxtLike, Interner, TypeFoldable, TypeFolder, TypeSuperFoldable,
-    TypeVisitableExt,
+    self as ty, InferCtxtLike, Interner, PlaceholderConst, PlaceholderRegion, PlaceholderType,
+    TypeFoldable, TypeFolder, TypeSuperFoldable, TypeVisitableExt,
 };
 
 pub struct BoundVarReplacer<'a, Infcx, I = <Infcx as InferCtxtLike>::Interner>
@@ -16,9 +16,9 @@ where
     // These three maps track the bound variable that were replaced by placeholders. It might be
     // nice to remove these since we already have the `kind` in the placeholder; we really just need
     // the `var` (but we *could* bring that into scope if we were to track them as we pass them).
-    mapped_regions: IndexMap<I::PlaceholderRegion, I::BoundRegion>,
-    mapped_types: IndexMap<I::PlaceholderTy, I::BoundTy>,
-    mapped_consts: IndexMap<I::PlaceholderConst, I::BoundConst>,
+    mapped_regions: IndexMap<ty::PlaceholderRegion<I>, ty::BoundRegion<I>>,
+    mapped_types: IndexMap<ty::PlaceholderType<I>, ty::BoundTy<I>>,
+    mapped_consts: IndexMap<ty::PlaceholderConst<I>, ty::BoundConst<I>>,
     // The current depth relative to *this* folding, *not* the entire normalization. In other words,
     // the depth of binders we've passed here.
     current_index: ty::DebruijnIndex,
@@ -32,17 +32,19 @@ where
     Infcx: InferCtxtLike<Interner = I>,
     I: Interner,
 {
-    /// Returns `Some` if we *were* able to replace bound vars. If there are any bound vars that
-    /// use a binding level above `universe_indices.len()`, we fail.
+    /// Returns a type with all bound vars replaced by placeholders,
+    /// together with mappings from the new placeholders back to the original variable.
+    ///
+    /// Panics if there are any bound vars that use a binding level above `universe_indices.len()`.
     pub fn replace_bound_vars<T: TypeFoldable<I>>(
         infcx: &'a Infcx,
         universe_indices: &'a mut Vec<Option<ty::UniverseIndex>>,
         value: T,
     ) -> (
         T,
-        IndexMap<I::PlaceholderRegion, I::BoundRegion>,
-        IndexMap<I::PlaceholderTy, I::BoundTy>,
-        IndexMap<I::PlaceholderConst, I::BoundConst>,
+        IndexMap<ty::PlaceholderRegion<I>, ty::BoundRegion<I>>,
+        IndexMap<ty::PlaceholderType<I>, ty::BoundTy<I>>,
+        IndexMap<ty::PlaceholderConst<I>, ty::BoundConst<I>>,
     ) {
         let mut replacer = BoundVarReplacer {
             infcx,
@@ -103,7 +105,7 @@ where
                 if debruijn >= self.current_index =>
             {
                 let universe = self.universe_for(debruijn);
-                let p = PlaceholderLike::new(universe, br);
+                let p = PlaceholderRegion::new(universe, br);
                 self.mapped_regions.insert(p, br);
                 Region::new_placeholder(self.cx(), p)
             }
@@ -126,7 +128,7 @@ where
                 if debruijn >= self.current_index =>
             {
                 let universe = self.universe_for(debruijn);
-                let p = PlaceholderLike::new(universe, bound_ty);
+                let p = PlaceholderType::new(universe, bound_ty);
                 self.mapped_types.insert(p, bound_ty);
                 Ty::new_placeholder(self.cx(), p)
             }
@@ -150,7 +152,7 @@ where
                 if debruijn >= self.current_index =>
             {
                 let universe = self.universe_for(debruijn);
-                let p = PlaceholderLike::new(universe, bound_const);
+                let p = PlaceholderConst::new(universe, bound_const);
                 self.mapped_consts.insert(p, bound_const);
                 Const::new_placeholder(self.cx(), p)
             }

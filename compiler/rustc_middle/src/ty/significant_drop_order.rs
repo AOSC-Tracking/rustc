@@ -119,7 +119,7 @@ pub fn extract_component_with_significant_dtor<'tcx>(
 /// when we are working with current local crate.
 #[instrument(level = "trace", skip(tcx))]
 pub fn ty_dtor_span<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<Span> {
-    match ty.kind() {
+    match *ty.kind() {
         ty::Bool
         | ty::Char
         | ty::Int(_)
@@ -133,7 +133,7 @@ pub fn ty_dtor_span<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<Span> {
         | ty::FnPtr(_, _)
         | ty::Tuple(_)
         | ty::Dynamic(_, _)
-        | ty::Alias(_, _)
+        | ty::Alias(_)
         | ty::Bound(_, _)
         | ty::Pat(_, _)
         | ty::Placeholder(_)

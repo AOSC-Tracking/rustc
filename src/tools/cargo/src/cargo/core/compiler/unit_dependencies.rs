@@ -28,13 +28,14 @@ use crate::core::compiler::{
 };
 use crate::core::dependency::{Artifact, ArtifactKind, ArtifactTarget, DepKind};
 use crate::core::profiles::{Profile, Profiles, UnitFor};
-use crate::core::resolver::Resolve;
 use crate::core::resolver::features::{FeaturesFor, ResolvedFeatures};
+use crate::core::resolver::{ForceAllTargets, HasDevUnits, Resolve};
 use crate::core::{
     Dependency, Feature, Package, PackageId, PackageSet, Target, TargetKind, Workspace,
 };
 use crate::ops::resolve_all_features;
 use crate::util::GlobalContext;
+use crate::util::Unhashed;
 use crate::util::interning::InternedString;
 
 const IS_NO_ARTIFACT_DEP: Option<&'static Artifact> = None;
@@ -206,6 +207,9 @@ fn attach_std_deps(
                 // TODO: Does this `public` make sense?
                 public: true,
                 noprelude: true,
+                nounused: true,
+                // Artificial dependency
+                manifest_deps: Unhashed(None),
             }));
             found = true;
         }
@@ -305,6 +309,8 @@ fn compute_deps(
         let mode = check_or_build_mode(unit.mode, dep_lib);
         let dep_unit_for = unit_for.with_dependency(unit, dep_lib, unit_for.root_compile_kind());
 
+        let manifest_deps = deps.iter().map(|d| (*d).clone()).collect::<Vec<_>>();
+
         let start = ret.len();
         if state.gctx.cli_unstable().dual_proc_macros
             && dep_lib.proc_macro()
@@ -315,6 +321,7 @@ fn compute_deps(
                 unit,
                 dep_pkg,
                 dep_lib,
+                Some(manifest_deps.clone()),
                 dep_unit_for,
                 unit.kind,
                 mode,
@@ -326,6 +333,7 @@ fn compute_deps(
                 unit,
                 dep_pkg,
                 dep_lib,
+                Some(manifest_deps),
                 dep_unit_for,
                 CompileKind::Host,
                 mode,
@@ -338,6 +346,7 @@ fn compute_deps(
                 unit,
                 dep_pkg,
                 dep_lib,
+                Some(manifest_deps),
                 dep_unit_for,
                 unit.kind.for_target(dep_lib),
                 mode,
@@ -399,6 +408,10 @@ fn compute_deps(
                                 state.features(),
                                 state.package_set,
                                 id,
+                                HasDevUnits::No,
+                                &[unit.kind],
+                                state.target_data,
+                                ForceAllTargets::No,
                             );
                             rf.iter().all(|f| features.contains(f))
                         }
@@ -412,6 +425,7 @@ fn compute_deps(
                         unit,
                         &unit.pkg,
                         t,
+                        None, // artificial
                         UnitFor::new_normal(unit_for.root_compile_kind()),
                         unit.kind.for_target(t),
                         CompileMode::Build,
@@ -507,6 +521,7 @@ fn compute_deps_custom_build(
         unit,
         &unit.pkg,
         &unit.target,
+        None, // artificial
         script_unit_for,
         // Build scripts always compiled for the host.
         CompileKind::Host,
@@ -600,6 +615,7 @@ fn artifact_targets_to_unit_deps(
                                     target
                                         .clone()
                                         .set_kind(TargetKind::Lib(vec![target_kind.clone()])),
+                                    None, // TBD
                                     parent_unit_for,
                                     compile_kind,
                                     CompileMode::Build,
@@ -612,6 +628,7 @@ fn artifact_targets_to_unit_deps(
                         parent,
                         artifact_pkg,
                         target,
+                        None, // TBD
                         parent_unit_for,
                         compile_kind,
                         CompileMode::Build,
@@ -647,6 +664,7 @@ fn compute_deps_doc(
             unit,
             dep_pkg,
             dep_lib,
+            None, // not checking unused deps
             dep_unit_for,
             unit.kind.for_target(dep_lib),
             mode,
@@ -660,6 +678,7 @@ fn compute_deps_doc(
                 unit,
                 dep_pkg,
                 dep_lib,
+                None, // not checking unused deps
                 dep_unit_for,
                 unit.kind.for_target(dep_lib),
                 unit.mode,
@@ -693,6 +712,7 @@ fn compute_deps_doc(
                 unit,
                 &unit.pkg,
                 lib,
+                None, // not checking unused deps
                 dep_unit_for,
                 unit.kind.for_target(lib),
                 unit.mode,
@@ -712,6 +732,7 @@ fn compute_deps_doc(
                 scrape_unit,
                 &scrape_unit.pkg,
                 &scrape_unit.target,
+                None, // not checking unused deps
                 scrape_unit_for,
                 scrape_unit.kind,
                 scrape_unit.mode,
@@ -740,6 +761,7 @@ fn maybe_lib(
                 unit,
                 &unit.pkg,
                 t,
+                None,
                 dep_unit_for,
                 unit.kind.for_target(t),
                 mode,
@@ -801,6 +823,7 @@ fn dep_build_script(
                     unit,
                     &unit.pkg,
                     t,
+                    None, // artificial
                     script_unit_for,
                     unit.kind,
                     CompileMode::RunCustomBuild,
@@ -837,6 +860,7 @@ fn new_unit_dep(
     parent: &Unit,
     pkg: &Package,
     target: &Target,
+    manifest_deps: Option<Vec<Dependency>>,
     unit_for: UnitFor,
     kind: CompileKind,
     mode: CompileMode,
@@ -851,7 +875,16 @@ fn new_unit_dep(
         kind,
     );
     new_unit_dep_with_profile(
-        state, parent, pkg, target, unit_for, kind, mode, profile, artifact,
+        state,
+        parent,
+        pkg,
+        target,
+        manifest_deps,
+        unit_for,
+        kind,
+        mode,
+        profile,
+        artifact,
     )
 }
 
@@ -860,6 +893,7 @@ fn new_unit_dep_with_profile(
     parent: &Unit,
     pkg: &Package,
     target: &Target,
+    manifest_deps: Option<Vec<Dependency>>,
     unit_for: UnitFor,
     kind: CompileKind,
     mode: CompileMode,
@@ -907,6 +941,8 @@ fn new_unit_dep_with_profile(
         dep_name,
         public,
         noprelude: false,
+        nounused: false,
+        manifest_deps: Unhashed(manifest_deps),
     })
 }
 

@@ -1,10 +1,7 @@
 // tidy-alphabetical-start
-#![allow(rustc::diagnostic_outside_of_impl)]
-#![allow(rustc::untranslatable_diagnostic)]
-#![feature(assert_matches)]
+#![cfg_attr(bootstrap, feature(assert_matches))]
 #![feature(box_patterns)]
 #![feature(file_buffered)]
-#![feature(if_let_guard)]
 #![feature(negative_impls)]
 #![feature(string_from_utf8_lossy_owned)]
 #![feature(trait_alias)]
@@ -26,7 +23,8 @@ use rustc_data_structures::unord::UnordMap;
 use rustc_hir::CRATE_HIR_ID;
 use rustc_hir::attrs::{CfgEntry, NativeLibKind, WindowsSubsystemKind};
 use rustc_hir::def_id::CrateNum;
-use rustc_macros::{Decodable, Encodable, HashStable};
+use rustc_lint_defs::builtin::LINKER_INFO;
+use rustc_macros::{Decodable, Encodable};
 use rustc_metadata::EncodedMetadata;
 use rustc_middle::dep_graph::WorkProduct;
 use rustc_middle::lint::LevelAndSource;
@@ -56,8 +54,6 @@ pub mod mono_item;
 pub mod size_of_val;
 pub mod target_features;
 pub mod traits;
-
-rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 
 pub struct ModuleCodegen<M> {
     /// The name of the module. When the crate may be saved between
@@ -177,7 +173,12 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Clone, Debug, Encodable, Decodable, HashStable)]
+// This is the same as `rustc_session::cstore::NativeLib`, except:
+// - (important) the `foreign_module` field is missing, because it contains a `DefId`, which can't
+//   be encoded with `FileEncoder`.
+// - (less important) the `verbatim` field is a `bool` rather than an `Option<bool>`, because here
+//   we can treat `false` and `absent` the same.
+#[derive(Clone, Debug, Encodable, Decodable)]
 pub struct NativeLib {
     pub kind: NativeLibKind,
     pub name: Symbol,
@@ -208,7 +209,8 @@ impl From<&cstore::NativeLib> for NativeLib {
 /// identifiers (`CrateNum`) to `CrateSource`. The other fields map `CrateNum` to the crate's own
 /// additional properties, so that effectively we can retrieve each dependent crate's `CrateSource`
 /// and the corresponding properties without referencing information outside of a `CrateInfo`.
-#[derive(Debug, Encodable, Decodable)]
+// rustc_codegen_cranelift needs a Clone impl for its jit mode, which isn't tested in rust CI
+#[derive(Clone, Debug, Encodable, Decodable)]
 pub struct CrateInfo {
     pub target_cpu: String,
     pub target_features: Vec<String>,
@@ -250,13 +252,12 @@ pub struct TargetConfig {
 }
 
 #[derive(Encodable, Decodable)]
-pub struct CodegenResults {
+pub struct CompiledModules {
     pub modules: Vec<CompiledModule>,
     pub allocator_module: Option<CompiledModule>,
-    pub crate_info: CrateInfo,
 }
 
-pub enum CodegenErrors {
+pub enum CodegenError {
     WrongFileType,
     EmptyVersionNumber,
     EncodingVersionMismatch { version_array: String, rlink_version: u32 },
@@ -292,11 +293,12 @@ pub fn looks_like_rust_object_file(filename: &str) -> bool {
 const RLINK_VERSION: u32 = 1;
 const RLINK_MAGIC: &[u8] = b"rustlink";
 
-impl CodegenResults {
+impl CompiledModules {
     pub fn serialize_rlink(
         sess: &Session,
         rlink_file: &Path,
-        codegen_results: &CodegenResults,
+        compiled_modules: &CompiledModules,
+        crate_info: &CrateInfo,
         metadata: &EncodedMetadata,
         outputs: &OutputFilenames,
     ) -> Result<usize, io::Error> {
@@ -306,7 +308,8 @@ impl CodegenResults {
         // Encoder's inner representation of `u32`.
         encoder.emit_raw_bytes(&RLINK_VERSION.to_be_bytes());
         encoder.emit_str(sess.cfg_version);
-        Encodable::encode(codegen_results, &mut encoder);
+        Encodable::encode(compiled_modules, &mut encoder);
+        Encodable::encode(crate_info, &mut encoder);
         Encodable::encode(metadata, &mut encoder);
         Encodable::encode(outputs, &mut encoder);
         encoder.finish().map_err(|(_path, err)| err)
@@ -315,40 +318,41 @@ impl CodegenResults {
     pub fn deserialize_rlink(
         sess: &Session,
         data: Vec<u8>,
-    ) -> Result<(Self, EncodedMetadata, OutputFilenames), CodegenErrors> {
+    ) -> Result<(Self, CrateInfo, EncodedMetadata, OutputFilenames), CodegenError> {
         // The Decodable machinery is not used here because it panics if the input data is invalid
         // and because its internal representation may change.
         if !data.starts_with(RLINK_MAGIC) {
-            return Err(CodegenErrors::WrongFileType);
+            return Err(CodegenError::WrongFileType);
         }
         let data = &data[RLINK_MAGIC.len()..];
         if data.len() < 4 {
-            return Err(CodegenErrors::EmptyVersionNumber);
+            return Err(CodegenError::EmptyVersionNumber);
         }
 
         let mut version_array: [u8; 4] = Default::default();
         version_array.copy_from_slice(&data[..4]);
         if u32::from_be_bytes(version_array) != RLINK_VERSION {
-            return Err(CodegenErrors::EncodingVersionMismatch {
+            return Err(CodegenError::EncodingVersionMismatch {
                 version_array: String::from_utf8_lossy(&version_array).to_string(),
                 rlink_version: RLINK_VERSION,
             });
         }
 
         let Ok(mut decoder) = MemDecoder::new(&data[4..], 0) else {
-            return Err(CodegenErrors::CorruptFile);
+            return Err(CodegenError::CorruptFile);
         };
         let rustc_version = decoder.read_str();
         if rustc_version != sess.cfg_version {
-            return Err(CodegenErrors::RustcVersionMismatch {
+            return Err(CodegenError::RustcVersionMismatch {
                 rustc_version: rustc_version.to_string(),
             });
         }
 
-        let codegen_results = CodegenResults::decode(&mut decoder);
+        let compiled_modules = CompiledModules::decode(&mut decoder);
+        let crate_info = CrateInfo::decode(&mut decoder);
         let metadata = EncodedMetadata::decode(&mut decoder);
         let outputs = OutputFilenames::decode(&mut decoder);
-        Ok((codegen_results, metadata, outputs))
+        Ok((compiled_modules, crate_info, metadata, outputs))
     }
 }
 
@@ -360,10 +364,14 @@ impl CodegenResults {
 #[derive(Copy, Clone, Debug, Encodable, Decodable)]
 pub struct CodegenLintLevels {
     linker_messages: LevelAndSource,
+    linker_info: LevelAndSource,
 }
 
 impl CodegenLintLevels {
     pub fn from_tcx(tcx: TyCtxt<'_>) -> Self {
-        Self { linker_messages: tcx.lint_level_at_node(LINKER_MESSAGES, CRATE_HIR_ID) }
+        Self {
+            linker_messages: tcx.lint_level_at_node(LINKER_MESSAGES, CRATE_HIR_ID),
+            linker_info: tcx.lint_level_at_node(LINKER_INFO, CRATE_HIR_ID),
+        }
     }
 }

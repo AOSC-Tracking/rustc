@@ -213,7 +213,7 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
 
     /// Returns the directory where the artifacts for the given unit are
     /// initially created.
-    pub fn out_dir(&self, unit: &Unit) -> PathBuf {
+    pub fn output_dir(&self, unit: &Unit) -> PathBuf {
         // Docscrape units need to have doc/ set as the out_dir so sources for reverse-dependencies
         // will be put into doc/ and not into deps/ where the *.examples files are stored.
         if unit.mode.is_doc() || unit.mode.is_doc_scrape() {
@@ -272,7 +272,7 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
         self.host.build_dir().root()
     }
 
-    /// Returns the host `deps` directory path.
+    /// Returns the host `deps` directory path for a given build unit.
     pub fn host_deps(&self, unit: &Unit) -> PathBuf {
         let dir = self.pkg_dir(unit);
         self.host.build_dir().deps(&dir)
@@ -289,9 +289,11 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
     /// specified unit. (new layout)
     ///
     /// New features should consider using this so we can avoid their migrations.
-    pub fn deps_dir_new_layout(&self, unit: &Unit) -> PathBuf {
+    pub fn out_dir_new_layout(&self, unit: &Unit) -> PathBuf {
         let dir = self.pkg_dir(unit);
-        self.layout(unit.kind).build_dir().deps_new_layout(&dir)
+        self.layout(unit.kind)
+            .build_dir()
+            .out_force_new_layout(&dir)
     }
 
     /// Directory where the fingerprint for the given unit should go.
@@ -377,11 +379,7 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
                 invalid
             ),
         };
-        self.layout(unit.kind)
-            .build_dir()
-            .artifact()
-            .join(dir)
-            .join(kind)
+        self.layout(unit.kind).build_dir().artifact(&dir, kind)
     }
 
     /// Returns the directory where information about running a build script
@@ -451,7 +449,13 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
     ///
     /// Returns `None` if the unit shouldn't be uplifted (for example, a
     /// dependent rlib).
-    fn uplift_to(&self, unit: &Unit, file_type: &FileType, from_path: &Path) -> Option<PathBuf> {
+    fn uplift_to(
+        &self,
+        unit: &Unit,
+        file_type: &FileType,
+        from_path: &Path,
+        bcx: &BuildContext<'_, '_>,
+    ) -> Option<PathBuf> {
         // Tests, check, doc, etc. should not be uplifted.
         if unit.mode != CompileMode::Build || file_type.flavor == FileFlavor::Rmeta {
             return None;
@@ -459,6 +463,11 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
 
         // Artifact dependencies are never uplifted.
         if unit.artifact.is_true() {
+            return None;
+        }
+
+        // Build script bins are never uplifted.
+        if bcx.gctx.cli_unstable().build_dir_new_layout && unit.target.is_custom_build() {
             return None;
         }
 
@@ -515,10 +524,10 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
             }
             CompileMode::Doc => {
                 let path = if bcx.build_config.intent.wants_doc_json_output() {
-                    self.out_dir(unit)
+                    self.output_dir(unit)
                         .join(format!("{}.json", unit.target.crate_name()))
                 } else {
-                    self.out_dir(unit)
+                    self.output_dir(unit)
                         .join(unit.target.crate_name())
                         .join("index.html")
                 };
@@ -534,7 +543,7 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
                     // `-Zrustdoc-mergeable-info` always uses the new layout.
                     outputs.push(OutputFile {
                         path: self
-                            .deps_dir_new_layout(unit)
+                            .out_dir_new_layout(unit)
                             .join(unit.target.crate_name())
                             .with_extension("json"),
                         hardlink: None,
@@ -613,7 +622,7 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
         unit: &Unit,
         bcx: &BuildContext<'a, 'gctx>,
     ) -> CargoResult<Vec<OutputFile>> {
-        let out_dir = self.out_dir(unit);
+        let out_dir = self.output_dir(unit);
 
         let info = bcx.target_data.info(unit.kind);
         let triple = bcx.target_data.short_name(&unit.kind);
@@ -647,7 +656,7 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
 
             // If, the `different_binary_name` feature is enabled, the name of the hardlink will
             // be the name of the binary provided by the user in `Cargo.toml`.
-            let hardlink = self.uplift_to(unit, &file_type, &path);
+            let hardlink = self.uplift_to(unit, &file_type, &path, bcx);
             let export_path = if unit.target.is_custom_build() {
                 None
             } else {
@@ -905,10 +914,15 @@ fn use_extra_filename(bcx: &BuildContext<'_, '_>, unit: &Unit) -> bool {
             // These always use metadata.
             return true;
         }
+
+        if unit.target.is_custom_build() {
+            // Build scripts never use metadata
+            return false;
+        }
         // No metadata in these cases:
         //
-        // - dylib, cdylib, executable: `pkg_dir` avoids collisions for us and rustc isn't looking these
-        //   up by `-Cextra-filename`
+        // - dylib, cdylib, executable: `pkg_dir` avoids collisions for us and rustc isn't
+        // looking these up by `-Cextra-filename`
         //
         // The __CARGO_DEFAULT_LIB_METADATA env var is used to override this to
         // force metadata in the hash. This is only used for building libstd. For

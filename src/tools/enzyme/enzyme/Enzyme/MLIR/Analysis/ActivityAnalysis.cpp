@@ -1,5 +1,6 @@
 #include "ActivityAnalysis.h"
 #include "Interfaces/GradientUtils.h"
+#include "Interfaces/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
@@ -215,10 +216,20 @@ const static unsigned constantIntrinsics[] = {
     llvm::Intrinsic::nvvm_barrier0,
 #else
     llvm::Intrinsic::nvvm_barrier_cta_sync_aligned_all,
+    llvm::Intrinsic::nvvm_barrier_cta_sync_aligned_count,
 #endif
+#if LLVM_VERSION_MAJOR < 22
     llvm::Intrinsic::nvvm_barrier0_popc,
     llvm::Intrinsic::nvvm_barrier0_and,
     llvm::Intrinsic::nvvm_barrier0_or,
+#else
+    llvm::Intrinsic::nvvm_barrier_cta_red_and_aligned_all,
+    llvm::Intrinsic::nvvm_barrier_cta_red_and_aligned_count,
+    llvm::Intrinsic::nvvm_barrier_cta_red_or_aligned_all,
+    llvm::Intrinsic::nvvm_barrier_cta_red_or_aligned_count,
+    llvm::Intrinsic::nvvm_barrier_cta_red_popc_aligned_all,
+    llvm::Intrinsic::nvvm_barrier_cta_red_popc_aligned_count,
+#endif
     llvm::Intrinsic::nvvm_membar_cta,
     llvm::Intrinsic::nvvm_membar_gl,
     llvm::Intrinsic::nvvm_membar_sys,
@@ -283,6 +294,16 @@ static bool isReadOnly(Operation *op) {
     return true;
   }
   return false;
+}
+
+bool mlir::enzyme::ActivityAnalyzer::isReadOnly(Operation *val) {
+  auto find = readOnlyCache.find(val);
+  if (find != readOnlyCache.end()) {
+    return find->second;
+  }
+  auto res = ::isReadOnly(val);
+  readOnlyCache[val] = res;
+  return res;
 }
 
 /// Is the use of value val as an argument of call CI known to be inactive
@@ -389,12 +410,13 @@ bool mlir::enzyme::ActivityAnalyzer::isFunctionArgumentConstant(
   }
 
   // only the buffer is active for mpi send/recv
-  if (Name == "MPI_Recv" || Name == "PMPI_Recv" || Name == "MPI_Send" ||
+  if (Name == "MPI_Recv" || Name == "MPI_Send" || Name == "PMPI_Recv" ||
       Name == "PMPI_Send") {
     return val != CI.getArgOperands()[0];
   }
   // only the recv buffer and request is active for mpi isend/irecv
-  if (Name == "MPI_Irecv" || Name == "MPI_Isend") {
+  if (Name == "MPI_Irecv" || Name == "MPI_Isend" || Name == "PMPI_Irecv" ||
+      Name == "PMPI_Isend") {
     return val != CI.getArgOperands()[0] && val != CI.getArgOperands()[6];
   }
 
@@ -830,7 +852,8 @@ static bool isValuePotentiallyUsedAsPointer(Value val) {
       continue;
     seen.insert(cur);
     for (Operation *user : cur.getUsers()) {
-      if (isa<RegionBranchOpInterface>(user->getParentOp()))
+      if (auto regionIface =
+              dyn_cast<RegionBranchOpInterface>(user->getParentOp()))
         if (auto termIface =
                 dyn_cast<RegionBranchTerminatorOpInterface>(user)) {
           SmallVector<RegionSuccessor> successors;
@@ -842,9 +865,10 @@ static bool isValuePotentiallyUsedAsPointer(Value val) {
           for (auto &successor : successors) {
             OperandRange operandRange =
                 termIface.getSuccessorOperands(successor);
-            ValueRange targetValues = successor.isParent()
-                                          ? parentOp->getResults()
-                                          : successor.getSuccessorInputs();
+            ValueRange targetValues =
+                successor.isParent()
+                    ? parentOp->getResults()
+                    : regionIface.getSuccessorInputs(successor);
             assert(operandRange.size() == targetValues.size());
             for (auto &&[prev, post] : llvm::zip(operandRange, targetValues)) {
               if (prev == cur) {
@@ -947,7 +971,8 @@ getPotentialTerminatorUsers(Operation *op, Value parent) {
 
   if (auto termIface = dyn_cast<ADDataFlowOpInterface>(op->getParentOp())) {
     return termIface.getPotentialTerminatorUsers(op, parent);
-  } else if (isa<RegionBranchOpInterface>(op->getParentOp())) {
+  } else if (auto regionIface =
+                 dyn_cast<RegionBranchOpInterface>(op->getParentOp())) {
     if (auto termIface = dyn_cast<RegionBranchTerminatorOpInterface>(op)) {
       SmallVector<RegionSuccessor> successors;
       termIface.getSuccessorRegions(
@@ -958,9 +983,9 @@ getPotentialTerminatorUsers(Operation *op, Value parent) {
       SmallVector<Value> results;
       for (auto &successor : successors) {
         OperandRange operandRange = termIface.getSuccessorOperands(successor);
-        ValueRange targetValues = successor.isParent()
-                                      ? parentOp->getResults()
-                                      : successor.getSuccessorInputs();
+        ValueRange targetValues =
+            successor.isParent() ? parentOp->getResults()
+                                 : regionIface.getSuccessorInputs(successor);
         assert(operandRange.size() == targetValues.size());
         for (auto &&[prev, post] : llvm::zip(operandRange, targetValues)) {
           if (prev == parent) {
@@ -1044,7 +1069,7 @@ static SmallVector<Value> getPotentialIncomingValues(OpResult res) {
         // TODO: the interface may also tell us which regions are allowed to
         // yield parent op results, and which only branch to other regions.
         auto successorOperands = llvm::to_vector(
-            iface.getSuccessorOperands(RegionBranchPoint::parent()));
+            iface.getSuccessorOperands(RegionSuccessor::parent()));
         // TODO: understand/document the assumption of how operands flow.
 
         if (successorOperands.size() != owner->getNumResults()) {
@@ -1109,7 +1134,8 @@ static SmallVector<Value> getPotentialIncomingValues(BlockArgument arg) {
           continue;
 
         unsigned operandOffset = static_cast<unsigned>(-1);
-        for (const auto &en : llvm::enumerate(successor.getSuccessorInputs())) {
+        for (const auto &en :
+             llvm::enumerate(iface.getSuccessorInputs(successor))) {
           if (en.value() != arg)
             continue;
           operandOffset = en.index();
@@ -1124,14 +1150,15 @@ static SmallVector<Value> getPotentialIncomingValues(BlockArgument arg) {
           // XXX: this assumes a contiguous slice of operands is mapped 1-1
           // without swaps to a contiguous slice of entry block arguments.
           assert(iface.getEntrySuccessorOperands(region).size() ==
-                 successor.getSuccessorInputs().size());
+                 iface.getSuccessorInputs(successor).size());
           potentialSources.insert(
               iface.getEntrySuccessorOperands(region)[operandOffset]);
         } else {
           // Find all block terminators in the predecessor region that
           // may be branching to this region, and get the operands they
           // forward.
-          for (Block &block : *predecessor.getRegionOrNull()) {
+          for (Block &block : *predecessor.getTerminatorPredecessorOrNull()
+                                   ->getParentRegion()) {
             // TODO: MLIR block without terminator
             if (auto terminator = dyn_cast<RegionBranchTerminatorOpInterface>(
                     block.getTerminator())) {
@@ -1139,7 +1166,7 @@ static SmallVector<Value> getPotentialIncomingValues(BlockArgument arg) {
               // 1-1 without swaps to a contiguous slice of entry block
               // arguments.
               assert(terminator.getSuccessorOperands(region).size() ==
-                     successor.getSuccessorInputs().size());
+                     iface.getSuccessorInputs(successor).size());
               potentialSources.insert(
                   terminator.getSuccessorOperands(region)[operandOffset]);
             } else {
@@ -1155,7 +1182,10 @@ static SmallVector<Value> getPotentialIncomingValues(BlockArgument arg) {
     isRegionSucessorOf(iface, parentRegion, RegionBranchPoint::parent(),
                        potentialSources);
     for (Region &childRegion : parent->getRegions())
-      isRegionSucessorOf(iface, parentRegion, childRegion, potentialSources);
+      isRegionSucessorOf(iface, parentRegion,
+                         cast<RegionBranchTerminatorOpInterface>(
+                             childRegion.front().getTerminator()),
+                         potentialSources);
 
   } else {
     // Conservatively assume any op operand and any terminator operand of
@@ -1251,7 +1281,11 @@ static void allFollowersOf(Operation *op,
     if (!parentOp || isa<FunctionOpInterface>(parentOp))
       return;
 
-    addEntryBlocksOfSuccessorRegions(parentOp, current->getParent(), todo);
+    addEntryBlocksOfSuccessorRegions(
+        parentOp,
+        cast<RegionBranchTerminatorOpInterface>(
+            current->getParent()->front().getTerminator()),
+        todo);
   };
 
   std::deque<Block *> todo;

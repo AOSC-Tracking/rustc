@@ -39,17 +39,28 @@ implicit_minimum_version_req = "warn"
 7 | dep = "1"
   |       ^^^ missing full version components
   |
+  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [HELP] consider specifying full `major.minor.patch` version components
   |
 7 | dep = "1.0.0"
   |         ++++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [UPDATING] `dummy-registry` index
 [LOCKING] 1 package to latest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] dep v1.0.0 (registry `dummy-registry`)
 [CHECKING] dep v1.0.0
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | dep = "1"
+  | ^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - dep = "1"
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -87,17 +98,28 @@ implicit_minimum_version_req = "warn"
 7 | dep = "1.0"
   |       ^^^^^ missing full version components
   |
+  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [HELP] consider specifying full `major.minor.patch` version components
   |
 7 | dep = "1.0.0"
   |           ++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [UPDATING] `dummy-registry` index
 [LOCKING] 1 package to latest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] dep v1.0.0 (registry `dummy-registry`)
 [CHECKING] dep v1.0.0
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | dep = "1.0"
+  | ^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - dep = "1.0"
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -135,6 +157,17 @@ implicit_minimum_version_req = "warn"
 [DOWNLOADED] dep v1.2.3 (registry `dummy-registry`)
 [CHECKING] dep v1.2.3
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | dep = "1.0.0"
+  | ^^^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - dep = "1.0.0"
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -172,17 +205,28 @@ implicit_minimum_version_req = "warn"
 7 | dep = { version = "1" }
   |                   ^^^ missing full version components
   |
+  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [HELP] consider specifying full `major.minor.patch` version components
   |
 7 | dep = { version = "1.0.0" }
   |                     ++++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [UPDATING] `dummy-registry` index
 [LOCKING] 1 package to latest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] dep v1.0.0 (registry `dummy-registry`)
 [CHECKING] dep v1.0.0
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | dep = { version = "1" }
+  | ^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - dep = { version = "1" }
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -220,17 +264,28 @@ implicit_minimum_version_req = "warn"
 7 | dep = ">=1.0"
   |       ^^^^^^^ missing full version components
   |
+  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [HELP] consider specifying full `major.minor.patch` version components
   |
 7 | dep = ">=1.0.0"
   |             ++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [UPDATING] `dummy-registry` index
 [LOCKING] 1 package to latest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] dep v1.0.0 (registry `dummy-registry`)
 [CHECKING] dep v1.0.0
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | dep = ">=1.0"
+  | ^^^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - dep = ">=1.0"
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -268,6 +323,17 @@ implicit_minimum_version_req = "warn"
 [DOWNLOADED] dep v1.0.0 (registry `dummy-registry`)
 [CHECKING] dep v1.0.0
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | dep = "<2.0"
+  | ^^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - dep = "<2.0"
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -305,6 +371,17 @@ implicit_minimum_version_req = "warn"
 [DOWNLOADED] dep v1.0.0 (registry `dummy-registry`)
 [CHECKING] dep v1.0.0
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | dep = "1.*"
+  | ^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - dep = "1.*"
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -342,6 +419,17 @@ implicit_minimum_version_req = "warn"
 [DOWNLOADED] dep v1.0.0 (registry `dummy-registry`)
 [CHECKING] dep v1.0.0
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | dep = "1.0.*"
+  | ^^^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - dep = "1.0.*"
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -379,6 +467,17 @@ implicit_minimum_version_req = "warn"
 [DOWNLOADED] dep v1.1.0 (registry `dummy-registry`)
 [CHECKING] dep v1.1.0
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | dep = ">1.0"
+  | ^^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - dep = ">1.0"
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -416,6 +515,17 @@ implicit_minimum_version_req = "warn"
 [DOWNLOADED] dep v1.0.0 (registry `dummy-registry`)
 [CHECKING] dep v1.0.0
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | dep = "<=2.0"
+  | ^^^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - dep = "<=2.0"
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -453,17 +563,28 @@ implicit_minimum_version_req = "warn"
 7 | dep = ">=1.0, <2.0"
   |       ^^^^^^^^^^^^^ missing full version components
   |
+  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [HELP] consider specifying full `major.minor.patch` version components
   |
 7 | dep = ">=1.0.0, <2.0"
   |             ++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [UPDATING] `dummy-registry` index
 [LOCKING] 1 package to latest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] dep v1.0.0 (registry `dummy-registry`)
 [CHECKING] dep v1.0.0
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | dep = ">=1.0, <2.0"
+  | ^^^^^^^^^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - dep = ">=1.0, <2.0"
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -501,6 +622,17 @@ implicit_minimum_version_req = "warn"
 [DOWNLOADED] dep v1.0.0 (registry `dummy-registry`)
 [CHECKING] dep v1.0.0
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | dep = "~1.0"
+  | ^^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - dep = "~1.0"
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -538,6 +670,17 @@ implicit_minimum_version_req = "warn"
 [DOWNLOADED] dep v1.0.0 (registry `dummy-registry`)
 [CHECKING] dep v1.0.0
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | dep = "=1"
+  | ^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - dep = "=1"
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -580,6 +723,17 @@ edition = "2021"
 [LOCKING] 1 package to latest compatible version
 [CHECKING] bar v0.1.0 ([ROOT]/foo/bar)
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | bar = { path = "bar" }
+  | ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - bar = { path = "bar" }
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -626,14 +780,25 @@ edition = "2021"
 7 | bar = { path = "bar", version = "0.1" }
   |                                 ^^^^^ missing full version components
   |
+  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [HELP] consider specifying full `major.minor.patch` version components
   |
 7 | bar = { path = "bar", version = "0.1.0" }
   |                                     ++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [LOCKING] 1 package to latest compatible version
 [CHECKING] bar v0.1.0 ([ROOT]/foo/bar)
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | bar = { path = "bar", version = "0.1" }
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - bar = { path = "bar", version = "0.1" }
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -676,6 +841,17 @@ implicit_minimum_version_req = "warn"
 [LOCKING] 1 package to latest compatible version
 [CHECKING] bar v0.1.0 ([ROOTURL]/bar#[..])
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | bar = { git = '[ROOTURL]/bar' }
+  | ^^^^^^^^^^^^^^^[..]^^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - bar = { git = '[ROOTURL]/bar' }
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -720,15 +896,26 @@ implicit_minimum_version_req = "warn"
 7 | bar = { git = '[ROOTURL]/bar', version = "0.1" }
   |                                      [..]^^^^^ missing full version components
   |
+  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [HELP] consider specifying full `major.minor.patch` version components
   |
 7 | bar = { git = '[ROOTURL]/bar', version = "0.1.0" }
   |                                          [..]++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [UPDATING] git repository `[ROOTURL]/bar`
 [LOCKING] 1 package to latest compatible version
 [CHECKING] bar v0.1.0 ([ROOTURL]/bar#[..])
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | bar = { git = '[ROOTURL]/bar', version = "0.1" }
+  | ^^^^^^^^^^^^^^^[..]^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - bar = { git = '[ROOTURL]/bar', version = "0.1" }
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -766,11 +953,11 @@ implicit_minimum_version_req = "warn"
 7 | dep = "1"
   |       ^^^ missing full version components
   |
+  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [HELP] consider specifying full `major.minor.patch` version components
   |
 7 | dep = "1.0.0"
   |         ++++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [UPDATING] `dummy-registry` index
 [LOCKING] 1 package to latest compatible version
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
@@ -812,17 +999,28 @@ implicit_minimum_version_req = "warn"
 7 | dep = "1.0"
   |       ^^^^^ missing full version components
   |
+  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [HELP] consider specifying full `major.minor.patch` version components
   |
 7 | dep = "1.0.0"
   |           ++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [UPDATING] `dummy-registry` index
 [LOCKING] 1 package to latest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] dep v1.0.0 (registry `dummy-registry`)
 [COMPILING] dep v1.0.0
 [COMPILING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | dep = "1.0"
+  | ^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - dep = "1.0"
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -861,17 +1059,20 @@ implicit_minimum_version_req = "warn"
 8 | dep = "1"
   |       ^^^ missing full version components
   |
+  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [HELP] consider specifying full `major.minor.patch` version components
   |
 8 | dep = "1.0.0"
   |         ++++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [UPDATING] `dummy-registry` index
 [LOCKING] 1 package to latest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] dep v1.0.0 (registry `dummy-registry`)
 [CHECKING] dep v1.0.0
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
+[WARNING] unused dependency
+ --> Cargo.toml
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -910,11 +1111,11 @@ implicit_minimum_version_req = "warn"
 8 | dep = "1"
   |       ^^^ missing full version components
   |
+  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [HELP] consider specifying full `major.minor.patch` version components
   |
 8 | dep = "1.0.0"
   |         ++++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [UPDATING] `dummy-registry` index
 [LOCKING] 1 package to latest compatible version
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
@@ -948,21 +1149,20 @@ implicit_minimum_version_req = "warn"
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("check -Zcargo-lints")
+    p.cargo("check -Zcargo-lints --quiet")
         .masquerade_as_nightly_cargo(&["cargo-lints"])
-        .with_stderr_data(
-            str![[r#"
+        .with_stderr_data(str![[r#"
 [WARNING] dependency version requirement without an explicit minimum version
  --> Cargo.toml:7:7
   |
 7 | dep = "1"
   |       ^^^ missing full version components
   |
+  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [HELP] consider specifying full `major.minor.patch` version components
   |
 7 | dep = "1.0.0"
   |         ++++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [WARNING] dependency version requirement without an explicit minimum version
  --> Cargo.toml:8:9
   |
@@ -973,20 +1173,29 @@ implicit_minimum_version_req = "warn"
   |
 8 | regex = "1.0.0"
   |             ++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
-[UPDATING] `dummy-registry` index
-[LOCKING] 2 packages to latest compatible versions
-[DOWNLOADING] crates ...
-[DOWNLOADED] regex v1.0.0 (registry `dummy-registry`)
-[DOWNLOADED] dep v1.0.0 (registry `dummy-registry`)
-[CHECKING] dep v1.0.0
-[CHECKING] regex v1.0.0
-[CHECKING] foo v0.0.0 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[WARNING] unused dependency
+ --> Cargo.toml:7:1
+  |
+7 | dep = "1"
+  | ^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - dep = "1"
+  |
+[WARNING] unused dependency
+ --> Cargo.toml:8:1
+  |
+8 | regex = "1.0"
+  | ^^^^^^^^^^^^^
+  |
+[HELP] remove the dependency
+  |
+8 - regex = "1.0"
+  |
 
-"#]]
-            .unordered(),
-        )
+"#]])
         .run();
 }
 
@@ -1035,17 +1244,29 @@ workspace = true
 7 | dep = "1"
   |       ^^^ missing full version components
   |
+  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [HELP] consider specifying full `major.minor.patch` version components
   |
 7 | dep = "1.0.0"
   |         ++++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [UPDATING] `dummy-registry` index
 [LOCKING] 1 package to latest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] dep v1.0.0 (registry `dummy-registry`)
 [CHECKING] dep v1.0.0
 [CHECKING] member v0.0.0 ([ROOT]/foo/member)
+[WARNING] unused dependency
+ --> member/Cargo.toml:7:1
+  |
+7 | dep.workspace = true
+  | ^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - dep.workspace = true
+7 + .workspace = true
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -1078,6 +1299,8 @@ implicit_minimum_version_req = "warn"
 [package]
 name = "member"
 edition = "2021"
+
+[lints]
 "#,
         )
         .file("member/src/lib.rs", "")
@@ -1086,17 +1309,28 @@ edition = "2021"
     p.cargo("check -Zcargo-lints")
         .masquerade_as_nightly_cargo(&["cargo-lints"])
         .with_stderr_data(str![[r#"
+[WARNING] unused workspace dependency
+ --> Cargo.toml:7:1
+  |
+7 | dep = "1"
+  | ^^^
+  |
+  = [NOTE] `cargo::unused_workspace_dependencies` is set to `warn` by default
+[HELP] consider removing the unused dependency
+  |
+7 - dep = "1"
+  |
 [WARNING] dependency version requirement without an explicit minimum version
  --> Cargo.toml:7:7
   |
 7 | dep = "1"
   |       ^^^ missing full version components
   |
+  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [HELP] consider specifying full `major.minor.patch` version components
   |
 7 | dep = "1.0.0"
   |         ++++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [CHECKING] member v0.0.0 ([ROOT]/foo/member)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -1144,34 +1378,56 @@ workspace = true
     p.cargo("check -Zcargo-lints")
         .masquerade_as_nightly_cargo(&["cargo-lints"])
         .with_stderr_data(str![[r#"
+[WARNING] unused workspace dependency
+ --> Cargo.toml:7:1
+  |
+7 | dep = "1"
+  | ^^^
+  |
+  = [NOTE] `cargo::unused_workspace_dependencies` is set to `warn` by default
+[HELP] consider removing the unused dependency
+  |
+7 - dep = "1"
+  |
 [WARNING] dependency version requirement without an explicit minimum version
  --> Cargo.toml:7:7
   |
 7 | dep = "1"
   |       ^^^ missing full version components
   |
+  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [HELP] consider specifying full `major.minor.patch` version components
   |
 7 | dep = "1.0.0"
   |         ++++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [WARNING] dependency version requirement without an explicit minimum version
  --> member/Cargo.toml:7:7
   |
 7 | dep = "1.0"
   |       ^^^^^ missing full version components
   |
+  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [HELP] consider specifying full `major.minor.patch` version components
   |
 7 | dep = "1.0.0"
   |           ++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `warn` in `[lints]`
 [UPDATING] `dummy-registry` index
 [LOCKING] 1 package to latest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] dep v1.0.0 (registry `dummy-registry`)
 [CHECKING] dep v1.0.0
 [CHECKING] member v0.0.0 ([ROOT]/foo/member)
+[WARNING] unused dependency
+ --> member/Cargo.toml:7:1
+  |
+7 | dep = "1.0"
+  | ^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
+[HELP] remove the dependency
+  |
+7 - dep = "1.0"
+  |
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -1210,11 +1466,11 @@ implicit_minimum_version_req = "deny"
 7 | dep = "1"
   |       ^^^ missing full version components
   |
+  = [NOTE] `cargo::implicit_minimum_version_req` is set to `deny` in `[lints]`
 [HELP] consider specifying full `major.minor.patch` version components
   |
 7 | dep = "1.0.0"
   |         ++++
-  = [NOTE] `cargo::implicit_minimum_version_req` is set to `deny` in `[lints]`
 [ERROR] encountered 1 error while running lints
 
 "#]])

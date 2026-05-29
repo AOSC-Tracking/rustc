@@ -1,4 +1,4 @@
-use std::assert_matches::assert_matches;
+use std::assert_matches;
 
 use rustc_abi::{BackendRepr, FieldsShape, Scalar, Size, TagEncoding, Variants};
 use rustc_middle::bug;
@@ -250,7 +250,7 @@ pub(super) fn layout_sanity_check<'tcx>(cx: &LayoutCx<'tcx>, layout: &TyAndLayou
                 // And the size has to be element * count plus alignment padding, of course
                 assert!(size == (element_size * count).align_to(align));
             }
-            BackendRepr::Memory { .. } | BackendRepr::ScalableVector { .. } => {} // Nothing to check.
+            BackendRepr::Memory { .. } | BackendRepr::SimdScalableVector { .. } => {} // Nothing to check.
         }
     }
 

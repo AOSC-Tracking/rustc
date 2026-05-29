@@ -1,7 +1,7 @@
 //! Completion tests for type position.
 use expect_test::expect;
 
-use crate::tests::{check, check_with_base_items};
+use crate::tests::{check, check_edit, check_with_base_items};
 
 #[test]
 fn record_field_ty() {
@@ -94,6 +94,230 @@ fn x<'lt, T, const C: usize>() -> $0
 }
 
 #[test]
+fn fn_return_type_missing_thin_arrow() {
+    check_with_base_items(
+        r#"
+fn x() u$0
+"#,
+        expect![[r#"
+            en Enum (adds ->)          Enum
+            ma makro!(…) macro_rules! makro
+            md module (adds ->)
+            st Record (adds ->)      Record
+            st Tuple (adds ->)        Tuple
+            st Unit (adds ->)          Unit
+            tt Trait (adds ->)
+            un Union (adds ->)        Union
+            bt u32 (adds ->)            u32
+            kw crate:: (adds ->)
+            kw dyn (adds ->)
+            kw fn (adds ->)
+            kw for (adds ->)
+            kw impl (adds ->)
+            kw self:: (adds ->)
+            kw where
+        "#]],
+    );
+
+    check_with_base_items(
+        r#"
+fn x() $0
+"#,
+        expect![[r#"
+            en Enum (adds ->)          Enum
+            ma makro!(…) macro_rules! makro
+            md module (adds ->)
+            st Record (adds ->)      Record
+            st Tuple (adds ->)        Tuple
+            st Unit (adds ->)          Unit
+            tt Trait (adds ->)
+            un Union (adds ->)        Union
+            bt u32 (adds ->)            u32
+            kw crate:: (adds ->)
+            kw dyn (adds ->)
+            kw fn (adds ->)
+            kw for (adds ->)
+            kw impl (adds ->)
+            kw self:: (adds ->)
+            kw where
+        "#]],
+    );
+}
+
+#[test]
+fn fn_return_type_missing_thin_arrow_path_completion() {
+    check_edit(
+        "u32",
+        r#"
+fn foo() u$0
+"#,
+        r#"
+fn foo() -> u32
+"#,
+    );
+
+    check_edit(
+        "u32",
+        r#"
+fn foo() $0
+"#,
+        r#"
+fn foo() -> u32
+"#,
+    );
+
+    check_edit(
+        "Num",
+        r#"
+type Num = u32;
+fn foo() $0
+"#,
+        r#"
+type Num = u32;
+fn foo() -> Num
+"#,
+    );
+
+    check_edit(
+        "impl",
+        r#"
+fn foo() $0
+"#,
+        r#"
+fn foo() -> impl $0
+"#,
+    );
+
+    check_edit(
+        "foo",
+        r#"
+mod foo { pub type Num = u32; }
+fn foo() $0
+"#,
+        r#"
+mod foo { pub type Num = u32; }
+fn foo() -> foo
+"#,
+    );
+
+    check_edit(
+        "crate::",
+        r#"
+mod foo { pub type Num = u32; }
+fn foo() $0
+"#,
+        r#"
+mod foo { pub type Num = u32; }
+fn foo() -> crate::
+"#,
+    );
+
+    check_edit(
+        "Num",
+        r#"
+mod foo { pub type Num = u32; }
+fn foo() foo::$0
+"#,
+        r#"
+mod foo { pub type Num = u32; }
+fn foo() -> foo::Num
+"#,
+    );
+
+    // no spaces, test edit order
+    check_edit(
+        "foo",
+        r#"
+mod foo { pub type Num = u32; }
+fn foo()$0
+"#,
+        r#"
+mod foo { pub type Num = u32; }
+fn foo() ->foo
+"#,
+    );
+}
+
+#[test]
+fn fn_return_type_missing_thin_arrow_path_completion_with_generic_args() {
+    check_edit(
+        "Foo",
+        r#"
+struct Foo<T>(T);
+fn foo() F$0
+"#,
+        r#"
+struct Foo<T>(T);
+fn foo() -> Foo<$0>
+"#,
+    );
+
+    check_edit(
+        "Foo",
+        r#"
+struct Foo<T>(T);
+fn foo() $0
+"#,
+        r#"
+struct Foo<T>(T);
+fn foo() -> Foo<$0>
+"#,
+    );
+
+    check_edit(
+        "Foo",
+        r#"
+type Foo<T> = T;
+fn foo() $0
+"#,
+        r#"
+type Foo<T> = T;
+fn foo() -> Foo<$0>
+"#,
+    );
+}
+
+#[test]
+fn fn_return_type_missing_thin_arrow_infer_ref_type() {
+    check_with_base_items(
+        r#"
+fn x() u$0 {&2u32}
+"#,
+        expect![[r#"
+            en Enum (adds ->)          Enum
+            ma makro!(…) macro_rules! makro
+            md module (adds ->)
+            st Record (adds ->)      Record
+            st Tuple (adds ->)        Tuple
+            st Unit (adds ->)          Unit
+            tt Trait (adds ->)
+            un Union (adds ->)        Union
+            bt u32 (adds ->)            u32
+            it &u32 (adds ->)
+            kw crate:: (adds ->)
+            kw dyn (adds ->)
+            kw fn (adds ->)
+            kw for (adds ->)
+            kw impl (adds ->)
+            kw self:: (adds ->)
+            kw where
+        "#]],
+    );
+
+    check_edit(
+        "&u32",
+        r#"
+struct Foo<T>(T);
+fn x() u$0 {&2u32}
+"#,
+        r#"
+struct Foo<T>(T);
+fn x() -> &u32 {&2u32}
+"#,
+    );
+}
+
+#[test]
 fn fn_return_type_after_reference() {
     check_with_base_items(
         r#"
@@ -160,6 +384,35 @@ fn inferred_type_const() {
         r#"
 struct Foo<T>(T);
 const FOO: $0 = Foo(2);
+"#,
+        expect![[r#"
+            en Enum                    Enum
+            ma makro!(…) macro_rules! makro
+            md module
+            st Foo<…>        Foo<{unknown}>
+            st Record                Record
+            st Tuple                  Tuple
+            st Unit                    Unit
+            tt Trait
+            un Union                  Union
+            bt u32                      u32
+            it Foo<i32>
+            kw crate::
+            kw dyn
+            kw fn
+            kw for
+            kw impl
+            kw self::
+        "#]],
+    );
+}
+
+#[test]
+fn inferred_type_static() {
+    check_with_base_items(
+        r#"
+struct Foo<T>(T);
+static FOO: $0 = Foo(2);
 "#,
         expect![[r#"
             en Enum                    Enum

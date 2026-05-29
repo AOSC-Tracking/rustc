@@ -1,6 +1,6 @@
 //! A parser of the ENBF-like grammar.
 
-use super::{Characters, Expression, ExpressionKind, Grammar, Production};
+use super::{Character, Characters, Expression, ExpressionKind, Grammar, Production, RangeLimit};
 use std::fmt;
 use std::fmt::Display;
 use std::path::Path;
@@ -37,6 +37,24 @@ macro_rules! bail {
 }
 
 type Result<T> = std::result::Result<T, Error>;
+
+/// Whether a character can start a grammar rule name.
+///
+/// This includes ASCII alphabetic characters, underscores, and
+/// non-ASCII Unicode symbols such as `⊥` (bottom) and `⊤` (top).
+/// ASCII symbols are excluded because characters such as `+`, `|`,
+/// `~`, and `^` are grammar syntax.
+fn is_name_start(ch: char) -> bool {
+    ch.is_alphabetic() || ch == '_' || !ch.is_ascii()
+}
+
+/// Whether a character can continue a grammar rule name.
+///
+/// Accepts alphanumeric characters, underscores, and non-ASCII
+/// characters.
+fn is_name_continue(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_' || !ch.is_ascii()
+}
 
 pub fn parse_grammar(
     input: &str,
@@ -152,12 +170,11 @@ impl Parser<'_> {
     }
 
     fn parse_name(&mut self) -> Option<String> {
-        let name = self.take_while(&|c: char| c.is_alphanumeric() || c == '_');
-        if name.is_empty() {
-            None
-        } else {
-            Some(name.to_string())
+        let first = self.input[self.index..].chars().next()?;
+        if !is_name_start(first) {
+            return None;
         }
+        Some(self.take_while(&|c| is_name_continue(c)).to_string())
     }
 
     fn parse_expression(&mut self) -> Result<Option<Expression>> {
@@ -173,11 +190,7 @@ impl Parser<'_> {
         match es.len() {
             0 => Ok(None),
             1 => Ok(Some(es.pop().unwrap())),
-            _ => Ok(Some(Expression {
-                kind: ExpressionKind::Alt(es),
-                suffix: None,
-                footnote: None,
-            })),
+            _ => Ok(Some(Expression::new_kind(ExpressionKind::Alt(es)))),
         }
     }
 
@@ -185,6 +198,11 @@ impl Parser<'_> {
         let mut es = Vec::new();
         loop {
             self.space0();
+            if self.peek() == Some(b'^') {
+                let cut = self.parse_cut()?;
+                es.push(cut);
+                break;
+            }
             let Some(e) = self.parse_expr1()? else {
                 break;
             };
@@ -201,17 +219,30 @@ impl Parser<'_> {
         }
     }
 
+    /// Parse cut (`^`) operator.
+    fn parse_cut(&mut self) -> Result<Expression> {
+        self.expect("^", "expected `^`")?;
+        let Some(rhs) = self.parse_seq()? else {
+            bail!(self, "expected expression after cut operator");
+        };
+        Ok(Expression {
+            kind: ExpressionKind::Cut(Box::new(rhs)),
+            suffix: None,
+            footnote: None,
+        })
+    }
+
     fn parse_expr1(&mut self) -> Result<Option<Expression>> {
         let Some(next) = self.peek() else {
             return Ok(None);
         };
 
         let kind = if self.take_str("U+") {
-            self.parse_unicode()?
+            ExpressionKind::Unicode(self.parse_unicode()?)
         } else if self.input[self.index..]
             .chars()
             .next()
-            .map(|ch| ch.is_alphanumeric())
+            .map(|ch| is_name_start(ch))
             .unwrap_or(false)
         {
             self.parse_nonterminal()
@@ -237,6 +268,8 @@ impl Parser<'_> {
             self.parse_grouped()?
         } else if next == b'~' {
             self.parse_neg_expression()?
+        } else if next == b'!' {
+            self.parse_negative_lookahead()?
         } else {
             return Ok(None);
         };
@@ -306,31 +339,40 @@ impl Parser<'_> {
     /// Parse an element of a character class, e.g.
     /// `` `a`-`b` `` | `` `term` `` | `` NonTerminal ``.
     fn parse_characters(&mut self) -> Result<Option<Characters>> {
-        if let Some(b'`') = self.peek() {
-            let recov = self.index;
-            let a = self.parse_terminal_str()?;
+        if let Some(a) = self.parse_character()? {
             if self.take_str("-") {
-                //~^ Parse `` `a`-`b` `` character range.
-                if a.len() > 1 {
-                    self.index = recov + 1;
-                    bail!(self, "invalid start terminal in range");
-                }
-                let recov = self.index;
-                let b = self.parse_terminal_str()?;
-                if b.len() > 1 {
-                    self.index = recov + 1;
-                    bail!(self, "invalid end terminal in range");
-                }
-                let a = a.chars().next().unwrap();
-                let b = b.chars().next().unwrap();
+                let Some(b) = self.parse_character()? else {
+                    bail!(self, "expected character in range");
+                };
                 Ok(Some(Characters::Range(a, b)))
             } else {
                 //~^ Parse terminal in backticks.
-                Ok(Some(Characters::Terminal(a)))
+                let t = match a {
+                    Character::Char(ch) => ch.to_string(),
+                    Character::Unicode(_) => bail!(self, "unicode not supported"),
+                };
+                Ok(Some(Characters::Terminal(t)))
             }
         } else if let Some(name) = self.parse_name() {
             //~^ Parse nonterminal identifier.
             Ok(Some(Characters::Named(name)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn parse_character(&mut self) -> Result<Option<Character>> {
+        if let Some(b'`') = self.peek() {
+            let recov = self.index;
+            let term = self.parse_terminal_str()?;
+            if term.len() > 1 {
+                self.index = recov + 1;
+                bail!(self, "invalid start terminal in range");
+            }
+            let ch = term.chars().next().unwrap();
+            Ok(Some(Character::Char(ch)))
+        } else if self.take_str("U+") {
+            Ok(Some(Character::Unicode(self.parse_unicode()?)))
         } else {
             Ok(None)
         }
@@ -373,10 +415,19 @@ impl Parser<'_> {
         Ok(ExpressionKind::NegExpression(box_kind(kind)))
     }
 
+    fn parse_negative_lookahead(&mut self) -> Result<ExpressionKind> {
+        self.expect("!", "expected !")?;
+        self.space0();
+        let Some(e) = self.parse_expr1()? else {
+            bail!(self, "expected expression after !");
+        };
+        Ok(ExpressionKind::NegativeLookahead(Box::new(e)))
+    }
+
     /// Parse e.g. `F00F` after `U+`.
-    fn parse_unicode(&mut self) -> Result<ExpressionKind> {
-        let mut xs = Vec::with_capacity(4);
-        for _ in 0..4 {
+    fn parse_unicode(&mut self) -> Result<(char, String)> {
+        let mut xs = Vec::with_capacity(6);
+        let mut push_next = || {
             match self.peek() {
                 Some(x @ (b'0'..=b'9' | b'A'..=b'F')) => {
                     xs.push(x);
@@ -384,8 +435,19 @@ impl Parser<'_> {
                 }
                 _ => bail!(self, "expected 4 uppercase hexadecimal digits after `U+`"),
             }
+            Ok(())
+        };
+        for _ in 0..4 {
+            push_next()?;
         }
-        Ok(ExpressionKind::Unicode(String::from_utf8(xs).unwrap()))
+        for _ in 0..2 {
+            if push_next().is_err() {
+                break;
+            }
+        }
+        let s = String::from_utf8(xs).unwrap();
+        let ch = char::from_u32(u32::from_str_radix(&s, 16).unwrap()).unwrap();
+        Ok((ch, s))
     }
 
     /// Parse `?` after expression.
@@ -394,44 +456,73 @@ impl Parser<'_> {
         Ok(ExpressionKind::Optional(box_kind(kind)))
     }
 
-    /// Parse `*` | `*?` after expression.
+    /// Parse `*` after expression.
     fn parse_repeat(&mut self, kind: ExpressionKind) -> Result<ExpressionKind> {
         self.expect("*", "expected `*`")?;
-        Ok(if self.take_str("?") {
-            ExpressionKind::RepeatNonGreedy(box_kind(kind))
-        } else {
-            ExpressionKind::Repeat(box_kind(kind))
-        })
+        Ok(ExpressionKind::Repeat(box_kind(kind)))
     }
 
-    /// Parse `+` | `+?` after expression.
+    /// Parse `+` after expression.
     fn parse_repeat_plus(&mut self, kind: ExpressionKind) -> Result<ExpressionKind> {
         self.expect("+", "expected `+`")?;
-        Ok(if self.take_str("?") {
-            ExpressionKind::RepeatPlusNonGreedy(box_kind(kind))
-        } else {
-            ExpressionKind::RepeatPlus(box_kind(kind))
-        })
+        Ok(ExpressionKind::RepeatPlus(box_kind(kind)))
     }
 
-    /// Parse `{a..}` | `{..b}` | `{a..b}` after expression.
+    /// Parse `{a..b}` | `{a..=b}` | `{name:a..=b}` | `{name}` after expression.
+    //
+    // `name:` before the range is a named binding. `{name}` refers to that binding.
     fn parse_repeat_range(&mut self, kind: ExpressionKind) -> Result<ExpressionKind> {
         self.expect("{", "expected `{`")?;
-        let a = self.take_while(&|x| x.is_ascii_digit());
-        let Ok(a) = (!a.is_empty()).then(|| a.parse::<u32>()).transpose() else {
+        let start = self.index;
+        let name = match (self.parse_name(), self.peek()) {
+            (Some(name), Some(b':')) => {
+                self.index += 1;
+                Some(name)
+            }
+            (Some(name), Some(b'}')) => {
+                self.index += 1;
+                return Ok(ExpressionKind::RepeatRangeNamed(box_kind(kind), name));
+            }
+            _ => {
+                self.index = start;
+                None
+            }
+        };
+        let min = self.take_while(&|x| x.is_ascii_digit());
+        let Ok(min) = (!min.is_empty()).then(|| min.parse::<u32>()).transpose() else {
             bail!(self, "malformed range start");
         };
-        self.expect("..", "expected `..`")?;
-        let b = self.take_while(&|x| x.is_ascii_digit());
-        let Ok(b) = (!b.is_empty()).then(|| b.parse::<u32>()).transpose() else {
+        self.expect("..", "expected `..` or `..=`")?;
+        let limit = if self.take_str("=") {
+            RangeLimit::Closed
+        } else {
+            RangeLimit::HalfOpen
+        };
+        let max = self.take_while(&|x| x.is_ascii_digit());
+        let Ok(max) = (!max.is_empty()).then(|| max.parse::<u32>()).transpose() else {
             bail!(self, "malformed range end");
         };
-        match (a, b) {
-            (Some(a), Some(b)) if b < a => bail!(self, "range {a}..{b} is malformed"),
+        match (min, max, limit) {
+            (Some(min), Some(max), _) if max < min => {
+                bail!(self, "range {min}{limit}{max} is malformed")
+            }
+            (Some(min), Some(max), RangeLimit::HalfOpen) if max <= min => {
+                bail!(self, "half-open range maximum must be greater than minimum")
+            }
+            (None, Some(0), RangeLimit::HalfOpen) => {
+                bail!(self, "half-open range `..0` is empty")
+            }
+            (_, None, RangeLimit::Closed) => bail!(self, "closed range must have an upper bound"),
             _ => {}
         }
         self.expect("}", "expected `}`")?;
-        Ok(ExpressionKind::RepeatRange(box_kind(kind), a, b))
+        Ok(ExpressionKind::RepeatRange {
+            expr: box_kind(kind),
+            name,
+            min,
+            max,
+            limit,
+        })
     }
 
     fn parse_suffix(&mut self) -> Result<Option<String>> {
@@ -506,13 +597,738 @@ fn translate_position(input: &str, index: usize) -> (&str, usize, usize) {
     ("", line_number + 1, 0)
 }
 
-#[test]
-fn translate_tests() {
-    assert_eq!(translate_position("", 0), ("", 0, 0));
-    assert_eq!(translate_position("test", 0), ("test", 1, 1));
-    assert_eq!(translate_position("test", 3), ("test", 1, 4));
-    assert_eq!(translate_position("test", 4), ("test", 1, 5));
-    assert_eq!(translate_position("test\ntest2", 4), ("test", 1, 5));
-    assert_eq!(translate_position("test\ntest2", 5), ("test2", 2, 1));
-    assert_eq!(translate_position("test\ntest2\n", 11), ("", 3, 0));
+#[cfg(test)]
+mod tests {
+    use crate::parser::{parse_grammar, translate_position};
+    use crate::{Character, Characters, ExpressionKind, Grammar, RangeLimit};
+    use std::path::Path;
+
+    #[test]
+    fn test_translate() {
+        assert_eq!(translate_position("", 0), ("", 0, 0));
+        assert_eq!(translate_position("test", 0), ("test", 1, 1));
+        assert_eq!(translate_position("test", 3), ("test", 1, 4));
+        assert_eq!(translate_position("test", 4), ("test", 1, 5));
+        assert_eq!(translate_position("test\ntest2", 4), ("test", 1, 5));
+        assert_eq!(translate_position("test\ntest2", 5), ("test2", 2, 1));
+        assert_eq!(translate_position("test\ntest2\n", 11), ("", 3, 0));
+    }
+
+    fn parse(input: &str) -> Result<Grammar, String> {
+        let mut grammar = Grammar::default();
+        parse_grammar(input, &mut grammar, "test", Path::new("test.md"))
+            .map_err(|e| e.to_string())?;
+        Ok(grammar)
+    }
+
+    #[test]
+    fn test_cut() {
+        let input = "Rule -> A ^ B | C";
+        let grammar = parse(input).unwrap();
+        grammar.productions.get("Rule").unwrap();
+    }
+
+    #[test]
+    fn test_cut_captures() {
+        let input = "Rule -> A ^ B C | D";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        // The top-level expression is an alternation: (A ^ B C) | D.
+        let ExpressionKind::Alt(alts) = &rule.expression.kind else {
+            panic!("expected Alt, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(alts.len(), 2);
+        // First alternative is a sequence: A, Cut(Sequence(B, C)).
+        let ExpressionKind::Sequence(seq) = &alts[0].kind else {
+            panic!("expected Sequence, got {:?}", alts[0].kind);
+        };
+        assert_eq!(seq.len(), 2);
+        assert!(matches!(&seq[0].kind, ExpressionKind::Nt(n) if n == "A"));
+        // The cut captures the rest of the sequence (B and C).
+        let ExpressionKind::Cut(cut_inner) = &seq[1].kind else {
+            panic!("expected Cut, got {:?}", seq[1].kind);
+        };
+        let ExpressionKind::Sequence(cut_seq) = &cut_inner.kind else {
+            panic!("expected Sequence inside Cut, got {:?}", cut_inner.kind);
+        };
+        assert_eq!(cut_seq.len(), 2);
+        assert!(matches!(&cut_seq[0].kind, ExpressionKind::Nt(n) if n == "B"));
+        assert!(matches!(&cut_seq[1].kind, ExpressionKind::Nt(n) if n == "C"));
+        // Second alternative is just D.
+        assert!(matches!(&alts[1].kind, ExpressionKind::Nt(n) if n == "D"));
+    }
+
+    #[test]
+    fn test_cut_fail_trailing() {
+        let input = "Rule -> A ^";
+        let err = parse(input).unwrap_err();
+        assert!(err.contains("expected expression after cut operator"));
+    }
+
+    /// Extract the `RepeatRange` fields from a single-production
+    /// grammar whose rule body is a repeat-range expression.
+    fn repeat_range(input: &str) -> (Option<u32>, Option<u32>, RangeLimit) {
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("A").unwrap();
+        let ExpressionKind::RepeatRange {
+            min, max, limit, ..
+        } = rule.expression.kind
+        else {
+            panic!("expected RepeatRange, got {:?}", rule.expression.kind);
+        };
+        (min, max, limit)
+    }
+
+    // -- Valid ranges -----------------------------------------------
+
+    #[test]
+    fn test_range_half_open() {
+        let (min, max, limit) = repeat_range("A -> x{2..5}");
+        assert_eq!(min, Some(2));
+        assert_eq!(max, Some(5));
+        assert!(matches!(limit, RangeLimit::HalfOpen));
+    }
+
+    #[test]
+    fn test_range_half_open_no_min() {
+        let (min, max, limit) = repeat_range("A -> x{..5}");
+        assert_eq!(min, None);
+        assert_eq!(max, Some(5));
+        assert!(matches!(limit, RangeLimit::HalfOpen));
+    }
+
+    #[test]
+    fn test_range_half_open_no_max() {
+        let (min, max, limit) = repeat_range("A -> x{2..}");
+        assert_eq!(min, Some(2));
+        assert_eq!(max, None);
+        assert!(matches!(limit, RangeLimit::HalfOpen));
+    }
+
+    #[test]
+    fn test_range_half_open_unbounded() {
+        let (min, max, limit) = repeat_range("A -> x{..}");
+        assert_eq!(min, None);
+        assert_eq!(max, None);
+        assert!(matches!(limit, RangeLimit::HalfOpen));
+    }
+
+    #[test]
+    fn test_range_closed() {
+        let (min, max, limit) = repeat_range("A -> x{2..=5}");
+        assert_eq!(min, Some(2));
+        assert_eq!(max, Some(5));
+        assert!(matches!(limit, RangeLimit::Closed));
+    }
+
+    #[test]
+    fn test_range_closed_no_min() {
+        let (min, max, limit) = repeat_range("A -> x{..=5}");
+        assert_eq!(min, None);
+        assert_eq!(max, Some(5));
+        assert!(matches!(limit, RangeLimit::Closed));
+    }
+
+    // -- Invalid ranges ---------------------------------------------
+
+    #[test]
+    fn test_range_err_max_less_than_min() {
+        let err = parse("A -> x{3..2}").unwrap_err();
+        assert!(
+            err.contains("malformed"),
+            "expected malformed error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_range_err_empty_exclusive_equal() {
+        let err = parse("A -> x{2..2}").unwrap_err();
+        assert!(
+            err.contains("half-open range maximum must be greater"),
+            "expected empty-exclusive error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_range_err_empty_exclusive_zero() {
+        let err = parse("A -> x{0..0}").unwrap_err();
+        assert!(
+            err.contains("half-open range maximum must be greater"),
+            "expected empty-exclusive error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_range_err_closed_no_upper() {
+        let err = parse("A -> x{..=}").unwrap_err();
+        assert!(
+            err.contains("closed range must have an upper bound"),
+            "expected closed-needs-upper error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_range_err_closed_no_upper_with_min() {
+        let err = parse("A -> x{2..=}").unwrap_err();
+        assert!(
+            err.contains("closed range must have an upper bound"),
+            "expected closed-needs-upper error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_range_err_half_open_zero_max() {
+        let err = parse("A -> x{..0}").unwrap_err();
+        assert!(
+            err.contains("half-open range `..0` is empty"),
+            "expected half-open-zero error, got: {err}"
+        );
+    }
+
+    // -- Valid edge cases -------------------------------------------
+
+    #[test]
+    fn test_range_closed_exact() {
+        // `x{2..=2}` means exactly 2 -- not empty.
+        let (min, max, limit) = repeat_range("A -> x{2..=2}");
+        assert_eq!(min, Some(2));
+        assert_eq!(max, Some(2));
+        assert!(matches!(limit, RangeLimit::Closed));
+    }
+
+    #[test]
+    fn test_range_half_open_zero_to_one() {
+        // `x{0..1}` means exactly 0 repetitions (the half-open
+        // range contains only 0).
+        let (min, max, limit) = repeat_range("A -> x{0..1}");
+        assert_eq!(min, Some(0));
+        assert_eq!(max, Some(1));
+        assert!(matches!(limit, RangeLimit::HalfOpen));
+    }
+
+    // --- Negative lookahead tests ---
+
+    #[test]
+    fn lookahead_simple_nonterminal() {
+        let input = "Rule -> !Foo";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::NegativeLookahead(inner) = &rule.expression.kind else {
+            panic!("expected NegativeLookahead, got {:?}", rule.expression.kind);
+        };
+        assert!(matches!(&inner.kind, ExpressionKind::Nt(n) if n == "Foo"));
+    }
+
+    #[test]
+    fn lookahead_terminal() {
+        let input = "Rule -> !`'` Foo";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::Sequence(seq) = &rule.expression.kind else {
+            panic!("expected Sequence, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(seq.len(), 2);
+        let ExpressionKind::NegativeLookahead(inner) = &seq[0].kind else {
+            panic!("expected NegativeLookahead, got {:?}", seq[0].kind);
+        };
+        assert!(matches!(&inner.kind, ExpressionKind::Terminal(t) if t == "'"));
+        assert!(matches!(&seq[1].kind, ExpressionKind::Nt(n) if n == "Foo"));
+    }
+
+    #[test]
+    fn lookahead_charset() {
+        let input = "Rule -> ![`e` `E`] SUFFIX";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::Sequence(seq) = &rule.expression.kind else {
+            panic!("expected Sequence, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(seq.len(), 2);
+        let ExpressionKind::NegativeLookahead(inner) = &seq[0].kind else {
+            panic!("expected NegativeLookahead, got {:?}", seq[0].kind);
+        };
+        let ExpressionKind::Charset(chars) = &inner.kind else {
+            panic!("expected Charset inside lookahead, got {:?}", inner.kind);
+        };
+        assert_eq!(chars.len(), 2);
+        assert!(matches!(&chars[0], Characters::Terminal(t) if t == "e"));
+        assert!(matches!(&chars[1], Characters::Terminal(t) if t == "E"));
+    }
+
+    #[test]
+    fn lookahead_grouped() {
+        let input = "Rule -> !(`.` | `_` | XID_Start)";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::NegativeLookahead(inner) = &rule.expression.kind else {
+            panic!("expected NegativeLookahead, got {:?}", rule.expression.kind);
+        };
+        let ExpressionKind::Grouped(grouped) = &inner.kind else {
+            panic!("expected Grouped inside lookahead, got {:?}", inner.kind);
+        };
+        let ExpressionKind::Alt(alts) = &grouped.kind else {
+            panic!("expected Alt inside Grouped, got {:?}", grouped.kind);
+        };
+        assert_eq!(alts.len(), 3);
+        assert!(matches!(&alts[0].kind, ExpressionKind::Terminal(t) if t == "."));
+        assert!(matches!(&alts[1].kind, ExpressionKind::Terminal(t) if t == "_"));
+        assert!(matches!(&alts[2].kind, ExpressionKind::Nt(n) if n == "XID_Start"));
+    }
+
+    #[test]
+    fn lookahead_in_sequence_middle() {
+        let input = "Rule -> A !B C";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::Sequence(seq) = &rule.expression.kind else {
+            panic!("expected Sequence, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(seq.len(), 3);
+        assert!(matches!(&seq[0].kind, ExpressionKind::Nt(n) if n == "A"));
+        let ExpressionKind::NegativeLookahead(inner) = &seq[1].kind else {
+            panic!("expected NegativeLookahead, got {:?}", seq[1].kind);
+        };
+        assert!(matches!(&inner.kind, ExpressionKind::Nt(n) if n == "B"));
+        assert!(matches!(&seq[2].kind, ExpressionKind::Nt(n) if n == "C"));
+    }
+
+    #[test]
+    fn lookahead_in_repetition() {
+        let input = "Rule -> (!A B)*";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::Repeat(rep) = &rule.expression.kind else {
+            panic!("expected Repeat, got {:?}", rule.expression.kind);
+        };
+        let ExpressionKind::Grouped(grouped) = &rep.kind else {
+            panic!("expected Grouped inside Repeat, got {:?}", rep.kind);
+        };
+        let ExpressionKind::Sequence(seq) = &grouped.kind else {
+            panic!("expected Sequence inside Grouped, got {:?}", grouped.kind);
+        };
+        assert_eq!(seq.len(), 2);
+        assert!(matches!(&seq[0].kind, ExpressionKind::NegativeLookahead(_)));
+        assert!(matches!(&seq[1].kind, ExpressionKind::Nt(n) if n == "B"));
+    }
+
+    #[test]
+    fn lookahead_in_alternation() {
+        let input = "Rule -> !A B | C";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::Alt(alts) = &rule.expression.kind else {
+            panic!("expected Alt, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(alts.len(), 2);
+        let ExpressionKind::Sequence(seq) = &alts[0].kind else {
+            panic!("expected Sequence, got {:?}", alts[0].kind);
+        };
+        assert_eq!(seq.len(), 2);
+        assert!(matches!(&seq[0].kind, ExpressionKind::NegativeLookahead(_)));
+        assert!(matches!(&seq[1].kind, ExpressionKind::Nt(n) if n == "B"));
+        assert!(matches!(&alts[1].kind, ExpressionKind::Nt(n) if n == "C"));
+    }
+
+    #[test]
+    fn lookahead_fail_trailing() {
+        let input = "Rule -> !";
+        let err = parse(input).unwrap_err();
+        assert!(err.contains("expected expression after !"));
+    }
+
+    // --- Unicode tests ---
+
+    #[test]
+    fn unicode_4_digit() {
+        let input = "Rule -> U+0009";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::Unicode((ch, s)) = &rule.expression.kind else {
+            panic!("expected Unicode, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(*ch, '\t');
+        assert_eq!(s, "0009");
+    }
+
+    #[test]
+    fn unicode_5_digit() {
+        let input = "Rule -> U+E0000";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::Unicode((ch, s)) = &rule.expression.kind else {
+            panic!("expected Unicode, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(*ch, '\u{E0000}');
+        assert_eq!(s, "E0000");
+    }
+
+    #[test]
+    fn unicode_6_digit() {
+        let input = "Rule -> U+10FFFF";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::Unicode((ch, s)) = &rule.expression.kind else {
+            panic!("expected Unicode, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(*ch, '\u{10FFFF}');
+        assert_eq!(s, "10FFFF");
+    }
+
+    #[test]
+    fn unicode_in_alternation() {
+        let input = "Rule -> U+0009 | U+000A";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::Alt(alts) = &rule.expression.kind else {
+            panic!("expected Alt, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(alts.len(), 2);
+        assert!(matches!(
+            &alts[0].kind,
+            ExpressionKind::Unicode((ch, _)) if *ch == '\t'
+        ));
+        assert!(matches!(
+            &alts[1].kind,
+            ExpressionKind::Unicode((ch, _)) if *ch == '\n'
+        ));
+    }
+
+    // --- Character / charset range tests ---
+
+    #[test]
+    fn charset_unicode_range() {
+        let input = "Rule -> [U+0000-U+007F]";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::Charset(chars) = &rule.expression.kind else {
+            panic!("expected Charset, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(chars.len(), 1);
+        let Characters::Range(a, b) = &chars[0] else {
+            panic!("expected Range, got {:?}", chars[0]);
+        };
+        assert!(matches!(a, Character::Unicode((ch, _)) if *ch == '\0'));
+        assert!(matches!(
+            b,
+            Character::Unicode((ch, _)) if *ch == '\u{7F}'
+        ));
+    }
+
+    #[test]
+    fn charset_char_range() {
+        let input = "Rule -> [`a`-`z`]";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::Charset(chars) = &rule.expression.kind else {
+            panic!("expected Charset, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(chars.len(), 1);
+        let Characters::Range(a, b) = &chars[0] else {
+            panic!("expected Range, got {:?}", chars[0]);
+        };
+        assert!(matches!(a, Character::Char(ch) if *ch == 'a'));
+        assert!(matches!(b, Character::Char(ch) if *ch == 'z'));
+    }
+
+    #[test]
+    fn charset_mixed_range() {
+        let input = "Rule -> [`a`-U+007A]";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::Charset(chars) = &rule.expression.kind else {
+            panic!("expected Charset, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(chars.len(), 1);
+        let Characters::Range(a, b) = &chars[0] else {
+            panic!("expected Range, got {:?}", chars[0]);
+        };
+        assert!(matches!(a, Character::Char(ch) if *ch == 'a'));
+        assert!(matches!(
+            b,
+            Character::Unicode((ch, _)) if *ch == 'z'
+        ));
+    }
+
+    #[test]
+    fn charset_multiple_unicode_ranges() {
+        let input = "Rule -> [U+0000-U+D7FF U+E000-U+10FFFF]";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::Charset(chars) = &rule.expression.kind else {
+            panic!("expected Charset, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(chars.len(), 2);
+        let Characters::Range(a1, b1) = &chars[0] else {
+            panic!("expected Range, got {:?}", chars[0]);
+        };
+        assert!(matches!(a1, Character::Unicode((ch, _)) if *ch == '\0'));
+        assert!(matches!(b1, Character::Unicode((ch, _)) if *ch == '\u{D7FF}'));
+        let Characters::Range(a2, b2) = &chars[1] else {
+            panic!("expected Range, got {:?}", chars[1]);
+        };
+        assert!(matches!(a2, Character::Unicode((ch, _)) if *ch == '\u{E000}'));
+        assert!(matches!(b2, Character::Unicode((ch, _)) if *ch == '\u{10FFFF}'));
+    }
+
+    #[test]
+    fn charset_terminals_and_named() {
+        let input = "Rule -> [`a` `b` Foo]";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::Charset(chars) = &rule.expression.kind else {
+            panic!("expected Charset, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(chars.len(), 3);
+        assert!(matches!(&chars[0], Characters::Terminal(t) if t == "a"));
+        assert!(matches!(&chars[1], Characters::Terminal(t) if t == "b"));
+        assert!(matches!(&chars[2], Characters::Named(n) if n == "Foo"));
+    }
+
+    // --- Negative lookahead combined with charset ---
+
+    #[test]
+    fn lookahead_charset_with_named_and_terminals() {
+        // Pattern from tokens.md: ![`'` `\` LF CR TAB] ASCII
+        let input = "Rule -> ![`x` `y` LF] Foo";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::Sequence(seq) = &rule.expression.kind else {
+            panic!("expected Sequence, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(seq.len(), 2);
+        let ExpressionKind::NegativeLookahead(inner) = &seq[0].kind else {
+            panic!("expected NegativeLookahead, got {:?}", seq[0].kind);
+        };
+        let ExpressionKind::Charset(chars) = &inner.kind else {
+            panic!("expected Charset, got {:?}", inner.kind);
+        };
+        assert_eq!(chars.len(), 3);
+        assert!(matches!(&chars[0], Characters::Terminal(t) if t == "x"));
+        assert!(matches!(&chars[1], Characters::Terminal(t) if t == "y"));
+        assert!(matches!(&chars[2], Characters::Named(n) if n == "LF"));
+    }
+
+    // --- Negative lookahead combined with Unicode ---
+
+    #[test]
+    fn lookahead_charset_with_unicode_range() {
+        let input = "Rule -> ![U+0000-U+007F] Foo";
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("Rule").unwrap();
+        let ExpressionKind::Sequence(seq) = &rule.expression.kind else {
+            panic!("expected Sequence, got {:?}", rule.expression.kind);
+        };
+        let ExpressionKind::NegativeLookahead(inner) = &seq[0].kind else {
+            panic!("expected NegativeLookahead, got {:?}", seq[0].kind);
+        };
+        let ExpressionKind::Charset(chars) = &inner.kind else {
+            panic!("expected Charset, got {:?}", inner.kind);
+        };
+        assert_eq!(chars.len(), 1);
+        let Characters::Range(a, b) = &chars[0] else {
+            panic!("expected Range, got {:?}", chars[0]);
+        };
+        assert!(matches!(a, Character::Unicode((ch, _)) if *ch == '\0'));
+        assert!(matches!(
+            b,
+            Character::Unicode((ch, _)) if *ch == '\u{7F}'
+        ));
+    }
+
+    // --- `parse_name` digit rejection tests ---
+
+    #[test]
+    fn parse_name_rejects_leading_digits() {
+        // `{123}` should not parse as a named reference.  The
+        // digits don't form a valid name and there is no `..`
+        // range operator, so the parser should reject this.
+        let err = parse("A -> x{123}").unwrap_err();
+        assert!(
+            err.contains("expected `..`"),
+            "expected range-syntax error for {{123}}, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_name_allows_letter_then_digit() {
+        // `n1` is a valid name (starts with a letter).
+        let grammar = parse("A -> x{n1:2..5}").unwrap();
+        let rule = grammar.productions.get("A").unwrap();
+        let ExpressionKind::RepeatRange {
+            name,
+            min,
+            max,
+            limit,
+            ..
+        } = &rule.expression.kind
+        else {
+            panic!("expected RepeatRange, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(name.as_deref(), Some("n1"));
+        assert_eq!(*min, Some(2));
+        assert_eq!(*max, Some(5));
+        assert!(matches!(limit, RangeLimit::HalfOpen));
+    }
+
+    #[test]
+    fn parse_name_allows_underscore_start() {
+        // `_n` is a valid name (starts with underscore).
+        let grammar = parse("A -> x{_n:2..5}").unwrap();
+        let rule = grammar.productions.get("A").unwrap();
+        let ExpressionKind::RepeatRange {
+            name,
+            min,
+            max,
+            limit,
+            ..
+        } = &rule.expression.kind
+        else {
+            panic!("expected RepeatRange, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(name.as_deref(), Some("_n"));
+        assert_eq!(*min, Some(2));
+        assert_eq!(*max, Some(5));
+        assert!(matches!(limit, RangeLimit::HalfOpen));
+    }
+
+    // --- Named repeat range tests ---
+
+    /// Extract full `RepeatRange` fields including the name.
+    fn named_repeat_range(input: &str) -> (Option<String>, Option<u32>, Option<u32>, RangeLimit) {
+        let grammar = parse(input).unwrap();
+        let rule = grammar.productions.get("A").unwrap();
+        let ExpressionKind::RepeatRange {
+            name,
+            min,
+            max,
+            limit,
+            ..
+        } = &rule.expression.kind
+        else {
+            panic!("expected RepeatRange, got {:?}", rule.expression.kind);
+        };
+        (name.clone(), *min, *max, *limit)
+    }
+
+    #[test]
+    fn named_range_closed() {
+        let (name, min, max, limit) = named_repeat_range("A -> x{n:1..=255}");
+        assert_eq!(name.as_deref(), Some("n"));
+        assert_eq!(min, Some(1));
+        assert_eq!(max, Some(255));
+        assert!(matches!(limit, RangeLimit::Closed));
+    }
+
+    #[test]
+    fn named_range_half_open() {
+        let (name, min, max, limit) = named_repeat_range("A -> x{n:2..5}");
+        assert_eq!(name.as_deref(), Some("n"));
+        assert_eq!(min, Some(2));
+        assert_eq!(max, Some(5));
+        assert!(matches!(limit, RangeLimit::HalfOpen));
+    }
+
+    #[test]
+    fn named_range_omitted_min() {
+        let (name, min, max, limit) = named_repeat_range("A -> x{n:..=5}");
+        assert_eq!(name.as_deref(), Some("n"));
+        assert_eq!(min, None);
+        assert_eq!(max, Some(5));
+        assert!(matches!(limit, RangeLimit::Closed));
+    }
+
+    #[test]
+    fn named_range_omitted_max() {
+        let (name, min, max, limit) = named_repeat_range("A -> x{n:2..}");
+        assert_eq!(name.as_deref(), Some("n"));
+        assert_eq!(min, Some(2));
+        assert_eq!(max, None);
+        assert!(matches!(limit, RangeLimit::HalfOpen));
+    }
+
+    #[test]
+    fn named_reference() {
+        // `{n}` without a colon or range produces a
+        // RepeatRangeNamed variant.
+        let grammar = parse("A -> x{n}").unwrap();
+        let rule = grammar.productions.get("A").unwrap();
+        let ExpressionKind::RepeatRangeNamed(_, name) = &rule.expression.kind else {
+            panic!("expected RepeatRangeNamed, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(name, "n");
+    }
+
+    #[test]
+    fn named_binding_and_reference_in_sequence() {
+        // A production with a named binding and a named reference.
+        let grammar = parse("A -> x{n:1..=255} y{n}").unwrap();
+        let rule = grammar.productions.get("A").unwrap();
+        let ExpressionKind::Sequence(seq) = &rule.expression.kind else {
+            panic!("expected Sequence, got {:?}", rule.expression.kind);
+        };
+        assert_eq!(seq.len(), 2);
+
+        // First element: x{n:1..=255}
+        let ExpressionKind::RepeatRange {
+            name,
+            min,
+            max,
+            limit,
+            ..
+        } = &seq[0].kind
+        else {
+            panic!("expected RepeatRange, got {:?}", seq[0].kind);
+        };
+        assert_eq!(name.as_deref(), Some("n"));
+        assert_eq!(*min, Some(1));
+        assert_eq!(*max, Some(255));
+        assert!(matches!(limit, RangeLimit::Closed));
+
+        // Second element: y{n}
+        let ExpressionKind::RepeatRangeNamed(_, ref_name) = &seq[1].kind else {
+            panic!("expected RepeatRangeNamed, got {:?}", seq[1].kind);
+        };
+        assert_eq!(ref_name, "n");
+    }
+
+    #[test]
+    fn named_range_backtrack_to_plain_range() {
+        // When parse_name() succeeds but the next byte is
+        // neither `:` nor `}`, the parser backtracks and
+        // falls through to plain range parsing.  `{2..5}` is
+        // such a case after the parse_name fix (digits are
+        // rejected), but let's test a scenario where a name is
+        // parsed and then backtracked.
+        //
+        // There is no single-character token after a name that
+        // triggers backtrack in valid grammar (the match arms
+        // cover `:` and `}`), but the fallback resets the index
+        // and tries plain range parsing.  We verify that
+        // `{2..5}` parses correctly as a plain range even
+        // though it starts with a digit.
+        let (min, max, limit) = repeat_range("A -> x{2..5}");
+        assert_eq!(min, Some(2));
+        assert_eq!(max, Some(5));
+        assert!(matches!(limit, RangeLimit::HalfOpen));
+    }
+
+    #[test]
+    fn named_range_err_colon_missing_dots() {
+        // `{n:}` -- name followed by colon, then no `..`.
+        let err = parse("A -> x{n:}").unwrap_err();
+        assert!(
+            err.contains("expected `..`"),
+            "expected `..` error for {{n:}}, got: {err}"
+        );
+    }
+
+    #[test]
+    fn named_range_err_empty_braces() {
+        // `{}` -- empty braces contain no name and no range.
+        let err = parse("A -> x{}").unwrap_err();
+        assert!(
+            err.contains("expected `..`"),
+            "expected `..` error for {{}}, got: {err}"
+        );
+    }
 }

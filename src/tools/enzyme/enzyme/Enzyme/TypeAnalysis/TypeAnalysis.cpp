@@ -51,6 +51,7 @@
 
 #include "llvm/IR/InlineAsm.h"
 
+#include "../EnzymeLogic.h"
 #include "../Utils.h"
 #include "TypeAnalysis.h"
 
@@ -247,11 +248,11 @@ TypeAnalyzer::TypeAnalyzer(const FnTypeInfo &fn, TypeAnalysis &TA,
       notForAnalysis(getGuaranteedUnreachable(fn.Function)), intseen(),
       fntypeinfo(fn), interprocedural(TA), direction(direction), Invalid(false),
       PHIRecur(false),
-      TLI(TA.FAM.getResult<TargetLibraryAnalysis>(*fn.Function)),
-      DT(TA.FAM.getResult<DominatorTreeAnalysis>(*fn.Function)),
-      PDT(TA.FAM.getResult<PostDominatorTreeAnalysis>(*fn.Function)),
-      LI(TA.FAM.getResult<LoopAnalysis>(*fn.Function)),
-      SE(TA.FAM.getResult<ScalarEvolutionAnalysis>(*fn.Function)) {
+      TLI(TA.Logic.PPC.FAM.getResult<TargetLibraryAnalysis>(*fn.Function)),
+      DT(TA.Logic.PPC.FAM.getResult<DominatorTreeAnalysis>(*fn.Function)),
+      PDT(TA.Logic.PPC.FAM.getResult<PostDominatorTreeAnalysis>(*fn.Function)),
+      LI(TA.Logic.PPC.FAM.getResult<LoopAnalysis>(*fn.Function)),
+      SE(TA.Logic.PPC.FAM.getResult<ScalarEvolutionAnalysis>(*fn.Function)) {
 
   assert(fntypeinfo.KnownValues.size() ==
          fntypeinfo.Function->getFunctionType()->getNumParams());
@@ -289,16 +290,17 @@ TypeAnalyzer::TypeAnalyzer(
 }
 
 static SmallPtrSet<BasicBlock *, 1>
-findLoopIndices(llvm::Value *val, LoopInfo &LI, DominatorTree &DT) {
+findLoopIndices(llvm::Value *val, LoopInfo &LI, DominatorTree &DT,
+                SmallPtrSet<PHINode *, 1> &seen) {
   if (isa<Constant>(val))
     return {};
   if (auto CI = dyn_cast<CastInst>(val))
-    return findLoopIndices(CI->getOperand(0), LI, DT);
+    return findLoopIndices(CI->getOperand(0), LI, DT, seen);
   if (auto CI = dyn_cast<UnaryOperator>(val))
-    return findLoopIndices(CI->getOperand(0), LI, DT);
+    return findLoopIndices(CI->getOperand(0), LI, DT, seen);
   if (auto bo = dyn_cast<BinaryOperator>(val)) {
-    auto inset0 = findLoopIndices(bo->getOperand(0), LI, DT);
-    auto inset1 = findLoopIndices(bo->getOperand(1), LI, DT);
+    auto inset0 = findLoopIndices(bo->getOperand(0), LI, DT, seen);
+    auto inset1 = findLoopIndices(bo->getOperand(1), LI, DT, seen);
     inset0.insert(inset1.begin(), inset1.end());
     return inset0;
   }
@@ -333,7 +335,7 @@ findLoopIndices(llvm::Value *val, LoopInfo &LI, DominatorTree &DT) {
         }
       }
       if (SI && !failed && DT.dominates(SI, LDI)) {
-        return findLoopIndices(SI->getValueOperand(), LI, DT);
+        return findLoopIndices(SI->getValueOperand(), LI, DT, seen);
       }
     }
   }
@@ -341,10 +343,13 @@ findLoopIndices(llvm::Value *val, LoopInfo &LI, DominatorTree &DT) {
     auto L = LI.getLoopFor(pn->getParent());
     if (L && L->getHeader() == pn->getParent())
       return {pn->getParent()};
+    if (seen.contains(pn))
+      return {};
     SmallPtrSet<BasicBlock *, 1> ops;
+    seen.insert(pn);
     for (unsigned i = 0; i < pn->getNumIncomingValues(); ++i) {
       auto a = pn->getIncomingValue(i);
-      auto seti = findLoopIndices(a, LI, DT);
+      auto seti = findLoopIndices(a, LI, DT, seen);
       ops.insert(seti.begin(), seti.end());
     }
     return ops;
@@ -713,8 +718,8 @@ void getConstantAnalysis(Constant *Val, TypeAnalyzer &TA,
     }
 
     // Constants explicitly marked as negative that aren't -1 are considered
-    // integral
-    if (ci->isNegative() && !ci->isMinusOne()) {
+    // integral if >= -4096
+    if (ci->isNegative() && !ci->isMinusOne() && ci->getValue().sge(-4096)) {
       analysis[Val].insert({-1}, BaseType::Integer);
       return;
     }
@@ -749,8 +754,7 @@ void getConstantAnalysis(Constant *Val, TypeAnalyzer &TA,
           ConstantInt::get(Type::getInt32Ty(Val->getContext()), i),
       };
       auto g2 = GetElementPtrInst::Create(
-          Val->getType(),
-          UndefValue::get(PointerType::getUnqual(Val->getType())), vec);
+          Val->getType(), UndefValue::get(getUnqual(Val->getType())), vec);
       APInt ai(DL.getIndexSizeInBits(g2->getPointerAddressSpace()), 0);
       g2->accumulateConstantOffset(DL, ai);
       // Using destructor rather than eraseFromParent
@@ -802,8 +806,7 @@ void getConstantAnalysis(Constant *Val, TypeAnalyzer &TA,
           ConstantInt::get(Type::getInt32Ty(Val->getContext()), i),
       };
       auto g2 = GetElementPtrInst::Create(
-          Val->getType(),
-          UndefValue::get(PointerType::getUnqual(Val->getType())), vec);
+          Val->getType(), UndefValue::get(getUnqual(Val->getType())), vec);
       APInt ai(DL.getIndexSizeInBits(g2->getPointerAddressSpace()), 0);
       g2->accumulateConstantOffset(DL, ai);
       // Using destructor rather than eraseFromParent
@@ -1417,6 +1420,8 @@ void TypeAnalyzer::considerTBAA() {
                                          "ijl_gc_alloc_typed",
                                          "jl_alloc_genericmemory",
                                          "ijl_alloc_genericmemory",
+                                         "jl_alloc_genericmemory_unchecked",
+                                         "ijl_alloc_genericmemory_unchecked",
                                          "jl_new_array",
                                          "ijl_new_array"};
           if (JuliaKnownTypes.count(F->getName())) {
@@ -1943,9 +1948,20 @@ void TypeAnalyzer::visitGEPOperator(GEPOperator &gep) {
   // is valid. We could make it always valid by checking the pointer
   // operand explicitly is a pointer.
   if (direction & UP) {
-    if (gep.isInBounds() || (!EnzymeStrictAliasing &&
-                             pointerAnalysis.Inner0() == BaseType::Pointer &&
-                             getAnalysis(&gep).Inner0() == BaseType::Pointer)) {
+    bool has_non_const_idx = false;
+    for (auto I = gep.idx_begin(), E = gep.idx_end(); I != E; I++) {
+      auto ind = I->get();
+      if (!isa<ConstantInt>(ind)) {
+        has_non_const_idx = true;
+        break;
+      }
+    }
+
+    if (has_non_const_idx &&
+        (gep.isInBounds() ||
+         (!EnzymeStrictAliasing &&
+          pointerAnalysis.Inner0() == BaseType::Pointer &&
+          getAnalysis(&gep).Inner0() == BaseType::Pointer))) {
       for (auto I = gep.idx_begin(), E = gep.idx_end(); I != E; I++) {
         auto ind = I->get();
         updateAnalysis(ind, TypeTree(BaseType::Integer).Only(-1, inst), &gep);
@@ -1988,8 +2004,11 @@ void TypeAnalyzer::visitGEPOperator(GEPOperator &gep) {
       }
     }
     updateAnalysis(&gep, keepMinus, &gep);
-    updateAnalysis(&gep, TypeTree(pointerAnalysis.Inner0()).Only(-1, inst),
-                   &gep);
+    // Don't propagate pointer type when the input pointer is null
+    if (!isa<ConstantPointerNull>(gep.getPointerOperand())) {
+      updateAnalysis(&gep, TypeTree(pointerAnalysis.Inner0()).Only(-1, inst),
+                     &gep);
+    }
   }
   if (direction & UP)
     updateAnalysis(gep.getPointerOperand(),
@@ -2027,7 +2046,8 @@ void TypeAnalyzer::visitGEPOperator(GEPOperator &gep) {
     while (true) {
       if (auto gepop = dyn_cast<GEPOperator>(ptr)) {
         for (auto I = gepop->idx_begin(), E = gepop->idx_end(); I != E; I++) {
-          for (auto loopInd : findLoopIndices(*I, LI, DT)) {
+          SmallPtrSet<PHINode *, 1> seen;
+          for (auto loopInd : findLoopIndices(*I, LI, DT, seen)) {
             previousLoopInductionHeaders.insert(loopInd);
           }
         }
@@ -2062,7 +2082,8 @@ void TypeAnalyzer::visitGEPOperator(GEPOperator &gep) {
     //   In this case abort
     //   TODO, in the future, mutually compute the offset together.
     if (vset.size() != 1) {
-      for (auto loopInd : findLoopIndices(pair.first, LI, DT))
+      SmallPtrSet<PHINode *, 1> seen;
+      for (auto loopInd : findLoopIndices(pair.first, LI, DT, seen))
         if (previousLoopInductionHeaders.count(loopInd))
           return;
     }
@@ -2706,8 +2727,7 @@ void TypeAnalyzer::visitShuffleVectorInst(ShuffleVectorInst &I) {
     {
       Value *vec[2] = {ConstantInt::get(Type::getInt64Ty(I.getContext()), 0),
                        ConstantInt::get(Type::getInt64Ty(I.getContext()), i)};
-      auto ud =
-          UndefValue::get(PointerType::getUnqual(I.getOperand(0)->getType()));
+      auto ud = UndefValue::get(getUnqual(I.getOperand(0)->getType()));
       auto g2 = GetElementPtrInst::Create(I.getOperand(0)->getType(), ud, vec);
       APInt ai(dl.getIndexSizeInBits(g2->getPointerAddressSpace()), 0);
       g2->accumulateConstantOffset(dl, ai);
@@ -2740,8 +2760,7 @@ void TypeAnalyzer::visitShuffleVectorInst(ShuffleVectorInst &I) {
         Value *vec[2] = {
             ConstantInt::get(Type::getInt64Ty(I.getContext()), 0),
             ConstantInt::get(Type::getInt64Ty(I.getContext()), mask[i])};
-        auto ud =
-            UndefValue::get(PointerType::getUnqual(I.getOperand(0)->getType()));
+        auto ud = UndefValue::get(getUnqual(I.getOperand(0)->getType()));
         auto g2 =
             GetElementPtrInst::Create(I.getOperand(0)->getType(), ud, vec);
         APInt ai(dl.getIndexSizeInBits(g2->getPointerAddressSpace()), 0);
@@ -2769,8 +2788,7 @@ void TypeAnalyzer::visitShuffleVectorInst(ShuffleVectorInst &I) {
         Value *vec[2] = {ConstantInt::get(Type::getInt64Ty(I.getContext()), 0),
                          ConstantInt::get(Type::getInt64Ty(I.getContext()),
                                           mask[i] - numFirst)};
-        auto ud =
-            UndefValue::get(PointerType::getUnqual(I.getOperand(0)->getType()));
+        auto ud = UndefValue::get(getUnqual(I.getOperand(0)->getType()));
         auto g2 =
             GetElementPtrInst::Create(I.getOperand(0)->getType(), ud, vec);
         APInt ai(dl.getIndexSizeInBits(g2->getPointerAddressSpace()), 0);
@@ -2810,7 +2828,7 @@ void TypeAnalyzer::visitExtractValueInst(ExtractValueInst &I) {
   for (auto ind : I.indices()) {
     vec.push_back(ConstantInt::get(Type::getInt32Ty(I.getContext()), ind));
   }
-  auto ud = UndefValue::get(PointerType::getUnqual(I.getOperand(0)->getType()));
+  auto ud = UndefValue::get(getUnqual(I.getOperand(0)->getType()));
   auto g2 = GetElementPtrInst::Create(I.getOperand(0)->getType(), ud, vec);
   APInt ai(dl.getIndexSizeInBits(g2->getPointerAddressSpace()), 0);
   g2->accumulateConstantOffset(dl, ai);
@@ -2839,7 +2857,7 @@ void TypeAnalyzer::visitInsertValueInst(InsertValueInst &I) {
   for (auto ind : I.indices()) {
     vec.push_back(ConstantInt::get(Type::getInt32Ty(I.getContext()), ind));
   }
-  auto ud = UndefValue::get(PointerType::getUnqual(I.getOperand(0)->getType()));
+  auto ud = UndefValue::get(getUnqual(I.getOperand(0)->getType()));
   auto g2 = GetElementPtrInst::Create(I.getOperand(0)->getType(), ud, vec);
   APInt ai(dl.getIndexSizeInBits(g2->getPointerAddressSpace()), 0);
   g2->accumulateConstantOffset(dl, ai);
@@ -3592,9 +3610,18 @@ void TypeAnalyzer::visitIntrinsicInst(llvm::IntrinsicInst &I) {
     updateAnalysis(&I, TypeTree(BaseType::Integer).Only(-1, &I), &I);
     return;
 
+#if LLVM_VERSION_MAJOR < 22
   case Intrinsic::nvvm_barrier0_popc:
   case Intrinsic::nvvm_barrier0_and:
   case Intrinsic::nvvm_barrier0_or:
+#else
+  case Intrinsic::nvvm_barrier_cta_red_and_aligned_all:
+  case Intrinsic::nvvm_barrier_cta_red_and_aligned_count:
+  case Intrinsic::nvvm_barrier_cta_red_or_aligned_all:
+  case Intrinsic::nvvm_barrier_cta_red_or_aligned_count:
+  case Intrinsic::nvvm_barrier_cta_red_popc_aligned_all:
+  case Intrinsic::nvvm_barrier_cta_red_popc_aligned_count:
+#endif
     // No direction check as always valid
     updateAnalysis(&I, TypeTree(BaseType::Integer).Only(-1, &I), &I);
     updateAnalysis(I.getOperand(0), TypeTree(BaseType::Integer).Only(-1, &I),
@@ -5616,7 +5643,7 @@ void TypeAnalyzer::visitCallBase(CallBase &call) {
           Value *vec[2] = {
               ConstantInt::get(Type::getInt64Ty(call.getContext()), 0),
               ConstantInt::get(Type::getInt32Ty(call.getContext()), i)};
-          auto ud = UndefValue::get(PointerType::getUnqual(ST));
+          auto ud = UndefValue::get(getUnqual(ST));
           auto g2 = GetElementPtrInst::Create(ST, ud, vec);
           APInt ai(DL.getIndexSizeInBits(0), 0);
           g2->accumulateConstantOffset(DL, ai);
@@ -5630,7 +5657,7 @@ void TypeAnalyzer::visitCallBase(CallBase &call) {
             Value *vec[2] = {
                 ConstantInt::get(Type::getInt64Ty(call.getContext()), 0),
                 ConstantInt::get(Type::getInt32Ty(call.getContext()), i + 1)};
-            auto ud = UndefValue::get(PointerType::getUnqual(ST));
+            auto ud = UndefValue::get(getUnqual(ST));
             auto g2 = GetElementPtrInst::Create(ST, ud, vec);
             APInt ai(DL.getIndexSizeInBits(0), 0);
             g2->accumulateConstantOffset(DL, ai);
@@ -6383,8 +6410,8 @@ TypeTree defaultTypeTreeForLLVM(llvm::Type *ET, llvm::Instruction *I,
           ConstantInt::get(Type::getInt64Ty(I->getContext()), 0),
           ConstantInt::get(Type::getInt32Ty(I->getContext()), i),
       };
-      auto g2 = GetElementPtrInst::Create(
-          ST, UndefValue::get(PointerType::getUnqual(ST)), vec);
+      auto g2 =
+          GetElementPtrInst::Create(ST, UndefValue::get(getUnqual(ST)), vec);
       APInt ai(DL.getIndexSizeInBits(g2->getPointerAddressSpace()), 0);
       g2->accumulateConstantOffset(DL, ai);
       // Using destructor rather than eraseFromParent
@@ -6407,8 +6434,8 @@ TypeTree defaultTypeTreeForLLVM(llvm::Type *ET, llvm::Instruction *I,
           ConstantInt::get(Type::getInt64Ty(I->getContext()), 0),
           ConstantInt::get(Type::getInt32Ty(I->getContext()), i),
       };
-      auto g2 = GetElementPtrInst::Create(
-          AT, UndefValue::get(PointerType::getUnqual(AT)), vec);
+      auto g2 =
+          GetElementPtrInst::Create(AT, UndefValue::get(getUnqual(AT)), vec);
       APInt ai(DL.getIndexSizeInBits(g2->getPointerAddressSpace()), 0);
       g2->accumulateConstantOffset(DL, ai);
       // Using destructor rather than eraseFromParent
@@ -6437,8 +6464,8 @@ TypeTree defaultTypeTreeForLLVM(llvm::Type *ET, llvm::Instruction *I,
           ConstantInt::get(Type::getInt64Ty(I->getContext()), 0),
           ConstantInt::get(Type::getInt32Ty(I->getContext()), i),
       };
-      auto g2 = GetElementPtrInst::Create(
-          AT, UndefValue::get(PointerType::getUnqual(AT)), vec);
+      auto g2 =
+          GetElementPtrInst::Create(AT, UndefValue::get(getUnqual(AT)), vec);
       APInt ai(DL.getIndexSizeInBits(g2->getPointerAddressSpace()), 0);
       g2->accumulateConstantOffset(DL, ai);
       // Using destructor rather than eraseFromParent

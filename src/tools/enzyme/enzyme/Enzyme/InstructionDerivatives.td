@@ -586,7 +586,7 @@ def : CallPattern<(Op $x),
                   >;
 
 def : CallPattern<(Op $x),
-                  ["logabsgamma"],
+                  ["logabsgamma", "lgamma"],
                   [
                   (
                    ArrayRet (FMul (Call<(ArgAsRetTypesFunc<"digamma">), [ReadNone,NoUnwind]> $x), (DiffeRet) ),
@@ -598,7 +598,7 @@ def : CallPattern<(Op $x),
                   >;
 
 def : CallPattern<(Op $x),
-                  ["logabsgammaf"],
+                  ["logabsgammaf", "lgammaf"],
                   [
                   (
                    ArrayRet (FMul (Call<(ArgAsRetTypesFunc<"digammaf">), [ReadNone,NoUnwind]> $x), (DiffeRet) ),
@@ -678,6 +678,17 @@ def : CallPattern<(Op $n, $x),
                     (FMul (DiffeRet), (FMul (ConstantFP<"0.5"> $x), (FSub (Call<(SameFunc), [ReadNone,NoUnwind]> (ISub $n, (ConstantInt<1> $n)), $x), (Call<(SameFunc), [ReadNone,NoUnwind]> (IAdd $n, (ConstantInt<1> $n)), $x))))
                   ],
                   (ForwardFromSummedReverse),
+                  [ReadNone, NoUnwind]
+                  >;
+
+def : CallPattern<(Op $n, $z),
+                  ["cmplx_in"],
+                  [
+                    (AssertingInactiveArg),
+					// Reverse mode needs to return the conjugate
+                    (CFMul (DiffeRet), (Conj (CFMul (ConstantCFP<"0.5", "0"> $z), (CFAdd (Call<(SameFunc), [ReadNone,NoUnwind]> (FSub $n, (ConstantFP<"1"> $n)), $z), (Call<(SameFunc), [ReadNone,NoUnwind]> (FAdd $n, (ConstantFP<"1"> $n)), $z)))))
+                  ],
+                  (CFMul (Shadow $z), (CFMul (ConstantCFP<"0.5", "0"> $z), (CFAdd (Call<(SameFunc), [ReadNone,NoUnwind]> (FSub $n, (ConstantFP<"1"> $n)), $z), (Call<(SameFunc), [ReadNone,NoUnwind]> (FAdd $n, (ConstantFP<"1"> $n)), $z)))),
                   [ReadNone, NoUnwind]
                   >;
 
@@ -955,7 +966,7 @@ def : IntrPattern<(Op $x),
                   >;
 
 def : IntrPattern<(Op $x),
-                  [["exp2"], ["nvvm_ex2_approx_ftz_f"], ["nvvm_ex2_approx_f"], ["nvvm_ex2_approx_d"]],
+                  [["exp2"], ["nvvm_ex2_approx_ftz_f", "", "21"], ["nvvm_ex2_approx_f", "", "21"], ["nvvm_ex2_approx_d", "", "21"], ["nvvm_ex2_approx_ftz", "22", ""], ["nvvm_ex2_approx", "22", ""]],
                   [(FMul (DiffeRet), (FMul (ConstantFP<"0.6931471805599453"> $x), (Call<(SameFunc)> $x)))]                  ,
                   (ForwardFromSummedReverse)
                   >;

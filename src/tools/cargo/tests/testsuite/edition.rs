@@ -135,7 +135,7 @@ fn unset_edition_with_unset_rust_version() {
 
     p.cargo("check -v")
         .with_stderr_data(str![[r#"
-[WARNING] no edition set: defaulting to the 2015 edition while the latest is [..]
+[WARNING] `package.edition` is unspecified, defaulting to `2015` while the latest is `[..]`
 [CHECKING] foo v0.1.0 ([ROOT]/foo)
 [RUNNING] `rustc [..] --edition=2015 [..]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -186,7 +186,7 @@ fn unset_edition_works_on_old_msrv() {
 
     p.cargo("check -v")
         .with_stderr_data(str![[r#"
-[WARNING] no edition set: defaulting to the 2015 edition while 2018 is compatible with `rust-version`
+[WARNING] `package.edition` is unspecified, defaulting to `2015` while 2018 is compatible with `rust-version`
 [CHECKING] foo v0.1.0 ([ROOT]/foo)
 [RUNNING] `rustc [..] --edition=2015 [..]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -237,6 +237,43 @@ Caused by:
   The package requires the Cargo feature called `unstable-editions`, but that feature is not stabilized in this version of Cargo ([..]).
   Consider adding `cargo-features = ["unstable-editions"]` to the top of Cargo.toml (above the [package] table) to tell Cargo you are opting in to use this unstable feature.
   See https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#unstable-editions for more information about the status of this feature.
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn future_edition_with_rust_version_hint() {
+    // When an unstable edition is used and the package has `rust-version` set,
+    // the error message should include a `help:` line pointing the user at the
+    // required Rust toolchain version, matching the format used elsewhere in
+    // Cargo (e.g. `{name}@{version} requires rust {msrv}`).
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "future"
+                rust-version = "1.90"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
+
+Caused by:
+  feature `unstable-editions` is required
+
+  The package requires the Cargo feature called `unstable-editions`, but that feature is not stabilized in this version of Cargo ([..]).
+  Consider trying a newer version of Cargo (this may require the nightly release).
+  See https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#unstable-editions for more information about the status of this feature.
+  [HELP] foo@0.1.0 requires rust 1.90
 
 "#]])
         .run();

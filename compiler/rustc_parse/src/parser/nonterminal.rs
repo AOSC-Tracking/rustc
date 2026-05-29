@@ -6,7 +6,9 @@ use rustc_span::{Ident, kw};
 
 use crate::errors::UnexpectedNonterminal;
 use crate::parser::pat::{CommaRecoveryMode, RecoverColon, RecoverComma};
-use crate::parser::{FollowedByType, ForceCollect, ParseNtResult, Parser, PathStyle};
+use crate::parser::{
+    AllowConstBlockItems, FollowedByType, ForceCollect, ParseNtResult, Parser, PathStyle,
+};
 
 impl<'a> Parser<'a> {
     /// Checks whether a non-terminal may begin with a particular token.
@@ -29,7 +31,8 @@ impl<'a> Parser<'a> {
 
                 MetaVarKind::Item
                 | MetaVarKind::Block
-                | MetaVarKind::Vis => false,
+                | MetaVarKind::Vis
+                | MetaVarKind::Guard => false,
 
                 MetaVarKind::Ident
                 | MetaVarKind::Lifetime
@@ -84,7 +87,8 @@ impl<'a> Parser<'a> {
                     | MetaVarKind::Ty { .. }
                     | MetaVarKind::Meta { .. }
                     | MetaVarKind::Path
-                    | MetaVarKind::Vis => false,
+                    | MetaVarKind::Vis
+                    | MetaVarKind::Guard => false,
                     MetaVarKind::Lifetime | MetaVarKind::Ident | MetaVarKind::TT => {
                         unreachable!()
                     }
@@ -101,6 +105,7 @@ impl<'a> Parser<'a> {
                 token::Lifetime(..) | token::NtLifetime(..) => true,
                 _ => false,
             },
+            NonterminalKind::Guard => token.is_keyword(kw::If),
             NonterminalKind::TT | NonterminalKind::Item | NonterminalKind::Stmt => {
                 token.kind.close_delim().is_none()
             }
@@ -118,7 +123,9 @@ impl<'a> Parser<'a> {
         match kind {
             // Note that TT is treated differently to all the others.
             NonterminalKind::TT => Ok(ParseNtResult::Tt(self.parse_token_tree())),
-            NonterminalKind::Item => match self.parse_item(ForceCollect::Yes)? {
+            NonterminalKind::Item => match self
+                .parse_item(ForceCollect::Yes, AllowConstBlockItems::Yes)?
+            {
                 Some(item) => Ok(ParseNtResult::Item(item)),
                 None => Err(self.dcx().create_err(UnexpectedNonterminal::Item(self.token.span))),
             },
@@ -191,6 +198,9 @@ impl<'a> Parser<'a> {
                         token: self.token,
                     }))
                 }
+            }
+            NonterminalKind::Guard => {
+                Ok(ParseNtResult::Guard(self.expect_match_arm_guard(ForceCollect::Yes)?))
             }
         }
     }

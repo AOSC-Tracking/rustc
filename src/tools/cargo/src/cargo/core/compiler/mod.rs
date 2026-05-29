@@ -51,6 +51,7 @@ pub mod timings;
 mod unit;
 pub mod unit_dependencies;
 pub mod unit_graph;
+mod unused_deps;
 
 use std::borrow::Cow;
 use std::cell::OnceCell;
@@ -64,9 +65,9 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
-use annotate_snippets::{AnnotationKind, Group, Level, Renderer, Snippet};
 use anyhow::{Context as _, Error};
 use cargo_platform::{Cfg, Platform};
+use cargo_util_terminal::report::{AnnotationKind, Group, Level, Renderer, Snippet};
 use itertools::Itertools;
 use regex::Regex;
 use tracing::{debug, instrument, trace};
@@ -74,6 +75,7 @@ use tracing::{debug, instrument, trace};
 pub use self::build_config::UserIntent;
 pub use self::build_config::{BuildConfig, CompileMode, MessageFormat};
 pub use self::build_context::BuildContext;
+pub use self::build_context::DepKindSet;
 pub use self::build_context::FileFlavor;
 pub use self::build_context::FileType;
 pub use self::build_context::RustcTargetData;
@@ -102,10 +104,9 @@ pub use crate::core::compiler::unit::UnitIndex;
 pub use crate::core::compiler::unit::UnitInterner;
 use crate::core::manifest::TargetSourcePath;
 use crate::core::profiles::{PanicStrategy, Profile, StripInner};
-use crate::core::{Feature, PackageId, Target, Verbosity};
+use crate::core::{Feature, PackageId, Target};
 use crate::lints::get_key_value;
 use crate::util::OnceExt;
-use crate::util::context::WarningHandling;
 use crate::util::errors::{CargoResult, VerboseError};
 use crate::util::interning::InternedString;
 use crate::util::machine_message::{self, Message};
@@ -115,6 +116,7 @@ use cargo_util::{ProcessBuilder, ProcessError, paths};
 use cargo_util_schemas::manifest::TomlDebugInfo;
 use cargo_util_schemas::manifest::TomlTrimPaths;
 use cargo_util_schemas::manifest::TomlTrimPathsValue;
+use cargo_util_terminal::Verbosity;
 use rustfix::diagnostics::Applicability;
 
 const RUSTDOC_CRATE_VERSION_FLAG: &str = "--crate-version";
@@ -185,7 +187,6 @@ fn compile<'gctx>(
     exec: &Arc<dyn Executor>,
     force_rebuild: bool,
 ) -> CargoResult<()> {
-    let bcx = build_runner.bcx;
     if !build_runner.compiled.insert(unit.clone()) {
         return Ok(());
     }
@@ -220,18 +221,14 @@ fn compile<'gctx>(
                 };
                 work.then(link_targets(build_runner, unit, false)?)
             } else {
-                // We always replay the output cache,
-                // since it might contain future-incompat-report messages
-                let show_diagnostics = unit.show_warnings(bcx.gctx)
-                    && build_runner.bcx.gctx.warning_handling()? != WarningHandling::Allow;
+                let output_options = OutputOptions::for_fresh(build_runner, unit);
                 let manifest = ManifestErrorContext::new(build_runner, unit);
                 let work = replay_output_cache(
                     unit.pkg.package_id(),
                     manifest,
                     &unit.target,
                     build_runner.files().message_cache_path(unit),
-                    build_runner.bcx.build_config.message_format,
-                    show_diagnostics,
+                    output_options,
                 );
                 // Need to link targets on both the dirty and fresh.
                 work.then(link_targets(build_runner, unit, true)?)
@@ -300,7 +297,7 @@ fn rustc(
     let name = unit.pkg.name();
 
     let outputs = build_runner.outputs(unit)?;
-    let root = build_runner.files().out_dir(unit);
+    let root = build_runner.files().output_dir(unit);
 
     // Prepare the native lib state (extra `-L` and `-l` flags).
     let build_script_outputs = Arc::clone(&build_runner.build_script_outputs);
@@ -321,7 +318,7 @@ fn rustc(
     let rustc_dep_info_loc = root.join(dep_info_name);
     let dep_info_loc = fingerprint::dep_info_loc(build_runner, unit);
 
-    let mut output_options = OutputOptions::new(build_runner, unit);
+    let mut output_options = OutputOptions::for_dirty(build_runner, unit);
     let package_id = unit.pkg.package_id();
     let target = Target::clone(&unit.target);
     let mode = unit.mode;
@@ -802,6 +799,7 @@ fn prepare_rustc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResult
             );
         }
         base.arg("-Z").arg("crate-attr=feature(frontmatter)");
+        base.arg("-Z").arg("crate-attr=allow(unused_features)");
     }
 
     base.inherit_jobserver(&build_runner.jobserver);
@@ -836,6 +834,12 @@ fn prepare_rustc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResult
         base.env("CARGO_TARGET_TMPDIR", tmp.display().to_string());
     }
 
+    if build_runner.bcx.gctx.cli_unstable().cargo_lints {
+        // Added last to reduce the risk of RUSTFLAGS or `[lints]` from interfering with
+        // `unused_dependencies` tracking
+        base.arg("-Wunused_crate_dependencies");
+    }
+
     Ok(base)
 }
 
@@ -857,6 +861,7 @@ fn prepare_rustdoc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
             );
         }
         rustdoc.arg("-Z").arg("crate-attr=feature(frontmatter)");
+        rustdoc.arg("-Z").arg("crate-attr=allow(unused_features)");
     }
     rustdoc.inherit_jobserver(&build_runner.jobserver);
     let crate_name = unit.target.crate_name();
@@ -864,10 +869,8 @@ fn prepare_rustdoc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
     add_path_args(bcx.ws, unit, &mut rustdoc);
     add_cap_lints(bcx, unit, &mut rustdoc);
 
-    if let CompileKind::Target(target) = unit.kind {
-        rustdoc.arg("--target").arg(target.rustc_target());
-    }
-    let doc_dir = build_runner.files().out_dir(unit);
+    unit.kind.add_target_arg(&mut rustdoc);
+    let doc_dir = build_runner.files().output_dir(unit);
     rustdoc.arg("-o").arg(&doc_dir);
     rustdoc.args(&features_args(unit));
     rustdoc.args(&check_cfg_args(unit));
@@ -876,14 +879,14 @@ fn prepare_rustdoc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
     add_allow_features(build_runner, &mut rustdoc);
 
     if build_runner.bcx.gctx.cli_unstable().rustdoc_depinfo {
-        // toolchain-shared-resources is required for keeping the shared styling resources
-        // invocation-specific is required for keeping the original rustdoc emission
+        // html-static-files is required for keeping the shared styling resources
+        // html-non-static-files is required for keeping the original rustdoc emission
         let mut arg = if build_runner.bcx.gctx.cli_unstable().rustdoc_mergeable_info {
             // toolchain resources are written at the end, at the same time as merging
-            OsString::from("--emit=invocation-specific,dep-info=")
+            OsString::from("--emit=html-non-static-files,dep-info=")
         } else {
             // if not using mergeable CCI, everything is written every time
-            OsString::from("--emit=toolchain-shared-resources,invocation-specific,dep-info=")
+            OsString::from("--emit=html-static-files,html-non-static-files,dep-info=")
         };
         arg.push(rustdoc_dep_info_loc(build_runner, unit));
         rustdoc.arg(arg);
@@ -895,7 +898,7 @@ fn prepare_rustdoc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
         rustdoc.arg("-Zunstable-options");
     } else if build_runner.bcx.gctx.cli_unstable().rustdoc_mergeable_info {
         // toolchain resources are written at the end, at the same time as merging
-        rustdoc.arg("--emit=invocation-specific");
+        rustdoc.arg("--emit=html-non-static-files");
         rustdoc.arg("-Zunstable-options");
     }
 
@@ -904,7 +907,7 @@ fn prepare_rustdoc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
         rustdoc.arg("--merge=none");
         let mut arg = OsString::from("--parts-out-dir=");
         // `-Zrustdoc-mergeable-info` always uses the new layout.
-        arg.push(build_runner.files().deps_dir_new_layout(unit));
+        arg.push(build_runner.files().out_dir_new_layout(unit));
         rustdoc.arg(arg);
     }
 
@@ -971,7 +974,7 @@ fn rustdoc(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<W
     let mut rustdoc = prepare_rustdoc(build_runner, unit)?;
 
     let crate_name = unit.target.crate_name();
-    let doc_dir = build_runner.files().out_dir(unit);
+    let doc_dir = build_runner.files().output_dir(unit);
     // Create the documentation directory ahead of time as rustdoc currently has
     // a bug where concurrent invocations will race to create this directory if
     // it doesn't already exist.
@@ -997,7 +1000,7 @@ fn rustdoc(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<W
     let env_config = Arc::clone(build_runner.bcx.gctx.env_config()?);
     let rustdoc_depinfo_enabled = build_runner.bcx.gctx.cli_unstable().rustdoc_depinfo;
 
-    let mut output_options = OutputOptions::new(build_runner, unit);
+    let mut output_options = OutputOptions::for_dirty(build_runner, unit);
     let script_metadatas = build_runner.find_build_script_metadatas(unit);
     let scrape_outputs = if should_include_scrape_units(build_runner.bcx, unit) {
         Some(
@@ -1173,15 +1176,18 @@ fn add_allow_features(build_runner: &BuildRunner<'_, '_>, cmd: &mut ProcessBuild
 ///
 /// [`--error-format`]: https://doc.rust-lang.org/nightly/rustc/command-line-arguments.html#--error-format-control-how-errors-are-produced
 fn add_error_format_and_color(build_runner: &BuildRunner<'_, '_>, cmd: &mut ProcessBuilder) {
-    let enable_timings = build_runner.bcx.gctx.cli_unstable().section_timings
-        && (build_runner.bcx.build_config.timing_report || build_runner.bcx.logger.is_some());
+    let enable_timings =
+        build_runner.bcx.gctx.cli_unstable().section_timings && build_runner.bcx.logger.is_some();
     if enable_timings {
         cmd.arg("-Zunstable-options");
     }
 
     cmd.arg("--error-format=json");
-    let mut json = String::from("--json=diagnostic-rendered-ansi,artifacts,future-incompat");
 
+    let mut json = String::from("--json=diagnostic-rendered-ansi,artifacts,future-incompat");
+    if build_runner.bcx.gctx.cli_unstable().cargo_lints {
+        json.push_str(",unused-externs-silent");
+    }
     if let MessageFormat::Short | MessageFormat::Json { short: true, .. } =
         build_runner.bcx.build_config.message_format
     {
@@ -1191,11 +1197,9 @@ fn add_error_format_and_color(build_runner: &BuildRunner<'_, '_>, cmd: &mut Proc
     {
         json.push_str(",diagnostic-unicode");
     }
-
     if enable_timings {
         json.push_str(",timings");
     }
-
     cmd.arg(json);
 
     let gctx = build_runner.bcx.gctx;
@@ -1404,33 +1408,14 @@ fn build_base_args(
     }
 
     cmd.arg("--out-dir")
-        .arg(&build_runner.files().out_dir(unit));
+        .arg(&build_runner.files().output_dir(unit));
 
-    fn opt(cmd: &mut ProcessBuilder, key: &str, prefix: &str, val: Option<&OsStr>) {
-        if let Some(val) = val {
-            let mut joined = OsString::from(prefix);
-            joined.push(val);
-            cmd.arg(key).arg(joined);
-        }
-    }
+    unit.kind.add_target_arg(cmd);
 
-    if let CompileKind::Target(n) = unit.kind {
-        cmd.arg("--target").arg(n.rustc_target());
-    }
+    add_codegen_linker(cmd, build_runner, unit, bcx.gctx.target_applies_to_host()?);
 
-    opt(
-        cmd,
-        "-C",
-        "linker=",
-        build_runner
-            .compilation
-            .target_linker(unit.kind)
-            .as_ref()
-            .map(|s| s.as_ref()),
-    );
     if incremental {
-        let dir = build_runner.files().incremental_dir(&unit);
-        opt(cmd, "-C", "incremental=", Some(dir.as_os_str()));
+        add_codegen_incremental(cmd, build_runner, unit)
     }
 
     let pkg_hint_mostly_unused = match hints.mostly_unused {
@@ -1538,8 +1523,7 @@ fn trim_paths_args(
     }
 
     // feature gate was checked during manifest/config parsing.
-    cmd.arg("-Zunstable-options");
-    cmd.arg(format!("-Zremap-path-scope={trim_paths}"));
+    cmd.arg(format!("--remap-path-scope={trim_paths}"));
 
     // Order of `--remap-path-prefix` flags is important for `-Zbuild-std`.
     // We want to show `/rustc/<hash>/library/std` instead of `std-0.0.0`.
@@ -1754,7 +1738,11 @@ fn build_deps_args(
     // Add `OUT_DIR` environment variables for build scripts
     let first_custom_build_dep = deps.iter().find(|dep| dep.unit.mode.is_run_custom_build());
     if let Some(dep) = first_custom_build_dep {
-        let out_dir = &build_runner.files().build_script_out_dir(&dep.unit);
+        let out_dir = if bcx.gctx.cli_unstable().build_dir_new_layout {
+            build_runner.files().out_dir_new_layout(&dep.unit)
+        } else {
+            build_runner.files().build_script_out_dir(&dep.unit)
+        };
         cmd.env("OUT_DIR", &out_dir);
     }
 
@@ -1769,7 +1757,11 @@ fn build_deps_args(
     if is_multiple_build_scripts_enabled {
         for dep in deps {
             if dep.unit.mode.is_run_custom_build() {
-                let out_dir = &build_runner.files().build_script_out_dir(&dep.unit);
+                let out_dir = if bcx.gctx.cli_unstable().build_dir_new_layout {
+                    build_runner.files().out_dir_new_layout(&dep.unit)
+                } else {
+                    build_runner.files().build_script_out_dir(&dep.unit)
+                };
                 let target_name = dep.unit.target.name();
                 let out_dir_prefix = target_name
                     .strip_prefix("build-script-")
@@ -1886,68 +1878,75 @@ pub fn extern_args(
     let no_embed_metadata = build_runner.bcx.gctx.cli_unstable().no_embed_metadata;
 
     // Closure to add one dependency to `result`.
-    let mut link_to =
-        |dep: &UnitDep, extern_crate_name: InternedString, noprelude: bool| -> CargoResult<()> {
-            let mut value = OsString::new();
-            let mut opts = Vec::new();
-            let is_public_dependency_enabled = unit
-                .pkg
-                .manifest()
-                .unstable_features()
-                .require(Feature::public_dependency())
-                .is_ok()
-                || build_runner.bcx.gctx.cli_unstable().public_dependency;
-            if !dep.public && unit.target.is_lib() && is_public_dependency_enabled {
-                opts.push("priv");
-                *unstable_opts = true;
-            }
-            if noprelude {
-                opts.push("noprelude");
-                *unstable_opts = true;
-            }
-            if !opts.is_empty() {
-                value.push(opts.join(","));
-                value.push(":");
-            }
-            value.push(extern_crate_name.as_str());
-            value.push("=");
+    let mut link_to = |dep: &UnitDep,
+                       extern_crate_name: InternedString,
+                       noprelude: bool,
+                       nounused: bool|
+     -> CargoResult<()> {
+        let mut value = OsString::new();
+        let mut opts = Vec::new();
+        let is_public_dependency_enabled = unit
+            .pkg
+            .manifest()
+            .unstable_features()
+            .require(Feature::public_dependency())
+            .is_ok()
+            || build_runner.bcx.gctx.cli_unstable().public_dependency;
+        if !dep.public && unit.target.is_lib() && is_public_dependency_enabled {
+            opts.push("priv");
+            *unstable_opts = true;
+        }
+        if noprelude {
+            opts.push("noprelude");
+            *unstable_opts = true;
+        }
+        if nounused {
+            opts.push("nounused");
+            *unstable_opts = true;
+        }
+        if !opts.is_empty() {
+            value.push(opts.join(","));
+            value.push(":");
+        }
+        value.push(extern_crate_name.as_str());
+        value.push("=");
 
-            let mut pass = |file| {
-                let mut value = value.clone();
-                value.push(file);
-                result.push(OsString::from("--extern"));
-                result.push(value);
-            };
+        let mut pass = |file| {
+            let mut value = value.clone();
+            value.push(file);
+            result.push(OsString::from("--extern"));
+            result.push(value);
+        };
 
-            let outputs = build_runner.outputs(&dep.unit)?;
+        let outputs = build_runner.outputs(&dep.unit)?;
 
-            if build_runner.only_requires_rmeta(unit, &dep.unit) || dep.unit.mode.is_check() {
-                // Example: rlib dependency for an rlib, rmeta is all that is required.
-                let output = outputs
-                    .iter()
-                    .find(|output| output.flavor == FileFlavor::Rmeta)
-                    .expect("failed to find rmeta dep for pipelined dep");
-                pass(&output.path);
-            } else {
-                // Example: a bin needs `rlib` for dependencies, it cannot use rmeta.
-                for output in outputs.iter() {
-                    if output.flavor == FileFlavor::Linkable {
-                        pass(&output.path);
-                    }
-                    // If we use -Zembed-metadata=no, we also need to pass the path to the
-                    // corresponding .rmeta file to the linkable artifact, because the
-                    // normal dependency (rlib) doesn't contain the full metadata.
-                    else if no_embed_metadata && output.flavor == FileFlavor::Rmeta {
-                        pass(&output.path);
-                    }
+        if build_runner.only_requires_rmeta(unit, &dep.unit) || dep.unit.mode.is_check() {
+            // Example: rlib dependency for an rlib, rmeta is all that is required.
+            let output = outputs
+                .iter()
+                .find(|output| output.flavor == FileFlavor::Rmeta)
+                .expect("failed to find rmeta dep for pipelined dep");
+            pass(&output.path);
+        } else {
+            // Example: a bin needs `rlib` for dependencies, it cannot use rmeta.
+            for output in outputs.iter() {
+                if output.flavor == FileFlavor::Linkable {
+                    pass(&output.path);
+                }
+                // If we use -Zembed-metadata=no, we also need to pass the path to the
+                // corresponding .rmeta file to the linkable artifact, because the
+                // normal dependency (rlib) doesn't contain the full metadata.
+                else if no_embed_metadata && output.flavor == FileFlavor::Rmeta {
+                    pass(&output.path);
                 }
             }
-            Ok(())
-        };
+        }
+        Ok(())
+    };
 
     for dep in deps {
         if dep.unit.target.is_linkable() && !dep.unit.mode.is_doc() {
-            link_to(dep, dep.extern_crate_name, dep.noprelude)?;
+            link_to(dep, dep.extern_crate_name, dep.noprelude, dep.nounused)?;
         }
     }
     if unit.target.proc_macro() {
@@ -1957,6 +1956,44 @@ pub fn extern_args(
     }
 
     Ok(result)
+}
+
+/// Adds `-C linker=<path>` if specified.
+fn add_codegen_linker(
+    cmd: &mut ProcessBuilder,
+    build_runner: &BuildRunner<'_, '_>,
+    unit: &Unit,
+    target_applies_to_host: bool,
+) {
+    let linker = if unit.target.for_host() && !target_applies_to_host {
+        build_runner
+            .compilation
+            .host_linker()
+            .map(|s| s.as_os_str())
+    } else {
+        build_runner
+            .compilation
+            .target_linker(unit.kind)
+            .map(|s| s.as_os_str())
+    };
+
+    if let Some(linker) = linker {
+        let mut arg = OsString::from("linker=");
+        arg.push(linker);
+        cmd.arg("-C").arg(arg);
+    }
+}
+
+/// Adds `-C incremental=<path>`.
+fn add_codegen_incremental(
+    cmd: &mut ProcessBuilder,
+    build_runner: &BuildRunner<'_, '_>,
+    unit: &Unit,
+) {
+    let dir = build_runner.files().incremental_dir(&unit);
+    let mut arg = OsString::from("incremental=");
+    arg.push(dir.as_os_str());
+    cmd.arg("-C").arg(arg);
 }
 
 fn envify(s: &str) -> String {
@@ -1991,15 +2028,36 @@ struct OutputOptions {
 }
 
 impl OutputOptions {
-    fn new(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> OutputOptions {
+    fn for_dirty(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> OutputOptions {
         let path = build_runner.files().message_cache_path(unit);
         // Remove old cache, ignore ENOENT, which is the common case.
         drop(fs::remove_file(&path));
         let cache_cell = Some((path, OnceCell::new()));
-        let show_diagnostics =
-            build_runner.bcx.gctx.warning_handling().unwrap_or_default() != WarningHandling::Allow;
+
+        let show_diagnostics = true;
+
+        let format = build_runner.bcx.build_config.message_format;
+
         OutputOptions {
-            format: build_runner.bcx.build_config.message_format,
+            format,
+            cache_cell,
+            show_diagnostics,
+            warnings_seen: 0,
+            errors_seen: 0,
+        }
+    }
+
+    fn for_fresh(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> OutputOptions {
+        let cache_cell = None;
+
+        // We always replay the output cache,
+        // since it might contain future-incompat-report messages
+        let show_diagnostics = unit.show_warnings(build_runner.bcx.gctx);
+
+        let format = build_runner.bcx.build_config.message_format;
+
+        OutputOptions {
+            format,
             cache_cell,
             show_diagnostics,
             warnings_seen: 0,
@@ -2318,6 +2376,19 @@ fn on_stderr_line_inner(
         return Ok(false);
     }
 
+    #[derive(serde::Deserialize)]
+    struct UnusedExterns {
+        unused_extern_names: Vec<String>,
+    }
+    if let Ok(uext) = serde_json::from_str::<UnusedExterns>(compiler_message.get()) {
+        trace!(
+            "obtained unused externs list from rustc: `{:?}`",
+            uext.unused_extern_names
+        );
+        state.unused_externs(uext.unused_extern_names);
+        return Ok(true);
+    }
+
     // And failing all that above we should have a legitimate JSON diagnostic
     // from the compiler, so wrap it in an external Cargo JSON message
     // indicating which package it came from and then emit it.
@@ -2401,7 +2472,7 @@ impl ManifestErrorContext {
                 .shell()
                 .err_width()
                 .diagnostic_terminal_width()
-                .unwrap_or(annotate_snippets::renderer::DEFAULT_TERM_WIDTH),
+                .unwrap_or(cargo_util_terminal::report::renderer::DEFAULT_TERM_WIDTH),
         }
     }
 
@@ -2503,17 +2574,9 @@ fn replay_output_cache(
     manifest: ManifestErrorContext,
     target: &Target,
     path: PathBuf,
-    format: MessageFormat,
-    show_diagnostics: bool,
+    mut output_options: OutputOptions,
 ) -> Work {
     let target = target.clone();
-    let mut options = OutputOptions {
-        format,
-        cache_cell: None,
-        show_diagnostics,
-        warnings_seen: 0,
-        errors_seen: 0,
-    };
     Work::new(move |state| {
         if !path.exists() {
             // No cached output, probably didn't emit anything.
@@ -2531,7 +2594,14 @@ fn replay_output_cache(
                 break;
             }
             let trimmed = line.trim_end_matches(&['\n', '\r'][..]);
-            on_stderr_line(state, trimmed, package_id, &manifest, &target, &mut options)?;
+            on_stderr_line(
+                state,
+                trimmed,
+                package_id,
+                &manifest,
+                &target,
+                &mut output_options,
+            )?;
             line.clear();
         }
         Ok(())

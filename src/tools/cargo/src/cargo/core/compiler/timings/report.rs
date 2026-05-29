@@ -9,12 +9,10 @@ use indexmap::IndexMap;
 use itertools::Itertools as _;
 
 use crate::CargoResult;
-use crate::core::compiler::Unit;
 use crate::core::compiler::UnitIndex;
 
 use super::CompilationSection;
 use super::UnitData;
-use super::UnitTime;
 
 /// Name of an individual compilation section.
 #[derive(Clone, Hash, Eq, PartialEq)]
@@ -350,52 +348,6 @@ fn write_unit_table(ctx: &RenderContext<'_>, f: &mut impl Write) -> CargoResult<
     }
     write!(f, "</tbody>\n</table>\n")?;
     Ok(())
-}
-
-pub(super) fn to_unit_data(
-    unit_times: &[UnitTime],
-    unit_map: &HashMap<Unit, UnitIndex>,
-) -> Vec<UnitData> {
-    unit_times
-        .iter()
-        .map(|ut| (unit_map[&ut.unit], ut))
-        .map(|(i, ut)| {
-            let mode = if ut.unit.mode.is_run_custom_build() {
-                "run-custom-build"
-            } else {
-                "todo"
-            }
-            .to_string();
-            // These filter on the unlocked units because not all unlocked
-            // units are actually "built". For example, Doctest mode units
-            // don't actually generate artifacts.
-            let unblocked_units = ut
-                .unblocked_units
-                .iter()
-                .filter_map(|unit| unit_map.get(unit).copied())
-                .collect();
-            let unblocked_rmeta_units = ut
-                .unblocked_rmeta_units
-                .iter()
-                .filter_map(|unit| unit_map.get(unit).copied())
-                .collect();
-            let sections = aggregate_sections(ut.sections.clone(), ut.duration, ut.rmeta_time);
-
-            UnitData {
-                i,
-                name: ut.unit.pkg.name().to_string(),
-                version: ut.unit.pkg.version().to_string(),
-                mode,
-                target: ut.target.clone(),
-                features: ut.unit.features.iter().map(|f| f.to_string()).collect(),
-                start: round_to_centisecond(ut.start),
-                duration: round_to_centisecond(ut.duration),
-                unblocked_units,
-                unblocked_rmeta_units,
-                sections,
-            }
-        })
-        .collect()
 }
 
 /// Derives concurrency information from unit timing data.
@@ -799,7 +751,6 @@ static HTML_CANVAS: &str = r#"
     <td title="Scale corresponds to a number of pixels per second. It is automatically initialized based on your viewport width.">
       <label for="scale">Scale:</label>
     </td>
-    <td>Renderer:</td>
   </tr>
   <tr>
     <td><input type="range" min="0" max="30" step="0.1" value="0" id="min-unit-time"></td>
@@ -809,16 +760,6 @@ static HTML_CANVAS: &str = r#"
         based on the client viewport.
     -->
     <td><input type="range" min="1" max="100" value="50" id="scale"></td>
-    <td>
-        <label>
-            <input type="radio" name="renderer" value="canvas" checked />
-            Canvas
-        </label>
-        <label>
-            <input type="radio" name="renderer" value="svg" />
-            SVG
-        </label>
-    </td>
   </tr>
   <tr>
     <td><output for="min-unit-time" id="min-unit-time-output"></output></td>
@@ -827,13 +768,6 @@ static HTML_CANVAS: &str = r#"
   </tr>
 </table>
 
-<div id="pipeline-container" class="canvas-container" part="canvas">
- <canvas id="pipeline-graph" class="graph" style="position: absolute; left: 0; top: 0; z-index: 0;"></canvas>
- <canvas id="pipeline-graph-lines" style="position: absolute; left: 0; top: 0; z-index: 1; pointer-events:none;"></canvas>
-</div>
-<div class="canvas-container" part="canvas">
-  <canvas id="timing-graph" class="graph"></canvas>
-</div>
-<div id="pipeline-container-svg" class="canvas-container" part="svg"></div>
-<div id="timing-container-svg" class="canvas-container" part="svg"></div>
+<div id="pipeline-container" class="canvas-container"></div>
+<div id="timing-container" class="canvas-container"></div>
 "#;

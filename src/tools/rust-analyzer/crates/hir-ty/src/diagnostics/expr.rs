@@ -21,7 +21,7 @@ use syntax::{
     ast::{self, UnaryOp},
 };
 use tracing::debug;
-use triomphe::Arc;
+
 use typed_arena::Arena;
 
 use crate::{
@@ -41,7 +41,7 @@ use crate::{
 pub(crate) use hir_def::{
     LocalFieldId, VariantId,
     expr_store::Body,
-    hir::{Expr, ExprId, MatchArm, Pat, PatId, Statement},
+    hir::{Expr, ExprId, MatchArm, Pat, PatId, RecordSpread, Statement},
 };
 
 pub enum BodyValidationDiagnostic {
@@ -76,9 +76,9 @@ impl BodyValidationDiagnostic {
         validate_lints: bool,
     ) -> Vec<BodyValidationDiagnostic> {
         let _p = tracing::info_span!("BodyValidationDiagnostic::collect").entered();
-        let infer = InferenceResult::for_body(db, owner);
-        let body = db.body(owner);
-        let env = db.trait_environment_for_body(owner);
+        let infer = InferenceResult::of(db, owner);
+        let body = Body::of(db, owner);
+        let env = db.trait_environment(owner.into());
         let interner = DbInterner::new_with(db, owner.krate(db));
         let infcx =
             interner.infer_ctxt().build(TypingMode::typeck_for_body(interner, owner.into()));
@@ -98,7 +98,7 @@ impl BodyValidationDiagnostic {
 
 struct ExprValidator<'db> {
     owner: DefWithBodyId,
-    body: Arc<Body>,
+    body: &'db Body,
     infer: &'db InferenceResult,
     env: ParamEnv<'db>,
     diagnostics: Vec<BodyValidationDiagnostic>,
@@ -116,14 +116,14 @@ impl<'db> ExprValidator<'db> {
         let db = self.db();
         let mut filter_map_next_checker = None;
         // we'll pass &mut self while iterating over body.exprs, so they need to be disjoint
-        let body = Arc::clone(&self.body);
+        let body = self.body;
 
         if matches!(self.owner, DefWithBodyId::FunctionId(_)) {
-            self.check_for_trailing_return(body.body_expr, &body);
+            self.check_for_trailing_return(body.root_expr(), body);
         }
 
         for (id, expr) in body.exprs() {
-            if let Some((variant, missed_fields, true)) =
+            if let Some((variant, missed_fields)) =
                 record_literal_missing_fields(db, self.infer, id, expr)
             {
                 self.diagnostics.push(BodyValidationDiagnostic::RecordMissingFields {
@@ -141,7 +141,7 @@ impl<'db> ExprValidator<'db> {
                     self.validate_call(id, expr, &mut filter_map_next_checker);
                 }
                 Expr::Closure { body: body_expr, .. } => {
-                    self.check_for_trailing_return(*body_expr, &body);
+                    self.check_for_trailing_return(*body_expr, body);
                 }
                 Expr::If { .. } => {
                     self.check_for_unnecessary_else(id, expr);
@@ -154,7 +154,7 @@ impl<'db> ExprValidator<'db> {
         }
 
         for (id, pat) in body.pats() {
-            if let Some((variant, missed_fields, true)) =
+            if let Some((variant, missed_fields)) =
                 record_pattern_missing_fields(db, self.infer, id, pat)
             {
                 self.diagnostics.push(BodyValidationDiagnostic::RecordMissingFields {
@@ -240,7 +240,7 @@ impl<'db> ExprValidator<'db> {
                     .as_reference()
                     .map(|(match_expr_ty, ..)| match_expr_ty == pat_ty)
                     .unwrap_or(false))
-                && types_of_subpatterns_do_match(arm.pat, &self.body, self.infer)
+                && types_of_subpatterns_do_match(arm.pat, self.body, self.infer)
             {
                 // If we had a NotUsefulMatchArm diagnostic, we could
                 // check the usefulness of each pattern as we added it
@@ -388,7 +388,7 @@ impl<'db> ExprValidator<'db> {
         pat: PatId,
         have_errors: &mut bool,
     ) -> DeconstructedPat<'a, 'db> {
-        let mut patcx = match_check::PatCtxt::new(self.db(), self.infer, &self.body);
+        let mut patcx = match_check::PatCtxt::new(self.db(), self.infer, self.body);
         let pattern = patcx.lower_pattern(pat);
         let pattern = cx.lower_pat(&pattern);
         if !patcx.errors.is_empty() {
@@ -451,7 +451,7 @@ impl<'db> ExprValidator<'db> {
                     && last_then_expr_ty.is_never()
                 {
                     // Only look at sources if the then branch diverges and we have an else branch.
-                    let source_map = self.db().body_with_source_map(self.owner).1;
+                    let source_map = &Body::with_source_map(self.db(), self.owner).1;
                     let Ok(source_ptr) = source_map.expr_syntax(id) else {
                         return;
                     };
@@ -557,9 +557,9 @@ pub fn record_literal_missing_fields(
     infer: &InferenceResult,
     id: ExprId,
     expr: &Expr,
-) -> Option<(VariantId, Vec<LocalFieldId>, /*exhaustive*/ bool)> {
-    let (fields, exhaustive) = match expr {
-        Expr::RecordLit { fields, spread, .. } => (fields, spread.is_none()),
+) -> Option<(VariantId, Vec<LocalFieldId>)> {
+    let (fields, spread) = match expr {
+        Expr::RecordLit { fields, spread, .. } => (fields, spread),
         _ => return None,
     };
 
@@ -571,15 +571,28 @@ pub fn record_literal_missing_fields(
     let variant_data = variant_def.fields(db);
 
     let specified_fields: FxHashSet<_> = fields.iter().map(|f| &f.name).collect();
+    // don't show missing fields if:
+    // - has ..expr
+    // - or has default value + ..
+    // - or already in code
     let missed_fields: Vec<LocalFieldId> = variant_data
         .fields()
         .iter()
-        .filter_map(|(f, d)| if specified_fields.contains(&d.name) { None } else { Some(f) })
+        .filter_map(|(f, d)| {
+            if specified_fields.contains(&d.name)
+                || matches!(spread, RecordSpread::Expr(_))
+                || (d.default_value.is_some() && matches!(spread, RecordSpread::FieldDefaults))
+            {
+                None
+            } else {
+                Some(f)
+            }
+        })
         .collect();
     if missed_fields.is_empty() {
         return None;
     }
-    Some((variant_def, missed_fields, exhaustive))
+    Some((variant_def, missed_fields))
 }
 
 pub fn record_pattern_missing_fields(
@@ -587,9 +600,9 @@ pub fn record_pattern_missing_fields(
     infer: &InferenceResult,
     id: PatId,
     pat: &Pat,
-) -> Option<(VariantId, Vec<LocalFieldId>, /*exhaustive*/ bool)> {
-    let (fields, exhaustive) = match pat {
-        Pat::Record { path: _, args, ellipsis } => (args, !ellipsis),
+) -> Option<(VariantId, Vec<LocalFieldId>)> {
+    let (fields, ellipsis) = match pat {
+        Pat::Record { path: _, args, ellipsis } => (args, *ellipsis),
         _ => return None,
     };
 
@@ -601,15 +614,22 @@ pub fn record_pattern_missing_fields(
     let variant_data = variant_def.fields(db);
 
     let specified_fields: FxHashSet<_> = fields.iter().map(|f| &f.name).collect();
+    // don't show missing fields if:
+    // - in code
+    // - or has ..
     let missed_fields: Vec<LocalFieldId> = variant_data
         .fields()
         .iter()
-        .filter_map(|(f, d)| if specified_fields.contains(&d.name) { None } else { Some(f) })
+        .filter_map(
+            |(f, d)| {
+                if specified_fields.contains(&d.name) || ellipsis { None } else { Some(f) }
+            },
+        )
         .collect();
     if missed_fields.is_empty() {
         return None;
     }
-    Some((variant_def, missed_fields, exhaustive))
+    Some((variant_def, missed_fields))
 }
 
 fn types_of_subpatterns_do_match(pat: PatId, body: &Body, infer: &InferenceResult) -> bool {

@@ -1,8 +1,7 @@
 //! The expansion from a test function to the appropriate test struct for libtest
 //! Ideally, this code would be in libtest but for efficiency and error messages it lives here.
 
-use std::assert_matches::assert_matches;
-use std::iter;
+use std::{assert_matches, iter};
 
 use rustc_ast::{self as ast, GenericParamKind, HasNodeId, attr, join_path_idents};
 use rustc_ast_pretty::pprust;
@@ -283,13 +282,13 @@ pub(crate) fn expand_test_or_bench(
             // const $ident: test::TestDescAndFn =
             ast::ItemKind::Const(
                 ast::ConstItem {
-                    defaultness: ast::Defaultness::Final,
+                    defaultness: ast::Defaultness::Implicit,
                     ident: Ident::new(fn_.ident.name, sp),
                     generics: ast::Generics::default(),
                     ty: cx.ty(sp, ast::TyKind::Path(None, test_path("TestDescAndFn"))),
                     define_opaque: None,
                     // test::TestDescAndFn {
-                    rhs: Some(ast::ConstItemRhs::Body(
+                    rhs_kind: ast::ConstItemRhsKind::new_body(
                         cx.expr_struct(
                             sp,
                             test_path("TestDescAndFn"),
@@ -371,7 +370,7 @@ pub(crate) fn expand_test_or_bench(
                         field("testfn", test_fn), // }
                     ],
                         ), // }
-                    )),
+                    ),
                 }
                 .into(),
             ),
@@ -484,7 +483,7 @@ fn should_panic(cx: &ExtCtxt<'_>, i: &ast::Item) -> ShouldPanic {
         AttributeParser::parse_limited(
             cx.sess,
             &i.attrs,
-            sym::should_panic,
+            &[sym::should_panic],
             i.span,
             i.node_id(),
             None,

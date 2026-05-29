@@ -177,13 +177,21 @@ impl std::str::FromStr for CodegenBackendKind {
 }
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
-pub enum DocTests {
-    /// Run normal tests and doc tests (default).
-    Yes,
-    /// Do not run any doc tests.
-    No,
+pub enum TestTarget {
+    /// Run unit, integration and doc tests (default).
+    Default,
+    /// Run unit, integration, doc tests, examples, bins, benchmarks (no doc tests).
+    AllTargets,
     /// Only run doc tests.
-    Only,
+    DocOnly,
+    /// Only run unit and integration tests.
+    Tests,
+}
+
+impl TestTarget {
+    fn runs_doctests(&self) -> bool {
+        matches!(self, TestTarget::DocOnly | TestTarget::Default)
+    }
 }
 
 pub enum GitRepo {
@@ -222,7 +230,7 @@ pub struct Build {
     in_tree_gcc_info: GitInfo,
     local_rebuild: bool,
     fail_fast: bool,
-    doc_tests: DocTests,
+    test_target: TestTarget,
     verbosity: usize,
 
     /// Build triple for the pre-compiled snapshot compiler.
@@ -340,13 +348,6 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub fn is_tool(&self) -> bool {
-        match self {
-            Mode::ToolBootstrap | Mode::ToolRustcPrivate | Mode::ToolStd | Mode::ToolTarget => true,
-            Mode::Std | Mode::Codegen | Mode::Rustc => false,
-        }
-    }
-
     pub fn must_support_dlopen(&self) -> bool {
         match self {
             Mode::Std | Mode::Codegen => true,
@@ -542,14 +543,12 @@ impl Build {
             initial_lld,
             initial_relative_libdir,
             initial_rustc: config.initial_rustc.clone(),
-            initial_rustdoc: config
-                .initial_rustc
-                .with_file_name(exe("rustdoc", config.host_target)),
+            initial_rustdoc: config.initial_rustdoc.clone(),
             initial_cargo: config.initial_cargo.clone(),
             initial_sysroot: config.initial_sysroot.clone(),
             local_rebuild: config.local_rebuild,
             fail_fast: config.cmd.fail_fast(),
-            doc_tests: config.cmd.doc_tests(),
+            test_target: config.cmd.test_target(),
             verbosity: config.exec_ctx.verbosity as usize,
 
             host_target: config.host_target,
@@ -884,6 +883,12 @@ impl Build {
             features.push("check_only");
         }
 
+        if crates.iter().any(|c| c == "rustc_transmute") {
+            // for `x test rustc_transmute`, this feature isn't enabled automatically by a
+            // dependent crate.
+            features.push("rustc");
+        }
+
         // If debug logging is on, then we want the default for tracing:
         // https://github.com/tokio-rs/tracing/blob/3dd5c03d907afdf2c39444a29931833335171554/tracing/src/level_filters.rs#L26
         // which is everything (including debug/trace/etc.)
@@ -898,8 +903,12 @@ impl Build {
 
     /// Component directory that Cargo will produce output into (e.g.
     /// release/debug)
-    fn cargo_dir(&self) -> &'static str {
-        if self.config.rust_optimize.is_release() { "release" } else { "debug" }
+    fn cargo_dir(&self, mode: Mode) -> &'static str {
+        match (mode, self.config.rust_optimize.is_release()) {
+            (Mode::Std, _) => "dist",
+            (_, true) => "release",
+            (_, false) => "debug",
+        }
     }
 
     fn tools_dir(&self, build_compiler: Compiler) -> PathBuf {
@@ -956,7 +965,7 @@ impl Build {
     /// running a particular compiler, whether or not we're building the
     /// standard library, and targeting the specified architecture.
     fn cargo_out(&self, build_compiler: Compiler, mode: Mode, target: TargetSelection) -> PathBuf {
-        self.stage_out(build_compiler, mode).join(target).join(self.cargo_dir())
+        self.stage_out(build_compiler, mode).join(target).join(self.cargo_dir(mode))
     }
 
     /// Root output directory of LLVM for `target`

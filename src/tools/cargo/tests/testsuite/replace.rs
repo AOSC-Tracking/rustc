@@ -469,7 +469,8 @@ fn use_a_spec_to_select() {
         .build();
 
     p.cargo("check")
-        .with_stderr_data(str![[r#"
+        .with_stderr_data(
+            str![[r#"
 [UPDATING] `dummy-registry` index
 [UPDATING] git repository `[ROOTURL]/override`
 [LOCKING] 4 packages to latest compatible versions
@@ -483,7 +484,9 @@ fn use_a_spec_to_select() {
 [CHECKING] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
-"#]])
+"#]]
+            .unordered(),
+        )
         .run();
 }
 
@@ -736,10 +739,10 @@ Caused by:
   failed to load source for dependency `bar`
 
 Caused by:
-  Unable to update [ROOTURL]/override
+  unable to update [ROOTURL]/override
 
 Caused by:
-  Could not find Cargo.toml in `[ROOT]/home/.cargo/git/checkouts/override-[HASH]/[..]`
+  could not find `Cargo.toml` in `[ROOT]/home/.cargo/git/checkouts/override-[HASH]/[..]`
 
 "#]])
         .run();
@@ -865,8 +868,8 @@ fn test_override_dep() {
 [UPDATING] `dummy-registry` index
 [UPDATING] git repository `[ROOTURL]/override`
 [LOCKING] 2 packages to latest compatible versions
-[ERROR] There are multiple `bar` packages in your project, and the specification `bar` is ambiguous.
-Please re-run this command with one of the following specifications:
+[ERROR] specification `bar` is ambiguous
+[HELP] re-run this command with one of the following specifications
   registry+https://github.com/rust-lang/crates.io-index#bar@0.1.0
   git+[ROOTURL]/override#bar@0.1.0
 

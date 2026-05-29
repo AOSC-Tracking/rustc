@@ -6,6 +6,7 @@
 
 - [Lexical structure](lexical-structure.md)
     - [Input format](input-format.md)
+    - [Shebang](shebang.md)
     - [Keywords](keywords.md)
     - [Identifiers](identifiers.md)
     - [Comments](comments.md)
@@ -75,7 +76,8 @@
     - [Types](types.md)
         - [Boolean type](types/boolean.md)
         - [Numeric types](types/numeric.md)
-        - [Textual types](types/textual.md)
+        - [Character type](types/char.md)
+        - [String slice type](types/str.md)
         - [Never type](types/never.md)
         - [Tuple types](types/tuple.md)
         - [Array types](types/array.md)
@@ -97,6 +99,7 @@
     - [Subtyping and variance](subtyping.md)
     - [Trait and lifetime bounds](trait-bounds.md)
     - [Type coercions](type-coercions.md)
+    - [Divergence](divergence.md)
     - [Destructors](destructors.md)
     - [Lifetime elision](lifetime-elision.md)
 

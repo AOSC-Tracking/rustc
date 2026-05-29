@@ -3,9 +3,13 @@ r[input]
 
 r[input.syntax]
 ```grammar,lexer
-@root CHAR -> <a Unicode scalar value>
+CHAR -> [U+0000-U+D7FF U+E000-U+10FFFF] // a Unicode scalar value
+
+ASCII -> [U+0000-U+007F]
 
 NUL -> U+0000
+
+EOF -> !CHAR  // End of file or input
 ```
 
 r[input.intro]
@@ -37,22 +41,8 @@ Other occurrences of the character `U+000D` (CR) are left in place (they are tre
 r[input.shebang]
 ## Shebang removal
 
-r[input.shebang.intro]
-If the remaining sequence begins with the characters `#!`, the characters up to and including the first `U+000A` (LF) are removed from the sequence.
-
-For example, the first line of the following file would be ignored:
-
-<!-- ignore: tests don't like shebang -->
-```rust,ignore
-#!/usr/bin/env rustx
-
-fn main() {
-    println!("Hello!");
-}
-```
-
-r[input.shebang.inner-attribute]
-As an exception, if the `#!` characters are followed (ignoring intervening [comments] or [whitespace]) by a `[` token, nothing is removed. This prevents an [inner attribute] at the start of a source file being removed.
+r[input.shebang.removal]
+If a [shebang] is present, it is removed from the input sequence (and is therefore ignored).
 
 r[input.tokenization]
 ## Tokenization
@@ -68,9 +58,7 @@ The resulting sequence of characters is then converted into tokens as described 
 >
 > The [`include_str!`] and [`include_bytes!`] macros do not apply these transformations.
 
-[inner attribute]: attributes.md
 [BYTE ORDER MARK]: https://en.wikipedia.org/wiki/Byte_order_mark#UTF-8
-[comments]: comments.md
 [Crates and source files]: crates-and-source-files.md
-[_shebang_]: https://en.wikipedia.org/wiki/Shebang_(Unix)
+[shebang]: shebang.md
 [whitespace]: whitespace.md

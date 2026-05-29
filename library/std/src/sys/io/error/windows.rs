@@ -1,6 +1,9 @@
 use crate::sys::pal::{api, c};
 use crate::{io, ptr};
 
+#[cfg(test)]
+mod tests;
+
 pub fn errno() -> i32 {
     api::get_last_error().code as i32
 }
@@ -126,7 +129,7 @@ pub fn error_string(mut errnum: i32) -> String {
         match String::from_utf16(&buf[..res]) {
             Ok(mut msg) => {
                 // Trim trailing CRLF inserted by FormatMessageW
-                let len = msg.trim_end().len();
+                let len = msg.trim_ascii_end().len();
                 msg.truncate(len);
                 msg
             }

@@ -41,6 +41,8 @@ impl flags::Diagnostics {
             load_out_dirs_from_check: !self.disable_build_scripts,
             with_proc_macro_server,
             prefill_caches: false,
+            num_worker_threads: 1,
+            proc_macro_processes: 1,
         };
         let (db, _vfs, _proc_macro) =
             load_workspace_at(&self.path, &cargo_config, &load_cargo_config, &|_| {})?;

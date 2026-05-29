@@ -1,5 +1,6 @@
 //@ only-msvc
-//@ min-lldb-version: 1800
+// LLDB 1800+ tests were not tested in CI, broke, and now are disabled
+//@ ignore-lldb
 //@ ignore-gdb
 //@ compile-flags:-g
 
@@ -274,7 +275,6 @@ enum NicheLayoutWithFields3 {
 #[repr(transparent)]
 struct Wrapping128(u128);
 
-// #[rustc_layout(debug)]
 enum Wrapping128Niche {
     X(Wrapping128),
     Y,

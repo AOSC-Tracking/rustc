@@ -2,8 +2,8 @@
 
 use crate::prelude::*;
 use cargo_test_support::registry::{Dependency, Package};
-use cargo_test_support::str;
 use cargo_test_support::{basic_manifest, project};
+use cargo_test_support::{rustc_host, str};
 
 #[cargo_test]
 fn feature_activates_missing_feature() {
@@ -279,7 +279,7 @@ fn dependency_activates_typoed_feature() {
 versions that meet the requirements `*` are: 0.0.1
 
 package `foo` depends on `bar` with feature `bar` but `bar` does not have that feature.
- package `bar` does have feature `baz`
+[HELP] there is a feature `baz` with a similar name
 
 
 failed to select a version for `bar` which could resolve this conflict
@@ -330,7 +330,7 @@ fn dependency_activates_feature_with_no_close_match() {
 versions that meet the requirements `*` are: 0.0.1
 
 package `foo` depends on `bar` with feature `serde` but `bar` does not have that feature.
- available features: cookies, json, tls
+[HELP] available features: cookies, json, tls
 
 
 failed to select a version for `bar` which could resolve this conflict
@@ -549,7 +549,7 @@ fn dependency_activates_required_dependency() {
 versions that meet the requirements `*` are: 0.0.1
 
 package `foo` depends on `bar` with feature `baz` but `bar` does not have that feature.
- A required dependency with that name exists, but only optional dependencies can be used as features.
+[NOTE] a required dependency with that name exists, but only optional dependencies can be used as features.
 
 
 failed to select a version for `bar` which could resolve this conflict
@@ -2417,5 +2417,40 @@ fn invalid_feature_name_slash_error() {
   |                 ^^^^^^^^^
 
 "#]])
+        .run();
+}
+
+#[cargo_test]
+fn dont_demand_not_required_dep() {
+    Package::new("not-required", "1.0.0").publish();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+[package]
+name = "sample"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["feat"]
+feat = ["dep:not-required"]
+
+[target.'cfg(false)'.dependencies]
+not-required = { version = "1.0", optional = true }
+
+[[example]]
+name = "demo"
+required-features = ["feat"]
+"#,
+        )
+        .file("src/main.rs", "fn main() {}")
+        .file("examples/demo.rs", "fn main() {}")
+        .build();
+
+    let host = rustc_host();
+    p.cargo(&format!("fetch --target={host}")).run();
+    p.cargo(&format!("check --target={host} --examples --frozen"))
         .run();
 }

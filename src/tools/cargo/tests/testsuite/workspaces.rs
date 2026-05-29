@@ -6,7 +6,10 @@ use std::fs;
 use crate::prelude::*;
 use cargo_test_support::registry::Package;
 use cargo_test_support::str;
-use cargo_test_support::{basic_lib_manifest, basic_manifest, git, project, sleep_ms};
+use cargo_test_support::{
+    ProjectBuilder, basic_lib_manifest, basic_manifest, git, paths, project, project_in_home,
+    sleep_ms,
+};
 
 #[cargo_test]
 fn simple_explicit() {
@@ -1121,6 +1124,11 @@ fn new_warning_with_corrupt_ws() {
   |     ^
 [WARNING] compiling this new package may not work due to invalid workspace configuration
 
+failed searching for potential workspace
+package manifest: `[ROOT]/foo/bar/Cargo.toml`
+invalid potential workspace manifest: `[ROOT]/foo/Cargo.toml`
+
+[HELP] to avoid searching for a non-existent workspace, add `[workspace]` to the package manifest
 [NOTE] see more `Cargo.toml` keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 "#]]).run();
@@ -1399,6 +1407,11 @@ fn error_if_parent_cargo_toml_is_invalid() {
   |
 1 | Totally not a TOML file
   |         ^
+[ERROR] failed searching for potential workspace
+package manifest: `[ROOT]/foo/bar/Cargo.toml`
+invalid potential workspace manifest: `[ROOT]/foo/Cargo.toml`
+
+[HELP] to avoid searching for a non-existent workspace, add `[workspace]` to the package manifest
 
 "#]])
         .run();
@@ -2199,6 +2212,44 @@ fn cargo_home_at_root_works() {
 }
 
 #[cargo_test]
+fn parent_manifest_error_mentions_workspace_search() {
+    ProjectBuilder::new(paths::home())
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "home-manifest"
+                version = "0.1.0"
+                authors = []
+            "#,
+        )
+        .build();
+
+    let p = project_in_home("stuff")
+        .file("src/main.rs", "fn main() {}")
+        .build();
+
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed searching for potential workspace
+package manifest: `[ROOT]/home/stuff/Cargo.toml`
+invalid potential workspace manifest: `[ROOT]/home/Cargo.toml`
+
+[HELP] to avoid searching for a non-existent workspace, add `[workspace]` to the package manifest
+
+Caused by:
+  failed to parse manifest at `[ROOT]/home/Cargo.toml`
+
+Caused by:
+  no targets specified in the manifest
+  either src/lib.rs, src/main.rs, a [lib] section, or [[bin]] section must be present
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
 fn relative_rustc() {
     let p = project()
         .file(
@@ -2433,7 +2484,7 @@ Caused by:
   failed to load source for dependency `x`
 
 Caused by:
-  Unable to update [ROOT]/foo/x
+  unable to update [ROOT]/foo/x
 
 Caused by:
   failed to read `[ROOT]/foo/x/Cargo.toml`
@@ -2751,6 +2802,129 @@ fn fix_only_check_manifest_path_member() {
         .with_stderr_data(str![[r#"
 [CHECKING] foo v0.1.0 ([ROOT]/foo/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn error_if_member_is_outside_root() {
+    // This test ensures that if a member is physically outside the workspace root,
+    // we get a helpful error message.
+    //
+    // Setup:
+    // root/Cargo.toml     (workspace, members = [])
+    // member/Cargo.toml   (package, workspace = "../root")
+
+    let _root = project()
+        .at("root")
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "root"
+                version = "0.1.0"
+                edition = "2015"
+
+                [workspace]
+                members = []
+            "#,
+        )
+        .file("src/main.rs", "fn main() {}")
+        .build();
+
+    let member = project()
+        .at("member")
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "member"
+                version = "0.1.0"
+                edition = "2015"
+                workspace = "../root"
+            "#,
+        )
+        .file("src/main.rs", "fn main() {}")
+        .build();
+
+    // The error message should reflect that these paths are unrelated (Old Behavior)
+    member.cargo("build")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] current package believes it's in a workspace when it's not:
+current:   [ROOT]/member/Cargo.toml
+workspace: [ROOT]/root/Cargo.toml
+
+this may be fixable by adding `../member` to the `workspace.members` array of the manifest located at: [ROOT]/root/Cargo.toml
+Alternatively, to keep it out of the workspace, add the package to the `workspace.exclude` array, or add an empty `[workspace]` table to the package's manifest.
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn error_if_manifest_path_is_relative() {
+    // This test simulates running cargo usage with a relative --manifest-path
+    // that includes `..` to verify normalization and suggestions.
+    //
+    // Directory structure:
+    // root/Cargo.toml
+    // root/subdir/
+    // outside/Cargo.toml  (workspace = "../root")
+
+    let root = project()
+        .at("root")
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "root"
+                version = "0.1.0"
+                edition = "2015"
+
+                [workspace]
+                members = []
+            "#,
+        )
+        .file("src/main.rs", "fn main() {}")
+        .file("subdir/file", "")
+        .build();
+
+    let _outside = project()
+        .at("outside")
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "outside"
+                version = "0.1.0"
+                edition = "2015"
+                workspace = "../root"
+            "#,
+        )
+        .file("src/main.rs", "fn main() {}")
+        .build();
+
+    // Run from `root/subdir` pointing to `../../outside/Cargo.toml`
+    // The workspace root is at `root`.
+    // The package is at `outside`.
+    // Relative path from root to outside is `../outside`.
+
+    // We execute inside `root`, but targeting the outside package.
+    root.cargo("build")
+        .cwd(root.root().join("subdir"))
+        .arg("-v")
+        .arg("--manifest-path")
+        .arg("../../outside/Cargo.toml")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] current package believes it's in a workspace when it's not:
+current:   [ROOT]/outside/Cargo.toml
+workspace: [ROOT]/root/Cargo.toml
+
+this may be fixable by adding `../outside` to the `workspace.members` array of the manifest located at: [ROOT]/root/Cargo.toml
+Alternatively, to keep it out of the workspace, add the package to the `workspace.exclude` array, or add an empty `[workspace]` table to the package's manifest.
 
 "#]])
         .run();

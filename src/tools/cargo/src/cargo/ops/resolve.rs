@@ -78,11 +78,11 @@ use crate::util::CanonicalUrl;
 use crate::util::cache_lock::CacheLockMode;
 use crate::util::context::FeatureUnification;
 use crate::util::errors::CargoResult;
-use annotate_snippets::Group;
-use annotate_snippets::Level;
 use anyhow::Context as _;
 use cargo_util::paths;
 use cargo_util_schemas::core::PartialVersion;
+use cargo_util_terminal::report::Group;
+use cargo_util_terminal::report::Level;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -439,7 +439,7 @@ pub fn resolve_with_previous<'gctx>(
     if ws.resolve_honors_rust_version() {
         let mut rust_versions: Vec<_> = ws
             .members()
-            .filter_map(|p| p.rust_version().map(|rv| rv.as_partial().clone()))
+            .filter_map(|p| p.rust_version().map(|rv| rv.to_partial()))
             .collect();
         if rust_versions.is_empty() {
             let rustc = ws.gctx().load_global_rustc(Some(ws))?;
@@ -548,7 +548,7 @@ pub fn add_overrides<'a>(
 
     for (path, definition) in paths {
         let id = SourceId::for_path(&path)?;
-        let mut source = RecursivePathSource::new(&path, id, ws.gctx());
+        let source = RecursivePathSource::new(&path, id, ws.gctx());
         source.load().with_context(|| {
             format!(
                 "failed to update path override `{}` \

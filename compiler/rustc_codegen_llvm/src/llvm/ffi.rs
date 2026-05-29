@@ -167,6 +167,7 @@ pub(crate) enum CallConv {
     PreserveMost = 14,
     PreserveAll = 15,
     Tail = 18,
+    PreserveNone = 21,
     X86StdcallCallConv = 64,
     X86FastcallCallConv = 65,
     ArmAapcsCallConv = 67,
@@ -292,6 +293,7 @@ pub(crate) enum AttributeKind {
     CapturesNone = 46,
     SanitizeRealtimeNonblocking = 47,
     SanitizeRealtimeBlocking = 48,
+    Convergent = 49,
 }
 
 /// LLVMIntPredicate
@@ -463,6 +465,8 @@ pub(crate) struct SanitizerOptions {
     pub sanitize_hwaddress_recover: bool,
     pub sanitize_kernel_address: bool,
     pub sanitize_kernel_address_recover: bool,
+    pub sanitize_kernel_hwaddress: bool,
+    pub sanitize_kernel_hwaddress_recover: bool,
 }
 
 /// LLVMRustRelocModel
@@ -535,9 +539,6 @@ pub(crate) enum DiagnosticLevel {
 unsafe extern "C" {
     // LLVMRustThinLTOData
     pub(crate) type ThinLTOData;
-
-    // LLVMRustThinLTOBuffer
-    pub(crate) type ThinLTOBuffer;
 }
 
 /// LLVMRustThinLTOModule
@@ -847,7 +848,7 @@ bitflags! {
 }
 
 unsafe extern "C" {
-    pub(crate) type ModuleBuffer;
+    pub(crate) type Buffer;
 }
 
 pub(crate) type SelfProfileBeforePassCallback =
@@ -1675,7 +1676,11 @@ mod Offload {
             _M: &'a Module,
             _host_out: *const c_char,
         ) -> bool;
-        pub(crate) fn LLVMRustOffloadMapper<'a>(OldFn: &'a Value, NewFn: &'a Value);
+        pub(crate) fn LLVMRustOffloadMapper<'a>(
+            OldFn: &'a Value,
+            NewFn: &'a Value,
+            RebuiltArgs: *const &Value,
+        );
     }
 }
 
@@ -1702,7 +1707,11 @@ mod Offload_fallback {
         unimplemented!("This rustc version was not built with LLVM Offload support!");
     }
     #[allow(unused_unsafe)]
-    pub(crate) unsafe fn LLVMRustOffloadMapper<'a>(_OldFn: &'a Value, _NewFn: &'a Value) {
+    pub(crate) unsafe fn LLVMRustOffloadMapper<'a>(
+        _OldFn: &'a Value,
+        _NewFn: &'a Value,
+        _RebuiltArgs: *const &Value,
+    ) {
         unimplemented!("This rustc version was not built with LLVM Offload support!");
     }
 }
@@ -1959,6 +1968,7 @@ unsafe extern "C" {
         Metadata: &'a Metadata,
     );
     pub(crate) fn LLVMRustIsNonGVFunctionPointerTy(Val: &Value) -> bool;
+    pub(crate) fn LLVMRustStripPointerCasts<'a>(Val: &'a Value) -> &'a Value;
 
     // Operations on scalar constants
     pub(crate) fn LLVMRustConstIntGetZExtValue(ConstantVal: &ConstantInt, Value: &mut u64) -> bool;
@@ -2038,6 +2048,7 @@ unsafe extern "C" {
     pub(crate) fn LLVMRustSetFastMath(Instr: &Value);
     pub(crate) fn LLVMRustSetAlgebraicMath(Instr: &Value);
     pub(crate) fn LLVMRustSetAllowReassoc(Instr: &Value);
+    pub(crate) fn LLVMRustSetNoSignedZeros(Instr: &Value);
 
     // Miscellaneous instructions
     pub(crate) fn LLVMRustBuildMemCpy<'a>(
@@ -2292,6 +2303,23 @@ unsafe extern "C" {
         Params: Option<&'a DIArray>,
     );
 
+    pub(crate) fn LLVMRustDIGetOrCreateSubrange<'a>(
+        Builder: &DIBuilder<'a>,
+        CountNode: Option<&'a Metadata>,
+        LB: &'a Metadata,
+        UB: &'a Metadata,
+        Stride: Option<&'a Metadata>,
+    ) -> &'a Metadata;
+
+    pub(crate) fn LLVMRustDICreateVectorType<'a>(
+        Builder: &DIBuilder<'a>,
+        Size: u64,
+        AlignInBits: u32,
+        Type: &'a DIType,
+        Subscripts: &'a DIArray,
+        BitStride: Option<&'a Metadata>,
+    ) -> &'a Metadata;
+
     pub(crate) fn LLVMRustDILocationCloneWithBaseDiscriminator<'a>(
         Location: &'a DILocation,
         BD: c_uint,
@@ -2338,6 +2366,7 @@ unsafe extern "C" {
         DebugInfoCompression: CompressionKind,
         UseEmulatedTls: bool,
         UseWasmEH: bool,
+        LargeDataThreshold: u64,
     ) -> *mut TargetMachine;
 
     pub(crate) fn LLVMRustAddLibraryInfo<'a>(
@@ -2364,9 +2393,8 @@ unsafe extern "C" {
         NoPrepopulatePasses: bool,
         VerifyIR: bool,
         LintIR: bool,
-        ThinLTOBuffer: Option<&mut *mut ThinLTOBuffer>,
-        EmitThinLTO: bool,
-        EmitThinLTOSummary: bool,
+        ThinLTOBuffer: Option<&mut Option<crate::back::lto::Buffer>>,
+        ThinLTOSummaryBuffer: Option<&mut Option<crate::back::lto::Buffer>>,
         MergeFunctions: bool,
         UnrollLoops: bool,
         SLPVectorize: bool,
@@ -2447,22 +2475,13 @@ unsafe extern "C" {
     pub(crate) fn LLVMRustSetModulePICLevel(M: &Module);
     pub(crate) fn LLVMRustSetModulePIELevel(M: &Module);
     pub(crate) fn LLVMRustSetModuleCodeModel(M: &Module, Model: CodeModel);
-    pub(crate) fn LLVMRustModuleBufferCreate(M: &Module) -> &'static mut ModuleBuffer;
-    pub(crate) fn LLVMRustModuleBufferPtr(p: &ModuleBuffer) -> *const u8;
-    pub(crate) fn LLVMRustModuleBufferLen(p: &ModuleBuffer) -> usize;
-    pub(crate) fn LLVMRustModuleBufferFree(p: &'static mut ModuleBuffer);
+    pub(crate) fn LLVMRustBufferPtr(p: &Buffer) -> *const u8;
+    pub(crate) fn LLVMRustBufferLen(p: &Buffer) -> usize;
+    pub(crate) fn LLVMRustBufferFree(p: &'static mut Buffer);
     pub(crate) fn LLVMRustModuleCost(M: &Module) -> u64;
     pub(crate) fn LLVMRustModuleInstructionStats(M: &Module) -> u64;
 
-    pub(crate) fn LLVMRustThinLTOBufferCreate(
-        M: &Module,
-        is_thin: bool,
-    ) -> &'static mut ThinLTOBuffer;
-    pub(crate) fn LLVMRustThinLTOBufferFree(M: &'static mut ThinLTOBuffer);
-    pub(crate) fn LLVMRustThinLTOBufferPtr(M: &ThinLTOBuffer) -> *const c_char;
-    pub(crate) fn LLVMRustThinLTOBufferLen(M: &ThinLTOBuffer) -> size_t;
-    pub(crate) fn LLVMRustThinLTOBufferThinLinkDataPtr(M: &ThinLTOBuffer) -> *const c_char;
-    pub(crate) fn LLVMRustThinLTOBufferThinLinkDataLen(M: &ThinLTOBuffer) -> size_t;
+    pub(crate) fn LLVMRustModuleSerialize(M: &Module, is_thin: bool) -> &'static mut Buffer;
     pub(crate) fn LLVMRustCreateThinLTOData(
         Modules: *const ThinLTOModule,
         NumModules: size_t,

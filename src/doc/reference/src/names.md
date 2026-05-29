@@ -2,29 +2,19 @@ r[names]
 # Names
 
 r[names.intro]
-An *entity* is a language construct that can be referred to in some way within
-the source program, usually via a [path]. Entities include [types], [items],
-[generic parameters], [variable bindings], [loop labels], [lifetimes],
-[fields], [attributes], and [lints].
+An *entity* is a language construct that can be referred to in some way within the source program, usually via a [path]. Entities include [types], [items], [generic parameters], [variable bindings], [loop labels], [lifetimes], [fields], [attributes], and [lints].
 
-A *declaration* is a syntactical construct that can introduce a *name* to
-refer to an entity. Entity names are valid within a [*scope*] --- a region of
-source text where that name may be referenced.
+A *declaration* is a syntactical construct that can introduce a *name* to refer to an entity. Entity names are valid within a [*scope*] --- a region of source text where that name may be referenced.
 
-Some entities are [explicitly declared](#explicitly-declared-entities) in the
-source code, and some are [implicitly declared](#implicitly-declared-entities)
-as part of the language or compiler extensions.
+Some entities are [explicitly declared](#explicitly-declared-entities) in the source code, and some are [implicitly declared](#implicitly-declared-entities) as part of the language or compiler extensions.
 
 [*Paths*] are used to refer to an entity, possibly in another module or type.
 
-Lifetimes and loop labels use a [dedicated syntax][lifetimes-and-loop-labels] using a
-leading quote.
+Lifetimes and loop labels use a [dedicated syntax][lifetimes-and-loop-labels] using a leading quote.
 
-Names are segregated into different [*namespaces*], allowing entities in
-different namespaces to share the same name without conflict.
+Names are segregated into different [*namespaces*], allowing entities in different namespaces to share the same name without conflict.
 
-[*Name resolution*] is the compile-time process of tying paths, identifiers,
-and labels to entity declarations.
+[*Name resolution*] is the compile-time process of tying paths, identifiers, and labels to entity declarations.
 
 Access to certain names may be restricted based on their [*visibility*].
 
@@ -41,8 +31,7 @@ r[names.explicit.item-decl]
     * [Use declarations]
     * [Function declarations] and [function parameters]
     * [Type aliases]
-    * [struct], [union], [enum], enum variant declarations, and their named
-      fields
+    * [struct], [union], [enum], enum variant declarations, and their named fields
     * [Constant item declarations]
     * [Static item declarations]
     * [Trait item declarations] and their [associated items]
@@ -75,20 +64,18 @@ r[names.explicit.macro_export]
 * The [`macro_export` attribute] can introduce an alias for the macro into the crate root
 
 r[names.explicit.macro-invocation]
-Additionally, [macro invocations] and [attributes] can introduce names by
-expanding to one of the above items.
+Additionally, [macro invocations] and [attributes] can introduce names by expanding to one of the above items.
 
 r[names.implicit]
 ## Implicitly declared entities
 
 r[names.implicit.list]
-The following entities are implicitly defined by the language, or are
-introduced by compiler options and extensions:
+The following entities are implicitly defined by the language, or are introduced by compiler options and extensions:
 
 r[names.implicit.primitive-types]
 * [Language prelude]:
     * [Boolean type] --- `bool`
-    * [Textual types] --- `char` and `str`
+    * Textual types --- [`char`] and [`str`]
     * [Integer types] --- `i8`, `i16`, `i32`, `i64`, `i128`, `u8`, `u16`, `u32`, `u64`, `u128`
     * [Machine-dependent integer types] --- `usize` and `isize`
     * [floating-point types] --- `f32` and `f64`
@@ -118,8 +105,7 @@ r[names.implicit.lifetime-static]
 * The [`'static`] lifetime
 
 r[names.implicit.root]
-Additionally, the crate root module does not have a name, but can be referred
-to with certain [path qualifiers] or aliases.
+Additionally, the crate root module does not have a name, but can be referred to with certain [path qualifiers] or aliases.
 
 [*Name resolution*]: names/name-resolution.md
 [*namespaces*]: names/namespaces.md
@@ -127,6 +113,7 @@ to with certain [path qualifiers] or aliases.
 [*scope*]: names/scopes.md
 [*visibility*]: visibility-and-privacy.md
 [`'static`]: keywords.md#weak-keywords
+[`char`]: types/char.md
 [`for`]: expressions/loop-expr.md#iterator-loops
 [`if let`]: expressions/if-expr.md#if-let-patterns
 [`let` statement]: statements.md#let-statements
@@ -134,6 +121,7 @@ to with certain [path qualifiers] or aliases.
 [`macro_rules` declarations]: macros-by-example.md
 [`macro_use` attribute]: macros-by-example.md#the-macro_use-attribute
 [`match`]: expressions/match-expr.md
+[`str`]: types/str.md
 [`while let`]: expressions/loop-expr.md#while-let-patterns
 [associated items]: items/associated-items.md
 [attributes]: attributes.md
@@ -170,7 +158,6 @@ to with certain [path qualifiers] or aliases.
 [Standard library prelude]: names/preludes.md#standard-library-prelude
 [Static item declarations]: items/static-items.md
 [struct]: items/structs.md
-[Textual types]: types/textual.md
 [Tool attributes]: attributes.md#tool-attributes
 [tool lint attributes]: attributes/diagnostics.md#tool-lint-attributes
 [Trait item declarations]: items/traits.md

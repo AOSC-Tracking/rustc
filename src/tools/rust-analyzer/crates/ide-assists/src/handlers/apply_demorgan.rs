@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use ide_db::{
     assists::GroupLabel,
     famous_defs::FamousDefs,
-    syntax_helpers::node_ext::{for_each_tail_expr, walk_expr},
+    syntax_helpers::node_ext::{for_each_tail_expr, is_pattern_cond, walk_expr},
 };
 use syntax::{
     NodeOrToken, SyntaxKind, T,
@@ -69,6 +69,10 @@ pub(crate) fn apply_demorgan(acc: &mut Assists, ctx: &AssistContext<'_>) -> Opti
         }
     }
 
+    if is_pattern_cond(bin_expr.clone().into()) {
+        return None;
+    }
+
     let op = bin_expr.op_kind()?;
     let (inv_token, prec) = match op {
         ast::BinaryOp::LogicOp(ast::LogicOp::And) => (SyntaxKind::PIPE2, ExprPrecedence::LOr),
@@ -78,8 +82,7 @@ pub(crate) fn apply_demorgan(acc: &mut Assists, ctx: &AssistContext<'_>) -> Opti
 
     let make = SyntaxFactory::with_mappings();
 
-    let demorganed = bin_expr.clone_subtree();
-    let mut editor = SyntaxEditor::new(demorganed.syntax().clone());
+    let (mut editor, demorganed) = SyntaxEditor::with_ast_node(&bin_expr);
     editor.replace(demorganed.op_token()?, make.token(inv_token));
 
     let mut exprs = VecDeque::from([
@@ -193,7 +196,7 @@ pub(crate) fn apply_demorgan_iterator(acc: &mut Assists, ctx: &AssistContext<'_>
     let (name, arg_expr) = validate_method_call_expr(ctx, &method_call)?;
 
     let ast::Expr::ClosureExpr(closure_expr) = arg_expr else { return None };
-    let closure_body = closure_expr.body()?.clone_for_update();
+    let closure_body = closure_expr.body()?;
 
     let op_range = method_call.syntax().text_range();
     let label = format!("Apply De Morgan's law to `Iterator::{}`", name.text().as_str());
@@ -373,6 +376,16 @@ fn f() { !(S <= S || S < S) }
             "fn f() { 1 || 3 &&$0 4 || 5 }",
             "fn f() { 1 || !(!3 || !4) || 5 }",
         )
+    }
+
+    #[test]
+    fn demorgan_doesnt_handles_pattern() {
+        check_assist_not_applicable(
+            apply_demorgan,
+            r#"
+fn f() { if let 1 = 1 &&$0 true { } }
+"#,
+        );
     }
 
     #[test]

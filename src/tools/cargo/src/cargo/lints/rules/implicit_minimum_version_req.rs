@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use annotate_snippets::AnnotationKind;
-use annotate_snippets::Group;
-use annotate_snippets::Level;
-use annotate_snippets::Origin;
-use annotate_snippets::Patch;
-use annotate_snippets::Snippet;
 use cargo_platform::Platform;
 use cargo_util_schemas::manifest::TomlDependency;
 use cargo_util_schemas::manifest::TomlToolLints;
+use cargo_util_terminal::report::AnnotationKind;
+use cargo_util_terminal::report::Group;
+use cargo_util_terminal::report::Level;
+use cargo_util_terminal::report::Origin;
+use cargo_util_terminal::report::Patch;
+use cargo_util_terminal::report::Snippet;
 use toml::de::DeValue;
 
 use crate::CargoResult;
@@ -17,20 +17,20 @@ use crate::GlobalContext;
 use crate::core::Manifest;
 use crate::core::MaybePackage;
 use crate::core::Package;
+use crate::core::Workspace;
 use crate::lints::Lint;
 use crate::lints::LintLevel;
 use crate::lints::LintLevelReason;
-use crate::lints::ManifestFor;
 use crate::lints::PEDANTIC;
 use crate::lints::get_key_value;
 use crate::lints::rel_cwd_manifest_path;
 use crate::util::OptVersionReq;
 
-pub const LINT: Lint = Lint {
+pub static LINT: &Lint = &Lint {
     name: "implicit_minimum_version_req",
     desc: "dependency version requirement without an explicit minimum version",
     primary_group: &PEDANTIC,
-    edition_lint_opts: None,
+    msrv: None,
     feature_gate: None,
     docs: Some(
         r#"
@@ -82,14 +82,18 @@ serde = "1.0.219"
     ),
 };
 
-pub fn implicit_minimum_version_req(
-    manifest: ManifestFor<'_>,
+pub fn implicit_minimum_version_req_pkg(
+    pkg: &Package,
     manifest_path: &Path,
     cargo_lints: &TomlToolLints,
     error_count: &mut usize,
     gctx: &GlobalContext,
 ) -> CargoResult<()> {
-    let (lint_level, reason) = manifest.lint_level(cargo_lints, LINT);
+    let (lint_level, reason) = LINT.level(
+        cargo_lints,
+        pkg.rust_version(),
+        pkg.manifest().unstable_features(),
+    );
 
     if lint_level == LintLevel::Allow {
         return Ok(());
@@ -97,35 +101,13 @@ pub fn implicit_minimum_version_req(
 
     let manifest_path = rel_cwd_manifest_path(manifest_path, gctx);
 
-    match manifest {
-        ManifestFor::Package(pkg) => {
-            lint_package(pkg, manifest_path, lint_level, reason, error_count, gctx)
-        }
-        ManifestFor::Workspace(maybe_pkg) => lint_workspace(
-            maybe_pkg,
-            manifest_path,
-            lint_level,
-            reason,
-            error_count,
-            gctx,
-        ),
-    }
-}
-
-pub fn lint_package(
-    pkg: &Package,
-    manifest_path: String,
-    lint_level: LintLevel,
-    reason: LintLevelReason,
-    error_count: &mut usize,
-    gctx: &GlobalContext,
-) -> CargoResult<()> {
     let manifest = pkg.manifest();
 
     let document = manifest.document();
     let contents = manifest.contents();
     let target_key_for_platform = target_key_for_platform(&manifest);
 
+    let mut emit_source = true;
     for dep in manifest.dependencies().iter() {
         let version_req = dep.version_req();
         let Some(suggested_req) = get_suggested_version_req(&version_req) else {
@@ -148,9 +130,14 @@ pub fn lint_package(
             key_path,
             &manifest_path,
             &suggested_req,
+            emit_source,
         ) else {
             continue;
         };
+
+        if emit_source {
+            emit_source = false;
+        }
 
         if lint_level.is_error() {
             *error_count += 1;
@@ -161,14 +148,26 @@ pub fn lint_package(
     Ok(())
 }
 
-pub fn lint_workspace(
+pub fn implicit_minimum_version_req_ws(
+    ws: &Workspace<'_>,
     maybe_pkg: &MaybePackage,
-    manifest_path: String,
-    lint_level: LintLevel,
-    reason: LintLevelReason,
+    manifest_path: &Path,
+    cargo_lints: &TomlToolLints,
     error_count: &mut usize,
     gctx: &GlobalContext,
 ) -> CargoResult<()> {
+    let (lint_level, reason) = LINT.level(
+        cargo_lints,
+        ws.lowest_rust_version(),
+        maybe_pkg.unstable_features(),
+    );
+
+    if lint_level == LintLevel::Allow {
+        return Ok(());
+    }
+
+    let manifest_path = rel_cwd_manifest_path(manifest_path, gctx);
+
     let document = maybe_pkg.document();
     let contents = maybe_pkg.contents();
     let toml = match maybe_pkg {
@@ -198,6 +197,7 @@ pub fn lint_workspace(
             (name, req)
         });
 
+    let mut emit_source = true;
     for (name_in_toml, version_req) in dep_iter {
         let Some(suggested_req) = get_suggested_version_req(&version_req) else {
             continue;
@@ -213,9 +213,14 @@ pub fn lint_workspace(
             &key_path,
             &manifest_path,
             &suggested_req,
+            emit_source,
         ) else {
             continue;
         };
+
+        if emit_source {
+            emit_source = false;
+        }
 
         if lint_level.is_error() {
             *error_count += 1;
@@ -256,6 +261,7 @@ fn report<'a>(
     key_path: &[&str],
     manifest_path: &str,
     suggested_req: &str,
+    emit_source: bool,
 ) -> Option<[Group<'a>; 2]> {
     let level = lint_level.to_diagnostic_level();
     let emitted_source = LINT.emitted_source(lint_level, reason);
@@ -277,12 +283,14 @@ fn report<'a>(
                 .path(manifest_path.to_owned())
                 .annotation(AnnotationKind::Primary.span(span.clone()).label(label)),
         );
-        help = help
-            .element(Snippet::source(contents).patch(Patch::new(span.clone(), replacement)))
-            .element(Level::NOTE.message(emitted_source));
+
+        help = help.element(Snippet::source(contents).patch(Patch::new(span.clone(), replacement)));
     } else {
         desc = desc.element(Origin::path(manifest_path.to_owned()));
-        help = help.element(Level::NOTE.message(emitted_source));
+    }
+
+    if emit_source {
+        desc = desc.element(Level::NOTE.message(emitted_source));
     }
 
     Some([desc, help])

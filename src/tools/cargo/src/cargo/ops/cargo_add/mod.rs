@@ -7,13 +7,13 @@ use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::fmt::Write;
 use std::path::Path;
-use std::str::FromStr;
 
 use anyhow::Context as _;
 use cargo_util::paths;
 use cargo_util_schemas::core::PartialVersion;
 use cargo_util_schemas::manifest::PathBaseName;
 use cargo_util_schemas::manifest::RustVersion;
+use cargo_util_terminal::Shell;
 use indexmap::IndexSet;
 use itertools::Itertools;
 use toml_edit::Item as TomlItem;
@@ -26,7 +26,6 @@ use crate::core::Features;
 use crate::core::Package;
 use crate::core::PackageId;
 use crate::core::Registry;
-use crate::core::Shell;
 use crate::core::Summary;
 use crate::core::Workspace;
 use crate::core::dependency::DepKind;
@@ -253,7 +252,9 @@ pub fn add(workspace: &Workspace<'_>, options: &AddOptions<'_>) -> CargoResult<(
             if is_namespaced_features_supported {
                 let dep_key = dep.toml_key();
                 if !manifest.is_explicit_dep_activation(dep_key) {
-                    let table = manifest.get_table_mut(&[String::from("features")])?;
+                    let table = manifest
+                        .get_table_mut(&[String::from("features")])
+                        .expect("manifest validated");
                     let dep_name = dep.rename.as_deref().unwrap_or(&dep.name);
                     let new_feature: toml_edit::Value =
                         [format!("dep:{dep_name}")].iter().collect();
@@ -271,7 +272,6 @@ pub fn add(workspace: &Workspace<'_>, options: &AddOptions<'_>) -> CargoResult<(
     if was_sorted {
         if let Some(table) = manifest
             .get_table_mut(&dep_table)
-            .ok()
             .and_then(TomlItem::as_table_like_mut)
         {
             table.sort_values();
@@ -744,7 +744,7 @@ fn check_rust_version_for_optional_dependency(
 ) -> CargoResult<bool> {
     match rust_version {
         Some(version) => {
-            let syntax_support_version = RustVersion::from_str("1.60.0")?;
+            let syntax_support_version = RustVersion::new(1, 60, 0);
             Ok(&syntax_support_version <= version)
         }
         None => Ok(true),
@@ -831,14 +831,8 @@ fn get_latest_dependency(
             unreachable!("registry dependencies required, found a workspace dependency");
         }
         MaybeWorkspace::Other(query) => {
-            let possibilities = loop {
-                match registry.query_vec(&query, QueryKind::Normalized) {
-                    std::task::Poll::Ready(res) => {
-                        break res?;
-                    }
-                    std::task::Poll::Pending => registry.block_until_ready()?,
-                }
-            };
+            let possibilities =
+                crate::util::block_on(registry.query_vec(&query, QueryKind::Normalized))?;
 
             let mut possibilities: Vec<_> = possibilities
                 .into_iter()
@@ -862,7 +856,7 @@ fn get_latest_dependency(
                 let (req_msrv, is_msrv) = spec
                     .rust_version()
                     .cloned()
-                    .map(|msrv| CargoResult::Ok((msrv.clone().into_partial(), true)))
+                    .map(|msrv| CargoResult::Ok((msrv.to_partial(), true)))
                     .unwrap_or_else(|| {
                         let rustc = gctx.load_global_rustc(None)?;
 
@@ -963,15 +957,8 @@ fn select_package(
             unreachable!("path or git dependency expected, found workspace dependency");
         }
         MaybeWorkspace::Other(query) => {
-            let possibilities = loop {
-                // Exact to avoid returning all for path/git
-                match registry.query_vec(&query, QueryKind::Normalized) {
-                    std::task::Poll::Ready(res) => {
-                        break res?;
-                    }
-                    std::task::Poll::Pending => registry.block_until_ready()?,
-                }
-            };
+            let possibilities =
+                crate::util::block_on(registry.query_vec(&query, QueryKind::Normalized))?;
 
             let possibilities: Vec<_> = possibilities
                 .into_iter()
@@ -1196,14 +1183,8 @@ fn populate_available_features(
         return Ok(dependency);
     }
 
-    let possibilities = loop {
-        match registry.query_vec(&query, QueryKind::Normalized) {
-            std::task::Poll::Ready(res) => {
-                break res?;
-            }
-            std::task::Poll::Pending => registry.block_until_ready()?,
-        }
-    };
+    let possibilities = crate::util::block_on(registry.query_vec(&query, QueryKind::Normalized))?;
+
     // Ensure widest feature flag compatibility by picking the earliest version that could show up
     // in the lock file for a given version requirement.
     let lowest_common_denominator = possibilities
@@ -1224,7 +1205,7 @@ fn populate_available_features(
 }
 
 fn print_action_msg(shell: &mut Shell, dep: &DependencyUI, section: &[String]) -> CargoResult<()> {
-    if matches!(shell.verbosity(), crate::core::shell::Verbosity::Quiet) {
+    if matches!(shell.verbosity(), cargo_util_terminal::Verbosity::Quiet) {
         return Ok(());
     }
 
@@ -1266,7 +1247,7 @@ fn print_action_msg(shell: &mut Shell, dep: &DependencyUI, section: &[String]) -
 }
 
 fn print_dep_table_msg(shell: &mut Shell, dep: &DependencyUI) -> CargoResult<()> {
-    if matches!(shell.verbosity(), crate::core::shell::Verbosity::Quiet) {
+    if matches!(shell.verbosity(), cargo_util_terminal::Verbosity::Quiet) {
         return Ok(());
     }
 

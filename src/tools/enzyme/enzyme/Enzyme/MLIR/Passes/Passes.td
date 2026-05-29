@@ -43,8 +43,6 @@ def ProbProgPass : Pass<"probprog"> {
   let dependentDialects = [
     "arith::ArithDialect",
     "complex::ComplexDialect",
-    "cf::ControlFlowDialect",
-    "tensor::TensorDialect",
     "enzyme::EnzymeDialect",
   ];
   let options = [
@@ -55,12 +53,28 @@ def ProbProgPass : Pass<"probprog"> {
       /*default=*/"",
       /*description=*/"Optimization passes to apply to generated probabilistic programs"
     >,
+    Option<
+      /*C++ variable name=*/"debugDump",
+      /*CLI argument=*/"debug-dump",
+      /*type=*/"bool",
+      /*default=*/"false",
+      /*description=*/"Enable debug dump"
+    >,
   ];
 }
 
 def BatchPass : Pass<"enzyme-batch"> {
   let summary = "Batch Passes";
   let dependentDialects = [
+  ];
+}
+
+def BatchDiffPass : Pass<"enzyme-diff-batch">{
+  let summary = "Batching enzyme.fwddiff and enzyme.autodiff calls";
+  let dependentDialects = [
+    "arith::ArithDialect",
+    "tensor::TensorDialect",
+    "enzyme::EnzymeDialect",
   ];
 }
 
@@ -196,6 +210,13 @@ def OutlineEnzymeFromRegionPass : Pass<"outline-enzyme-regions"> {
   ];
 }
 
+def HoistEnzymeFromRegionPass : Pass<"hoist-enzyme-regions"> {
+  let summary = "Hoist independent primal ops out of autodiff_region.";
+  let dependentDialects = [ 
+  "enzyme::EnzymeDialect",
+  ];
+}
+
 def EnzymeOpsToMemRefPass : Pass<"convert-enzyme-to-memref"> {
   let summary = "Lower custom Enzyme ops to the MemRef dialect";
   let dependentDialects = [
@@ -218,6 +239,15 @@ def AddToOpToSplitPass : Pass<"add-to-op-to-split"> {
   let summary = "Duplicate linalg.generic once for each output to remove enzyme.addTo op";
 }
 
+def EnzymeBatchToTensorPass : Pass<"enzyme-batch-to-tensor"> {
+  let summary = "Legalize batching specific operations to tensor dialect";
+  let dependentDialects = [
+    "tensor::TensorDialect", 
+    "arith::ArithDialect",
+    "enzyme::EnzymeDialect"
+  ];
+}
+
 def RemoveUnusedEnzymeOpsPass : Pass<"remove-unnecessary-enzyme-ops"> {
   let summary = "Remove Unnecessary Enzyme Ops";
   let dependentDialects = [
@@ -228,6 +258,34 @@ def RemoveUnusedEnzymeOpsPass : Pass<"remove-unnecessary-enzyme-ops"> {
 
 def SimplifyMemrefCachePass : Pass<"simplify-memref-cache"> {
   let summary = "Rewrite all cache<memref<cache<...>>> to cache<memref<...>> if possible";
+}
+
+def LowerLLVMExtPass : Pass<"lower-llvm-ext"> {
+  let summary = "Lower LLVM ext operations to the LLVM dialect.";
+  let dependentDialects = [
+    "mlir::enzyme::llvm_ext::LLVMExtDialect",
+    "LLVM::LLVMDialect",
+  ];
+  let options = [
+    Option<"lowerToAllocaThreshold", "lower-to-alloca-threshold", "uint64_t",
+           /*default=*/"0",
+           "Maximum static size at which an alloc/free is promoted to an alloca (default -1: promotion disabled)">,
+  ];
+}
+
+def RaiseLLVMExtPass : Pass<"raise-llvm-ext"> {
+  let summary = "Raise LLVM operations to the LLVM Ext dialect.";
+  let dependentDialects = [
+    "mlir::enzyme::llvm_ext::LLVMExtDialect",
+    "LLVM::LLVMDialect",
+  ];
+}
+
+def LowerAffineAtomicRmwPass : Pass<"lower-affine-atomic-rmw"> {
+  let summary = "Lower AffineRmw to MemrefRmw";
+  let dependentDialects = [
+    "memref::MemRefDialect"
+  ];
 }
 
 #endif // ENZYME_PASSES

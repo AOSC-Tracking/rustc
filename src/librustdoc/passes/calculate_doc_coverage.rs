@@ -124,7 +124,7 @@ impl CoverageCalculator<'_, '_> {
             &self
                 .items
                 .iter()
-                .map(|(k, v)| (k.prefer_local_unconditionally().to_string(), v))
+                .map(|(k, v)| (k.display(RemapPathScopeComponents::COVERAGE).to_string(), v))
                 .collect::<BTreeMap<String, &ItemCount>>(),
         )
         .expect("failed to convert JSON data to string")
@@ -168,9 +168,7 @@ impl CoverageCalculator<'_, '_> {
             if let Some(percentage) = count.percentage() {
                 print_table_record(
                     &limit_filename_len(
-                        file.display(RemapPathScopeComponents::DIAGNOSTICS)
-                            .to_string_lossy()
-                            .into(),
+                        file.display(RemapPathScopeComponents::COVERAGE).to_string(),
                     ),
                     count,
                     percentage,
@@ -203,6 +201,10 @@ impl DocVisitor<'_> for CoverageCalculator<'_, '_> {
         match i.kind {
             clean::StrippedItem(..) => {
                 // don't count items in stripped modules
+                return;
+            }
+            clean::PlaceholderImplItem => {
+                // The "real" impl items are handled below.
                 return;
             }
             // docs on `use` and `extern crate` statements are not displayed, so they're not

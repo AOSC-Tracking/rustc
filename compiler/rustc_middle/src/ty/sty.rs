@@ -2,18 +2,18 @@
 
 #![allow(rustc::usage_of_ty_tykind)]
 
-use std::assert_matches::debug_assert_matches;
 use std::borrow::Cow;
+use std::debug_assert_matches;
 use std::ops::{ControlFlow, Range};
 
 use hir::def::{CtorKind, DefKind};
-use rustc_abi::{FIRST_VARIANT, FieldIdx, ScalableElt, VariantIdx};
+use rustc_abi::{FIRST_VARIANT, FieldIdx, NumScalableVectors, ScalableElt, VariantIdx};
 use rustc_errors::{ErrorGuaranteed, MultiSpan};
 use rustc_hir as hir;
 use rustc_hir::LangItem;
 use rustc_hir::def_id::DefId;
 use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, extension};
-use rustc_span::{DUMMY_SP, Span, Symbol, sym};
+use rustc_span::{DUMMY_SP, Span, Symbol, kw, sym};
 use rustc_type_ir::TyKind::*;
 use rustc_type_ir::solve::SizedTraitKind;
 use rustc_type_ir::walk::TypeWalker;
@@ -26,8 +26,8 @@ use crate::infer::canonical::Canonical;
 use crate::traits::ObligationCause;
 use crate::ty::InferTy::*;
 use crate::ty::{
-    self, AdtDef, BoundRegionKind, Discr, GenericArg, GenericArgs, GenericArgsRef, List, ParamEnv,
-    Region, Ty, TyCtxt, TypeFlags, TypeSuperVisitable, TypeVisitable, TypeVisitor, UintTy,
+    self, AdtDef, Const, Discr, GenericArg, GenericArgs, GenericArgsRef, List, ParamEnv, Region,
+    Ty, TyCtxt, TypeFlags, TypeSuperVisitable, TypeVisitable, TypeVisitor, UintTy, ValTree,
 };
 
 // Re-export and re-parameterize some `I = TyCtxt<'tcx>` types here
@@ -35,11 +35,22 @@ use crate::ty::{
 pub type TyKind<'tcx> = ir::TyKind<TyCtxt<'tcx>>;
 pub type TypeAndMut<'tcx> = ir::TypeAndMut<TyCtxt<'tcx>>;
 pub type AliasTy<'tcx> = ir::AliasTy<TyCtxt<'tcx>>;
+pub type AliasTyKind<'tcx> = ir::AliasTyKind<TyCtxt<'tcx>>;
 pub type FnSig<'tcx> = ir::FnSig<TyCtxt<'tcx>>;
 pub type Binder<'tcx, T> = ir::Binder<TyCtxt<'tcx>, T>;
 pub type EarlyBinder<'tcx, T> = ir::EarlyBinder<TyCtxt<'tcx>, T>;
 pub type TypingMode<'tcx> = ir::TypingMode<TyCtxt<'tcx>>;
+pub type TypingModeEqWrapper<'tcx> = ir::TypingModeEqWrapper<TyCtxt<'tcx>>;
 pub type Placeholder<'tcx, T> = ir::Placeholder<TyCtxt<'tcx>, T>;
+pub type PlaceholderRegion<'tcx> = ir::PlaceholderRegion<TyCtxt<'tcx>>;
+pub type PlaceholderType<'tcx> = ir::PlaceholderType<TyCtxt<'tcx>>;
+pub type PlaceholderConst<'tcx> = ir::PlaceholderConst<TyCtxt<'tcx>>;
+pub type BoundTy<'tcx> = ir::BoundTy<TyCtxt<'tcx>>;
+pub type BoundConst<'tcx> = ir::BoundConst<TyCtxt<'tcx>>;
+pub type BoundRegion<'tcx> = ir::BoundRegion<TyCtxt<'tcx>>;
+pub type BoundVariableKind<'tcx> = ir::BoundVariableKind<TyCtxt<'tcx>>;
+pub type BoundRegionKind<'tcx> = ir::BoundRegionKind<TyCtxt<'tcx>>;
+pub type BoundTyKind<'tcx> = ir::BoundTyKind<TyCtxt<'tcx>>;
 
 pub trait Article {
     fn article(&self) -> &'static str;
@@ -257,37 +268,6 @@ impl<'tcx> InlineConstArgs<'tcx> {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, TyEncodable, TyDecodable)]
-#[derive(HashStable)]
-pub enum BoundVariableKind {
-    Ty(BoundTyKind),
-    Region(BoundRegionKind),
-    Const,
-}
-
-impl BoundVariableKind {
-    pub fn expect_region(self) -> BoundRegionKind {
-        match self {
-            BoundVariableKind::Region(lt) => lt,
-            _ => bug!("expected a region, but found another kind"),
-        }
-    }
-
-    pub fn expect_ty(self) -> BoundTyKind {
-        match self {
-            BoundVariableKind::Ty(ty) => ty,
-            _ => bug!("expected a type, but found another kind"),
-        }
-    }
-
-    pub fn expect_const(self) {
-        match self {
-            BoundVariableKind::Const => (),
-            _ => bug!("expected a const, but found another kind"),
-        }
-    }
-}
-
 pub type PolyFnSig<'tcx> = Binder<'tcx, FnSig<'tcx>>;
 pub type CanonicalPolyFnSig<'tcx> = Canonical<'tcx, Binder<'tcx, FnSig<'tcx>>>;
 
@@ -381,30 +361,6 @@ impl ParamConst {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, TyEncodable, TyDecodable)]
-#[derive(HashStable)]
-pub struct BoundTy {
-    pub var: BoundVar,
-    pub kind: BoundTyKind,
-}
-
-impl<'tcx> rustc_type_ir::inherent::BoundVarLike<TyCtxt<'tcx>> for BoundTy {
-    fn var(self) -> BoundVar {
-        self.var
-    }
-
-    fn assert_eq(self, var: ty::BoundVariableKind) {
-        assert_eq!(self.kind, var.expect_ty())
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, TyEncodable, TyDecodable)]
-#[derive(HashStable)]
-pub enum BoundTyKind {
-    Anon,
-    Param(DefId),
-}
-
 /// Constructors for `Ty`
 impl<'tcx> Ty<'tcx> {
     /// Avoid using this in favour of more specific `new_*` methods, where possible.
@@ -479,7 +435,7 @@ impl<'tcx> Ty<'tcx> {
     pub fn new_bound(
         tcx: TyCtxt<'tcx>,
         index: ty::DebruijnIndex,
-        bound_ty: ty::BoundTy,
+        bound_ty: ty::BoundTy<'tcx>,
     ) -> Ty<'tcx> {
         // Use a pre-interned one when possible.
         if let ty::BoundTy { var, kind: ty::BoundTyKind::Anon } = bound_ty
@@ -514,18 +470,14 @@ impl<'tcx> Ty<'tcx> {
     }
 
     #[inline]
-    pub fn new_alias(
-        tcx: TyCtxt<'tcx>,
-        kind: ty::AliasTyKind,
-        alias_ty: ty::AliasTy<'tcx>,
-    ) -> Ty<'tcx> {
+    pub fn new_alias(tcx: TyCtxt<'tcx>, alias_ty: ty::AliasTy<'tcx>) -> Ty<'tcx> {
         debug_assert_matches!(
-            (kind, tcx.def_kind(alias_ty.def_id)),
-            (ty::Opaque, DefKind::OpaqueTy)
-                | (ty::Projection | ty::Inherent, DefKind::AssocTy)
-                | (ty::Free, DefKind::TyAlias)
+            (alias_ty.kind, tcx.def_kind(alias_ty.kind.def_id())),
+            (ty::Opaque { .. }, DefKind::OpaqueTy)
+                | (ty::Projection { .. } | ty::Inherent { .. }, DefKind::AssocTy)
+                | (ty::Free { .. }, DefKind::TyAlias)
         );
-        Ty::new(tcx, Alias(kind, alias_ty))
+        Ty::new(tcx, Alias(alias_ty))
     }
 
     #[inline]
@@ -534,9 +486,38 @@ impl<'tcx> Ty<'tcx> {
     }
 
     #[inline]
+    pub fn new_field_representing_type(
+        tcx: TyCtxt<'tcx>,
+        base: Ty<'tcx>,
+        variant: VariantIdx,
+        field: FieldIdx,
+    ) -> Ty<'tcx> {
+        let Some(did) = tcx.lang_items().field_representing_type() else {
+            bug!("could not locate the `FieldRepresentingType` lang item")
+        };
+        let def = tcx.adt_def(did);
+        let args = tcx.mk_args(&[
+            base.into(),
+            Const::new_value(
+                tcx,
+                ValTree::from_scalar_int(tcx, variant.as_u32().into()),
+                tcx.types.u32,
+            )
+            .into(),
+            Const::new_value(
+                tcx,
+                ValTree::from_scalar_int(tcx, field.as_u32().into()),
+                tcx.types.u32,
+            )
+            .into(),
+        ]);
+        Ty::new_adt(tcx, def, args)
+    }
+
+    #[inline]
     #[instrument(level = "debug", skip(tcx))]
     pub fn new_opaque(tcx: TyCtxt<'tcx>, def_id: DefId, args: GenericArgsRef<'tcx>) -> Ty<'tcx> {
-        Ty::new_alias(tcx, ty::Opaque, AliasTy::new_from_args(tcx, def_id, args))
+        Ty::new_alias(tcx, AliasTy::new_from_args(tcx, ty::Opaque { def_id }, args))
     }
 
     /// Constructs a `TyKind::Error` type with current `ErrorGuaranteed`
@@ -659,12 +640,12 @@ impl<'tcx> Ty<'tcx> {
                 | DefKind::AssocTy
                 | DefKind::TyParam
                 | DefKind::Fn
-                | DefKind::Const
+                | DefKind::Const { .. }
                 | DefKind::ConstParam
                 | DefKind::Static { .. }
                 | DefKind::Ctor(..)
                 | DefKind::AssocFn
-                | DefKind::AssocConst
+                | DefKind::AssocConst { .. }
                 | DefKind::Macro(..)
                 | DefKind::ExternCrate
                 | DefKind::Use
@@ -762,8 +743,7 @@ impl<'tcx> Ty<'tcx> {
                 .principal_def_id()
                 .into_iter()
                 .flat_map(|principal_def_id| {
-                    // NOTE: This should agree with `needed_associated_types` in
-                    // dyn trait lowering, or else we'll have ICEs.
+                    // IMPORTANT: This has to agree with HIR ty lowering of dyn trait!
                     elaborate::supertraits(
                         tcx,
                         ty::Binder::dummy(ty::TraitRef::identity(tcx, principal_def_id)),
@@ -771,7 +751,7 @@ impl<'tcx> Ty<'tcx> {
                     .map(|principal| {
                         tcx.associated_items(principal.def_id())
                             .in_definition_order()
-                            .filter(|item| item.is_type())
+                            .filter(|item| item.is_type() || item.is_type_const())
                             .filter(|item| !item.is_impl_trait_in_trait())
                             .filter(|item| !tcx.generics_require_sized_self(item.def_id))
                             .count()
@@ -793,7 +773,10 @@ impl<'tcx> Ty<'tcx> {
         item_def_id: DefId,
         args: ty::GenericArgsRef<'tcx>,
     ) -> Ty<'tcx> {
-        Ty::new_alias(tcx, ty::Projection, AliasTy::new_from_args(tcx, item_def_id, args))
+        Ty::new_alias(
+            tcx,
+            AliasTy::new_from_args(tcx, ty::Projection { def_id: item_def_id }, args),
+        )
     }
 
     #[inline]
@@ -802,7 +785,7 @@ impl<'tcx> Ty<'tcx> {
         item_def_id: DefId,
         args: impl IntoIterator<Item: Into<GenericArg<'tcx>>>,
     ) -> Ty<'tcx> {
-        Ty::new_alias(tcx, ty::Projection, AliasTy::new(tcx, item_def_id, args))
+        Ty::new_alias(tcx, AliasTy::new(tcx, ty::Projection { def_id: item_def_id }, args))
     }
 
     #[inline]
@@ -962,7 +945,11 @@ impl<'tcx> rustc_type_ir::inherent::Ty<TyCtxt<'tcx>> for Ty<'tcx> {
         Ty::new_placeholder(tcx, placeholder)
     }
 
-    fn new_bound(interner: TyCtxt<'tcx>, debruijn: ty::DebruijnIndex, var: ty::BoundTy) -> Self {
+    fn new_bound(
+        interner: TyCtxt<'tcx>,
+        debruijn: ty::DebruijnIndex,
+        var: ty::BoundTy<'tcx>,
+    ) -> Self {
         Ty::new_bound(interner, debruijn, var)
     }
 
@@ -974,12 +961,8 @@ impl<'tcx> rustc_type_ir::inherent::Ty<TyCtxt<'tcx>> for Ty<'tcx> {
         Ty::new_canonical_bound(tcx, var)
     }
 
-    fn new_alias(
-        interner: TyCtxt<'tcx>,
-        kind: ty::AliasTyKind,
-        alias_ty: ty::AliasTy<'tcx>,
-    ) -> Self {
-        Ty::new_alias(interner, kind, alias_ty)
+    fn new_alias(interner: TyCtxt<'tcx>, alias_ty: ty::AliasTy<'tcx>) -> Self {
+        Ty::new_alias(interner, alias_ty)
     }
 
     fn new_error(interner: TyCtxt<'tcx>, guar: ErrorGuaranteed) -> Self {
@@ -1275,17 +1258,27 @@ impl<'tcx> Ty<'tcx> {
         }
     }
 
-    pub fn scalable_vector_element_count_and_type(self, tcx: TyCtxt<'tcx>) -> (u16, Ty<'tcx>) {
+    pub fn scalable_vector_parts(
+        self,
+        tcx: TyCtxt<'tcx>,
+    ) -> Option<(u16, Ty<'tcx>, NumScalableVectors)> {
         let Adt(def, args) = self.kind() else {
-            bug!("`scalable_vector_size_and_type` called on invalid type")
+            return None;
         };
-        let Some(ScalableElt::ElementCount(element_count)) = def.repr().scalable else {
-            bug!("`scalable_vector_size_and_type` called on non-scalable vector type");
+        let (num_vectors, vec_def) = match def.repr().scalable? {
+            ScalableElt::ElementCount(_) => (NumScalableVectors::for_non_tuple(), *def),
+            ScalableElt::Container => (
+                NumScalableVectors::from_field_count(def.non_enum_variant().fields.len())?,
+                def.non_enum_variant().fields[FieldIdx::ZERO].ty(tcx, args).ty_adt_def()?,
+            ),
         };
-        let variant = def.non_enum_variant();
+        let Some(ScalableElt::ElementCount(element_count)) = vec_def.repr().scalable else {
+            return None;
+        };
+        let variant = vec_def.non_enum_variant();
         assert_eq!(variant.fields.len(), 1);
         let field_ty = variant.fields[FieldIdx::ZERO].ty(tcx, args);
-        (element_count, field_ty)
+        Some((element_count, field_ty, num_vectors))
     }
 
     pub fn simd_size_and_type(self, tcx: TyCtxt<'tcx>) -> (u64, Ty<'tcx>) {
@@ -1379,25 +1372,25 @@ impl<'tcx> Ty<'tcx> {
         }
     }
 
-    pub fn pinned_ref(self) -> Option<(Ty<'tcx>, ty::Mutability)> {
-        if let Adt(def, args) = self.kind()
-            && def.is_pin()
-            && let &ty::Ref(_, ty, mutbl) = args.type_at(0).kind()
-        {
-            return Some((ty, mutbl));
-        }
-        None
-    }
-
-    pub fn maybe_pinned_ref(self) -> Option<(Ty<'tcx>, ty::Pinnedness, ty::Mutability)> {
-        match *self.kind() {
+    /// Returns the type, pinnedness, mutability, and the region of a reference (`&T` or `&mut T`)
+    /// or a pinned-reference type (`Pin<&T>` or `Pin<&mut T>`).
+    ///
+    /// Regarding the [`pin_ergonomics`] feature, one of the goals is to make pinned references
+    /// (`Pin<&T>` and `Pin<&mut T>`) behaves similar to normal references (`&T` and `&mut T`).
+    /// This function is useful when references and pinned references are processed similarly.
+    ///
+    /// [`pin_ergonomics`]: https://github.com/rust-lang/rust/issues/130494
+    pub fn maybe_pinned_ref(
+        self,
+    ) -> Option<(Ty<'tcx>, ty::Pinnedness, ty::Mutability, Region<'tcx>)> {
+        match self.kind() {
             Adt(def, args)
                 if def.is_pin()
-                    && let ty::Ref(_, ty, mutbl) = *args.type_at(0).kind() =>
+                    && let &ty::Ref(region, ty, mutbl) = args.type_at(0).kind() =>
             {
-                Some((ty, ty::Pinnedness::Pinned, mutbl))
+                Some((ty, ty::Pinnedness::Pinned, mutbl, region))
             }
-            ty::Ref(_, ty, mutbl) => Some((ty, ty::Pinnedness::Not, mutbl)),
+            &Ref(region, ty, mutbl) => Some((ty, ty::Pinnedness::Not, mutbl, region)),
             _ => None,
         }
     }
@@ -1602,8 +1595,8 @@ impl<'tcx> Ty<'tcx> {
     }
 
     #[inline]
-    pub fn is_impl_trait(self) -> bool {
-        matches!(self.kind(), Alias(ty::Opaque, ..))
+    pub fn is_opaque(self) -> bool {
+        matches!(self.kind(), Alias(ty::AliasTy { kind: ty::Opaque { .. }, .. }))
     }
 
     #[inline]
@@ -1614,13 +1607,23 @@ impl<'tcx> Ty<'tcx> {
         }
     }
 
-    /// Iterates over tuple fields.
+    /// Returns a list of tuple type arguments.
+    ///
     /// Panics when called on anything but a tuple.
     #[inline]
     pub fn tuple_fields(self) -> &'tcx List<Ty<'tcx>> {
         match self.kind() {
             Tuple(args) => args,
             _ => bug!("tuple_fields called on non-tuple: {self:?}"),
+        }
+    }
+
+    /// Returns a list of tuple type arguments, or `None` if `self` isn't a tuple.
+    #[inline]
+    pub fn opt_tuple_fields(self) -> Option<&'tcx List<Ty<'tcx>>> {
+        match self.kind() {
+            Tuple(args) => Some(args),
+            _ => None,
         }
     }
 
@@ -1633,6 +1636,9 @@ impl<'tcx> Ty<'tcx> {
             TyKind::Adt(adt, _) => Some(adt.variant_range()),
             TyKind::Coroutine(def_id, args) => {
                 Some(args.as_coroutine().variant_range(*def_id, tcx))
+            }
+            TyKind::UnsafeBinder(bound_ty) => {
+                tcx.instantiate_bound_regions_with_erased((*bound_ty).into()).variant_range(tcx)
             }
             _ => None,
         }
@@ -1655,6 +1661,9 @@ impl<'tcx> Ty<'tcx> {
             TyKind::Coroutine(def_id, args) => {
                 Some(args.as_coroutine().discriminant_for_variant(*def_id, tcx, variant_index))
             }
+            TyKind::UnsafeBinder(bound_ty) => tcx
+                .instantiate_bound_regions_with_erased((*bound_ty).into())
+                .discriminant_for_variant(tcx, variant_index),
             _ => None,
         }
     }
@@ -1673,6 +1682,9 @@ impl<'tcx> Ty<'tcx> {
             }
 
             ty::Pat(ty, _) => ty.discriminant_ty(tcx),
+            ty::UnsafeBinder(bound_ty) => {
+                tcx.instantiate_bound_regions_with_erased((*bound_ty).into()).discriminant_ty(tcx)
+            }
 
             ty::Bool
             | ty::Char
@@ -1694,7 +1706,6 @@ impl<'tcx> Ty<'tcx> {
             | ty::CoroutineWitness(..)
             | ty::Never
             | ty::Tuple(_)
-            | ty::UnsafeBinder(_)
             | ty::Error(_)
             | ty::Infer(IntVar(_) | FloatVar(_)) => tcx.types.u8,
 
@@ -2136,6 +2147,12 @@ impl<'tcx> rustc_type_ir::inherent::Tys<TyCtxt<'tcx>> for &'tcx ty::List<Ty<'tcx
     }
 }
 
+impl<'tcx> rustc_type_ir::inherent::Symbol<TyCtxt<'tcx>> for Symbol {
+    fn is_kw_underscore_lifetime(self) -> bool {
+        self == kw::UnderscoreLifetime
+    }
+}
+
 // Some types are used a lot. Make sure they don't unintentionally get bigger.
 #[cfg(target_pointer_width = "64")]
 mod size_asserts {
@@ -2143,7 +2160,7 @@ mod size_asserts {
 
     use super::*;
     // tidy-alphabetical-start
-    static_assert_size!(TyKind<'_>, 24);
-    static_assert_size!(ty::WithCachedTypeInfo<TyKind<'_>>, 48);
+    static_assert_size!(TyKind<'_>, 32);
+    static_assert_size!(ty::WithCachedTypeInfo<TyKind<'_>>, 56);
     // tidy-alphabetical-end
 }
