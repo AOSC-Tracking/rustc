@@ -37,6 +37,7 @@ use crate::ops;
 use crate::ops::PackageOpts;
 use crate::ops::Packages;
 use crate::ops::RegistryOrIndex;
+use crate::ops::registry::RegistryClient;
 use crate::ops::registry::RegistrySourceIds;
 use crate::sources::CRATES_IO_REGISTRY;
 use crate::sources::RegistrySource;
@@ -210,9 +211,8 @@ pub fn publish(ws: &Workspace<'_>, opts: &PublishOpts<'_>) -> CargoResult<()> {
         // upload.
         let mut ready = plan.take_ready();
 
-        if ready.is_empty() {
-            // Circular dependencies are caught above, so this indicates a failure
-            // to progress, potentially due to a timeout while waiting for confirmations.
+        if ready.is_empty() && to_confirm.is_empty() {
+            // Cycles are caught above; reaching here means an unexpected stall.
             return Err(crate::util::internal(format!(
                 "no packages ready to publish but {} packages remain in plan with {} awaiting confirmation: {}",
                 plan.len(),
@@ -487,7 +487,7 @@ fn verify_unpublished(
 
 fn verify_dependencies(
     pkg: &Package,
-    registry: &Registry,
+    registry: &Registry<RegistryClient<'_>>,
     registry_src: SourceId,
 ) -> CargoResult<()> {
     for dep in pkg.dependencies().iter() {
@@ -652,7 +652,7 @@ fn transmit(
     ws: &Workspace<'_>,
     pkg: &Package,
     tarball: &File,
-    registry: &mut Registry,
+    registry: &mut Registry<RegistryClient<'_>>,
     registry_id: SourceId,
     dry_run: bool,
     workspace_context: impl Fn() -> String,

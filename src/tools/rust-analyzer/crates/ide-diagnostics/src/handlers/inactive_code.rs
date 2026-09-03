@@ -7,7 +7,7 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 //
 // This diagnostic is shown for code with inactive `#[cfg]` attributes.
 pub(crate) fn inactive_code(
-    ctx: &DiagnosticsContext<'_>,
+    ctx: &DiagnosticsContext<'_, '_>,
     d: &hir::InactiveCode,
 ) -> Option<Diagnostic> {
     // If there's inactive code somewhere in a macro, don't propagate to the call-site.
@@ -209,8 +209,8 @@ union FooBar {
 
   #[cfg(true)] fn active() {}
 
-  #[cfg(any(not(true)), false)] fn inactive2() {}
-//^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ weak: code is inactive due to #[cfg] directives: true is enabled
+  #[cfg(any(not(true), false))] fn inactive2() {}
+//^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ weak: code is inactive due to #[cfg] directives: true is enabled and false is disabled
 
 "#,
         );

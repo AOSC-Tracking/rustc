@@ -5,12 +5,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use rustc_data_structures::fingerprint::{Fingerprint, PackedFingerprint};
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_data_structures::outline;
+use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::profiling::QueryInvocationId;
 use rustc_data_structures::sharded::{self, ShardedHashMap};
-use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
-use rustc_data_structures::sync::{AtomicU64, Lock, is_dyn_thread_safe};
+use rustc_data_structures::stable_hash::{StableHash, StableHasher};
+use rustc_data_structures::sync::{AtomicU64, Lock};
 use rustc_data_structures::unord::UnordMap;
 use rustc_errors::DiagInner;
 use rustc_index::IndexVec;
@@ -26,7 +25,7 @@ use super::retained::RetainedDepGraph;
 use super::serialized::{GraphEncoder, SerializedDepGraph, SerializedDepNodeIndex};
 use super::{DepKind, DepNode, WorkProductId, read_deps, with_deps};
 use crate::dep_graph::edges::EdgesVec;
-use crate::ich::StableHashingContext;
+use crate::ich::StableHashState;
 use crate::ty::TyCtxt;
 use crate::verify_ich::incremental_verify_ich;
 
@@ -52,6 +51,7 @@ pub enum QuerySideEffect {
     /// the side effect dep node as a dependency.
     CheckFeature { symbol: Symbol },
 }
+
 #[derive(Clone)]
 pub struct DepGraph {
     data: Option<Arc<DepGraphData>>,
@@ -121,12 +121,12 @@ pub struct DepGraphData {
     debug_loaded_from_disk: Lock<FxHashSet<DepNode>>,
 }
 
-pub fn hash_result<R>(hcx: &mut StableHashingContext<'_>, result: &R) -> Fingerprint
+pub fn hash_result<R>(hcx: &mut StableHashState<'_>, result: &R) -> Fingerprint
 where
-    R: for<'a> HashStable<StableHashingContext<'a>>,
+    R: StableHash,
 {
     let mut stable_hasher = StableHasher::new();
-    result.hash_stable(hcx, &mut stable_hasher);
+    result.stable_hash(hcx, &mut stable_hasher);
     stable_hasher.finish()
 }
 
@@ -274,17 +274,19 @@ impl DepGraph {
     }
 
     #[inline(always)]
-    pub fn with_task<'tcx, A: Debug, R>(
+    pub fn with_task<'tcx, OP, R>(
         &self,
         dep_node: DepNode,
         tcx: TyCtxt<'tcx>,
-        task_arg: A,
-        task_fn: fn(tcx: TyCtxt<'tcx>, task_arg: A) -> R,
-        hash_result: Option<fn(&mut StableHashingContext<'_>, &R) -> Fingerprint>,
-    ) -> (R, DepNodeIndex) {
+        op: OP,
+        hash_result: Option<fn(&mut StableHashState<'_>, &R) -> Fingerprint>,
+    ) -> (R, DepNodeIndex)
+    where
+        OP: FnOnce() -> R,
+    {
         match self.data() {
-            Some(data) => data.with_task(dep_node, tcx, task_arg, task_fn, hash_result),
-            None => (task_fn(tcx, task_arg), self.next_virtual_depnode_index()),
+            Some(data) => data.with_task(dep_node, tcx, op, hash_result),
+            None => (op(), self.next_virtual_depnode_index()),
         }
     }
 
@@ -309,53 +311,35 @@ impl DepGraph {
 }
 
 impl DepGraphData {
-    /// Starts a new dep-graph task. Dep-graph tasks are specified
-    /// using a free function (`task`) and **not** a closure -- this
-    /// is intentional because we want to exercise tight control over
-    /// what state they have access to. In particular, we want to
-    /// prevent implicit 'leaks' of tracked state into the task (which
-    /// could then be read without generating correct edges in the
-    /// dep-graph -- see the [rustc dev guide] for more details on
-    /// the dep-graph).
-    ///
-    /// Therefore, the task function takes a `TyCtxt`, plus exactly one
-    /// additional argument, `task_arg`. The additional argument type can be
-    /// `()` if no argument is needed, or a tuple if multiple arguments are
-    /// needed.
-    ///
-    /// [rustc dev guide]: https://rustc-dev-guide.rust-lang.org/queries/incremental-compilation.html
     #[inline(always)]
-    pub fn with_task<'tcx, A: Debug, R>(
+    pub fn with_task<'tcx, OP, R>(
         &self,
         dep_node: DepNode,
         tcx: TyCtxt<'tcx>,
-        task_arg: A,
-        task_fn: fn(tcx: TyCtxt<'tcx>, task_arg: A) -> R,
-        hash_result: Option<fn(&mut StableHashingContext<'_>, &R) -> Fingerprint>,
-    ) -> (R, DepNodeIndex) {
+        op: OP,
+        hash_result: Option<fn(&mut StableHashState<'_>, &R) -> Fingerprint>,
+    ) -> (R, DepNodeIndex)
+    where
+        OP: FnOnce() -> R,
+    {
         // If the following assertion triggers, it can have two reasons:
         // 1. Something is wrong with DepNode creation, either here or
         //    in `DepGraph::try_mark_green()`.
         // 2. Two distinct query keys get mapped to the same `DepNode`
         //    (see for example #48923).
         self.assert_dep_node_not_yet_allocated_in_current_session(tcx.sess, &dep_node, || {
-            format!(
-                "forcing query with already existing `DepNode`\n\
-                 - query-key: {task_arg:?}\n\
-                 - dep-node: {dep_node:?}"
-            )
+            format!("forcing query with already existing `DepNode`: {dep_node:?}")
         });
 
-        let with_deps = |task_deps| with_deps(task_deps, || task_fn(tcx, task_arg));
         let (result, edges) = if tcx.is_eval_always(dep_node.kind) {
-            (with_deps(TaskDepsRef::EvalAlways), EdgesVec::new())
+            (with_deps(TaskDepsRef::EvalAlways, op), EdgesVec::new())
         } else {
             let task_deps = Lock::new(TaskDeps::new(
                 #[cfg(debug_assertions)]
                 Some(dep_node),
                 0,
             ));
-            (with_deps(TaskDepsRef::Allow(&task_deps)), task_deps.into_inner().reads)
+            (with_deps(TaskDepsRef::Allow(&task_deps), op), task_deps.into_inner().reads)
         };
 
         let dep_node_index =
@@ -411,10 +395,10 @@ impl DepGraphData {
             }
             _ => {
                 // The dep node indices are hashed here instead of hashing the dep nodes of the
-                // dependencies. These indices may refer to different nodes per session, but this isn't
-                // a problem here because we that ensure the final dep node hash is per session only by
-                // combining it with the per session random number `anon_id_seed`. This hash only need
-                // to map the dependencies to a single value on a per session basis.
+                // dependencies. These indices may refer to different nodes per session, but this
+                // isn't a problem here because we that ensure the final dep node hash is per
+                // session only by combining it with the per session `anon_id_seed`. This hash only
+                // need to map the dependencies to a single value on a per session basis.
                 let mut hasher = StableHasher::new();
                 reads.hash(&mut hasher);
 
@@ -449,7 +433,7 @@ impl DepGraphData {
         node: DepNode,
         edges: EdgesVec,
         result: &R,
-        hash_result: Option<fn(&mut StableHashingContext<'_>, &R) -> Fingerprint>,
+        hash_result: Option<fn(&mut StableHashState<'_>, &R) -> Fingerprint>,
     ) -> DepNodeIndex {
         let hashing_timer = tcx.prof.incr_result_hashing();
         let current_fingerprint = hash_result.map(|hash_result| {
@@ -574,7 +558,7 @@ impl DepGraph {
         node: DepNode,
         tcx: TyCtxt<'tcx>,
         result: &R,
-        hash_result: Option<fn(&mut StableHashingContext<'_>, &R) -> Fingerprint>,
+        hash_result: Option<fn(&mut StableHashState<'_>, &R) -> Fingerprint>,
         format_value_fn: fn(&R) -> String,
     ) -> DepNodeIndex {
         if let Some(data) = self.data.as_ref() {
@@ -644,16 +628,11 @@ impl DepGraphData {
             let ok = match color {
                 DepNodeColor::Unknown => true,
                 DepNodeColor::Red => false,
-                DepNodeColor::Green(..) => sess.threads() > 1, // Other threads may mark this green
+                DepNodeColor::Green(..) => sess.threads().is_some(), // Other threads may mark this green
             };
             if !ok {
                 panic!("{}", msg())
             }
-        } else if let Some(nodes_in_current_session) = &self.current.nodes_in_current_session {
-            outline(|| {
-                let seen = nodes_in_current_session.lock().contains_key(dep_node);
-                assert!(!seen, "{}", msg());
-            });
         }
     }
 
@@ -789,7 +768,8 @@ impl DepGraphData {
                 is_green,
             );
 
-            self.current.record_node(dep_node_index, key, value_fingerprint);
+            #[cfg(debug_assertions)]
+            self.current.record_edge(dep_node_index, key, value_fingerprint);
 
             dep_node_index
         } else {
@@ -801,8 +781,6 @@ impl DepGraphData {
         &self,
         prev_index: SerializedDepNodeIndex,
     ) -> Option<DepNodeIndex> {
-        self.current.debug_assert_not_in_new_nodes(&self.previous, prev_index);
-
         let dep_node_index = self.current.encoder.send_promoted(prev_index, &self.colors);
 
         #[cfg(debug_assertions)]
@@ -1127,13 +1105,6 @@ pub(super) struct CurrentDepGraph {
     #[cfg(debug_assertions)]
     forbidden_edge: Option<EdgeFilter>,
 
-    /// Used to verify the absence of hash collisions among DepNodes.
-    /// This field is only `Some` if the `-Z incremental_verify_ich` option is present
-    /// or if `debug_assertions` are enabled.
-    ///
-    /// The map contains all DepNodes that have been allocated in the current session so far.
-    nodes_in_current_session: Option<Lock<FxHashMap<DepNode, DepNodeIndex>>>,
-
     /// Anonymous `DepNode`s are nodes whose IDs we compute from the list of
     /// their edges. This has the beneficial side-effect that multiple anonymous
     /// nodes can be coalesced into one without changing the semantics of the
@@ -1174,9 +1145,6 @@ impl CurrentDepGraph {
 
         let new_node_count_estimate = 102 * prev_graph_node_count / 100 + 200;
 
-        let new_node_dbg =
-            session.opts.unstable_opts.incremental_verify_ich || cfg!(debug_assertions);
-
         CurrentDepGraph {
             encoder: GraphEncoder::new(session, encoder, prev_graph_node_count, previous),
             anon_node_to_index: ShardedHashMap::with_capacity(
@@ -1188,12 +1156,6 @@ impl CurrentDepGraph {
             forbidden_edge,
             #[cfg(debug_assertions)]
             value_fingerprints: Lock::new(IndexVec::from_elem_n(None, new_node_count_estimate)),
-            nodes_in_current_session: new_node_dbg.then(|| {
-                Lock::new(FxHashMap::with_capacity_and_hasher(
-                    new_node_count_estimate,
-                    Default::default(),
-                ))
-            }),
             total_read_count: AtomicU64::new(0),
             total_duplicate_read_count: AtomicU64::new(0),
         }
@@ -1216,25 +1178,6 @@ impl CurrentDepGraph {
         assert_eq!(prior_value_fingerprint, value_fingerprint, "Unstable fingerprints for {key:?}");
     }
 
-    #[inline(always)]
-    fn record_node(
-        &self,
-        dep_node_index: DepNodeIndex,
-        key: DepNode,
-        _value_fingerprint: Fingerprint,
-    ) {
-        #[cfg(debug_assertions)]
-        self.record_edge(dep_node_index, key, _value_fingerprint);
-
-        if let Some(ref nodes_in_current_session) = self.nodes_in_current_session {
-            outline(|| {
-                if nodes_in_current_session.lock().insert(key, dep_node_index).is_some() {
-                    panic!("Found duplicate dep-node {key:?}");
-                }
-            });
-        }
-    }
-
     /// Writes the node to the current dep-graph and allocates a `DepNodeIndex` for it.
     /// Assumes that this is a node that has no equivalent in the previous dep-graph.
     #[inline(always)]
@@ -1246,27 +1189,10 @@ impl CurrentDepGraph {
     ) -> DepNodeIndex {
         let dep_node_index = self.encoder.send_new(key, value_fingerprint, edges);
 
-        self.record_node(dep_node_index, key, value_fingerprint);
+        #[cfg(debug_assertions)]
+        self.record_edge(dep_node_index, key, value_fingerprint);
 
         dep_node_index
-    }
-
-    #[inline]
-    fn debug_assert_not_in_new_nodes(
-        &self,
-        prev_graph: &SerializedDepGraph,
-        prev_index: SerializedDepNodeIndex,
-    ) {
-        if !is_dyn_thread_safe()
-            && let Some(ref nodes_in_current_session) = self.nodes_in_current_session
-        {
-            debug_assert!(
-                !nodes_in_current_session
-                    .lock()
-                    .contains_key(&prev_graph.index_to_node(prev_index)),
-                "node from previous graph present in new node collection"
-            );
-        }
     }
 }
 
@@ -1296,13 +1222,14 @@ pub struct TaskDeps {
     #[cfg(debug_assertions)]
     node: Option<DepNode>,
 
-    /// A vector of `DepNodeIndex`, basically.
+    /// A vector of `DepNodeIndex`, basically. Contains no duplicates.
     reads: EdgesVec,
 
-    /// When adding new edges to `reads` in `DepGraph::read_index` we need to determine if the edge
-    /// has been seen before. If the number of elements in `reads` is small, we just do a linear
-    /// scan. If the number is higher, a hashset has better perf. This field is that hashset. It's
-    /// only used if the number of elements in `reads` exceeds `LINEAR_SCAN_MAX`.
+    /// When adding a new edge to `reads` in `DepGraph::read_index` we must determine if the edge
+    /// has been seen before. We just do a linear scan of `reads` if its length is less than or
+    /// equal to `LINEAR_SCAN_MAX`. Otherwise, we use this hashset for better performance. Note:
+    /// `reads` is always the canonical edges representation; this field is just to speed up the
+    /// seen-before test.
     read_set: FxHashSet<DepNodeIndex>,
 }
 
@@ -1441,17 +1368,6 @@ fn panic_on_forbidden_read(data: &DepGraphData, dep_node_index: DepNodeIndex) ->
         if data.colors.current(prev_index) == Some(dep_node_index) {
             dep_node = Some(*data.previous.index_to_node(prev_index));
             break;
-        }
-    }
-
-    if dep_node.is_none()
-        && let Some(nodes) = &data.current.nodes_in_current_session
-    {
-        // Try to find it among the nodes allocated so far in this session
-        // This is OK, there's only ever one node result possible so this is deterministic.
-        #[allow(rustc::potential_query_instability)]
-        if let Some((node, _)) = nodes.lock().iter().find(|&(_, index)| *index == dep_node_index) {
-            dep_node = Some(*node);
         }
     }
 

@@ -21,22 +21,26 @@ use crate::core::{
     PatchLocation,
 };
 use crate::core::{EitherManifest, Package, SourceId, VirtualManifest};
-use crate::lints::analyze_cargo_lints_table;
-use crate::lints::rules::blanket_hint_mostly_unused;
-use crate::lints::rules::check_im_a_teapot;
-use crate::lints::rules::implicit_minimum_version_req_pkg;
-use crate::lints::rules::implicit_minimum_version_req_ws;
-use crate::lints::rules::missing_lints_inheritance;
-use crate::lints::rules::non_kebab_case_bins;
-use crate::lints::rules::non_kebab_case_features;
-use crate::lints::rules::non_kebab_case_packages;
-use crate::lints::rules::non_snake_case_features;
-use crate::lints::rules::non_snake_case_packages;
-use crate::lints::rules::redundant_homepage;
-use crate::lints::rules::redundant_readme;
-use crate::lints::rules::unused_build_dependencies_no_build_rs;
-use crate::lints::rules::unused_workspace_dependencies;
-use crate::lints::rules::unused_workspace_package_fields;
+use crate::diagnostics::DiagnosticStats;
+use crate::diagnostics::rules::blanket_hint_mostly_unused;
+use crate::diagnostics::rules::check_im_a_teapot;
+use crate::diagnostics::rules::implicit_minimum_version_req_pkg;
+use crate::diagnostics::rules::implicit_minimum_version_req_ws;
+use crate::diagnostics::rules::missing_lints_features;
+use crate::diagnostics::rules::missing_lints_inheritance;
+use crate::diagnostics::rules::non_kebab_case_bins;
+use crate::diagnostics::rules::non_kebab_case_features;
+use crate::diagnostics::rules::non_kebab_case_packages;
+use crate::diagnostics::rules::non_snake_case_features;
+use crate::diagnostics::rules::non_snake_case_packages;
+use crate::diagnostics::rules::redundant_homepage;
+use crate::diagnostics::rules::redundant_readme;
+use crate::diagnostics::rules::text_direction_codepoint_in_comment;
+use crate::diagnostics::rules::text_direction_codepoint_in_literal;
+use crate::diagnostics::rules::unknown_lints;
+use crate::diagnostics::rules::unused_build_dependencies_no_build_rs;
+use crate::diagnostics::rules::unused_workspace_dependencies;
+use crate::diagnostics::rules::unused_workspace_package_fields;
 use crate::ops;
 use crate::ops::lockfile::LOCKFILE_NAME;
 use crate::sources::{CRATES_IO_INDEX, CRATES_IO_REGISTRY, PathSource, SourceConfigMap};
@@ -47,8 +51,8 @@ use crate::util::errors::{CargoResult, ManifestError};
 use crate::util::interning::InternedString;
 use crate::util::toml::{InheritableFields, read_manifest};
 use crate::util::{
-    Filesystem, GlobalContext, IntoUrl, context::CargoResolverConfig, context::ConfigRelativePath,
-    context::IncompatibleRustVersions,
+    Filesystem, GlobalContext, IntoUrl, closest_msg, context::CargoResolverConfig,
+    context::ConfigRelativePath, context::IncompatibleRustVersions,
 };
 
 use cargo_util::paths;
@@ -369,10 +373,9 @@ impl<'gctx> Workspace<'gctx> {
         };
 
         if let Some(lockfile_path) = config.lockfile_path {
-            if self.gctx().cli_unstable().lockfile_path {
-                // Reserve the ability to add templates in the future.
-                let replacements: [(&str, &str); 0] = [];
-                let path = lockfile_path
+            // Reserve the ability to add templates in the future.
+            let replacements: [(&str, &str); 0] = [];
+            let path = lockfile_path
                     .resolve_templated_path(self.gctx(), replacements)
                     .map_err(|e| match e {
                         context::ResolveTemplateError::UnexpectedVariable {
@@ -394,21 +397,16 @@ impl<'gctx> Workspace<'gctx> {
                             )
                         }
                     })?;
-                if !path.ends_with(LOCKFILE_NAME) {
-                    bail!("the `resolver.lockfile-path` must be a path to a {LOCKFILE_NAME} file");
-                }
-                if path.is_dir() {
-                    bail!(
-                        "`resolver.lockfile-path` `{}` is a directory but expected a file",
-                        path.display()
-                    );
-                }
-                self.requested_lockfile_path = Some(path);
-            } else {
-                self.gctx().shell().warn(
-                    "ignoring `resolver.lockfile-path`, pass `-Zlockfile-path` to enable it",
-                )?;
+            if !path.ends_with(LOCKFILE_NAME) {
+                bail!("the `resolver.lockfile-path` must be a path to a {LOCKFILE_NAME} file");
             }
+            if path.is_dir() {
+                bail!(
+                    "`resolver.lockfile-path` `{}` is a directory but expected a file",
+                    path.display()
+                );
+            }
+            self.requested_lockfile_path = Some(path);
         }
 
         Ok(())
@@ -1353,72 +1351,45 @@ impl<'gctx> Workspace<'gctx> {
             .unwrap_or(manifest::TomlToolLints::default());
 
         if self.gctx.cli_unstable().cargo_lints {
-            let mut verify_error_count = 0;
+            let mut stats = DiagnosticStats::new();
 
-            analyze_cargo_lints_table(
+            missing_lints_features(pkg.into(), &path, &cargo_lints, &mut stats, self.gctx)?;
+            unknown_lints(pkg.into(), &path, &cargo_lints, &mut stats, self.gctx)?;
+
+            check_im_a_teapot(pkg, &path, &cargo_lints, &mut stats, self.gctx)?;
+            implicit_minimum_version_req_pkg(pkg, &path, &cargo_lints, &mut stats, self.gctx)?;
+            non_kebab_case_packages(pkg, &path, &cargo_lints, &mut stats, self.gctx)?;
+            non_snake_case_packages(pkg, &path, &cargo_lints, &mut stats, self.gctx)?;
+            non_kebab_case_bins(self, pkg, &path, &cargo_lints, &mut stats, self.gctx)?;
+            non_kebab_case_features(pkg, &path, &cargo_lints, &mut stats, self.gctx)?;
+            non_snake_case_features(pkg, &path, &cargo_lints, &mut stats, self.gctx)?;
+            unused_build_dependencies_no_build_rs(pkg, &path, &cargo_lints, &mut stats, self.gctx)?;
+            redundant_readme(pkg, &path, &cargo_lints, &mut stats, self.gctx)?;
+            redundant_homepage(pkg, &path, &cargo_lints, &mut stats, self.gctx)?;
+            missing_lints_inheritance(self, pkg, &path, &cargo_lints, &mut stats, self.gctx)?;
+            text_direction_codepoint_in_comment(
                 pkg.into(),
                 &path,
                 &cargo_lints,
-                &mut verify_error_count,
+                &mut stats,
+                self.gctx,
+            )?;
+            text_direction_codepoint_in_literal(
+                pkg.into(),
+                &path,
+                &cargo_lints,
+                &mut stats,
                 self.gctx,
             )?;
 
-            if verify_error_count > 0 {
-                let plural = if verify_error_count == 1 { "" } else { "s" };
-                bail!("encountered {verify_error_count} error{plural} while verifying lints")
-            }
-
-            let mut run_error_count = 0;
-
-            check_im_a_teapot(pkg, &path, &cargo_lints, &mut run_error_count, self.gctx)?;
-            implicit_minimum_version_req_pkg(
-                pkg,
-                &path,
-                &cargo_lints,
-                &mut run_error_count,
-                self.gctx,
-            )?;
-            non_kebab_case_packages(pkg, &path, &cargo_lints, &mut run_error_count, self.gctx)?;
-            non_snake_case_packages(pkg, &path, &cargo_lints, &mut run_error_count, self.gctx)?;
-            non_kebab_case_bins(
-                self,
-                pkg,
-                &path,
-                &cargo_lints,
-                &mut run_error_count,
-                self.gctx,
-            )?;
-            non_kebab_case_features(pkg, &path, &cargo_lints, &mut run_error_count, self.gctx)?;
-            non_snake_case_features(pkg, &path, &cargo_lints, &mut run_error_count, self.gctx)?;
-            unused_build_dependencies_no_build_rs(
-                pkg,
-                &path,
-                &cargo_lints,
-                &mut run_error_count,
-                self.gctx,
-            )?;
-            redundant_readme(pkg, &path, &cargo_lints, &mut run_error_count, self.gctx)?;
-            redundant_homepage(pkg, &path, &cargo_lints, &mut run_error_count, self.gctx)?;
-            missing_lints_inheritance(
-                self,
-                pkg,
-                &path,
-                &cargo_lints,
-                &mut run_error_count,
-                self.gctx,
-            )?;
-
-            if run_error_count > 0 {
-                let plural = if run_error_count == 1 { "" } else { "s" };
-                bail!("encountered {run_error_count} error{plural} while running lints")
-            }
+            stats.report_summary("parse", Some(&*pkg.name()), self.gctx)?;
         }
 
         Ok(())
     }
 
     pub fn emit_ws_lints(&self) -> CargoResult<()> {
-        let mut run_error_count = 0;
+        let mut stats = DiagnosticStats::new();
 
         let cargo_lints = match self.root_maybe() {
             MaybePackage::Package(pkg) => {
@@ -1442,27 +1413,27 @@ impl<'gctx> Workspace<'gctx> {
         .unwrap_or(manifest::TomlToolLints::default());
 
         if self.gctx.cli_unstable().cargo_lints {
-            let mut verify_error_count = 0;
-
-            analyze_cargo_lints_table(
+            missing_lints_features(
                 (self, self.root_maybe()).into(),
                 self.root_manifest(),
                 &cargo_lints,
-                &mut verify_error_count,
+                &mut stats,
                 self.gctx,
             )?;
-
-            if verify_error_count > 0 {
-                let plural = if verify_error_count == 1 { "" } else { "s" };
-                bail!("encountered {verify_error_count} error{plural} while verifying lints")
-            }
+            unknown_lints(
+                (self, self.root_maybe()).into(),
+                self.root_manifest(),
+                &cargo_lints,
+                &mut stats,
+                self.gctx,
+            )?;
 
             unused_workspace_package_fields(
                 self,
                 self.root_maybe(),
                 self.root_manifest(),
                 &cargo_lints,
-                &mut run_error_count,
+                &mut stats,
                 self.gctx,
             )?;
             unused_workspace_dependencies(
@@ -1470,7 +1441,7 @@ impl<'gctx> Workspace<'gctx> {
                 self.root_maybe(),
                 self.root_manifest(),
                 &cargo_lints,
-                &mut run_error_count,
+                &mut stats,
                 self.gctx,
             )?;
             implicit_minimum_version_req_ws(
@@ -1478,7 +1449,21 @@ impl<'gctx> Workspace<'gctx> {
                 self.root_maybe(),
                 self.root_manifest(),
                 &cargo_lints,
-                &mut run_error_count,
+                &mut stats,
+                self.gctx,
+            )?;
+            text_direction_codepoint_in_comment(
+                (self, self.root_maybe()).into(),
+                self.root_manifest(),
+                &cargo_lints,
+                &mut stats,
+                self.gctx,
+            )?;
+            text_direction_codepoint_in_literal(
+                (self, self.root_maybe()).into(),
+                self.root_manifest(),
+                &cargo_lints,
+                &mut stats,
                 self.gctx,
             )?;
         }
@@ -1492,17 +1477,13 @@ impl<'gctx> Workspace<'gctx> {
                 self.root_maybe(),
                 self.root_manifest(),
                 &cargo_lints,
-                &mut run_error_count,
+                &mut stats,
                 self.gctx,
             )?;
         }
 
-        if run_error_count > 0 {
-            let plural = if run_error_count == 1 { "" } else { "s" };
-            bail!("encountered {run_error_count} error{plural} while running lints")
-        } else {
-            Ok(())
-        }
+        stats.report_summary("parse", None, self.gctx)?;
+        Ok(())
     }
 
     pub fn set_target_dir(&mut self, target_dir: Filesystem) {
@@ -1890,7 +1871,19 @@ impl<'gctx> Workspace<'gctx> {
                 && !cli_features.all_features
                 && cli_features.uses_default_features)
             {
-                bail!("cannot specify features for packages outside of workspace");
+                let hint = specs
+                    .iter()
+                    .map(|spec| {
+                        closest_msg(
+                            spec.name(),
+                            self.members(),
+                            |m| m.name().as_str(),
+                            "workspace member",
+                        )
+                    })
+                    .find(|msg| !msg.is_empty())
+                    .unwrap_or_default();
+                bail!("cannot specify features for packages outside of workspace{hint}");
             }
             // Add all members from the workspace so we can ensure `-p nonmember`
             // is in the resolve graph.

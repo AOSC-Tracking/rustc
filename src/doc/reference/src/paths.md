@@ -52,8 +52,14 @@ PathIdentSegment ->
     IDENTIFIER | `super` | `self` | `Self` | `crate` | `$crate`
 
 GenericArgs ->
-      `<` `>`
-    | `<` ( GenericArg `,` )* GenericArg `,`? `>`
+      `<` GenericArgList? `>`
+    | `(` TypeList? `)` (`->` TypeNoBounds)?
+
+GenericArgList ->
+    ( GenericArg `,` )* GenericArg `,`?
+
+TypeList ->
+    ( Type `,` )* Type `,`?
 
 GenericArg ->
     Lifetime | Type | GenericArgsConst | GenericArgsBinding | GenericArgsBounds
@@ -65,10 +71,10 @@ GenericArgsConst ->
     | SimplePathSegment
 
 GenericArgsBinding ->
-    IDENTIFIER GenericArgs? `=` Type
+    TypePathSegment `=` Type
 
 GenericArgsBounds ->
-    IDENTIFIER GenericArgs? `:` TypeParamBounds
+    TypePathSegment `:` Bounds
 ```
 
 r[paths.expr.intro]
@@ -154,15 +160,11 @@ r[paths.type.syntax]
 ```grammar,paths
 TypePath -> `::`? TypePathSegment (`::` TypePathSegment)*
 
-TypePathSegment -> PathIdentSegment (`::`? (GenericArgs | TypePathFn))?
-
-TypePathFn -> `(` TypePathFnInputs? `)` (`->` TypeNoBounds)?
-
-TypePathFnInputs -> Type (`,` Type)* `,`?
+TypePathSegment -> PathIdentSegment (`::`? GenericArgs)?
 ```
 
 r[paths.type.intro]
-Type paths are used within type definitions, trait bounds, type parameter bounds, and qualified paths.
+Type paths are used within type definitions, trait bounds, and qualified paths.
 
 r[paths.type.turbofish]
 Although the `::` token is allowed before the generics arguments, it is not required because there is no ambiguity like there is in [PathInExpression].
@@ -233,7 +235,30 @@ r[paths.qualifiers.mod-self.intro]
 `self` resolves the path relative to the current module.
 
 r[paths.qualifiers.mod-self.restriction]
-`self` can only be used as the first segment, without a preceding `::`.
+`self` may only be used as the first segment of a path (without a preceding `::`) or as the last segment (preceded by `::`).
+
+r[paths.qualifiers.mod-self.trailing]
+When `self` appears as the last segment of a path, it refers to the entity named by the preceding segment. The preceding path must resolve to a [module], [enumeration], or [trait].
+
+```rust
+mod m {
+    pub enum E { V1 }
+    pub trait Tr {}
+    pub(in crate::m::self) fn g() {} // OK: Modules can be parents of `self`.
+}
+type Ty = m::E::self; // OK: Enumerations can be parents of `self`.
+fn f<T: m::Tr::self>() {} // OK: Traits can be parents of `self`.
+# fn main() { let _: Ty = m::E::V1; }
+```
+
+```rust,compile_fail,E0223
+struct S;
+type Ty = S::self; // ERROR: Structs cannot be parents of `self`.
+# fn main() {}
+```
+
+> [!NOTE]
+> See [items.use.self] for additional rules about `self` in `use` declarations.
 
 r[paths.qualifiers.self-pat]
 In a method body, a path which consists of a single `self` segment resolves to the method's self parameter.
@@ -482,6 +507,7 @@ mod without { // crate::without
 [macro transcribers]: macros-by-example.md
 [macros]: macros.md
 [mbe]: macros-by-example.md
+[module]: items/modules.md
 [patterns]: patterns.md
 [struct]: items/structs.md
 [trait implementations]: items/implementations.md#trait-implementations

@@ -22,6 +22,12 @@ These tests exercise `#![feature(allocator_api)]` and the `#[global_allocator]` 
 
 See [Allocator traits and `std::heap` #32838](https://github.com/rust-lang/rust/issues/32838).
 
+## `tests/ui/allow-partial-mitigations`
+
+These tests exercise the support for mitigation coverage and the `allow-partial-mitigations` and `deny-partial-mitigations` options.
+
+See [RFC 3855](https://github.com/rust-lang/rfcs/pull/3855).
+
 ## `tests/ui/annotate-moves`
 
 These tests exercise the `annotate-moves` feature.
@@ -102,6 +108,10 @@ See:
 Tests focused on associated types. If the associated type is not in a trait definition, it belongs in the `tests/ui/associated-inherent-types/` directory. Aspects exercised include e.g. default associated types, overriding defaults, and type inference.
 
 See [Associated Types | Reference](https://doc.rust-lang.org/reference/items/associated-items.html#associated-types).
+
+## `tests/ui/assumptions_on_binders`: -Zassumptions-on-binders
+
+Tests focused on the -Zassumptions-on-binders flag.
 
 ## `tests/ui/async-await`: Async/Await
 
@@ -398,14 +408,6 @@ Tests for `#[deprecated]` attribute and `deprecated_in_future` internal lint.
 
 Tests for `Deref` and `DerefMut` traits.
 
-## `tests/ui/deref-patterns`: `#![feature(deref_patterns)]` and `#![feature(string_deref_patterns)]`
-
-Tests for `#![feature(deref_patterns)]` and `#![feature(string_deref_patterns)]`. See [Deref patterns | The Unstable book](https://doc.rust-lang.org/nightly/unstable-book/language-features/deref-patterns.html).
-
-**FIXME**: May have some overlap with `tests/ui/pattern/deref-patterns`.
-
-See [`std::ops::Deref`](https://doc.rust-lang.org/std/ops/trait.Deref.html) and [`std::ops::DerefMut`](https://doc.rust-lang.org/std/ops/trait.DerefMut.html)
-
 ## `tests/ui/derived-errors/`: Derived Error Messages
 
 Tests for quality of diagnostics involving suppression of cascading errors in some cases to avoid overwhelming the user.
@@ -413,10 +415,6 @@ Tests for quality of diagnostics involving suppression of cascading errors in so
 ## `tests/ui/derives/`: Derive Macro
 
 Tests for built-in derive macros (`Debug`, `Clone`, etc.) when used in conjunction with built-in `#[derive(..)]` attributes.
-
-## `tests/ui/deriving/`: Derive Macro
-
-**FIXME**: Coalesce with `tests/ui/derives`.
 
 ## `tests/ui/dest-prop/` Destination Propagation
 
@@ -933,6 +931,10 @@ Tests on the module system.
 
 **FIXME**: `tests/ui/imports/` should probably be merged with this.
 
+## `tests/ui/move-expr/`
+
+Tests for `#![feature(move_expr)]`.
+
 ## `tests/ui/moves`
 
 Tests on moves (destructive moves).
@@ -1165,14 +1167,6 @@ Exercises `[Type; n]` syntax for creating arrays with repeated types across a se
 ## `tests/ui/repr/`: `#[repr(_)]`
 
 Tests on the `#[repr(..)]` attribute. See [Representations | Reference](https://doc.rust-lang.org/reference/type-layout.html#representations).
-
-## `tests/ui/reserved/`
-
-Reserved keywords and attribute names.
-
-See e.g. [Reserved keywords | Reference](https://doc.rust-lang.org/reference/keywords.html).
-
-**FIXME**: maybe merge under `tests/ui/keyword/`.
 
 ## `tests/ui/resolve/`: Name resolution
 
@@ -1500,12 +1494,6 @@ See [Uninhabited | Reference](https://doc.rust-lang.org/reference/glossary.html?
 
 See [Unions | Reference](https://doc.rust-lang.org/reference/items/unions.html).
 
-## `tests/ui/unknown-unstable-lints/`: Attempting to refer to an unstable lint which does not exist
-
-Tests for trying to use non-existent unstable lints.
-
-**FIXME**: move this under `tests/ui/lints/`.
-
 ## `tests/ui/unop/`: Unary operators `-`, `*` and `!`
 
 Tests the three unary operators for negating, dereferencing and inverting, across different contexts.
@@ -1581,6 +1569,21 @@ Tests on various well-formedness checks, e.g. [Type-checking normal functions](h
 ## `tests/ui/where-clauses/`
 
 Tests on `where` clauses. See [Where clauses | Reference](https://doc.rust-lang.org/reference/items/generics.html#where-clauses).
+
+## `tests/ui/whitespace/`
+
+Tests for whitespace handling in the Rust lexer. The Rust language
+defines whitespace as Unicode Pattern_White_Space, which is not the
+same as what the standard library gives you:
+
+- `is_ascii_whitespace` follows the WhatWG Infra Standard and skips
+  vertical tab (`\x0B`)
+- `is_whitespace` matches Unicode White_Space, which is a broader set
+
+These tests make that gap visible and check that the lexer accepts
+all 11 Pattern_White_Space characters correctly.
+
+See: https://github.com/rustfoundation/interop-initiative/issues/53
 
 ## `tests/ui/windows-subsystem/`: `#![windows_subsystem = ""]`
 

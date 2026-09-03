@@ -47,9 +47,9 @@ ENV \
     CFLAGS_x86_64_fortanix_unknown_sgx="-D__ELF__ -isystem/usr/include/x86_64-linux-gnu -mlvi-hardening -mllvm -x86-experimental-lvi-inline-asm-hardening" \
     CXX_x86_64_fortanix_unknown_sgx=clang++-11 \
     CXXFLAGS_x86_64_fortanix_unknown_sgx="-D__ELF__ -isystem/usr/include/x86_64-linux-gnu -mlvi-hardening -mllvm -x86-experimental-lvi-inline-asm-hardening" \
-    AR_i686_unknown_freebsd=i686-unknown-freebsd12-ar \
-    CC_i686_unknown_freebsd=i686-unknown-freebsd12-clang \
-    CXX_i686_unknown_freebsd=i686-unknown-freebsd12-clang++ \
+    AR_i686_unknown_freebsd=i686-unknown-freebsd14-ar \
+    CC_i686_unknown_freebsd=i686-unknown-freebsd14-clang \
+    CXX_i686_unknown_freebsd=i686-unknown-freebsd14-clang++ \
     CC_aarch64_unknown_uefi=clang-11 \
     CXX_aarch64_unknown_uefi=clang++-11 \
     CC_i686_unknown_uefi=clang-11 \
@@ -84,9 +84,9 @@ RUN /tmp/build-fuchsia-toolchain.sh
 COPY host-x86_64/dist-various-2/build-x86_64-fortanix-unknown-sgx-toolchain.sh /tmp/
 RUN /tmp/build-x86_64-fortanix-unknown-sgx-toolchain.sh
 
-RUN curl -L https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-30/wasi-sdk-30.0-x86_64-linux.tar.gz | \
+RUN curl -L https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-33/wasi-sdk-33.0-x86_64-linux.tar.gz | \
   tar -xz
-ENV WASI_SDK_PATH=/tmp/wasi-sdk-30.0-x86_64-linux
+ENV WASI_SDK_PATH=/tmp/wasi-sdk-33.0-x86_64-linux
 
 COPY scripts/freebsd-toolchain.sh /tmp/
 RUN /tmp/freebsd-toolchain.sh i686

@@ -274,7 +274,7 @@ r[attributes.codegen.target_feature.x86]
 #### `x86` or `x86_64`
 
 Executing code with unsupported features is undefined behavior on this platform.
-Hence on this platform usage of `#[target_feature]` functions follows the
+Hence on this platform use of `#[target_feature]` functions follows the
 [above restrictions][attributes.codegen.target_feature.safety-restrictions].
 
 Feature     | Implicitly Enables | Description
@@ -399,7 +399,7 @@ Feature     | Implicitly Enables | Description
 r[attributes.codegen.target_feature.aarch64]
 #### `aarch64`
 
-On this platform the usage of `#[target_feature]` functions follows the
+On this platform the use of `#[target_feature]` functions follows the
 [above restrictions][attributes.codegen.target_feature.safety-restrictions].
 
 Further documentation on these features can be found in the [ARM Architecture
@@ -462,7 +462,7 @@ Feature        | Implicitly Enables | Feature Name
 r[attributes.codegen.target_feature.loongarch]
 #### `loongarch`
 
-On this platform the usage of `#[target_feature]` functions follows the
+On this platform the use of `#[target_feature]` functions follows the
 [above restrictions][attributes.codegen.target_feature.safety-restrictions].
 
 Feature     | Implicitly Enables  | Description
@@ -474,6 +474,11 @@ Feature     | Implicitly Enables  | Description
 `lbt`       |                     | [LBT][la-lbt] --- Binary translation instructions
 `lsx`       | `d`                 | [LSX][la-lsx] --- 128-bit vector instructions
 `lvz`       |                     | [LVZ][la-lvz] --- Virtualization instructions
+`div32`     |                     | [DIV32][la-div32] --- Division instructions accepting non-sign-extended 32-bit operands
+`lam-bh`    |                     | [LAM-BH][la-lam-bh] --- Atomic swap and add instructions for byte and halfword
+`lamcas`    |                     | [LAMCAS][la-lamcas] --- Atomic compare-and-swap instructions for byte, halfword, word, and doubleword
+`ld-seq-sa` |                     | [LD-SEQ-SA][la-ld-seq-sa] --- Sequential ordering of load operations to the same address
+`scq`       |                     | [SCQ][la-scq] --- Store-conditional quadword instructions
 
 <!-- Keep links near each table to make it easier to move and update. -->
 
@@ -484,11 +489,16 @@ Feature     | Implicitly Enables  | Description
 [la-lbt]: https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#cpucfg-lbt_x86
 [la-lsx]: https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#cpucfg-lsx
 [la-lvz]: https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#cpucfg-lvz
+[la-div32]: https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#cpucfg-div32
+[la-lam-bh]: https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#cpucfg-lam_bh
+[la-lamcas]: https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#cpucfg-lamcas
+[la-ld-seq-sa]: https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#cpucfg-ld_seq_sa
+[la-scq]: https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#cpucfg-scq
 
 r[attributes.codegen.target_feature.riscv]
 #### `riscv32` or `riscv64`
 
-On this platform the usage of `#[target_feature]` functions follows the
+On this platform the use of `#[target_feature]` functions follows the
 [above restrictions][attributes.codegen.target_feature.safety-restrictions].
 
 Further documentation on these features can be found in their respective

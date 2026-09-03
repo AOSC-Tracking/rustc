@@ -56,7 +56,6 @@ This API is completely unstable and subject to change.
 */
 
 // tidy-alphabetical-start
-#![cfg_attr(bootstrap, feature(assert_matches))]
 #![feature(default_field_values)]
 #![feature(gen_blocks)]
 #![feature(iter_intersperse)]
@@ -90,7 +89,7 @@ use rustc_middle::mir::interpret::GlobalId;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::{Const, Ty, TyCtxt};
 use rustc_middle::{middle, ty};
-use rustc_session::parse::feature_err;
+use rustc_session::errors::feature_err;
 use rustc_span::{ErrorGuaranteed, Span};
 use rustc_trait_selection::traits;
 
@@ -98,7 +97,7 @@ pub use crate::collect::suggest_impl_trait;
 use crate::hir_ty_lowering::HirTyLowerer;
 
 fn check_c_variadic_abi(tcx: TyCtxt<'_>, decl: &hir::FnDecl<'_>, abi: ExternAbi, span: Span) {
-    if !decl.c_variadic {
+    if !decl.c_variadic() {
         // Not even a variadic function.
         return;
     }

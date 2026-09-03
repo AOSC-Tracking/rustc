@@ -40,8 +40,8 @@ use walkdir::WalkDir;
 
 use self::directives::{EarlyProps, make_test_description};
 use crate::common::{
-    CodegenBackend, CompareMode, Config, Debugger, PassMode, TestMode, TestPaths, UI_EXTENSIONS,
-    expected_output_path, output_base_dir, output_relative_path,
+    CodegenBackend, CompareMode, Config, Debugger, ForcePassMode, TestMode, TestPaths,
+    UI_EXTENSIONS, expected_output_path, output_base_dir, output_relative_path,
 };
 use crate::directives::{AuxProps, DirectivesCache, FileDirectives};
 use crate::edition::parse_edition;
@@ -134,6 +134,11 @@ fn parse_config(args: Vec<String>) -> Config {
         )
         .optflag("", "optimize-tests", "run tests with optimizations enabled")
         .optflag("", "verbose", "run tests verbosely, showing all output")
+        .optflag(
+            "",
+            "verbose-run-make-subprocess-output",
+            "show verbose subprocess output for successful run-make tests",
+        )
         .optflag(
             "",
             "bless",
@@ -441,7 +446,7 @@ fn parse_config(args: Vec<String>) -> Config {
         skip: matches.opt_strs("skip"),
         filter_exact: matches.opt_present("exact"),
         force_pass_mode: matches.opt_str("pass").map(|mode| {
-            mode.parse::<PassMode>()
+            mode.parse::<ForcePassMode>()
                 .unwrap_or_else(|_| panic!("unknown `--pass` option `{}` given", mode))
         }),
         // FIXME: this run scheme is... confusing.
@@ -471,6 +476,8 @@ fn parse_config(args: Vec<String>) -> Config {
         adb_test_dir,
         adb_device_status,
         verbose: matches.opt_present("verbose"),
+        verbose_run_make_subprocess_output: matches
+            .opt_present("verbose-run-make-subprocess-output"),
         only_modified: matches.opt_present("only-modified"),
         remote_test_client: matches.opt_str("remote-test-client").map(Utf8PathBuf::from),
         compare_mode,

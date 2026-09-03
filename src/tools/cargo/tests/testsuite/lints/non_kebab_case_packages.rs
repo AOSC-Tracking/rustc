@@ -36,6 +36,7 @@ non_kebab_case_packages = "warn"
 3 - name = "foo_bar"
 3 + name = "foo-bar"
   |
+[WARNING] `foo_bar` (manifest) generated 1 warning
 [CHECKING] foo_bar v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -61,6 +62,7 @@ fn main() {}"#,
         .masquerade_as_nightly_cargo(&["cargo-lints", "script"])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
+[HELP] to pin the edition, run `cargo fix --manifest-path [ROOT]/foo/foo_bar`
 [WARNING] packages should have a kebab-case name
  --> foo_bar
   = [NOTE] `cargo::non_kebab_case_packages` is set to `warn` in `[lints]`
@@ -80,6 +82,7 @@ fn main() {}"#,
 1 - foo_bar
 1 + foo-bar
   |
+[WARNING] `foo_bar` (manifest) generated 2 warnings
 [CHECKING] foo_bar v0.0.0 ([ROOT]/foo/foo_bar)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 

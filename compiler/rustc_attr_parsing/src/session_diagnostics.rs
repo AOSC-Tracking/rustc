@@ -397,6 +397,13 @@ pub(crate) struct UnusedMultiple {
 }
 
 #[derive(Diagnostic)]
+#[diag("`export_name` may not be empty")]
+pub(crate) struct EmptyExportName {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
 #[diag("`export_name` may not contain null characters", code = E0648)]
 pub(crate) struct NullOnExport {
     #[primary_span]
@@ -406,6 +413,13 @@ pub(crate) struct NullOnExport {
 #[derive(Diagnostic)]
 #[diag("`link_section` may not contain null characters", code = E0648)]
 pub(crate) struct NullOnLinkSection {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag("link name may not contain null characters", code = E0648)]
+pub(crate) struct NullOnLinkName {
     #[primary_span]
     pub span: Span,
 }
@@ -557,6 +571,7 @@ pub(crate) enum AttributeParseErrorReason<'a> {
         upper_bound: isize,
     },
     ExpectedAtLeastOneArgument,
+    ExpectedArgument,
     ExpectedSingleArgument,
     ExpectedList,
     ExpectedListOrNoArgs,
@@ -567,6 +582,7 @@ pub(crate) enum AttributeParseErrorReason<'a> {
     ExpectedNonEmptyStringLiteral,
     ExpectedNotLiteral,
     ExpectedNameValue(Option<Symbol>),
+    MissingNameValue(Symbol),
     DuplicateKey(Symbol),
     ExpectedSpecificArgument {
         possibilities: &'a [Symbol],
@@ -773,6 +789,10 @@ impl<'a, G: EmissionGuarantee> Diagnostic<'a, G> for AttributeParseError<'_> {
                 diag.span_label(self.span, "expected a single argument here");
                 diag.code(E0805);
             }
+            AttributeParseErrorReason::ExpectedArgument => {
+                diag.span_label(self.span, "expected an argument here");
+                diag.code(E0805);
+            }
             AttributeParseErrorReason::ExpectedAtLeastOneArgument => {
                 diag.span_label(self.span, "expected at least 1 argument here");
             }
@@ -817,6 +837,9 @@ impl<'a, G: EmissionGuarantee> Diagnostic<'a, G> for AttributeParseError<'_> {
                     self.span,
                     format!("expected this to be of the form `{name} = \"...\"`"),
                 );
+            }
+            AttributeParseErrorReason::MissingNameValue(name) => {
+                diag.span_label(self.span, format!("missing argument `{name} = \"...\"`"));
             }
             AttributeParseErrorReason::ExpectedSpecificArgument {
                 possibilities,
@@ -976,13 +999,6 @@ pub(crate) struct LinkRequiresName {
 }
 
 #[derive(Diagnostic)]
-#[diag("link name must not contain NUL characters if link kind is `raw-dylib`")]
-pub(crate) struct RawDylibNoNul {
-    #[primary_span]
-    pub span: Span,
-}
-
-#[derive(Diagnostic)]
 #[diag("link kind `raw-dylib` is only supported on Windows targets", code = E0455)]
 pub(crate) struct RawDylibOnlyWindows {
     #[primary_span]
@@ -1127,4 +1143,23 @@ pub(crate) struct UnstableAttrForAlreadyStableFeature {
     pub attr_span: Span,
     #[label("the stability attribute annotates this item")]
     pub item_span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag("invalid Mach-O section specifier")]
+pub(crate) struct InvalidMachoSection {
+    #[primary_span]
+    #[label("not a valid Mach-O section specifier")]
+    pub name_span: Span,
+    #[subdiagnostic]
+    pub reason: InvalidMachoSectionReason,
+}
+
+#[derive(Subdiagnostic)]
+pub(crate) enum InvalidMachoSectionReason {
+    #[note("a Mach-O section specifier requires a segment and a section, separated by a comma")]
+    #[help("an example of a valid Mach-O section specifier is `__TEXT,__cstring`")]
+    MissingSection,
+    #[note("section name `{$section}` is longer than 16 bytes")]
+    SectionTooLong { section: String },
 }

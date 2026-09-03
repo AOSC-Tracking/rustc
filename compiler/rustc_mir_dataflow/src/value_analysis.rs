@@ -9,7 +9,7 @@ use rustc_index::IndexVec;
 use rustc_index::bit_set::DenseBitSet;
 use rustc_middle::mir::visit::{PlaceContext, Visitor};
 use rustc_middle::mir::*;
-use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_middle::ty::{self, Ty, TyCtxt, Unnormalized};
 use tracing::debug;
 
 use crate::JoinSemiLattice;
@@ -441,7 +441,7 @@ impl<'tcx> Map<'tcx> {
             for stmt in bbdata.statements.iter() {
                 let Some((lhs, rhs)) = stmt.kind.as_assign() else { continue };
                 match rhs {
-                    Rvalue::Use(Operand::Move(rhs) | Operand::Copy(rhs))
+                    Rvalue::Use(Operand::Move(rhs) | Operand::Copy(rhs), _)
                     | Rvalue::CopyForDeref(rhs) => {
                         let Some(lhs) = self.register_place_and_discr(tcx, body, *lhs) else {
                             continue;
@@ -544,7 +544,9 @@ impl<'tcx> Map<'tcx> {
                 break;
             }
 
-            if let Ok(ty) = tcx.try_normalize_erasing_regions(typing_env, place_info.ty) {
+            if let Ok(ty) =
+                tcx.try_normalize_erasing_regions(typing_env, Unnormalized::new_wip(place_info.ty))
+            {
                 place_info.ty = ty;
             }
 
@@ -666,7 +668,9 @@ impl<'tcx> Map<'tcx> {
             return Some(value);
         }
 
-        if let Ok(ty) = tcx.try_normalize_erasing_regions(typing_env, place_info.ty) {
+        if let Ok(ty) =
+            tcx.try_normalize_erasing_regions(typing_env, Unnormalized::new_wip(place_info.ty))
+        {
             place_info.ty = ty;
         }
 
@@ -1066,9 +1070,10 @@ pub fn iter_fields<'tcx>(
                 let variant = if def.is_struct() { None } else { Some(v_index) };
                 for (f_index, f_def) in v_def.fields.iter().enumerate() {
                     let field_ty = f_def.ty(tcx, args);
-                    let field_ty = tcx
-                        .try_normalize_erasing_regions(typing_env, field_ty)
-                        .unwrap_or_else(|_| tcx.erase_and_anonymize_regions(field_ty));
+                    let field_ty =
+                        tcx.try_normalize_erasing_regions(typing_env, field_ty).unwrap_or_else(
+                            |_| tcx.erase_and_anonymize_regions(field_ty.skip_norm_wip()),
+                        );
                     f(variant, f_index.into(), field_ty);
                 }
             }

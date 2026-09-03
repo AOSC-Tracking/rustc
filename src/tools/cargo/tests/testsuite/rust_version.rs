@@ -164,11 +164,12 @@ fn lint_dep_incompatible_with_rust_version() {
         .run();
     p.cargo("check")
         .with_status(101)
-        .with_stderr_data(str![[r#"
+        .with_stderr_data(
+            str![[r#"
 [DOWNLOADING] crates ...
-[DOWNLOADED] too_new_parent v0.0.1 (registry `dummy-registry`)
-[DOWNLOADED] too_new_child v0.0.1 (registry `dummy-registry`)
 [DOWNLOADED] rustc_compatible v0.0.1 (registry `dummy-registry`)
+[DOWNLOADED] too_new_child v0.0.1 (registry `dummy-registry`)
+[DOWNLOADED] too_new_parent v0.0.1 (registry `dummy-registry`)
 [ERROR] rustc [..] is not supported by the following packages:
   too_new_child@0.0.1 requires rustc 1.2345.0
   too_new_parent@0.0.1 requires rustc 1.2345.0
@@ -177,7 +178,9 @@ Either upgrade rustc or select compatible dependency versions with
 where `<compatible-ver>` is the latest version supporting rustc [..]
 
 
-"#]])
+"#]]
+            .unordered(),
+        )
         .run();
     p.cargo("check --ignore-rust-version").run();
 }

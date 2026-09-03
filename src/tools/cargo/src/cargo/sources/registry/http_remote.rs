@@ -18,7 +18,6 @@ use crate::util::cache_lock::CacheLockMode;
 use crate::util::errors::CargoResult;
 use crate::util::errors::HttpNotSuccessful;
 use crate::util::interning::InternedString;
-use crate::util::network::http_async::ResponsePartsExtensions;
 use crate::util::network::retry::Retry;
 use crate::util::network::retry::RetryResult;
 use anyhow::Context as _;
@@ -27,6 +26,7 @@ use cargo_util::paths;
 use futures::lock::Mutex;
 use http::HeaderName;
 use http::HeaderValue;
+use http::Response;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -302,8 +302,8 @@ impl<'gctx> RegistryData for HttpRegistry<'gctx> {
         self.inner().progress.replace(None);
     }
 
-    fn download(&self, pkg: PackageId, checksum: &str) -> CargoResult<MaybeLock> {
-        let registry_config = crate::util::block_on(self.config())?;
+    async fn download(&self, pkg: PackageId, checksum: &str) -> CargoResult<MaybeLock> {
+        let registry_config = self.config().await?;
         download::download(
             &self.inner().crate_cache_path,
             &self.inner().gctx,
@@ -314,7 +314,12 @@ impl<'gctx> RegistryData for HttpRegistry<'gctx> {
         )
     }
 
-    fn finish_download(&self, pkg: PackageId, checksum: &str, data: &[u8]) -> CargoResult<File> {
+    async fn finish_download(
+        &self,
+        pkg: PackageId,
+        checksum: &str,
+        data: &[u8],
+    ) -> CargoResult<File> {
         download::finish_download(
             &self.inner().crate_cache_path,
             &self.inner().gctx,
@@ -476,11 +481,6 @@ impl<'gctx> HttpBackend<'gctx> {
         if self.offline() {
             return Ok(LoadResponse::NotFound);
         }
-
-        if !self.fresh.borrow_mut().insert(path.to_string()) {
-            warn!("downloaded the index file `{path}` twice");
-        }
-
         let mut r = Retry::new(self.gctx)?;
         self.pending.update(|v| v + 1);
         let response = loop {
@@ -494,6 +494,9 @@ impl<'gctx> HttpBackend<'gctx> {
             }
         };
         self.pending.update(|v| v - 1);
+        if !self.fresh.borrow_mut().insert(path.to_string()) {
+            warn!("downloaded the index file `{path}` twice");
+        }
         response
     }
 
@@ -601,17 +604,10 @@ impl<'gctx> HttpBackend<'gctx> {
                     }
                 }
 
-                let mut err = Err(HttpNotSuccessful {
-                    code: http::StatusCode::UNAUTHORIZED.as_u16() as u32,
-                    body: body,
-                    url: full_url,
-                    ip: None,
-                    headers: response
-                        .headers
-                        .iter()
-                        .map(|(k, v)| format!("{}: {}", k, v.to_str().unwrap_or_default()))
-                        .collect(),
-                }
+                let mut err = Err(HttpNotSuccessful::new_from_response(
+                    Response::from_parts(response, body),
+                    &full_url,
+                )
                 .into());
                 if self.auth_required.get() {
                     let auth_error = auth::AuthorizationError::new(
@@ -624,17 +620,10 @@ impl<'gctx> HttpBackend<'gctx> {
                 }
                 err
             }
-            code => Err(HttpNotSuccessful {
-                code: code.as_u16() as u32,
-                body: body,
-                url: full_url,
-                ip: response.client_ip().map(str::to_owned),
-                headers: response
-                    .headers
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.to_str().unwrap_or_default()))
-                    .collect(),
-            }
+            _ => Err(HttpNotSuccessful::new_from_response(
+                Response::from_parts(response, body),
+                &full_url,
+            )
             .into()),
         }
     }

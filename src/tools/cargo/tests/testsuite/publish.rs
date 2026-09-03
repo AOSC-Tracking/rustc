@@ -2420,10 +2420,8 @@ fn api_error_code() {
 Caused by:
   failed to get a 200 OK response, got 400
   headers:
-  	HTTP/1.1 400
-  	Content-Length: 7
-  	Connection: close
-  	
+  	content-length: 7
+  	connection: close
   body:
   go away
 
@@ -3406,6 +3404,112 @@ fn timeout_waiting_for_publish() {
 [WARNING] timed out waiting for delay v0.0.1 to be available in registry `crates-io`
   |
   = [NOTE] the registry may have a backlog that is delaying making the crate available. The crate should be available soon.
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn wait_for_workspace_publish() {
+    let arc: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+
+    let registry = registry::RegistryBuilder::new()
+        .http_api()
+        .http_index()
+        .add_responder("/index/1/c", move |req, server| {
+            let mut lock = arc.lock().unwrap();
+            *lock += 1;
+            // 3 queries come from resolving `c` during packaging of `a`
+            // 3 more from the wait loop while `b` and `c` are being confirmed
+            // `c` becomes available on the 7th query, unblocking `a`
+            if *lock <= 6 {
+                server.not_found(req)
+            } else {
+                server.index(req)
+            }
+        })
+        .build();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [workspace]
+            members = ["a", "b", "c"]
+            "#,
+        )
+        .file(
+            "a/Cargo.toml",
+            r#"
+            [package]
+            name = "a"
+            version = "1.0.0"
+            edition = "2015"
+            license = "MIT"
+            description = "a"
+            repository = "a"
+
+            [dependencies]
+            b = { version = "1.0", path = "../b" }
+            c = { version = "1.0", path = "../c" }
+            "#,
+        )
+        .file("a/src/lib.rs", "")
+        .file(
+            "b/Cargo.toml",
+            r#"
+            [package]
+            name = "b"
+            version = "1.0.0"
+            edition = "2015"
+            license = "MIT"
+            description = "b"
+            repository = "b"
+            "#,
+        )
+        .file("b/src/lib.rs", "")
+        .file(
+            "c/Cargo.toml",
+            r#"
+            [package]
+            name = "c"
+            version = "1.0.0"
+            edition = "2015"
+            license = "MIT"
+            description = "c"
+            repository = "c"
+            "#,
+        )
+        .file("c/src/lib.rs", "")
+        .build();
+
+    p.cargo("publish --workspace --no-verify")
+        .replace_crates_io(registry.index_url())
+        .with_status(0)
+        .with_stderr_data(str![[r#"
+[UPDATING] crates.io index
+[PACKAGING] b v1.0.0 ([ROOT]/foo/b)
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] c v1.0.0 ([ROOT]/foo/c)
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGING] a v1.0.0 ([ROOT]/foo/a)
+[UPDATING] crates.io index
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[UPLOADING] b v1.0.0 ([ROOT]/foo/b)
+[UPLOADED] b v1.0.0 to registry `crates-io`
+[UPLOADING] c v1.0.0 ([ROOT]/foo/c)
+[UPLOADED] c v1.0.0 to registry `crates-io`
+[NOTE] waiting for b v1.0.0 or c v1.0.0 to be available at registry `crates-io`.
+      1 remaining crate to be published
+[PUBLISHED] b v1.0.0 at registry `crates-io`
+[NOTE] waiting for c v1.0.0 to be available at registry `crates-io`.
+      1 remaining crate to be published
+[PUBLISHED] c v1.0.0 at registry `crates-io`
+[UPLOADING] a v1.0.0 ([ROOT]/foo/a)
+[UPLOADED] a v1.0.0 to registry `crates-io`
+[NOTE] waiting for a v1.0.0 to be available at registry `crates-io`
+[HELP] you may press ctrl-c to skip waiting; the crate should be available shortly
+[PUBLISHED] a v1.0.0 at registry `crates-io`
 
 "#]])
         .run();
@@ -4584,11 +4688,9 @@ fn workspace_publish_rate_limit_error() {
 Caused by:
   failed to get a 200 OK response, got 429
   headers:
-  	HTTP/1.1 429
-  	Content-Length: 172
-  	Connection: close
-  	Retry-After: 3600
-  	
+  	content-length: 172
+  	connection: close
+  	retry-after: 3600
   body:
   You have published too many new crates in a short period of time. Please try again after Fri, 18 Jul 2025 20:00:34 GMT or email help@crates.io to have your limit increased.
 

@@ -31,8 +31,8 @@ use crate::core::{
 use crate::core::{Dependency, Manifest, Package, PackageId, Summary, Target};
 use crate::core::{Edition, EitherManifest, Feature, Features, VirtualManifest, Workspace};
 use crate::core::{GitReference, PackageIdSpec, SourceId, WorkspaceConfig, WorkspaceRootConfig};
-use crate::lints::get_key_value_span;
-use crate::lints::rel_cwd_manifest_path;
+use crate::diagnostics::get_key_value_span;
+use crate::diagnostics::rel_cwd_manifest_path;
 use crate::sources::{CRATES_IO_INDEX, CRATES_IO_REGISTRY};
 use crate::util::errors::{CargoResult, ManifestError};
 use crate::util::interning::InternedString;
@@ -633,9 +633,14 @@ fn normalize_package_toml<'a>(
             if is_embedded {
                 const DEFAULT_EDITION: crate::core::features::Edition =
                     crate::core::features::Edition::LATEST_STABLE;
-                let report = [Group::with_title(Level::WARNING.secondary_title(format!(
+                let mut report = vec![Group::with_title(Level::WARNING.secondary_title(format!(
                     "`package.edition` is unspecified, defaulting to the latest edition (currently `{DEFAULT_EDITION}`)"
                 )))];
+                if !matches!(gctx.shell().verbosity(), cargo_util_terminal::Verbosity::Quiet) {
+                    report.push(Group::with_title(Level::HELP.secondary_title(format!(
+                        "to pin the edition, run `cargo fix --manifest-path {}`", manifest_file.display()
+                    ))));
+                }
                 let _ = gctx.shell().print_report(&report, true);
                 Some(manifest::InheritableField::Value(
                     DEFAULT_EDITION.to_string(),
@@ -2717,7 +2722,6 @@ supported tools: {}",
 }
 
 static EXPECTED_LINT_CONFIG: &[(&str, &str, &str)] = &[
-    ("cargo", "unused_dependencies", "ignore"),
     // forwarded to rustc/rustdoc
     ("rust", "unexpected_cfgs", "check-cfg"),
 ];

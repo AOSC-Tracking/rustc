@@ -40,6 +40,7 @@ non_kebab_case_bins = "warn"
 9 - name = "foo_bar"
 9 + name = "foo-bar"
   |
+[WARNING] `foo` (manifest) generated 1 warning
 [CHECKING] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -89,6 +90,7 @@ non_kebab_case_bins = "warn"
 11 + name = "foo-bar"
 12 + path = "src/main.rs"
    |
+[WARNING] `foo_bar` (manifest) generated 1 warning
 [CHECKING] foo_bar v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -129,6 +131,7 @@ non_kebab_case_bins = "warn"
 1 - src/bin/foo_bar.rs
 1 + src/bin/foo-bar.rs
   |
+[WARNING] `foo` (manifest) generated 1 warning
 [CHECKING] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -154,6 +157,7 @@ fn main() {}"#,
         .masquerade_as_nightly_cargo(&["cargo-lints", "script"])
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
+[HELP] to pin the edition, run `cargo fix --manifest-path [ROOT]/foo/foo_bar`
 [WARNING] binaries should have a kebab-case name
   |
 1 | [ROOT]/home/.cargo/build/[HASH]/target/.../foo_bar[EXE]
@@ -165,6 +169,7 @@ fn main() {}"#,
 1 - foo_bar
 1 + foo-bar
   |
+[WARNING] `foo_bar` (manifest) generated 1 warning
 [CHECKING] foo_bar v0.0.0 ([ROOT]/foo/foo_bar)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 

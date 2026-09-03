@@ -53,7 +53,7 @@ r[items.fn.implicit-return]
 If the output type is not explicitly stated, it is the [unit type].
 
 r[items.fn.fn-item-type]
-When referred to, a _function_ yields a first-class *value* of the corresponding zero-sized [*function item type*], which when called evaluates to a direct call to the function.
+When referred to, a _function_ yields a first-class *value* of the corresponding [zero-sized] [*function item type*], which when called evaluates to a direct call to the function.
 
 For example, this is a simple function:
 
@@ -122,7 +122,7 @@ r[items.fn.generics.param-names]
 Inside the function signature and body, the name of the type parameter can be used as a type name.
 
 r[items.fn.generics.param-bounds]
-[Trait] bounds can be specified for type parameters to allow methods with that trait to be called on values of that type. This is specified using the `where` syntax:
+[Trait] bounds can be specified for type parameters to allow methods from that trait to be called on values of that type. This is specified using the `where` syntax:
 
 ```rust
 # use std::fmt::Debug;
@@ -426,3 +426,4 @@ fn foo_oof(#[some_inert_attribute] arg: u8) {
 [value namespace]: ../names/namespaces.md
 [variadic function]: external-blocks.md#variadic-functions
 [`extern` block]: external-blocks.md
+[zero-sized]: glossary.zst

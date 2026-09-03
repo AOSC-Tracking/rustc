@@ -69,13 +69,10 @@ use crate::{fmt, hash, intrinsics, mem, ptr};
 /// [null pointer optimization]: crate::option#representation
 #[stable(feature = "nonnull", since = "1.25.0")]
 #[repr(transparent)]
-#[rustc_layout_scalar_valid_range_start(1)]
 #[rustc_nonnull_optimization_guaranteed]
 #[rustc_diagnostic_item = "NonNull"]
 pub struct NonNull<T: PointeeSized> {
-    // Remember to use `.as_ptr()` instead of `.pointer`, as field projecting to
-    // this is banned by <https://github.com/rust-lang/compiler-team/issues/807>.
-    pointer: *const T,
+    pointer: crate::pattern_type!(*const T is !null),
 }
 
 /// `NonNull` pointers are not `Send` because the data they reference may be aliased.
@@ -1119,12 +1116,12 @@ impl<T: PointeeSized> NonNull<T> {
     #[inline(always)]
     #[stable(feature = "non_null_convenience", since = "1.80.0")]
     #[rustc_const_unstable(feature = "const_drop_in_place", issue = "109342")]
-    pub const unsafe fn drop_in_place(self)
+    pub const unsafe fn drop_in_place(mut self)
     where
         T: [const] Destruct,
     {
         // SAFETY: the caller must uphold the safety contract for `drop_in_place`.
-        unsafe { ptr::drop_in_place(self.as_ptr()) }
+        unsafe { ptr::drop_glue(self.as_mut()) }
     }
 
     /// Overwrites a memory location with the given value without reading or

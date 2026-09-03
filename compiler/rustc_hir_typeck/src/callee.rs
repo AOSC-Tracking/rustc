@@ -12,7 +12,7 @@ use rustc_infer::traits::{Obligation, ObligationCause, ObligationCauseCode};
 use rustc_middle::ty::adjustment::{
     Adjust, Adjustment, AllowTwoPhase, AutoBorrow, AutoBorrowMutability,
 };
-use rustc_middle::ty::{self, GenericArgsRef, Ty, TyCtxt, TypeVisitableExt};
+use rustc_middle::ty::{self, GenericArgsRef, Ty, TyCtxt, TypeVisitableExt, Unnormalized};
 use rustc_middle::{bug, span_bug};
 use rustc_span::def_id::LocalDefId;
 use rustc_span::{Span, sym};
@@ -37,12 +37,15 @@ pub(crate) fn check_legal_trait_for_method_call(
     receiver: Option<Span>,
     expr_span: Span,
     trait_id: DefId,
-    _body_id: DefId,
+    body_id: DefId,
 ) -> Result<(), ErrorGuaranteed> {
-    if tcx.is_lang_item(trait_id, LangItem::Drop) {
+    if tcx.is_lang_item(trait_id, LangItem::Drop)
+        // Allow calling `Drop::pin_drop` in `Drop::drop`
+        && !tcx.is_lang_item(tcx.parent(body_id), LangItem::Drop)
+    {
         let sugg = if let Some(receiver) = receiver.filter(|s| !s.is_empty()) {
             errors::ExplicitDestructorCallSugg::Snippet {
-                lo: expr_span.shrink_to_lo(),
+                lo: expr_span.shrink_to_lo().to(receiver.shrink_to_lo()),
                 hi: receiver.shrink_to_hi().to(expr_span.shrink_to_hi()),
             }
         } else {
@@ -62,6 +65,7 @@ enum CallStep<'tcx> {
 }
 
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
+    #[tracing::instrument(skip(self))]
     pub(crate) fn check_expr_call(
         &self,
         call_expr: &'tcx hir::Expr<'tcx>,
@@ -79,7 +83,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             _ => self.check_expr(callee_expr),
         };
 
-        let expr_ty = self.try_structurally_resolve_type(call_expr.span, original_callee_ty);
+        let expr_ty = self.resolve_vars_with_obligations(original_callee_ty);
 
         let mut autoderef = self.autoderef(callee_expr.span, expr_ty);
         let mut result = None;
@@ -89,11 +93,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         match *autoderef.final_ty().kind() {
             ty::FnDef(def_id, _) => {
-                let abi = self.tcx.fn_sig(def_id).skip_binder().skip_binder().abi;
+                let abi = self.tcx.fn_sig(def_id).skip_binder().skip_binder().abi();
                 self.check_call_abi(abi, call_expr.span);
             }
             ty::FnPtr(_, header) => {
-                self.check_call_abi(header.abi, call_expr.span);
+                self.check_call_abi(header.abi(), call_expr.span);
             }
             _ => { /* cannot have a non-rust abi */ }
         }
@@ -198,6 +202,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             | CanonAbi::Rust
             | CanonAbi::RustCold
             | CanonAbi::RustPreserveNone
+            | CanonAbi::Swift
             | CanonAbi::Arm(_)
             | CanonAbi::X86(_) => {}
         }
@@ -211,8 +216,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         arg_exprs: &'tcx [hir::Expr<'tcx>],
         autoderef: &Autoderef<'a, 'tcx>,
     ) -> Option<CallStep<'tcx>> {
-        let adjusted_ty =
-            self.try_structurally_resolve_type(autoderef.span(), autoderef.final_ty());
+        let adjusted_ty = self.resolve_vars_with_obligations(autoderef.final_ty());
 
         // If the callee is a function pointer or a closure, then we're all set.
         match *adjusted_ty.kind() {
@@ -275,9 +279,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         self.tcx.coroutine_for_closure(def_id),
                         tupled_upvars_ty,
                     ),
-                    coroutine_closure_sig.c_variadic,
-                    coroutine_closure_sig.safety,
-                    coroutine_closure_sig.abi,
+                    coroutine_closure_sig.fn_sig_kind,
                 );
                 let adjustments = self.adjust_steps(autoderef);
                 self.record_deferred_call_resolution(
@@ -542,7 +544,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let (fn_sig, def_id) = match *callee_ty.kind() {
             ty::FnDef(def_id, args) => {
                 self.enforce_context_effects(Some(call_expr.hir_id), call_expr.span, def_id, args);
-                let fn_sig = self.tcx.fn_sig(def_id).instantiate(self.tcx, args);
+                let fn_sig = self.tcx.fn_sig(def_id).instantiate(self.tcx, args).skip_norm_wip();
 
                 // Unit testing: function items annotated with
                 // `#[rustc_evaluate_where_clauses]` trigger special output
@@ -551,6 +553,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     let predicates = self.tcx.predicates_of(def_id);
                     let predicates = predicates.instantiate(self.tcx, args);
                     for (predicate, predicate_span) in predicates {
+                        let predicate = predicate.skip_norm_wip();
                         let obligation = Obligation::new(
                             self.tcx,
                             ObligationCause::dummy_with_span(callee_expr.span),
@@ -586,7 +589,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             BoundRegionConversionTime::FnCall,
             fn_sig,
         );
-        let fn_sig = self.normalize(call_expr.span, fn_sig);
+        let fn_sig = self.normalize(call_expr.span, Unnormalized::new_wip(fn_sig));
 
         self.check_argument_types(
             call_expr.span,
@@ -595,12 +598,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             fn_sig.output(),
             expected,
             arg_exprs,
-            fn_sig.c_variadic,
+            fn_sig.c_variadic(),
             TupleArgumentsFlag::DontTupleArguments,
             def_id,
         );
 
-        if fn_sig.abi == rustc_abi::ExternAbi::RustCall {
+        if fn_sig.abi() == rustc_abi::ExternAbi::RustCall {
             let sp = arg_exprs.last().map_or(call_expr.span, |expr| expr.span);
             if let Some(ty) = fn_sig.inputs().last().copied() {
                 self.register_bound(
@@ -905,7 +908,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             fn_sig.output(),
             expected,
             arg_exprs,
-            fn_sig.c_variadic,
+            fn_sig.c_variadic(),
             TupleArgumentsFlag::TupleArguments,
             Some(closure_def_id.to_def_id()),
         );
@@ -961,7 +964,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     self.tcx,
                     cause,
                     self.param_env,
-                    cond.to_host_effect_clause(self.tcx, host),
+                    cond.to_host_effect_clause(self.tcx, host).skip_norm_wip(),
                 ));
             }
         } else {
@@ -984,7 +987,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             method.sig.output(),
             expected,
             arg_exprs,
-            method.sig.c_variadic,
+            method.sig.c_variadic(),
             TupleArgumentsFlag::TupleArguments,
             Some(method.def_id),
         );

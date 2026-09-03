@@ -61,7 +61,7 @@ fn main() {
     }
 }
 
-fn setup_logger() -> Option<ChromeFlushGuard> {
+fn setup_logger() -> Option<tracing_chrome::FlushGuard> {
     use tracing_subscriber::prelude::*;
 
     let env = tracing_subscriber::EnvFilter::from_env("CARGO_LOG");
@@ -81,12 +81,9 @@ fn setup_logger() -> Option<ChromeFlushGuard> {
     profile_guard
 }
 
-#[cfg(target_has_atomic = "64")]
-type ChromeFlushGuard = tracing_chrome::FlushGuard;
-#[cfg(target_has_atomic = "64")]
 fn chrome_layer<S>() -> (
     Option<tracing_chrome::ChromeLayer<S>>,
-    Option<ChromeFlushGuard>,
+    Option<tracing_chrome::FlushGuard>,
 )
 where
     S: tracing::Subscriber
@@ -95,7 +92,6 @@ where
         + Sync,
 {
     #![expect(clippy::disallowed_methods, reason = "runs before config is loaded")]
-
     if env_to_bool(std::env::var_os("CARGO_LOG_PROFILE").as_deref()) {
         let capture_args =
             env_to_bool(std::env::var_os("CARGO_LOG_PROFILE_CAPTURE_ARGS").as_deref());
@@ -108,17 +104,6 @@ where
     }
 }
 
-#[cfg(not(target_has_atomic = "64"))]
-type ChromeFlushGuard = ();
-#[cfg(not(target_has_atomic = "64"))]
-fn chrome_layer() -> (
-    Option<tracing_subscriber::layer::Identity>,
-    Option<ChromeFlushGuard>,
-) {
-    (None, None)
-}
-
-#[cfg(target_has_atomic = "64")]
 fn env_to_bool(os: Option<&OsStr>) -> bool {
     match os.and_then(|os| os.to_str()) {
         Some("1") | Some("true") => true,
@@ -293,7 +278,11 @@ fn execute_external_subcommand(gctx: &GlobalContext, cmd: &str, args: &[&OsStr])
                 )
             } else {
                 let suggestions = list_commands(gctx);
-                let did_you_mean = closest_msg(cmd, suggestions.keys(), |c| c, "command");
+                let did_you_mean = if cmd == "rustfmt" {
+                    "\n\nhelp: a command with a similar name exists: `fmt`".to_string()
+                } else {
+                    closest_msg(cmd, suggestions.keys(), |c| c, "command")
+                };
 
                 anyhow::format_err!(
                     "no such command: `{cmd}`{did_you_mean}\n\n\

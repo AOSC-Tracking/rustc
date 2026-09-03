@@ -84,7 +84,7 @@ workspace = true
 12 | not-inherited = "1"
    | ^^^^^^^^^^^^^
    |
-   = [NOTE] `cargo::unused_workspace_dependencies` is set to `warn` by default
+   = [NOTE] `cargo::unused_workspace_dependencies` is set to `warn` in `[lints]`
 [HELP] consider removing the unused dependency
    |
 12 - not-inherited = "1"
@@ -99,6 +99,7 @@ workspace = true
    |
 11 - unused = "1"
    |
+[WARNING] workspace (manifest) generated 2 warnings
 [WARNING] unused dependency
  --> bar/Cargo.toml:9:1
   |
@@ -111,6 +112,7 @@ workspace = true
 9 - build-dep.workspace = true
 9 + .workspace = true
   |
+[WARNING] `bar` (manifest) generated 1 warning
 [UPDATING] `dummy-registry` index
 [LOCKING] 6 packages to latest compatible versions
 [DOWNLOADING] crates ...

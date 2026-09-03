@@ -441,7 +441,9 @@ fn generate_item_def_id_path(
         let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
         def_id = infcx
             .at(&ObligationCause::dummy(), tcx.param_env(def_id))
-            .query_normalize(ty::Binder::dummy(tcx.type_of(def_id).instantiate_identity()))
+            .query_normalize(ty::Binder::dummy(
+                tcx.type_of(def_id).instantiate_identity().skip_norm_wip(),
+            ))
             .map(|resolved| infcx.resolve_vars_if_possible(resolved.value))
             .ok()
             .and_then(|normalized| normalized.skip_binder().ty_adt_def())
@@ -959,7 +961,7 @@ fn fmt_type(
                 }
             }
         },
-        clean::Slice(box clean::Generic(name)) => {
+        clean::Slice(clean::Generic(name)) => {
             primitive_link(f, PrimitiveType::Slice, format_args!("[{name}]"), cx)
         }
         clean::Slice(t) => Wrapped::with_square_brackets().wrap(print_type(t, cx)).fmt(f),
@@ -972,7 +974,7 @@ fn fmt_type(
             fmt::Display::fmt(&print_type(t, cx), f)?;
             write!(f, ", {field})")
         }
-        clean::Array(box clean::Generic(name), n) if !f.alternate() => primitive_link(
+        clean::Array(clean::Generic(name), n) if !f.alternate() => primitive_link(
             f,
             PrimitiveType::Array,
             format_args!("[{name}; {n}]", n = Escape(n)),
@@ -1278,7 +1280,7 @@ fn print_parameter(parameter: &clean::Parameter, cx: &Context<'_>) -> impl fmt::
         if let Some(self_ty) = parameter.to_receiver() {
             match self_ty {
                 clean::SelfTy => f.write_str("self"),
-                clean::BorrowedRef { lifetime, mutability, type_: box clean::SelfTy } => {
+                clean::BorrowedRef { lifetime, mutability, type_: clean::SelfTy } => {
                     f.write_str(if f.alternate() { "&" } else { "&amp;" })?;
                     if let Some(lt) = lifetime {
                         write!(f, "{lt} ", lt = print_lifetime(lt))?;

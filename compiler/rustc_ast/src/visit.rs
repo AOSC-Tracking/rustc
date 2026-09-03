@@ -430,6 +430,7 @@ macro_rules! common_visitor_and_walkers {
             Defaultness,
             Delegation,
             DelegationMac,
+            DelegationSuffixes,
             DelimArgs,
             DelimSpan,
             EnumDef,
@@ -850,7 +851,7 @@ macro_rules! common_visitor_and_walkers {
                         visit_visitable!($($mut)? vis, impl_),
                     ItemKind::Trait(trait_) =>
                         visit_visitable!($($mut)? vis, trait_),
-                    ItemKind::TraitAlias(box TraitAlias { constness, ident, generics, bounds}) => {
+                    ItemKind::TraitAlias(TraitAlias { constness, ident, generics, bounds}) => {
                         visit_visitable!($($mut)? vis, constness, ident, generics);
                         visit_visitable_with!($($mut)? vis, bounds, BoundKind::Bound)
                     }
@@ -948,7 +949,7 @@ macro_rules! common_visitor_and_walkers {
         impl_walkable!(|&$($mut)? $($lt)? self: Impl, vis: &mut V| {
             let Impl { generics, of_trait, self_ty, items, constness: _ } = self;
             try_visit!(vis.visit_generics(generics));
-            if let Some(box of_trait) = of_trait {
+            if let Some(of_trait) = of_trait {
                 let TraitImplHeader { defaultness, safety, polarity, trait_ref } = of_trait;
                 visit_visitable!($($mut)? vis, defaultness, safety, polarity, trait_ref);
             }
@@ -1003,7 +1004,7 @@ macro_rules! common_visitor_and_walkers {
                     visit_visitable!($($mut)? vis, block, opt_label, span),
                 ExprKind::Match(subexpression, arms, kind) =>
                     visit_visitable!($($mut)? vis, subexpression, arms, kind),
-                ExprKind::Closure(box Closure {
+                ExprKind::Closure(Closure {
                     binder,
                     capture_clause,
                     coroutine_kind,
@@ -1023,7 +1024,9 @@ macro_rules! common_visitor_and_walkers {
                     visit_visitable!($($mut)? vis, block, opt_label),
                 ExprKind::Gen(capt, body, kind, decl_span) =>
                     visit_visitable!($($mut)? vis, capt, body, kind, decl_span),
-                ExprKind::Await(expr, span) | ExprKind::Use(expr, span) =>
+                ExprKind::Await(expr, span)
+                | ExprKind::Move(expr, span)
+                | ExprKind::Use(expr, span) =>
                     visit_visitable!($($mut)? vis, expr, span),
                 ExprKind::Assign(lhs, rhs, span) =>
                     visit_visitable!($($mut)? vis, lhs, rhs, span),

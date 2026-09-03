@@ -12,16 +12,15 @@ use rustc_ast::{self as ast};
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxIndexSet;
 use rustc_data_structures::sorted_map::SortedMap;
-use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
+use rustc_data_structures::stable_hash::{StableHash, StableHashCtxt, StableHasher};
 use rustc_data_structures::steal::Steal;
-use rustc_data_structures::sync::{DynSend, DynSync, spawn, try_par_for_each_in};
+use rustc_data_structures::sync::{DynSend, DynSync, try_par_for_each_in};
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId, LocalModDefId};
-use rustc_hir::lints::DelayedLint;
 use rustc_hir::*;
 use rustc_index::IndexVec;
-use rustc_macros::{Decodable, Encodable, HashStable};
-use rustc_span::{ErrorGuaranteed, ExpnId, HashStableContext, Span};
+use rustc_macros::{Decodable, Encodable, StableHash};
+use rustc_span::{ErrorGuaranteed, ExpnId, Span};
 
 use crate::query::Providers;
 use crate::ty::{ResolverAstLowering, TyCtxt};
@@ -64,8 +63,7 @@ impl<'hir> Crate<'hir> {
         // which is greater than delayed LocalDefId, we use IndexVec for owners,
         // so we will call ensure_contains_elem which will grow it.
         if let Some(owner) = self.owners.get(def_id)
-            && (self.delayed_ids.is_empty()
-                || !matches!(owner, MaybeOwner::Phantom | MaybeOwner::Delayed(_)))
+            && (self.delayed_ids.is_empty() || !matches!(owner, MaybeOwner::Phantom))
         {
             return *owner;
         }
@@ -78,16 +76,16 @@ impl<'hir> Crate<'hir> {
     }
 }
 
-impl<Hcx: HashStableContext> HashStable<Hcx> for Crate<'_> {
-    fn hash_stable(&self, hcx: &mut Hcx, hasher: &mut StableHasher) {
+impl StableHash for Crate<'_> {
+    fn stable_hash<Hcx: StableHashCtxt>(&self, hcx: &mut Hcx, hasher: &mut StableHasher) {
         let Crate { opt_hir_hash, .. } = self;
-        opt_hir_hash.unwrap().hash_stable(hcx, hasher)
+        opt_hir_hash.unwrap().stable_hash(hcx, hasher)
     }
 }
 
 /// Gather the LocalDefId for each item-like within a module, including items contained within
 /// bodies. The Ids are in visitor order. This is used to partition a pass between modules.
-#[derive(Debug, HashStable, Encodable, Decodable)]
+#[derive(Debug, StableHash, Encodable, Decodable)]
 pub struct ModuleItems {
     /// Whether this represents the whole crate, in which case we need to add `CRATE_OWNER_ID` to
     /// the iterators if we want to account for the crate root.
@@ -208,24 +206,6 @@ impl ModuleItems {
 }
 
 impl<'tcx> TyCtxt<'tcx> {
-    pub fn force_delayed_owners_lowering(self) {
-        let krate = self.hir_crate(());
-        self.ensure_done().hir_crate_items(());
-
-        for &id in &krate.delayed_ids {
-            self.ensure_done().lower_delayed_owner(id);
-        }
-
-        let (_, krate) = krate.delayed_resolver.steal();
-        let prof = self.sess.prof.clone();
-
-        // Drop AST to free memory. It can be expensive so try to drop it on a separate thread.
-        spawn(move || {
-            let _timer = prof.verbose_generic_activity("drop_ast");
-            drop(krate);
-        });
-    }
-
     pub fn parent_module(self, id: HirId) -> LocalModDefId {
         if !id.is_owner() && self.def_kind(id.owner) == DefKind::Mod {
             LocalModDefId::new_unchecked(id.owner.def_id)
@@ -255,42 +235,28 @@ impl<'tcx> TyCtxt<'tcx> {
         node: OwnerNode<'_>,
         bodies: &SortedMap<ItemLocalId, &Body<'_>>,
         attrs: &SortedMap<ItemLocalId, &[Attribute]>,
-        delayed_lints: &[DelayedLint],
         define_opaque: Option<&[(Span, LocalDefId)]>,
     ) -> Hashes {
-        if !self.needs_crate_hash() {
-            return Hashes {
-                opt_hash_including_bodies: None,
-                attrs_hash: None,
-                delayed_lints_hash: None,
-            };
+        if !self.needs_hir_hash() {
+            return Hashes { opt_hash_including_bodies: None, attrs_hash: None };
         }
 
         self.with_stable_hashing_context(|mut hcx| {
             let mut stable_hasher = StableHasher::new();
-            node.hash_stable(&mut hcx, &mut stable_hasher);
+            node.stable_hash(&mut hcx, &mut stable_hasher);
             // Bodies are stored out of line, so we need to pull them explicitly in the hash.
-            bodies.hash_stable(&mut hcx, &mut stable_hasher);
+            bodies.stable_hash(&mut hcx, &mut stable_hasher);
             let h1 = stable_hasher.finish();
 
             let mut stable_hasher = StableHasher::new();
-            attrs.hash_stable(&mut hcx, &mut stable_hasher);
+            attrs.stable_hash(&mut hcx, &mut stable_hasher);
 
             // Hash the defined opaque types, which are not present in the attrs.
-            define_opaque.hash_stable(&mut hcx, &mut stable_hasher);
+            define_opaque.stable_hash(&mut hcx, &mut stable_hasher);
 
             let h2 = stable_hasher.finish();
 
-            // hash lints emitted during ast lowering
-            let mut stable_hasher = StableHasher::new();
-            delayed_lints.hash_stable(&mut hcx, &mut stable_hasher);
-            let h3 = stable_hasher.finish();
-
-            Hashes {
-                opt_hash_including_bodies: Some(h1),
-                attrs_hash: Some(h2),
-                delayed_lints_hash: Some(h3),
-            }
+            Hashes { opt_hash_including_bodies: Some(h1), attrs_hash: Some(h2) }
         })
     }
 
@@ -334,8 +300,8 @@ impl<'tcx> TyCtxt<'tcx> {
             Node::Expr(parent_expr) => {
                 match parent_expr.kind {
                     // Addr-of, field projections, and LHS of assignment don't constitute reads.
-                    // Assignment does call `drop_in_place`, though, but its safety
-                    // requirements are not the same.
+                    // Assignment does call `drop_glue`, though, but its safety requirements are
+                    // not the same.
                     ExprKind::AddrOf(..) | ExprKind::Field(..) => false,
 
                     // Place-preserving expressions only constitute reads if their
@@ -484,7 +450,6 @@ impl<'tcx> TyCtxt<'tcx> {
 pub struct Hashes {
     pub opt_hash_including_bodies: Option<Fingerprint>,
     pub attrs_hash: Option<Fingerprint>,
-    pub delayed_lints_hash: Option<Fingerprint>,
 }
 
 pub fn provide(providers: &mut Providers) {
@@ -494,8 +459,7 @@ pub fn provide(providers: &mut Providers) {
     providers.local_def_id_to_hir_id = |tcx, def_id| match tcx.hir_crate(()).owner(tcx, def_id) {
         MaybeOwner::Owner(_) => HirId::make_owner(def_id),
         MaybeOwner::NonOwner(hir_id) => hir_id,
-        MaybeOwner::Phantom => bug!("no HirId for {:?}", def_id),
-        MaybeOwner::Delayed(_) => bug!("delayed owner should be lowered {:?}", def_id),
+        MaybeOwner::Phantom => bug!("No HirId for {:?}", def_id),
     };
     providers.opt_hir_owner_nodes =
         |tcx, id| tcx.hir_crate(()).owner(tcx, id).as_owner().map(|i| &i.nodes);

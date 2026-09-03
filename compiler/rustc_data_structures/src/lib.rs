@@ -10,7 +10,6 @@
 #![allow(internal_features)]
 #![allow(rustc::default_hash_types)]
 #![allow(rustc::potential_query_instability)]
-#![cfg_attr(bootstrap, feature(assert_matches))]
 #![cfg_attr(test, feature(test))]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![feature(allocator_api)]
@@ -74,14 +73,13 @@ pub mod small_c_str;
 pub mod snapshot_map;
 pub mod sorted_map;
 pub mod sso;
-pub mod stable_hasher;
+pub mod stable_hash;
 pub mod stack;
 pub mod steal;
 pub mod svh;
 pub mod sync;
 pub mod tagged_ptr;
 pub mod temp_dir;
-pub mod thinvec;
 pub mod thousands;
 pub mod transitive_relation;
 pub mod unhash;

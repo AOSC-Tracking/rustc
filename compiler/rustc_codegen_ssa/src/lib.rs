@@ -1,6 +1,5 @@
 // tidy-alphabetical-start
-#![cfg_attr(bootstrap, feature(assert_matches))]
-#![feature(box_patterns)]
+#![feature(deref_patterns)]
 #![feature(file_buffered)]
 #![feature(negative_impls)]
 #![feature(string_from_utf8_lossy_owned)]
@@ -18,6 +17,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rustc_abi::Size;
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
 use rustc_data_structures::unord::UnordMap;
 use rustc_hir::CRATE_HIR_ID;
@@ -27,7 +27,7 @@ use rustc_lint_defs::builtin::LINKER_INFO;
 use rustc_macros::{Decodable, Encodable};
 use rustc_metadata::EncodedMetadata;
 use rustc_middle::dep_graph::WorkProduct;
-use rustc_middle::lint::LevelAndSource;
+use rustc_middle::lint::StableLevelSpec;
 use rustc_middle::middle::debugger_visualizer::DebuggerVisualizerFile;
 use rustc_middle::middle::dependency_format::Dependencies;
 use rustc_middle::middle::exported_symbols::SymbolExportKind;
@@ -36,7 +36,7 @@ use rustc_middle::util::Providers;
 use rustc_serialize::opaque::{FileEncoder, MemDecoder};
 use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 use rustc_session::Session;
-use rustc_session::config::{CrateType, OutputFilenames, OutputType, RUST_CGU_EXT};
+use rustc_session::config::{CrateType, OutputFilenames, OutputType};
 use rustc_session::cstore::{self, CrateSource};
 use rustc_session::lint::builtin::LINKER_MESSAGES;
 use rustc_span::Symbol;
@@ -96,19 +96,14 @@ impl<M> ModuleCodegen<M> {
         emit_asm: bool,
         emit_ir: bool,
         outputs: &OutputFilenames,
-        invocation_temp: Option<&str>,
     ) -> CompiledModule {
-        let object = emit_obj
-            .then(|| outputs.temp_path_for_cgu(OutputType::Object, &self.name, invocation_temp));
-        let dwarf_object =
-            emit_dwarf_obj.then(|| outputs.temp_path_dwo_for_cgu(&self.name, invocation_temp));
-        let bytecode = emit_bc
-            .then(|| outputs.temp_path_for_cgu(OutputType::Bitcode, &self.name, invocation_temp));
-        let assembly = emit_asm
-            .then(|| outputs.temp_path_for_cgu(OutputType::Assembly, &self.name, invocation_temp));
-        let llvm_ir = emit_ir.then(|| {
-            outputs.temp_path_for_cgu(OutputType::LlvmAssembly, &self.name, invocation_temp)
-        });
+        let object = emit_obj.then(|| outputs.temp_path_for_cgu(OutputType::Object, &self.name));
+        let dwarf_object = emit_dwarf_obj.then(|| outputs.temp_path_dwo_for_cgu(&self.name));
+        let bytecode = emit_bc.then(|| outputs.temp_path_for_cgu(OutputType::Bitcode, &self.name));
+        let assembly =
+            emit_asm.then(|| outputs.temp_path_for_cgu(OutputType::Assembly, &self.name));
+        let llvm_ir =
+            emit_ir.then(|| outputs.temp_path_for_cgu(OutputType::LlvmAssembly, &self.name));
 
         CompiledModule {
             name: self.name,
@@ -173,6 +168,37 @@ bitflags::bitflags! {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct RetagInfo<V> {
+    /// The size of the initial range within the allocation that is
+    /// associated with the permission created by the retag.
+    pub size: Size,
+    /// Encoded type information used to determine the kind of permission
+    /// created by the retag.
+    pub flags: RetagFlags,
+    /// A pointer to a constant array of (offset, size) pairs describing
+    /// the ranges covered by `UnsafeCell` within the pointee type.
+    pub im_layout: V,
+    /// A pointer to a constant array of (offset, size) pairs describing
+    /// the ranges covered by `UnsafePinned` within the pointee type.
+    pub pin_layout: V,
+}
+
+bitflags::bitflags! {
+    #[repr(C)]
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+    pub struct RetagFlags: u8 {
+        /// If this is a function-entry retag.
+        const IS_PROTECTED = 1 << 0;
+        /// If this is a mutable reference or a `Box`.
+        const IS_MUTABLE = 1 << 1;
+        /// If this is a `Box`.
+        const IS_BOX = 1 << 2;
+        /// If the pointee type is `Freeze`
+        const IS_FREEZE = 1 << 3;
+    }
+}
+
 // This is the same as `rustc_session::cstore::NativeLib`, except:
 // - (important) the `foreign_module` field is missing, because it contains a `DefId`, which can't
 //   be encoded with `FileEncoder`.
@@ -229,8 +255,10 @@ pub struct CrateInfo {
     pub dependency_formats: Arc<Dependencies>,
     pub windows_subsystem: Option<WindowsSubsystemKind>,
     pub natvis_debugger_visualizers: BTreeSet<DebuggerVisualizerFile>,
-    pub lint_levels: CodegenLintLevels,
+    pub lint_level_specs: CodegenLintLevelSpecs,
     pub metadata_symbol: String,
+    pub each_linked_rlib_file_for_lto: Vec<PathBuf>,
+    pub exported_symbols_for_lto: Vec<String>,
 }
 
 /// Target-specific options that get set in `cfg(...)`.
@@ -271,23 +299,6 @@ pub fn provide(providers: &mut Providers) {
     crate::target_features::provide(&mut providers.queries);
     crate::codegen_attrs::provide(&mut providers.queries);
     providers.queries.global_backend_features = |_tcx: TyCtxt<'_>, ()| vec![];
-}
-
-/// Checks if the given filename ends with the `.rcgu.o` extension that `rustc`
-/// uses for the object files it generates.
-pub fn looks_like_rust_object_file(filename: &str) -> bool {
-    let path = Path::new(filename);
-    let ext = path.extension().and_then(|s| s.to_str());
-    if ext != Some(OutputType::Object.extension()) {
-        // The file name does not end with ".o", so it can't be an object file.
-        return false;
-    }
-
-    // Strip the ".o" at the end
-    let ext2 = path.file_stem().and_then(|s| Path::new(s).extension()).and_then(|s| s.to_str());
-
-    // Check if the "inner" extension
-    ext2 == Some(RUST_CGU_EXT)
 }
 
 const RLINK_VERSION: u32 = 1;
@@ -362,16 +373,16 @@ impl CompiledModules {
 /// solely from the `.rlink` file. `Lint`s are defined too early to be encodeable.
 /// Instead, encode exactly the information we need.
 #[derive(Copy, Clone, Debug, Encodable, Decodable)]
-pub struct CodegenLintLevels {
-    linker_messages: LevelAndSource,
-    linker_info: LevelAndSource,
+pub struct CodegenLintLevelSpecs {
+    linker_messages: StableLevelSpec,
+    linker_info: StableLevelSpec,
 }
 
-impl CodegenLintLevels {
+impl CodegenLintLevelSpecs {
     pub fn from_tcx(tcx: TyCtxt<'_>) -> Self {
         Self {
-            linker_messages: tcx.lint_level_at_node(LINKER_MESSAGES, CRATE_HIR_ID),
-            linker_info: tcx.lint_level_at_node(LINKER_INFO, CRATE_HIR_ID),
+            linker_messages: tcx.lint_level_spec_at_node(LINKER_MESSAGES, CRATE_HIR_ID),
+            linker_info: tcx.lint_level_spec_at_node(LINKER_INFO, CRATE_HIR_ID),
         }
     }
 }

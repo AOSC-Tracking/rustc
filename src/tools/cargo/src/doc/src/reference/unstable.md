@@ -100,7 +100,7 @@ Each new feature described below should explain how to use it.
     * [panic-immediate-abort](#panic-immediate-abort) --- Passes `-Cpanic=immediate-abort` to the compiler.
     * [compile-time-deps](#compile-time-deps) --- Perma-unstable feature for rust-analyzer
     * [fine-grain-locking](#fine-grain-locking) --- Use fine grain locking instead of locking the entire build cache
-    * [target-spec-json](#target-spec-json) --- Allows the use of `.json` custom target specs.
+    * [json-target-spec](#json-target-spec) --- Allows the use of `.json` custom target specs.
 * rustdoc
     * [rustdoc-map](#rustdoc-map) --- Provides mappings for documentation to link to external sites like [docs.rs](https://docs.rs/).
     * [scrape-examples](#scrape-examples) --- Shows examples within documentation.
@@ -130,9 +130,7 @@ Each new feature described below should explain how to use it.
 * Other
     * [gitoxide](#gitoxide) --- Use `gitoxide` instead of `git2` for a set of operations.
     * [script](#script) --- Enable support for single-file `.rs` packages.
-    * [lockfile-path](#lockfile-path) --- Allows to specify a path to lockfile other than the default path `<workspace_root>/Cargo.lock`.
     * [native-completions](#native-completions) --- Move cargo shell completions to native completions.
-    * [warnings](#warnings) --- controls warning behavior; options for allowing or denying warnings.
     * [Package message format](#package-message-format) --- Message format for `cargo package`.
     * [`fix-edition`](#fix-edition) --- A permanently unstable edition migration helper.
     * [Plumbing subcommands](https://github.com/crate-ci/cargo-plumbing) --- Low, level commands that act as APIs for Cargo, like `cargo metadata`
@@ -1766,43 +1764,6 @@ will prefer the value in the configuration. The allows Cargo to add new built-in
 path bases without compatibility issues (as existing uses will shadow the
 built-in name).
 
-## lockfile-path
-
-* Original Issue: [#5707](https://github.com/rust-lang/cargo/issues/5707)
-* Tracking Issue: [#14421](https://github.com/rust-lang/cargo/issues/14421)
-
-The `-Zlockfile-path` flag enables the `resolver.lockfile-path` configuration option,
-which allows you to specify the path of the lockfile `Cargo.lock`.
-
-By default, lockfile is written into `<workspace_root>/Cargo.lock`. 
-However, when sources are stored in read-only directory,
-most of the cargo commands would fail when trying to write a lockfile.
-This configuration makes it easier to work with readonly sources. 
-
-Note, that currently path must end with `Cargo.lock`.
-If you want to use this feature in multiple projects,
-lockfiles should be stored in different directories.
-
-### Documentation updates
-
-*as a new `resolver.lockfile-path` entry in config.md*
-
-*Keep in mind, the `[resolver]` section has this clarification:*
-
-> *The `[resolver]` table overrides dependency resolution behavior for local development (e.g. excludes `cargo install`).*
-
-#### `resolver.lockfile-path`
-
-* Type: string (path)
-* Default: `<workspace_root>/Cargo.lock`
-* Environment: `CARGO_RESOLVER_LOCKFILE_PATH`
-
-Specifies the path to the lockfile.
-By default, the lockfile is written to `<workspace_root>/Cargo.lock`.
-This option is useful when working with read-only source directories.
-
-The path must end with `Cargo.lock`.
-
 ## native-completions
 * Original Issue: [#6645](https://github.com/rust-lang/cargo/issues/6645)
 * Tracking Issue: [#14520](https://github.com/rust-lang/cargo/issues/14520)
@@ -1843,28 +1804,6 @@ When in doubt, you can discuss this in [#14520](https://github.com/rust-lang/car
 
 - powershell:
   Add `CARGO_COMPLETE=powershell cargo +nightly | Invoke-Expression` to `$PROFILE`.
-
-## warnings
-
-* Original Issue: [#8424](https://github.com/rust-lang/cargo/issues/8424)
-* Tracking Issue: [#14802](https://github.com/rust-lang/cargo/issues/14802)
-
-The `-Z warnings` feature enables the `build.warnings` configuration option to control how
-Cargo handles warnings. If the `-Z warnings` unstable flag is not enabled, then
-the `build.warnings` config will be ignored.
-
-This setting currently only applies to rustc warnings. It may apply to additional warnings (such as Cargo lints or Cargo warnings)
-in the future.
-
-### `build.warnings`
-* Type: string
-* Default: `warn`
-* Environment: `CARGO_BUILD_WARNINGS`
-
-Controls how Cargo handles warnings. Allowed values are:
-* `warn`: warnings are emitted as warnings (default).
-* `allow`: warnings are hidden.
-* `deny`: if warnings are emitted, an error will be raised at the end of the current crate and the process. Use `--keep-going` to see all warnings.
 
 ## feature unification
 
@@ -2056,13 +1995,13 @@ so that `cargo doc` can merge cross-crate information
 from separate output directories,
 and run `rustdoc` in parallel.
 
-## target-spec-json
+## json-target-spec
 * Tracking Issue: [rust-lang/rust#151528](https://github.com/rust-lang/rust/issues/151528)
 
-The `-Z target-spec-json` CLI flag enables the ability to use [custom target spec JSON files](https://doc.rust-lang.org/nightly/rustc/targets/custom.html) as a target.
+The `-Z json-target-spec` CLI flag enables the ability to use [custom target spec JSON files](https://doc.rust-lang.org/nightly/rustc/targets/custom.html) as a target.
 
 ```console
-cargo +nightly build --target my-target.json -Z target-spec-json
+cargo +nightly build --target my-target.json -Z json-target-spec
 ```
 
 This usually must be combined with [build-std](#build-std).
@@ -2353,3 +2292,11 @@ See the [`include` config documentation](config.md#include) for more.
 ## pubtime
 
 The `pubtime` index field  has been stabilized in Rust 1.94.0.
+
+## lockfile-path
+
+Support for `resolver.lockfile-path` config field has been stabilized in Rust 1.97.0.
+
+## warnings
+
+The `build.warnings` config field has been stabilized in Rust 1.97.

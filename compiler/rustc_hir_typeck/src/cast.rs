@@ -40,7 +40,9 @@ use rustc_middle::mir::Mutability;
 use rustc_middle::ty::adjustment::AllowTwoPhase;
 use rustc_middle::ty::cast::{CastKind, CastTy};
 use rustc_middle::ty::error::TypeError;
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeAndMut, TypeVisitableExt, VariantDef, elaborate};
+use rustc_middle::ty::{
+    self, Ty, TyCtxt, TypeAndMut, TypeVisitableExt, Unnormalized, VariantDef, elaborate,
+};
 use rustc_middle::{bug, span_bug};
 use rustc_session::lint;
 use rustc_span::{DUMMY_SP, Span, sym};
@@ -100,7 +102,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             return Ok(Some(PointerKind::Thin));
         }
 
-        let t = self.try_structurally_resolve_type(span, t);
+        let t = self.resolve_vars_with_obligations(t);
 
         Ok(match *t.kind() {
             ty::Slice(_) | ty::Str => Some(PointerKind::Length),
@@ -289,12 +291,40 @@ impl<'a, 'tcx> CastCheck<'tcx> {
             CastError::NeedViaThinPtr | CastError::NeedViaPtr => {
                 let mut err =
                     make_invalid_casting_error(self.span, self.expr_ty, self.cast_ty, fcx);
+
                 if self.cast_ty.is_integral() {
-                    err.help(format!("cast through {} first", match e {
-                        CastError::NeedViaPtr => "a raw pointer",
-                        CastError::NeedViaThinPtr => "a thin pointer",
-                        e => unreachable!("control flow means we should never encounter a {e:?}"),
-                    }));
+                    if !matches!(self.expr.kind, ExprKind::AddrOf(..))
+                        && let ty::Ref(_, inner_ty, _) = *self.expr_ty.kind()
+                        && let ty::Adt(adt_def, _) = *inner_ty.kind()
+                        && adt_def.is_enum()
+                        && adt_def.is_payloadfree()
+                    {
+                        err.span_suggestion_verbose(
+                            self.expr_span.shrink_to_lo(),
+                            "try dereferencing before the cast",
+                            "*",
+                            Applicability::MaybeIncorrect,
+                        );
+                        if !fcx.type_is_copy_modulo_regions(fcx.param_env, inner_ty) {
+                            err.span_suggestion_verbose(
+                                fcx.tcx.def_span(adt_def.did()).shrink_to_lo(),
+                                "add `#[derive(Copy, Clone)]` to the enum definition",
+                                "#[derive(Copy, Clone)]\n",
+                                Applicability::MaybeIncorrect,
+                            );
+                        }
+                    } else {
+                        err.help(format!(
+                            "cast through {} first",
+                            match e {
+                                CastError::NeedViaPtr => "a raw pointer",
+                                CastError::NeedViaThinPtr => "a thin pointer",
+                                e => unreachable!(
+                                    "control flow means we should never encounter a {e:?}"
+                                ),
+                            }
+                        ));
+                    }
                 }
 
                 self.try_suggest_collection_to_bool(fcx, &mut err);
@@ -753,7 +783,10 @@ impl<'a, 'tcx> CastCheck<'tcx> {
                 match *self.expr_ty.kind() {
                     ty::FnDef(..) => {
                         // Attempt a coercion to a fn pointer type.
-                        let f = fcx.normalize(self.expr_span, self.expr_ty.fn_sig(fcx.tcx));
+                        let f = fcx.normalize(
+                            self.expr_span,
+                            Unnormalized::new_wip(self.expr_ty.fn_sig(fcx.tcx)),
+                        );
                         let res = fcx.coerce(
                             self.expr,
                             self.expr_ty,
@@ -1036,8 +1069,8 @@ impl<'a, 'tcx> CastCheck<'tcx> {
         mut m_cast: ty::TypeAndMut<'tcx>,
     ) -> Result<CastKind, CastError<'tcx>> {
         // array-ptr-cast: allow mut-to-mut, mut-to-const, const-to-const
-        m_expr.ty = fcx.try_structurally_resolve_type(self.expr_span, m_expr.ty);
-        m_cast.ty = fcx.try_structurally_resolve_type(self.cast_span, m_cast.ty);
+        m_expr.ty = fcx.resolve_vars_with_obligations(m_expr.ty);
+        m_cast.ty = fcx.resolve_vars_with_obligations(m_cast.ty);
 
         if m_expr.mutbl >= m_cast.mutbl
             && let ty::Array(ety, _) = m_expr.ty.kind()

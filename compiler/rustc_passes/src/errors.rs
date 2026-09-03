@@ -14,10 +14,6 @@ use crate::check_attr::ProcMacroKind;
 use crate::lang_items::Duplicate;
 
 #[derive(Diagnostic)]
-#[diag("`#[diagnostic::do_not_recommend]` can only be placed on trait implementations")]
-pub(crate) struct IncorrectDoNotRecommendLocation;
-
-#[derive(Diagnostic)]
 #[diag("`#[loop_match]` should be applied to a loop")]
 pub(crate) struct LoopMatchAttr {
     #[primary_span]
@@ -302,6 +298,8 @@ pub(crate) enum UnusedNote {
         "the `linker_messages` and `linker_info` lints can only be controlled at the root of a crate that needs to be linked"
     )]
     LinkerMessagesBinaryCrateOnly,
+    #[note("the `dead_code_pub_in_binary` lint has no effect in library crates")]
+    NoEffectDeadCodePubInBinary,
 }
 
 #[derive(Diagnostic)]
@@ -326,30 +324,6 @@ pub(crate) struct NonExportedMacroInvalidAttrs {
 pub(crate) struct InvalidMayDangle {
     #[primary_span]
     pub attr_span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag("unused attribute")]
-pub(crate) struct UnusedDuplicate {
-    #[suggestion("remove this attribute", code = "", applicability = "machine-applicable")]
-    pub this: Span,
-    #[note("attribute also specified here")]
-    pub other: Span,
-    #[warning(
-        "this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!"
-    )]
-    pub warning: bool,
-}
-
-#[derive(Diagnostic)]
-#[diag("multiple `{$name}` attributes")]
-pub(crate) struct UnusedMultiple {
-    #[primary_span]
-    #[suggestion("remove this attribute", code = "", applicability = "machine-applicable")]
-    pub this: Span,
-    #[note("attribute also specified here")]
-    pub other: Span,
-    pub name: Symbol,
 }
 
 #[derive(Diagnostic)]
@@ -896,6 +870,20 @@ pub(crate) struct ImpliedFeatureNotExist {
 }
 
 #[derive(Diagnostic)]
+#[diag("feature `{$feature}` has been removed", code = E0557)]
+#[note("removed in {$since}; see <{$link}> for more information")]
+#[note("{$reason}")]
+pub(crate) struct FeatureRemoved {
+    #[primary_span]
+    #[label("feature has been removed")]
+    pub span: Span,
+    pub feature: Symbol,
+    pub reason: Symbol,
+    pub since: String,
+    pub link: Symbol,
+}
+
+#[derive(Diagnostic)]
 #[diag(
     "attributes `#[rustc_const_unstable]`, `#[rustc_const_stable]` and `#[rustc_const_stable_indirect]` require the function or method to be `const`"
 )]
@@ -934,6 +922,8 @@ pub(crate) enum MultipleDeadCodes<'tcx> {
         participle: &'tcx str,
         name_list: DiagSymbolList,
         #[subdiagnostic]
+        dead_code_pub_in_binary_note: Option<DeadCodePubInBinaryNote>,
+        #[subdiagnostic]
         // only on DeadCodes since it's never a problem for tuple struct fields
         enum_variants_with_same_name: Vec<EnumVariantSameName<'tcx>>,
         #[subdiagnostic]
@@ -957,6 +947,8 @@ pub(crate) enum MultipleDeadCodes<'tcx> {
         participle: &'tcx str,
         name_list: DiagSymbolList,
         #[subdiagnostic]
+        dead_code_pub_in_binary_note: Option<DeadCodePubInBinaryNote>,
+        #[subdiagnostic]
         change_fields_suggestion: ChangeFields,
         #[subdiagnostic]
         parent_info: Option<ParentInfo<'tcx>>,
@@ -964,6 +956,12 @@ pub(crate) enum MultipleDeadCodes<'tcx> {
         ignored_derived_impls: Option<IgnoredDerivedImpls>,
     },
 }
+
+#[derive(Subdiagnostic)]
+#[note(
+    "in libraries, `pub` items can be used by dependent crates; in binaries, they cannot, so this `pub` item is unused"
+)]
+pub(crate) struct DeadCodePubInBinaryNote;
 
 #[derive(Subdiagnostic)]
 #[note(
@@ -1175,8 +1173,8 @@ pub(crate) struct ReprAlignShouldBeAlignStatic {
 }
 
 #[derive(Diagnostic)]
-#[diag("`eii_macro_for` is only valid on functions")]
-pub(crate) struct EiiImplNotFunction {
+#[diag("`eii_macro_for` is only valid on functions and statics")]
+pub(crate) struct EiiImplTarget {
     #[primary_span]
     pub span: Span,
 }

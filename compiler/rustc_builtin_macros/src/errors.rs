@@ -553,7 +553,7 @@ impl<'a, G: EmissionGuarantee> Diagnostic<'a, G> for EnvNotDefinedWithUserMessag
 }
 
 #[derive(Diagnostic)]
-pub(crate) enum EnvNotDefined<'a> {
+pub(crate) enum EnvNotDefined {
     #[diag("environment variable `{$var}` not defined at compile time")]
     #[help("`{$var}` may not be available for the current Cargo target")]
     #[help(
@@ -563,7 +563,7 @@ pub(crate) enum EnvNotDefined<'a> {
         #[primary_span]
         span: Span,
         var: Symbol,
-        var_expr: &'a rustc_ast::Expr,
+        var_expr: String,
     },
     #[diag("environment variable `{$var}` not defined at compile time")]
     #[help("there is a similar Cargo environment variable: `{$suggested_var}`")]
@@ -579,7 +579,7 @@ pub(crate) enum EnvNotDefined<'a> {
         #[primary_span]
         span: Span,
         var: Symbol,
-        var_expr: &'a rustc_ast::Expr,
+        var_expr: String,
     },
 }
 
@@ -1117,8 +1117,42 @@ pub(crate) struct EiiExternTargetExpectedUnsafe {
 }
 
 #[derive(Diagnostic)]
-#[diag("`#[{$name}]` is only valid on functions")]
-pub(crate) struct EiiSharedMacroExpectedFunction {
+#[diag("`#[{$name}]` is only valid on functions and statics")]
+pub(crate) struct EiiSharedMacroTarget {
+    #[primary_span]
+    pub span: Span,
+    pub name: String,
+}
+
+#[derive(Diagnostic)]
+#[diag("static cannot implement multiple EIIs")]
+#[note(
+    "this is not allowed because multiple externally implementable statics that alias may be unintuitive"
+)]
+pub(crate) struct EiiStaticMultipleImplementations {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag("`#[{$name}]` cannot be used on statics with a value")]
+pub(crate) struct EiiStaticDefault {
+    #[primary_span]
+    pub span: Span,
+    pub name: String,
+}
+
+#[derive(Diagnostic)]
+#[diag("`#[{$name}]` requires the name as an explicit argument when used on a static")]
+pub(crate) struct EiiStaticArgumentRequired {
+    #[primary_span]
+    pub span: Span,
+    pub name: String,
+}
+
+#[derive(Diagnostic)]
+#[diag("`#[{$name}]` cannot be used on mutable statics")]
+pub(crate) struct EiiStaticMutable {
     #[primary_span]
     pub span: Span,
     pub name: String,

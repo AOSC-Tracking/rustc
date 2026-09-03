@@ -61,14 +61,14 @@ impl PrettyPrintMirOptions {
 /// Manages MIR dumping, which is MIR writing done to a file with a specific name. In particular,
 /// it makes it impossible to dump MIR to one of these files when it hasn't been requested from the
 /// command line. Layered on top of `MirWriter`, which does the actual writing.
-pub struct MirDumper<'dis, 'de, 'tcx> {
+pub struct MirDumper<'a, 'tcx> {
     show_pass_num: bool,
     pass_name: &'static str,
-    disambiguator: &'dis dyn Display,
-    writer: MirWriter<'de, 'tcx>,
+    disambiguator: &'a dyn Display,
+    writer: MirWriter<'a, 'tcx>,
 }
 
-impl<'dis, 'de, 'tcx> MirDumper<'dis, 'de, 'tcx> {
+impl<'a, 'tcx> MirDumper<'a, 'tcx> {
     // If dumping should be performed (e.g. because it was requested on the
     // CLI), returns a `MirDumper` with default values for the following fields:
     // - `show_pass_num`: `false`
@@ -112,7 +112,7 @@ impl<'dis, 'de, 'tcx> MirDumper<'dis, 'de, 'tcx> {
     }
 
     #[must_use]
-    pub fn set_disambiguator(mut self, disambiguator: &'dis dyn Display) -> Self {
+    pub fn set_disambiguator(mut self, disambiguator: &'a dyn Display) -> Self {
         self.disambiguator = disambiguator;
         self
     }
@@ -120,7 +120,7 @@ impl<'dis, 'de, 'tcx> MirDumper<'dis, 'de, 'tcx> {
     #[must_use]
     pub fn set_extra_data(
         mut self,
-        extra_data: &'de dyn Fn(PassWhere, &mut dyn io::Write) -> io::Result<()>,
+        extra_data: &'a dyn Fn(PassWhere, &mut dyn io::Write) -> io::Result<()>,
     ) -> Self {
         self.writer.extra_data = extra_data;
         self
@@ -312,13 +312,9 @@ impl<'dis, 'de, 'tcx> MirDumper<'dis, 'de, 'tcx> {
 ///////////////////////////////////////////////////////////////////////////
 // Whole MIR bodies
 
-/// Write out a human-readable textual representation for the given MIR, with the default
-/// [PrettyPrintMirOptions].
-pub fn write_mir_pretty<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    single: Option<DefId>,
-    w: &mut dyn io::Write,
-) -> io::Result<()> {
+/// Write out a human-readable textual representation of this crate's MIR,
+/// with the default [`PrettyPrintMirOptions`].
+pub fn write_mir_pretty<'tcx>(tcx: TyCtxt<'tcx>, w: &mut dyn io::Write) -> io::Result<()> {
     let writer = MirWriter::new(tcx);
 
     writeln!(w, "// WARNING: This output format is intended for human consumers only")?;
@@ -326,7 +322,7 @@ pub fn write_mir_pretty<'tcx>(
     writeln!(w, "// HINT: See also -Z dump-mir for MIR at specific points during compilation.")?;
 
     let mut first = true;
-    for def_id in dump_mir_def_ids(tcx, single) {
+    for &def_id in tcx.mir_keys(()) {
         if first {
             first = false;
         } else {
@@ -360,7 +356,7 @@ pub fn write_mir_pretty<'tcx>(
                 }
                 writeln!(w, ": {} = const {};", ty, Const::Val(val, ty))?;
             } else {
-                let instance_mir = tcx.instance_mir(ty::InstanceKind::Item(def_id));
+                let instance_mir = tcx.instance_mir(ty::InstanceKind::Item(def_id.to_def_id()));
                 render_body(w, instance_mir)?;
             }
         }
@@ -369,13 +365,13 @@ pub fn write_mir_pretty<'tcx>(
 }
 
 /// Does the writing of MIR to output, e.g. a file.
-pub struct MirWriter<'de, 'tcx> {
+pub struct MirWriter<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
-    extra_data: &'de dyn Fn(PassWhere, &mut dyn io::Write) -> io::Result<()>,
+    extra_data: &'a dyn Fn(PassWhere, &mut dyn io::Write) -> io::Result<()>,
     options: PrettyPrintMirOptions,
 }
 
-impl<'de, 'tcx> MirWriter<'de, 'tcx> {
+impl<'a, 'tcx> MirWriter<'a, 'tcx> {
     pub fn new(tcx: TyCtxt<'tcx>) -> Self {
         MirWriter { tcx, extra_data: &|_, _| Ok(()), options: PrettyPrintMirOptions::from_cli(tcx) }
     }
@@ -522,7 +518,7 @@ fn write_scope_tree(
 
 impl Debug for VarDebugInfo<'_> {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
-        if let Some(box VarDebugInfoFragment { ty, ref projection }) = self.composite {
+        if let Some(VarDebugInfoFragment { ty, ref projection }) = self.composite {
             pre_fmt_projection(&projection[..], fmt)?;
             write!(fmt, "({}: {})", self.name, ty)?;
             post_fmt_projection(&projection[..], fmt)?;
@@ -698,18 +694,10 @@ fn write_user_type_annotations(
     Ok(())
 }
 
-pub fn dump_mir_def_ids(tcx: TyCtxt<'_>, single: Option<DefId>) -> Vec<DefId> {
-    if let Some(i) = single {
-        vec![i]
-    } else {
-        tcx.mir_keys(()).iter().map(|def_id| def_id.to_def_id()).collect()
-    }
-}
-
 ///////////////////////////////////////////////////////////////////////////
 // Basic blocks and their parts (statements, terminators, ...)
 
-impl<'de, 'tcx> MirWriter<'de, 'tcx> {
+impl<'a, 'tcx> MirWriter<'a, 'tcx> {
     /// Write out a human-readable textual representation for the given basic block.
     fn write_basic_block(
         &self,
@@ -806,21 +794,10 @@ impl Debug for StatementKind<'_> {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
         use self::StatementKind::*;
         match *self {
-            Assign(box (ref place, ref rv)) => write!(fmt, "{place:?} = {rv:?}"),
-            FakeRead(box (ref cause, ref place)) => {
+            Assign((ref place, ref rv)) => write!(fmt, "{place:?} = {rv:?}"),
+            FakeRead((ref cause, ref place)) => {
                 write!(fmt, "FakeRead({cause:?}, {place:?})")
             }
-            Retag(ref kind, ref place) => write!(
-                fmt,
-                "Retag({}{:?})",
-                match kind {
-                    RetagKind::FnEntry => "[fn entry] ",
-                    RetagKind::TwoPhase => "[2phase] ",
-                    RetagKind::Raw => "[raw] ",
-                    RetagKind::Default => "",
-                },
-                place,
-            ),
             StorageLive(ref place) => write!(fmt, "StorageLive({place:?})"),
             StorageDead(ref place) => write!(fmt, "StorageDead({place:?})"),
             SetDiscriminant { ref place, variant_index } => {
@@ -829,11 +806,11 @@ impl Debug for StatementKind<'_> {
             PlaceMention(ref place) => {
                 write!(fmt, "PlaceMention({place:?})")
             }
-            AscribeUserType(box (ref place, ref c_ty), ref variance) => {
+            AscribeUserType((ref place, ref c_ty), ref variance) => {
                 write!(fmt, "AscribeUserType({place:?}, {variance:?}, {c_ty:?})")
             }
             Coverage(ref kind) => write!(fmt, "Coverage::{kind:?}"),
-            Intrinsic(box ref intrinsic) => write!(fmt, "{intrinsic}"),
+            Intrinsic(ref intrinsic) => write!(fmt, "{intrinsic}"),
             ConstEvalCounter => write!(fmt, "ConstEvalCounter"),
             Nop => write!(fmt, "nop"),
             BackwardIncompatibleDropHint { ref place, reason: _ } => {
@@ -1095,7 +1072,10 @@ impl<'tcx> Debug for Rvalue<'tcx> {
         use self::Rvalue::*;
 
         match *self {
-            Use(ref place) => write!(fmt, "{place:?}"),
+            Use(ref operand, with_retag) => {
+                // With retag is more common so we only print when it's without.
+                write!(fmt, "{}{operand:?}", if with_retag.no() { "no_retag " } else { "" })
+            }
             Repeat(ref a, b) => {
                 write!(fmt, "[{a:?}; ")?;
                 pretty_print_const(b, fmt, false)?;
@@ -1104,7 +1084,7 @@ impl<'tcx> Debug for Rvalue<'tcx> {
             Cast(ref kind, ref place, ref ty) => {
                 with_no_trimmed_paths!(write!(fmt, "{place:?} as {ty} ({kind:?})"))
             }
-            BinaryOp(ref op, box (ref a, ref b)) => write!(fmt, "{op:?}({a:?}, {b:?})"),
+            BinaryOp(ref op, (ref a, ref b)) => write!(fmt, "{op:?}({a:?}, {b:?})"),
             UnaryOp(ref op, ref a) => write!(fmt, "{op:?}({a:?})"),
             Discriminant(ref place) => write!(fmt, "discriminant({place:?})"),
             ThreadLocalRef(did) => ty::tls::with(|tcx| {
@@ -1136,6 +1116,14 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                 write!(fmt, "&{region}{kind_str}{place:?}")
             }
 
+            Reborrow(target, mutability, ref place) => {
+                write!(
+                    fmt,
+                    "{target:?}({} {place:?})",
+                    if mutability.is_mut() { "reborrow" } else { "coerce shared" }
+                )
+            }
+
             CopyForDeref(ref place) => write!(fmt, "deref_copy {place:#?}"),
 
             RawPtr(mutability, ref place) => {
@@ -1165,7 +1153,7 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                     AggregateKind::Adt(adt_did, variant, args, _user_ty, _) => {
                         ty::tls::with(|tcx| {
                             let variant_def = &tcx.adt_def(adt_did).variant(variant);
-                            let args = tcx.lift(args).expect("could not lift for printing");
+                            let args = tcx.lift(args);
                             let name = FmtPrinter::print_string(tcx, Namespace::ValueNS, |p| {
                                 p.print_def_path(variant_def.def_id, args)
                             })?;
@@ -1187,7 +1175,7 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                     AggregateKind::Closure(def_id, args)
                     | AggregateKind::CoroutineClosure(def_id, args) => ty::tls::with(|tcx| {
                         let name = if tcx.sess.opts.unstable_opts.span_free_formats {
-                            let args = tcx.lift(args).unwrap();
+                            let args = tcx.lift(args);
                             format!("{{closure@{}}}", tcx.def_path_str_with_args(def_id, args),)
                         } else {
                             let span = tcx.def_span(def_id);
@@ -1911,8 +1899,6 @@ fn pretty_print_const_value_tcx<'tcx>(
         // E.g. `transmute([0usize; 2]): (u8, *mut T)` needs to know `T: Sized`
         // to be able to destructure the tuple into `(0u8, *mut T)`
         (_, ty::Array(..) | ty::Tuple(..) | ty::Adt(..)) if !ty.has_non_region_param() => {
-            let ct = tcx.lift(ct).unwrap();
-            let ty = tcx.lift(ty).unwrap();
             if let Some(contents) = tcx.try_destructure_mir_constant_for_user_output(ct, ty) {
                 let fields: Vec<(ConstValue, Ty<'_>)> = contents.fields.to_vec();
                 match *ty.kind() {
@@ -1937,7 +1923,6 @@ fn pretty_print_const_value_tcx<'tcx>(
                             .variant
                             .expect("destructed mir constant of adt without variant idx");
                         let variant_def = &def.variant(variant_idx);
-                        let args = tcx.lift(args).unwrap();
                         let mut p = FmtPrinter::new(tcx, Namespace::ValueNS);
                         p.print_alloc_ids = true;
                         p.pretty_print_value_path(variant_def.def_id, args)?;
@@ -1974,7 +1959,6 @@ fn pretty_print_const_value_tcx<'tcx>(
         (ConstValue::Scalar(scalar), _) => {
             let mut p = FmtPrinter::new(tcx, Namespace::ValueNS);
             p.print_alloc_ids = true;
-            let ty = tcx.lift(ty).unwrap();
             p.pretty_print_const_scalar(scalar, ty)?;
             fmt.write_str(&p.into_buffer())?;
             return Ok(());
@@ -2000,8 +1984,7 @@ pub(crate) fn pretty_print_const_value<'tcx>(
     fmt: &mut Formatter<'_>,
 ) -> fmt::Result {
     ty::tls::with(|tcx| {
-        let ct = tcx.lift(ct).unwrap();
-        let ty = tcx.lift(ty).unwrap();
+        let ty = tcx.lift(ty);
         pretty_print_const_value_tcx(tcx, ct, ty, fmt)
     })
 }

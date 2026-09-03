@@ -56,7 +56,7 @@ workspace = true
 8 | rust-version = "1.0"
   | ^^^^^^^^^^^^
   |
-  = [NOTE] `cargo::unused_workspace_package_fields` is set to `warn` by default
+  = [NOTE] `cargo::unused_workspace_package_fields` is set to `warn` in `[lints]`
 [HELP] consider removing the unused field
   |
 8 - rust-version = "1.0"
@@ -71,6 +71,7 @@ workspace = true
   |
 9 - unknown = "foo"
   |
+[WARNING] workspace (manifest) generated 2 warnings
 [WARNING] [ROOT]/foo/Cargo.toml: unused manifest key: workspace.package.unknown
 [CHECKING] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s

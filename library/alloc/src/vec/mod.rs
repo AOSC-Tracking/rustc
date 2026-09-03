@@ -1740,6 +1740,27 @@ impl<T, A: Allocator> Vec<T, A> {
         }
     }
 
+    /// Converts the Vec into a boxed array. This conversion will discard any spare capacity, if there is any, see [`Vec::shrink_to_fit`].
+    /// If you merely wish for a reference to an array, use [`as_array`](https://doc.rust-lang.org/stable/std/primitive.slice.html#method.as_array).
+    ///
+    /// If `N` is not exactly equal to [`Vec::len`], then this method returns `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(alloc_slice_into_array)]
+    /// let vec: Vec<i32> = vec![1, 2, 3];
+    /// let box_array: Box<[i32; 3]> = vec.clone().into_array().unwrap();
+    /// let not_enough_elements: Result<Box<[i32; 4]>, Vec<i32>> = vec.into_array::<4>();
+    /// assert_eq!(not_enough_elements, Err(vec![1, 2, 3]));
+    /// ```
+    #[cfg(not(no_global_oom_handling))]
+    #[unstable(feature = "alloc_slice_into_array", issue = "148082")]
+    #[must_use]
+    pub fn into_array<const N: usize>(self) -> Result<Box<[T; N], A>, Self> {
+        if self.len() == N { Ok(self.into_boxed_slice().into_array().unwrap()) } else { Err(self) }
+    }
+
     /// Shortens the vector, keeping the first `len` elements and dropping
     /// the rest.
     ///
@@ -1784,6 +1805,9 @@ impl<T, A: Allocator> Vec<T, A> {
     /// [`drain`]: Vec::drain
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn truncate(&mut self, len: usize) {
+        // SAFETY: `BufWriter::flush_buf` assumes that this will not
+        // de-initialize any elements of the spare capacity.
+
         // This is safe because:
         //
         // * the slice passed to `drop_in_place` is valid; the `len > self.len`
@@ -1857,6 +1881,9 @@ impl<T, A: Allocator> Vec<T, A> {
     #[rustc_diagnostic_item = "vec_as_mut_slice"]
     #[rustc_const_stable(feature = "const_vec_string_slice", since = "1.87.0")]
     pub const fn as_mut_slice(&mut self) -> &mut [T] {
+        // SAFETY: `BufWriter::flush_buf` assumes that this will not
+        // de-initialize any elements of the spare capacity.
+
         // SAFETY: `slice::from_raw_parts_mut` requires pointee is a contiguous, aligned buffer of
         // size `len` containing properly-initialized `T`s. Data must not be accessed through any
         // other pointer for the returned lifetime. Further, `len * size_of::<T>` <=
@@ -2992,6 +3019,10 @@ impl<T, A: Allocator> Vec<T, A> {
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn clear(&mut self) {
+        // Though this is equivalent to `truncate(0)`, the manual version
+        // optimizes better, justifying the additional complexity
+        // (see #96002 and #154095 for context).
+
         let elems: *mut [T] = self.as_mut_slice();
 
         // SAFETY:
@@ -3747,7 +3778,8 @@ impl<T: TrivialClone, A: Allocator> ExtendFromWithinSpec for Vec<T, A> {
 ////////////////////////////////////////////////////////////////////////////////
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T, A: Allocator> ops::Deref for Vec<T, A> {
+#[rustc_const_unstable(feature = "const_convert", issue = "143773")]
+impl<T, A: Allocator> const ops::Deref for Vec<T, A> {
     type Target = [T];
 
     #[inline]
@@ -3757,7 +3789,8 @@ impl<T, A: Allocator> ops::Deref for Vec<T, A> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T, A: Allocator> ops::DerefMut for Vec<T, A> {
+#[rustc_const_unstable(feature = "const_convert", issue = "143773")]
+impl<T, A: Allocator> const ops::DerefMut for Vec<T, A> {
     #[inline]
     fn deref_mut(&mut self) -> &mut [T] {
         self.as_mut_slice()
@@ -3822,7 +3855,8 @@ impl<T: Hash, A: Allocator> Hash for Vec<T, A> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T, I: SliceIndex<[T]>, A: Allocator> Index<I> for Vec<T, A> {
+#[rustc_const_unstable(feature = "const_index", issue = "143775")]
+impl<T, I: [const] SliceIndex<[T]>, A: Allocator> const Index<I> for Vec<T, A> {
     type Output = I::Output;
 
     #[inline]
@@ -3832,7 +3866,8 @@ impl<T, I: SliceIndex<[T]>, A: Allocator> Index<I> for Vec<T, A> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T, I: SliceIndex<[T]>, A: Allocator> IndexMut<I> for Vec<T, A> {
+#[rustc_const_unstable(feature = "const_index", issue = "143775")]
+impl<T, I: [const] SliceIndex<[T]>, A: Allocator> const IndexMut<I> for Vec<T, A> {
     #[inline]
     fn index_mut(&mut self, index: I) -> &mut Self::Output {
         IndexMut::index_mut(&mut **self, index)

@@ -1167,18 +1167,21 @@ fn inherit_dependency_features() {
         .build();
 
     p.cargo("check")
-        .with_stderr_data(str![[r#"
+        .with_stderr_data(
+            str![[r#"
 [UPDATING] `dummy-registry` index
 [LOCKING] 2 packages to latest compatible versions
 [DOWNLOADING] crates ...
-[DOWNLOADED] fancy_dep v0.2.4 (registry `dummy-registry`)
 [DOWNLOADED] dep v0.1.0 (registry `dummy-registry`)
+[DOWNLOADED] fancy_dep v0.2.4 (registry `dummy-registry`)
 [CHECKING] fancy_dep v0.2.4
 [CHECKING] dep v0.1.0
 [CHECKING] bar v0.2.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
-"#]])
+"#]]
+            .unordered(),
+        )
         .run();
 
     let lockfile = p.read_lockfile();
@@ -1539,14 +1542,14 @@ fn warn_inherit_def_feat_true_member_def_feat_false() {
 [UPDATING] `dummy-registry` index
 [LOCKING] 2 packages to latest compatible versions
 [DOWNLOADING] crates ...
-[DOWNLOADED] fancy_dep v0.2.4 (registry `dummy-registry`)
 [DOWNLOADED] dep v0.1.0 (registry `dummy-registry`)
+[DOWNLOADED] fancy_dep v0.2.4 (registry `dummy-registry`)
 [CHECKING] fancy_dep v0.2.4
 [CHECKING] dep v0.1.0
 [CHECKING] bar v0.2.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
-"#]]).run();
+"#]].unordered()).run();
 }
 
 #[cargo_test]
@@ -1631,14 +1634,14 @@ fn warn_inherit_simple_member_def_feat_false() {
 [UPDATING] `dummy-registry` index
 [LOCKING] 2 packages to latest compatible versions
 [DOWNLOADING] crates ...
-[DOWNLOADED] fancy_dep v0.2.4 (registry `dummy-registry`)
 [DOWNLOADED] dep v0.1.0 (registry `dummy-registry`)
+[DOWNLOADED] fancy_dep v0.2.4 (registry `dummy-registry`)
 [CHECKING] fancy_dep v0.2.4
 [CHECKING] dep v0.1.0
 [CHECKING] bar v0.2.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
-"#]]).run();
+"#]].unordered()).run();
 }
 
 #[cargo_test]
@@ -1719,18 +1722,21 @@ fn inherit_def_feat_false_member_def_feat_true() {
         .build();
 
     p.cargo("check")
-        .with_stderr_data(str![[r#"
+        .with_stderr_data(
+            str![[r#"
 [UPDATING] `dummy-registry` index
 [LOCKING] 2 packages to latest compatible versions
 [DOWNLOADING] crates ...
-[DOWNLOADED] fancy_dep v0.2.4 (registry `dummy-registry`)
 [DOWNLOADED] dep v0.1.0 (registry `dummy-registry`)
+[DOWNLOADED] fancy_dep v0.2.4 (registry `dummy-registry`)
 [CHECKING] fancy_dep v0.2.4
 [CHECKING] dep v0.1.0
 [CHECKING] bar v0.2.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
-"#]])
+"#]]
+            .unordered(),
+        )
         .run();
 }
 

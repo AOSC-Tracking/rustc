@@ -5,10 +5,9 @@
 use rustc_abi::ExternAbi;
 use rustc_ast::visit::{VisitorResult, walk_list};
 use rustc_data_structures::fingerprint::Fingerprint;
-use rustc_data_structures::fx::FxIndexSet;
-use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
+use rustc_data_structures::stable_hash::{StableHash, StableHasher};
 use rustc_data_structures::svh::Svh;
-use rustc_data_structures::sync::{DynSend, DynSync, par_for_each_in, try_par_for_each_in};
+use rustc_data_structures::sync::{DynSend, DynSync, par_for_each_in, spawn, try_par_for_each_in};
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LOCAL_CRATE, LocalDefId, LocalModDefId};
 use rustc_hir::definitions::{DefKey, DefPath, DefPathHash};
@@ -318,11 +317,9 @@ impl<'tcx> TyCtxt<'tcx> {
             BodyOwnerKind::Static(mutability) => ConstContext::Static(mutability),
 
             BodyOwnerKind::Fn if self.is_constructor(def_id) => return None,
-            // Const closures use their parent's const context
-            BodyOwnerKind::Closure if self.is_const_fn(def_id) => {
-                return self.hir_body_const_context(self.local_parent(local_def_id));
+            BodyOwnerKind::Fn | BodyOwnerKind::Closure if self.is_const_fn(def_id) => {
+                ConstContext::ConstFn
             }
-            BodyOwnerKind::Fn if self.is_const_fn(def_id) => ConstContext::ConstFn,
             BodyOwnerKind::Fn | BodyOwnerKind::Closure | BodyOwnerKind::GlobalAsm => return None,
         };
 
@@ -371,7 +368,7 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     pub fn hir_rustc_coherence_is_core(self) -> bool {
-        find_attr!(self.hir_krate_attrs(), RustcCoherenceIsCore(..))
+        find_attr!(self.hir_krate_attrs(), RustcCoherenceIsCore)
     }
 
     pub fn hir_get_module(self, module: LocalModDefId) -> (&'tcx Mod<'tcx>, Span, HirId) {
@@ -645,7 +642,7 @@ impl<'tcx> TyCtxt<'tcx> {
                     | ItemKind::Enum(..)
                     | ItemKind::Struct(..)
                     | ItemKind::Union(..)
-                    | ItemKind::Trait(..)
+                    | ItemKind::Trait { .. }
                     | ItemKind::Impl { .. },
                 ..
             })
@@ -696,7 +693,7 @@ impl<'tcx> TyCtxt<'tcx> {
                     ItemKind::Enum(..) => "enum",
                     ItemKind::Struct(..) => "struct",
                     ItemKind::Union(..) => "union",
-                    ItemKind::Trait(..) => "trait",
+                    ItemKind::Trait { .. } => "trait",
                     ItemKind::TraitAlias(..) => "trait alias",
                     ItemKind::Impl { .. } => "impl",
                 };
@@ -708,7 +705,7 @@ impl<'tcx> TyCtxt<'tcx> {
             Node::ImplItem(ii) => {
                 let kind = match ii.kind {
                     ImplItemKind::Const(..) => "associated constant",
-                    ImplItemKind::Fn(fn_sig, _) => match fn_sig.decl.implicit_self {
+                    ImplItemKind::Fn(fn_sig, _) => match fn_sig.decl.implicit_self() {
                         ImplicitSelfKind::None => "associated function",
                         _ => "method",
                     },
@@ -719,7 +716,7 @@ impl<'tcx> TyCtxt<'tcx> {
             Node::TraitItem(ti) => {
                 let kind = match ti.kind {
                     TraitItemKind::Const(..) => "associated constant",
-                    TraitItemKind::Fn(fn_sig, _) => match fn_sig.decl.implicit_self {
+                    TraitItemKind::Fn(fn_sig, _) => match fn_sig.decl.implicit_self() {
                         ImplicitSelfKind::None => "associated function",
                         _ => "trait method",
                     },
@@ -946,7 +943,7 @@ impl<'tcx> TyCtxt<'tcx> {
             }) => until_within(*outer_span, ty.span),
             // With generics and bounds.
             Node::Item(Item {
-                kind: ItemKind::Trait(_, _, _, _, generics, bounds, _),
+                kind: ItemKind::Trait { generics, bounds, .. },
                 span: outer_span,
                 ..
             })
@@ -983,8 +980,8 @@ impl<'tcx> TyCtxt<'tcx> {
                 span,
                 ..
             }) => {
-                // Ensure that the returned span has the item's SyntaxContext.
-                fn_decl_span.find_ancestor_inside(*span).unwrap_or(*span)
+                // Ensure that the returned span has the closure expression's SyntaxContext.
+                fn_decl_span.find_ancestor_inside_same_ctxt(*span).unwrap_or(*span)
             }
             _ => self.hir_span_with_body(hir_id),
         };
@@ -1164,10 +1161,10 @@ pub(super) fn crate_hash(tcx: TyCtxt<'_>, _: LocalCrate) -> Svh {
 
     let crate_hash: Fingerprint = tcx.with_stable_hashing_context(|mut hcx| {
         let mut stable_hasher = StableHasher::new();
-        hir_body_hash.hash_stable(&mut hcx, &mut stable_hasher);
-        upstream_crates.hash_stable(&mut hcx, &mut stable_hasher);
-        source_file_names.hash_stable(&mut hcx, &mut stable_hasher);
-        debugger_visualizers.hash_stable(&mut hcx, &mut stable_hasher);
+        hir_body_hash.stable_hash(&mut hcx, &mut stable_hasher);
+        upstream_crates.stable_hash(&mut hcx, &mut stable_hasher);
+        source_file_names.stable_hash(&mut hcx, &mut stable_hasher);
+        debugger_visualizers.stable_hash(&mut hcx, &mut stable_hasher);
         if tcx.sess.opts.incremental.is_some() {
             let definitions = tcx.untracked().definitions.freeze();
             let mut owner_spans: Vec<_> = tcx
@@ -1181,17 +1178,17 @@ pub(super) fn crate_hash(tcx: TyCtxt<'_>, _: LocalCrate) -> Svh {
                 })
                 .collect();
             owner_spans.sort_unstable_by_key(|bn| bn.0);
-            owner_spans.hash_stable(&mut hcx, &mut stable_hasher);
+            owner_spans.stable_hash(&mut hcx, &mut stable_hasher);
         }
-        tcx.sess.opts.dep_tracking_hash(true).hash_stable(&mut hcx, &mut stable_hasher);
-        tcx.stable_crate_id(LOCAL_CRATE).hash_stable(&mut hcx, &mut stable_hasher);
+        tcx.sess.opts.dep_tracking_hash(true).stable_hash(&mut hcx, &mut stable_hasher);
+        tcx.stable_crate_id(LOCAL_CRATE).stable_hash(&mut hcx, &mut stable_hasher);
         // Hash visibility information since it does not appear in HIR.
         // FIXME: Figure out how to remove `visibilities_for_hashing` by hashing visibilities on
         // the fly in the resolver, storing only their accumulated hash in `ResolverGlobalCtxt`,
         // and combining it with other hashes here.
-        resolutions.visibilities_for_hashing.hash_stable(&mut hcx, &mut stable_hasher);
+        resolutions.visibilities_for_hashing.stable_hash(&mut hcx, &mut stable_hasher);
         with_metavar_spans(|mspans| {
-            mspans.freeze_and_get_read_spans().hash_stable(&mut hcx, &mut stable_hasher);
+            mspans.freeze_and_get_read_spans().stable_hash(&mut hcx, &mut stable_hasher);
         });
         stable_hasher.finish()
     });
@@ -1246,7 +1243,25 @@ pub(super) fn hir_module_items(tcx: TyCtxt<'_>, module_id: LocalModDefId) -> Mod
     }
 }
 
+fn force_delayed_owners_lowering(tcx: TyCtxt<'_>) {
+    let krate = tcx.hir_crate(());
+    for &id in &krate.delayed_ids {
+        tcx.ensure_done().lower_delayed_owner(id);
+    }
+
+    let (_, krate) = krate.delayed_resolver.steal();
+    let prof = tcx.sess.prof.clone();
+
+    // Drop AST to free memory. It can be expensive so try to drop it on a separate thread.
+    spawn(move || {
+        let _timer = prof.verbose_generic_activity("drop_ast");
+        drop(krate);
+    });
+}
+
 pub(crate) fn hir_crate_items(tcx: TyCtxt<'_>, _: ()) -> ModuleItems {
+    force_delayed_owners_lowering(tcx);
+
     let mut collector = ItemCollector::new(tcx, true);
 
     // A "crate collector" and "module collector" start at a
@@ -1307,12 +1322,11 @@ struct ItemCollector<'tcx> {
     nested_bodies: Vec<LocalDefId>,
     delayed_lint_items: Vec<OwnerId>,
     eiis: Vec<LocalDefId>,
-    delayed_ids: Option<&'tcx FxIndexSet<LocalDefId>>,
 }
 
 impl<'tcx> ItemCollector<'tcx> {
     fn new(tcx: TyCtxt<'tcx>, crate_collector: bool) -> ItemCollector<'tcx> {
-        let mut collector = ItemCollector {
+        ItemCollector {
             crate_collector,
             tcx,
             submodules: Vec::default(),
@@ -1325,45 +1339,12 @@ impl<'tcx> ItemCollector<'tcx> {
             nested_bodies: Vec::default(),
             delayed_lint_items: Vec::default(),
             eiis: Vec::default(),
-            delayed_ids: None,
-        };
-
-        if crate_collector {
-            let krate = tcx.hir_crate(());
-            collector.delayed_ids = Some(&krate.delayed_ids);
-
-            let delayed_kinds =
-                krate.delayed_ids.iter().copied().map(|id| (id, krate.owners[id].expect_delayed()));
-
-            // FIXME(fn_delegation): need to add delayed lints, eiis
-            for (def_id, kind) in delayed_kinds {
-                let owner_id = OwnerId { def_id };
-
-                match kind {
-                    DelayedOwnerKind::Item => collector.items.push(ItemId { owner_id }),
-                    DelayedOwnerKind::ImplItem => {
-                        collector.impl_items.push(ImplItemId { owner_id })
-                    }
-                    DelayedOwnerKind::TraitItem => {
-                        collector.trait_items.push(TraitItemId { owner_id })
-                    }
-                };
-
-                collector.body_owners.push(def_id);
-            }
         }
-
-        collector
     }
 }
 
 impl<'hir> Visitor<'hir> for ItemCollector<'hir> {
     type NestedFilter = nested_filter::All;
-
-    #[inline]
-    fn visit_if_delayed(&self, def_id: LocalDefId) -> bool {
-        !self.crate_collector || self.delayed_ids.is_none_or(|ids| !ids.contains(&def_id))
-    }
 
     fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
         self.tcx

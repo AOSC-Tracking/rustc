@@ -15,6 +15,7 @@ mod non_snake_case_features;
 mod non_snake_case_packages;
 mod redundant_homepage;
 mod redundant_readme;
+mod text_direction_codepoint;
 mod unknown_lints;
 mod unused_dependencies;
 mod unused_workspace_dependencies;
@@ -54,6 +55,7 @@ im-a-teapot = "warn"
    |
    = [NOTE] `cargo::unknown_lints` is set to `warn` by default
    = [HELP] there is a lint with a similar name: `im_a_teapot`
+[WARNING] `foo` (manifest) generated 1 warning
 [CHECKING] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -95,7 +97,7 @@ test_dummy_unstable = { level = "forbid", priority = -1 }
   | ^^^^^^^^^^^^^^^^^^
   |
   = [NOTE] `cargo::im_a_teapot` is set to `forbid` in `[lints]`
-[ERROR] encountered 1 error while running lints
+[ERROR] could not parse `foo` (manifest) due to 1 previous error
 
 "#]])
         .run();
@@ -138,7 +140,7 @@ workspace = true
    | ^^^^^^^^^^^^^^^^^^
    |
    = [NOTE] `cargo::im_a_teapot` is set to `forbid` in `[lints]`
-[ERROR] encountered 1 error while running lints
+[ERROR] could not parse `foo` (manifest) due to 1 previous error
 
 "#]])
         .run();
@@ -192,6 +194,7 @@ im-a-teapot = true
  9 ~ im-a-teapot = true
 10 + [lints]
    |
+[WARNING] `foo` (manifest) generated 1 warning
 [CHECKING] foo v0.0.1 ([ROOT]/foo/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -295,7 +298,7 @@ im_a_teapot = "warn"
   | ^^^^^^^^^^^ this is behind `test-dummy-unstable`, which is not enabled
   |
   = [HELP] consider adding `cargo-features = ["test-dummy-unstable"]` to the top of the manifest
-[ERROR] encountered 1 error while verifying lints
+[ERROR] could not parse `foo` (manifest) due to 1 previous error
 
 "#]])
         .run();
@@ -349,7 +352,7 @@ workspace = true
   | ^^^^^^^^^^^^^^^^^^^ this is behind `test-dummy-unstable`, which is not enabled
   |
   = [HELP] consider adding `cargo-features = ["test-dummy-unstable"]` to the top of the manifest
-[ERROR] encountered 2 errors while verifying lints
+[ERROR] could not parse workspace (manifest) due to 2 previous errors
 
 "#]])
         .run();
@@ -414,7 +417,8 @@ authors = []
 7 ~             
 8 + [lints]
   |
-[ERROR] encountered 2 errors while verifying lints
+[WARNING] `foo` (manifest) generated 1 warning
+[ERROR] could not parse workspace (manifest) due to 2 previous errors
 
 "#]])
         .run();
@@ -452,8 +456,63 @@ im_a_teapot = { level = "warn", priority = 10 }
   │ ━━━━━━━━━━━━━━━━━━
   │
   ╰ [NOTE] `cargo::im_a_teapot` is set to `warn` in `[lints]`
+[WARNING] `foo` (manifest) generated 1 warning
 [CHECKING] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn explicit_lint_level_overrides_default() {
+    Package::new("unused", "0.1.0").publish();
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [package]
+            name = "foo"
+            version = "0.1.0"
+            authors = []
+            edition = "2018"
+
+            [dependencies]
+            unused = "0.1.0"
+
+            [lints.cargo]
+            unused_dependencies = "deny"
+        "#,
+        )
+        .file(
+            "src/main.rs",
+            r#"
+            fn main() {}
+            "#,
+        )
+        .build();
+
+    p.cargo("check -Zcargo-lints")
+        .masquerade_as_nightly_cargo(&["cargo-lints"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to latest compatible version
+[DOWNLOADING] crates ...
+[DOWNLOADED] unused v0.1.0 (registry `dummy-registry`)
+[CHECKING] unused v0.1.0
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[ERROR] unused dependency
+ --> Cargo.toml:9:13
+  |
+9 |             unused = "0.1.0"
+  |             ^^^^^^^^^^^^^^^^
+  |
+  = [NOTE] `cargo::unused_dependencies` is set to `deny` in `[lints]`
+[HELP] remove the dependency
+  |
+9 -             unused = "0.1.0"
+  |
 
 "#]])
         .run();

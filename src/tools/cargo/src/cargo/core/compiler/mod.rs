@@ -105,7 +105,7 @@ pub use crate::core::compiler::unit::UnitInterner;
 use crate::core::manifest::TargetSourcePath;
 use crate::core::profiles::{PanicStrategy, Profile, StripInner};
 use crate::core::{Feature, PackageId, Target};
-use crate::lints::get_key_value;
+use crate::diagnostics::get_key_value;
 use crate::util::OnceExt;
 use crate::util::errors::{CargoResult, VerboseError};
 use crate::util::interning::InternedString;
@@ -837,7 +837,7 @@ fn prepare_rustc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResult
     if build_runner.bcx.gctx.cli_unstable().cargo_lints {
         // Added last to reduce the risk of RUSTFLAGS or `[lints]` from interfering with
         // `unused_dependencies` tracking
-        base.arg("-Wunused_crate_dependencies");
+        base.arg("--force-warn=unused_crate_dependencies");
     }
 
     Ok(base)
@@ -870,7 +870,16 @@ fn prepare_rustdoc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
     add_cap_lints(bcx, unit, &mut rustdoc);
 
     unit.kind.add_target_arg(&mut rustdoc);
-    let doc_dir = build_runner.files().output_dir(unit);
+
+    let doc_dir = if build_runner.bcx.build_config.intent.wants_doc_json_output() {
+        // Always use new layout for '--output-format=json'.
+        // In fix for https://github.com/rust-lang/cargo/issues/16291
+
+        build_runner.files().out_dir_new_layout(unit)
+    } else {
+        build_runner.files().output_dir(unit)
+    };
+
     rustdoc.arg("-o").arg(&doc_dir);
     rustdoc.args(&features_args(unit));
     rustdoc.args(&check_cfg_args(unit));
@@ -974,6 +983,7 @@ fn rustdoc(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<W
     let mut rustdoc = prepare_rustdoc(build_runner, unit)?;
 
     let crate_name = unit.target.crate_name();
+    let is_json_output = build_runner.bcx.build_config.intent.wants_doc_json_output();
     let doc_dir = build_runner.files().output_dir(unit);
     // Create the documentation directory ahead of time as rustdoc currently has
     // a bug where concurrent invocations will race to create this directory if
@@ -1057,13 +1067,15 @@ fn rustdoc(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<W
             }
         }
 
-        let crate_dir = doc_dir.join(&crate_name);
-        if crate_dir.exists() {
-            // Remove output from a previous build. This ensures that stale
-            // files for removed items are removed.
-            debug!("removing pre-existing doc directory {:?}", crate_dir);
-            paths::remove_dir_all(crate_dir)?;
-        }
+        if !is_json_output {
+            let crate_dir = doc_dir.join(&crate_name);
+            if crate_dir.exists() {
+                // Remove output from a previous build. This ensures that stale
+                // files for removed items are removed.
+                debug!("removing pre-existing doc directory {:?}", crate_dir);
+                paths::remove_dir_all(&crate_dir)?;
+            }
+        };
         state.running(&rustdoc);
         let timestamp = paths::set_invocation_time(&fingerprint_dir)?;
 
@@ -1866,6 +1878,15 @@ pub fn lib_search_paths(
     Ok(lib_search_paths)
 }
 
+fn is_public_dependency_enabled(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> bool {
+    unit.pkg
+        .manifest()
+        .unstable_features()
+        .require(Feature::public_dependency())
+        .is_ok()
+        || build_runner.bcx.gctx.cli_unstable().public_dependency
+}
+
 /// Generates a list of `--extern` arguments.
 pub fn extern_args(
     build_runner: &BuildRunner<'_, '_>,
@@ -1876,6 +1897,7 @@ pub fn extern_args(
     let deps = build_runner.unit_deps(unit);
 
     let no_embed_metadata = build_runner.bcx.gctx.cli_unstable().no_embed_metadata;
+    let public_dependency_enabled = is_public_dependency_enabled(build_runner, unit);
 
     // Closure to add one dependency to `result`.
     let mut link_to = |dep: &UnitDep,
@@ -1885,14 +1907,7 @@ pub fn extern_args(
      -> CargoResult<()> {
         let mut value = OsString::new();
         let mut opts = Vec::new();
-        let is_public_dependency_enabled = unit
-            .pkg
-            .manifest()
-            .unstable_features()
-            .require(Feature::public_dependency())
-            .is_ok()
-            || build_runner.bcx.gctx.cli_unstable().public_dependency;
-        if !dep.public && unit.target.is_lib() && is_public_dependency_enabled {
+        if !dep.public && unit.target.is_lib() && public_dependency_enabled {
             opts.push("priv");
             *unstable_opts = true;
         }
@@ -2378,7 +2393,7 @@ fn on_stderr_line_inner(
 
     #[derive(serde::Deserialize)]
     struct UnusedExterns {
-        unused_extern_names: Vec<String>,
+        unused_extern_names: std::collections::BTreeSet<InternedString>,
     }
     if let Ok(uext) = serde_json::from_str::<UnusedExterns>(compiler_message.get()) {
         trace!(

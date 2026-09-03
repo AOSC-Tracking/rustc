@@ -2147,11 +2147,7 @@ impl GlobalContext {
 
     /// Get the global [`WarningHandling`] configuration.
     pub fn warning_handling(&self) -> CargoResult<WarningHandling> {
-        if self.unstable_flags.warnings {
-            Ok(self.build_config()?.warnings.unwrap_or_default())
-        } else {
-            Ok(WarningHandling::default())
-        }
+        Ok(self.build_config()?.warnings.unwrap_or_default())
     }
 
     pub fn ws_roots(&self) -> MutexGuard<'_, HashMap<PathBuf, WorkspaceRootConfig>> {
@@ -2351,6 +2347,7 @@ impl ConfigInclude {
             Definition::Environment(_) | Definition::Cli(None) | Definition::BuiltIn => gctx.cwd(),
         }
         .join(&self.path);
+        let abs_path = paths::normalize_path(&abs_path);
 
         if self.optional && !abs_path.exists() {
             tracing::info!(

@@ -39,16 +39,16 @@
 use std::iter;
 
 use ast::visit::Visitor;
-use hir::def::{DefKind, PartialRes, Res};
+use hir::def::{DefKind, Res};
 use hir::{BodyId, HirId};
 use rustc_abi::ExternAbi;
 use rustc_ast as ast;
 use rustc_ast::*;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::ErrorGuaranteed;
-use rustc_hir as hir;
 use rustc_hir::attrs::{AttributeKind, InlineAttr};
 use rustc_hir::def_id::DefId;
+use rustc_hir::{self as hir, FnDeclFlags};
 use rustc_middle::span_bug;
 use rustc_middle::ty::Asyncness;
 use rustc_span::symbol::kw;
@@ -105,7 +105,7 @@ static ATTRS_ADDITIONS: &[AttrAdditionInfo] = &[
     },
 ];
 
-impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
+impl<'hir> LoweringContext<'_, 'hir> {
     fn is_method(&self, def_id: DefId, span: Span) -> bool {
         match self.tcx.def_kind(def_id) {
             DefKind::Fn => false,
@@ -122,8 +122,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         let span = self.lower_span(delegation.path.segments.last().unwrap().ident.span);
 
         // Delegation can be unresolved in illegal places such as function bodies in extern blocks (see #151356)
-        let sig_id = if let Some(delegation_info) =
-            self.resolver.delegation_info(self.local_def_id(item_id))
+        let sig_id = if let Some(delegation_info) = self.resolver.delegation_info(self.owner.def_id)
         {
             self.get_sig_id(delegation_info.resolution_node, span)
         } else {
@@ -143,7 +142,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
 
                 let (param_count, c_variadic) = self.param_count(sig_id);
 
-                let mut generics = self.uplift_delegation_generics(delegation, sig_id, item_id);
+                let mut generics = self.uplift_delegation_generics(delegation, sig_id, is_method);
 
                 let body_id = self.lower_delegation_body(
                     delegation,
@@ -265,13 +264,13 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
     }
 
     fn get_resolution_id(&self, node_id: NodeId) -> Option<DefId> {
-        self.resolver.get_partial_res(node_id).and_then(|r| r.expect_full_res().opt_def_id())
+        self.get_partial_res(node_id).and_then(|r| r.expect_full_res().opt_def_id())
     }
 
     // Function parameter count, including C variadic `...` if present.
     fn param_count(&self, def_id: DefId) -> (usize, bool /*c_variadic*/) {
         let sig = self.tcx.fn_sig(def_id).skip_binder().skip_binder();
-        (sig.inputs().len() + usize::from(sig.c_variadic), sig.c_variadic)
+        (sig.inputs().len() + usize::from(sig.c_variadic()), sig.c_variadic())
     }
 
     fn lower_delegation_decl(
@@ -301,6 +300,8 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
                 hir::InferDelegationSig::Output(self.arena.alloc(hir::DelegationGenerics {
                     child_args_segment_id: generics.child.args_segment_id,
                     parent_args_segment_id: generics.parent.args_segment_id,
+                    self_ty_id: generics.self_ty_id,
+                    propagate_self_ty: generics.propagate_self_ty,
                 })),
             )),
             span,
@@ -309,9 +310,9 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         self.arena.alloc(hir::FnDecl {
             inputs,
             output: hir::FnRetTy::Return(output),
-            c_variadic,
-            lifetime_elision_allowed: true,
-            implicit_self: hir::ImplicitSelfKind::None,
+            fn_decl_kind: FnDeclFlags::default()
+                .set_lifetime_elision_allowed(true)
+                .set_c_variadic(c_variadic),
         })
     }
 
@@ -331,11 +332,11 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
             safety: if self.tcx.codegen_fn_attrs(sig_id).safe_target_features {
                 hir::HeaderSafety::SafeTargetFeatures
             } else {
-                hir::HeaderSafety::Normal(sig.safety)
+                hir::HeaderSafety::Normal(sig.safety())
             },
             constness: self.tcx.constness(sig_id),
             asyncness,
-            abi: sig.abi,
+            abi: sig.abi(),
         };
 
         hir::FnSig { decl, header, span }
@@ -414,7 +415,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
                     && idx == 0
                 {
                     let mut self_resolver = SelfResolver {
-                        resolver: this.resolver,
+                        ctxt: this,
                         path_id: delegation.id,
                         self_param_id: pat_node_id,
                     };
@@ -433,7 +434,6 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
             // also nested delegations may need to access information about this code (#154332),
             // so it is better to leave this code as opposed to bodies of extern functions,
             // which are completely erased from existence.
-            // FIXME(fn_delegation): fix `help` in error message (see `inner-attr.stderr`)
             if param_count == 0
                 && let Some(block) = block
             {
@@ -506,7 +506,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
 
             // FIXME(fn_delegation): proper support for parent generics propagation
             // in method call scenario.
-            let segment = self.process_segment(span, &segment, &mut generics.child, false);
+            let segment = self.process_segment(span, &segment, &mut generics.child);
             let segment = self.arena.alloc(segment);
 
             self.arena.alloc(hir::Expr {
@@ -532,14 +532,10 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
 
                     new_path.segments = self.arena.alloc_from_iter(
                         new_path.segments.iter().enumerate().map(|(idx, segment)| {
-                            let mut process_segment = |result, add_lifetimes| {
-                                self.process_segment(span, segment, result, add_lifetimes)
-                            };
-
                             if idx + 2 == len {
-                                process_segment(&mut generics.parent, true)
+                                self.process_segment(span, segment, &mut generics.parent)
                             } else if idx + 1 == len {
-                                process_segment(&mut generics.child, false)
+                                self.process_segment(span, segment, &mut generics.child)
                             } else {
                                 segment.clone()
                             }
@@ -549,11 +545,17 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
                     hir::QPath::Resolved(ty, self.arena.alloc(new_path))
                 }
                 hir::QPath::TypeRelative(ty, segment) => {
-                    let segment = self.process_segment(span, segment, &mut generics.child, false);
+                    let segment = self.process_segment(span, segment, &mut generics.child);
 
                     hir::QPath::TypeRelative(ty, self.arena.alloc(segment))
                 }
             };
+
+            generics.self_ty_id = match new_path {
+                hir::QPath::Resolved(ty, _) => ty,
+                hir::QPath::TypeRelative(ty, _) => Some(ty),
+            }
+            .map(|ty| ty.hir_id);
 
             let callee_path = self.arena.alloc(self.mk_expr(hir::ExprKind::Path(new_path), span));
             self.arena.alloc(self.mk_expr(hir::ExprKind::Call(callee_path, args), span))
@@ -576,13 +578,12 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         span: Span,
         segment: &hir::PathSegment<'hir>,
         result: &mut GenericsGenerationResult<'hir>,
-        add_lifetimes: bool,
     ) -> hir::PathSegment<'hir> {
         let details = result.generics.args_propagation_details();
 
         let segment = if details.should_propagate {
             let generics = result.generics.into_hir_generics(self, span);
-            let args = generics.into_generic_args(self, add_lifetimes, span);
+            let args = generics.into_generic_args(self, span);
 
             // Needed for better error messages (`trait-impl-wrong-args-count.rs` test).
             let args = if args.is_empty() { None } else { Some(args) };
@@ -604,13 +605,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
         span: Span,
         delegation: &Delegation,
     ) -> DelegationResults<'hir> {
-        let decl = self.arena.alloc(hir::FnDecl {
-            inputs: &[],
-            output: hir::FnRetTy::DefaultReturn(span),
-            c_variadic: false,
-            lifetime_elision_allowed: true,
-            implicit_self: hir::ImplicitSelfKind::None,
-        });
+        let decl = self.arena.alloc(hir::FnDecl::dummy(span));
 
         let header = self.generate_header_error();
         let sig = hir::FnSig { decl, header, span };
@@ -629,7 +624,7 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
             );
 
             let callee_path = this.arena.alloc(this.mk_expr(hir::ExprKind::Path(path), span));
-            let args = if let Some(box block) = delegation.body.as_ref() {
+            let args = if let Some(block) = delegation.body.as_ref() {
                 this.arena.alloc_slice(&[this.lower_target_expr(block)])
             } else {
                 &mut []
@@ -668,25 +663,24 @@ impl<'hir, R: ResolverAstLoweringExt<'hir>> LoweringContext<'_, 'hir, R> {
     }
 }
 
-struct SelfResolver<'a, R> {
-    resolver: &'a mut R,
+struct SelfResolver<'a, 'b, 'hir> {
+    ctxt: &'a mut LoweringContext<'b, 'hir>,
     path_id: NodeId,
     self_param_id: NodeId,
 }
 
-impl<'tcx, R: ResolverAstLoweringExt<'tcx>> SelfResolver<'_, R> {
+impl SelfResolver<'_, '_, '_> {
     fn try_replace_id(&mut self, id: NodeId) {
-        if let Some(res) = self.resolver.get_partial_res(id)
+        if let Some(res) = self.ctxt.get_partial_res(id)
             && let Some(Res::Local(sig_id)) = res.full_res()
             && sig_id == self.path_id
         {
-            let new_res = PartialRes::new(Res::Local(self.self_param_id));
-            self.resolver.insert_partial_res(id, new_res);
+            self.ctxt.partial_res_overrides.insert(id, self.self_param_id);
         }
     }
 }
 
-impl<'ast, 'tcx, R: ResolverAstLoweringExt<'tcx>> Visitor<'ast> for SelfResolver<'_, R> {
+impl<'ast> Visitor<'ast> for SelfResolver<'_, '_, '_> {
     fn visit_id(&mut self, id: NodeId) {
         self.try_replace_id(id);
     }

@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::collections::BTreeMap;
-use std::fs::{File, Metadata};
+use std::fs::File;
 use std::io::{ErrorKind, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::marker::CoercePointee;
 use std::ops::Deref;
@@ -18,6 +18,17 @@ use crate::*;
 /// for all `dup`licates and is never reused.
 #[derive(Debug, Copy, Clone, Default, Eq, PartialEq, Ord, PartialOrd)]
 pub struct FdId(usize);
+
+impl FdId {
+    pub fn to_usize(self) -> usize {
+        self.0
+    }
+
+    /// Create a new fd id from a `usize` without checking if this fd exists.
+    pub fn new_unchecked(id: usize) -> Self {
+        Self(id)
+    }
+}
 
 #[derive(Debug, Clone)]
 struct FdIdWith<T: ?Sized> {
@@ -49,6 +60,14 @@ impl<T: ?Sized> FileDescriptionRef<T> {
         self.0.id
     }
 }
+
+impl<T: ?Sized> PartialEq for FileDescriptionRef<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.id == other.0.id
+    }
+}
+
+impl<T: ?Sized> Eq for FileDescriptionRef<T> {}
 
 /// Holds a weak reference to the actual file description.
 #[derive(Debug)]
@@ -198,7 +217,11 @@ pub trait FileDescription: std::fmt::Debug + FileDescriptionExt {
         throw_unsup_format!("cannot close {}", self.name());
     }
 
-    fn metadata<'tcx>(&self) -> InterpResult<'tcx, io::Result<fs::Metadata>> {
+    /// Returns the metadata for this FD, if available.
+    /// This is either host metadata, or a non-file-backed-FD type.
+    /// The latter is for new represented as a string storing a `libc` name so we only
+    /// support that kind of metadata on Unix targets.
+    fn metadata<'tcx>(&self) -> InterpResult<'tcx, Either<io::Result<fs::Metadata>, &'static str>> {
         throw_unsup_format!("obtaining metadata is only supported on file-backed file descriptors");
     }
 
@@ -421,8 +444,8 @@ impl FileDescription for FileHandle {
         }
     }
 
-    fn metadata<'tcx>(&self) -> InterpResult<'tcx, io::Result<Metadata>> {
-        interp_ok(self.file.metadata())
+    fn metadata<'tcx>(&self) -> InterpResult<'tcx, Either<io::Result<fs::Metadata>, &'static str>> {
+        interp_ok(Either::Left(self.file.metadata()))
     }
 
     fn is_tty(&self, communicate_allowed: bool) -> bool {

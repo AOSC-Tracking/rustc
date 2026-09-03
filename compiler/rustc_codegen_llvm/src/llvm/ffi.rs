@@ -166,6 +166,7 @@ pub(crate) enum CallConv {
     ColdCallConv = 9,
     PreserveMost = 14,
     PreserveAll = 15,
+    SwiftCallConv = 16,
     Tail = 18,
     PreserveNone = 21,
     X86StdcallCallConv = 64,
@@ -921,6 +922,9 @@ unsafe extern "C" {
     pub(crate) fn LLVMDoubleTypeInContext(C: &Context) -> &Type;
     pub(crate) fn LLVMFP128TypeInContext(C: &Context) -> &Type;
 
+    // Operations on non-IEEE real types
+    pub(crate) fn LLVMBFloatTypeInContext(C: &Context) -> &Type;
+
     // Operations on function types
     pub(crate) fn LLVMFunctionType<'a>(
         ReturnType: &'a Type,
@@ -930,6 +934,8 @@ unsafe extern "C" {
     ) -> &'a Type;
     pub(crate) fn LLVMCountParamTypes(FunctionTy: &Type) -> c_uint;
     pub(crate) fn LLVMGetParamTypes<'a>(FunctionTy: &'a Type, Dest: *mut &'a Type);
+    pub(crate) fn LLVMGetReturnType(FunctionTy: &Type) -> &Type;
+    pub(crate) fn LLVMIsFunctionVarArg(FunctionTy: &Type) -> Bool;
 
     // Operations on struct types
     pub(crate) fn LLVMStructTypeInContext<'a>(
@@ -1084,12 +1090,18 @@ unsafe extern "C" {
 
     // Operations about llvm intrinsics
     pub(crate) fn LLVMLookupIntrinsicID(Name: *const c_char, NameLen: size_t) -> c_uint;
+    pub(crate) fn LLVMIntrinsicIsOverloaded(ID: NonZero<c_uint>) -> Bool;
     pub(crate) fn LLVMGetIntrinsicDeclaration<'a>(
         Mod: &'a Module,
         ID: NonZero<c_uint>,
         ParamTypes: *const &'a Type,
         ParamCount: size_t,
     ) -> &'a Value;
+    pub(crate) fn LLVMRustUpgradeIntrinsicFunction<'a>(
+        Fn: &'a Value,
+        NewFn: &mut Option<&'a Value>,
+    ) -> bool;
+    pub(crate) fn LLVMRustIsTargetIntrinsic(ID: NonZero<c_uint>) -> bool;
 
     // Operations on parameters
     pub(crate) fn LLVMIsAArgument(Val: &Value) -> Option<&Value>;
@@ -1605,6 +1617,9 @@ unsafe extern "C" {
         Packed: Bool,
     );
 
+    pub(crate) fn LLVMCountStructElementTypes(StructTy: &Type) -> c_uint;
+    pub(crate) fn LLVMGetStructElementTypes<'a>(StructTy: &'a Type, Dest: *mut &'a Type);
+
     pub(crate) safe fn LLVMMetadataAsValue<'a>(C: &'a Context, MD: &'a Metadata) -> &'a Value;
 
     pub(crate) safe fn LLVMSetUnnamedAddress(Global: &Value, UnnamedAddr: UnnamedAddr);
@@ -1989,6 +2004,13 @@ unsafe extern "C" {
         NameLen: size_t,
         T: &'a Type,
     ) -> &'a Value;
+    pub(crate) fn LLVMRustGetOrInsertGlobalInAddrspace<'a>(
+        M: &'a Module,
+        Name: *const c_char,
+        NameLen: size_t,
+        T: &'a Type,
+        AddressSpace: c_uint,
+    ) -> &'a Value;
     pub(crate) fn LLVMRustGetNamedValue(
         M: &Module,
         Name: *const c_char,
@@ -2092,6 +2114,9 @@ unsafe extern "C" {
 
     /// Prints the statistics collected by `-Zprint-codegen-stats`.
     pub(crate) fn LLVMRustPrintStatistics(OutStr: &RustString);
+
+    /// Save the statistics collected by `-Zprint-codegen-stats-json`
+    pub(crate) fn LLVMRustPrintStatisticsJSON(OutStr: &RustString);
 
     pub(crate) fn LLVMRustInlineAsmVerify(
         Ty: &Type,
@@ -2329,6 +2354,7 @@ unsafe extern "C" {
     pub(crate) fn LLVMRustWriteValueToString(value_ref: &Value, s: &RustString);
 
     pub(crate) fn LLVMRustHasFeature(T: &TargetMachine, s: *const c_char) -> bool;
+    pub(crate) fn LLVMRustTargetHasMnemonic(T: &TargetMachine, s: *const c_char) -> bool;
 
     pub(crate) fn LLVMRustPrintTargetCPUs(TM: &TargetMachine, OutStr: &RustString);
     pub(crate) fn LLVMRustGetTargetFeaturesCount(T: &TargetMachine) -> size_t;

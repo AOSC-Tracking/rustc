@@ -122,11 +122,17 @@ pub trait ValueVisitor<'tcx, M: Machine<'tcx>>: Sized {
                     phantom.layout().ty,
                 );
 
-                // ... that contains a `NonNull`... (gladly, only a single field here)
+                // ... that contains a `NonNull` whose only field finally is a raw ptr we can
+                // dereference.
                 assert_eq!(nonnull_ptr.layout().fields.count(), 1);
-                let raw_ptr = self.ecx().project_field(&nonnull_ptr, FieldIdx::ZERO)?; // the actual raw ptr
+                let pat_ptr = self.ecx().project_field(&nonnull_ptr, FieldIdx::ZERO)?; // `*mut T is !null`
+                let base = match *pat_ptr.layout().ty.kind() {
+                    ty::Pat(base, _) => self.ecx().layout_of(base)?,
+                    _ => unreachable!(),
+                };
+                let raw_ptr = pat_ptr.transmute(base, self.ecx())?; // The actual raw pointer
 
-                // ... whose only field finally is a raw ptr we can dereference.
+                // Hand this actual pointer to the visitor.
                 self.visit_box(ty, &raw_ptr)?;
 
                 // The second `Box` field is the allocator, which we recursively check for validity

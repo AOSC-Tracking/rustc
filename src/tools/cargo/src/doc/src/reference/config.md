@@ -64,6 +64,7 @@ recursive_example = "rr --example recursions"
 space_example = ["run", "--release", "--", "\"command list\""]
 
 [build]
+warnings = "warn"             # adjust the effective lint level for warnings
 jobs = 1                      # number of parallel jobs, defaults to # of CPUs
 rustc = "rustc"               # the rust compiler tool
 rustc-wrapper = "…"           # run this wrapper instead of `rustc`
@@ -149,6 +150,7 @@ rpath = false            # Sets the rpath linking option.
 # Same keys for a normal profile (minus `panic`, `lto`, and `rpath`).
 
 [resolver]
+lockfile-path = "…"  # Overrides the path used for
 incompatible-rust-versions = "allow"  # Specifies how resolver reacts to these
 
 [registries.<name>]  # registries other than crates.io
@@ -456,6 +458,23 @@ recursive_example = "rr --example recursions"
 ### `[build]`
 
 The `[build]` table controls build-time operations and compiler settings.
+
+#### `build.warnings`
+* Type: string
+* Default: `"warn"`
+* Environment: `CARGO_BUILD_WARNINGS`
+
+Adjust the effective level of lint warnings for local packages.
+Allowed levels are:
+* `"warn"`: continue to emit the lints as warnings (default).
+* `"allow"`: hide the lints.
+* `"deny"`: emit an error for a crate that has lint warnings.
+  Use `--keep-going` to see the lint warnings for all dependent crates.
+
+Only warnings that are lints (i.e. level is adjustable) are affected,
+e.g. leaving as-is non-lint warnings or warnings from dependencies visible through `--verbose --verbose`.
+
+> **MSRV:** Respected as of 1.97.
 
 #### `build.jobs`
 * Type: integer or string
@@ -1100,6 +1119,18 @@ See [strip](profiles.md#strip).
 ### `[resolver]`
 
 The `[resolver]` table overrides [dependency resolution behavior](resolver.md) for local development (e.g. excludes `cargo install`).
+
+#### `resolver.lockfile-path`
+* Type: string (path)
+* Default: `<workspace_root>/Cargo.lock`
+* Environment: `CARGO_RESOLVER_LOCKFILE_PATH`
+
+Specifies the path to the lockfile to use when resolving dependencies.
+This option is useful when working with read-only source directories.
+
+The path must end with `Cargo.lock`.
+
+> **MSRV:** Requires 1.97+
 
 #### `resolver.incompatible-rust-versions`
 * Type: string

@@ -16,7 +16,7 @@ called *sound*; if `unsafe` code can be misused by safe code to exhibit
 undefined behavior, it is *unsound*.
 
 > [!WARNING]
-> The following list is not exhaustive; it may grow or shrink. There is no formal model of Rust's semantics for what is and is not allowed in unsafe code, so there may be more behavior considered unsafe. We also reserve the right to make some of the behavior in that list defined in the future. In other words, this list does not say that anything will *definitely* always be undefined in all future Rust version (but we might make such commitments for some list items in the future).
+> The following list is not exhaustive; it may grow or shrink. There is no formal model of Rust's semantics for what is and is not allowed in unsafe code, so there may be more behavior considered unsafe. We also reserve the right to make some of the behavior in that list defined in the future. In other words, this list does not say that anything will *definitely* always be undefined in all future Rust versions (but we might make such commitments for some list items in the future).
 >
 > Please read the [Rustonomicon] before writing unsafe code.
 
@@ -139,7 +139,7 @@ A reference/pointer is "dangling" if not all of the bytes it
 part of *some* allocation).
 
 r[undefined.dangling.zero-size]
-If the size is 0, then the pointer is trivially never "dangling"
+If the [size is 0][zero-sized], then the pointer is trivially never "dangling"
 (even if it is a null pointer).
 
 r[undefined.dangling.dynamic-size]
@@ -189,7 +189,7 @@ r[undefined.validity.struct]
 r[undefined.validity.union]
 * For a `union`, the exact validity requirements are not decided yet.
   Obviously, all values that can be created entirely in safe code are valid.
-  If the union has a zero-sized field, then every possible value is valid.
+  If the union has a [zero-sized] field, then every possible value is valid.
   Further details are [still being debated](https://github.com/rust-lang/unsafe-code-guidelines/issues/438).
 
 r[undefined.validity.reference-box]
@@ -268,3 +268,4 @@ reading uninitialized memory is permitted are inside `union`s and in "padding"
 [unwinding-ffi]: panic.md#unwinding-across-ffi-boundaries
 [const-promoted]: destructors.md#constant-promotion
 [lifetime-extended]: destructors.md#temporary-lifetime-extension
+[zero-sized]: glossary.zst

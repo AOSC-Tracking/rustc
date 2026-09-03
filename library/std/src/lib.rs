@@ -281,6 +281,7 @@
 #![feature(const_trait_impl)]
 #![feature(decl_macro)]
 #![feature(deprecated_suggestion)]
+#![feature(diagnostic_on_move)]
 #![feature(doc_cfg)]
 #![feature(doc_masked)]
 #![feature(doc_notable_trait)]
@@ -305,7 +306,6 @@
 #![feature(staged_api)]
 #![feature(stmt_expr_attributes)]
 #![feature(strict_provenance_lints)]
-#![feature(target_feature_inline_always)]
 #![feature(thread_local)]
 #![feature(try_blocks)]
 #![feature(try_trait_v2)]
@@ -324,8 +324,11 @@
 #![feature(const_default)]
 #![feature(core_float_math)]
 #![feature(core_intrinsics)]
+#![feature(core_io)]
 #![feature(core_io_borrowed_buf)]
+#![feature(core_io_internals)]
 #![feature(cstr_display)]
+#![feature(cursor_split)]
 #![feature(drop_guard)]
 #![feature(duration_constants)]
 #![feature(error_generic_member_access)]
@@ -347,9 +350,13 @@
 #![feature(hashmap_internals)]
 #![feature(hint_must_use)]
 #![feature(int_from_ascii)]
+#![feature(io_error_inprogress)]
+#![feature(io_error_more)]
+#![feature(io_error_uncategorized)]
 #![feature(ip)]
 #![feature(iter_advance_by)]
 #![feature(iter_next_chunk)]
+#![feature(maybe_dangling)]
 #![feature(maybe_uninit_array_assume_init)]
 #![feature(maybe_uninit_fill)]
 #![feature(panic_can_unwind)]
@@ -360,6 +367,8 @@
 #![feature(ptr_as_uninit)]
 #![feature(ptr_mask)]
 #![feature(random)]
+#![feature(raw_os_error_ty)]
+#![feature(seek_io_take_position)]
 #![feature(slice_internals)]
 #![feature(slice_ptr_get)]
 #![feature(slice_range)]
@@ -421,6 +430,13 @@
 // tidy-alphabetical-end
 //
 #![default_lib_allocator]
+// Removed features
+#![unstable_removed(
+    feature = "concat_idents",
+    reason = "Replaced by the macro_metavar_expr_concat feature",
+    link = "https://github.com/rust-lang/rust/issues/29599#issuecomment-2986866250",
+    since = "1.90.0"
+)]
 
 // The Rust prelude
 // The compiler expects the prelude definition to be defined before its use statement.

@@ -156,11 +156,12 @@ series of steps.
 Compiletest starts with an empty directory with the `-C incremental` flag, and
 then runs the compiler for each revision, reusing the incremental results from previous steps.
 
-The revisions should start with:
+Each revision name must start with one of:
 
-* `cfail` — the test should fail to compile
-* `cpass` — the test should compile successully
-* `rpass` — the test should compile and run successfully
+* `cpass` - the test must compile successfully (check build, no codegen)
+* `bfail` — the test must fail to compile (full build, with codegen)
+* `bpass` — the test must compile successully (full build, with codegen)
+* `rpass` — the test must compile and run successfully
 
 To make the revisions unique, you should add a suffix like `rpass1` and `rpass2`.
 
@@ -185,15 +186,10 @@ fn foo() {
 fn main() { foo(); }
 ```
 
-`cfail` tests support the `forbid-output` directive to specify that a certain
+Incremental tests support the `forbid-output` directive to specify that a certain
 substring must not appear anywhere in the compiler output.
 This can be useful to ensure certain errors do not appear, but this can be fragile as error messages
 change over time, and a test may no longer be checking the right thing but will still pass.
-
-`cfail` tests support the `should-ice` directive to specify that a test should
-cause an Internal Compiler Error (ICE).
-This is a highly specialized directive
-to check that the incremental cache continues to work after an ICE.
 
 Incremental tests may use the attribute `#[rustc_clean(...)]` attribute.
 This attribute compares the fingerprint from the current compilation session with the previous one.
@@ -350,6 +346,17 @@ See also the [codegen tests](#codegen-tests) for a similar set of tests.
 If you need to work with `#![no_std]` cross-compiling tests, consult the
 [`minicore` test auxiliary](./minicore.md) chapter.
 
+#### Conditional assembly tests based on instruction support
+
+Tests that depend on specific assembly instructions being available can use the
+`//@ needs-asm-mnemonic: <MNEMONIC>` directive.
+This will skip the test if the target backend does not support the specified instruction mnemonic.
+
+For example, a test that requires the `RET` instruction:
+```rust,ignore
+//@ needs-asm-mnemonic: RET
+```
+
 [`tests/assembly-llvm`]: https://github.com/rust-lang/rust/tree/HEAD/tests/assembly-llvm
 
 
@@ -459,6 +466,16 @@ However, revisions or building auxiliary via directives are not currently suppor
 
 `rmake.rs` and `run-make-support` may *not* use any nightly/unstable features,
 as they must be compilable by a stage 0 rustc that may be a beta or even stable rustc.
+
+By default, run-make tests print each subprocess command and its stdout/stderr.
+When running with `--no-capture` on `panic=abort` test suites (such as `cg_clif`),
+this can flood the terminal.
+Omit `--verbose-run-make-subprocess-output` to
+suppress this output for passing tests — failing tests always print regardless:
+
+```bash
+./x test tests/run-make --no-capture --verbose-run-make-subprocess-output=false
+```
 
 #### Quickly check if `rmake.rs` tests can be compiled
 
@@ -815,13 +832,14 @@ check for any problems that might arise.
 To run the tests in a different mode, you need to pass the `--compare-mode` CLI flag:
 
 ```bash
-./x test tests/ui --compare-mode=chalk
+./x test tests/ui --compare-mode=next-solver
 ```
 
 The possible compare modes are:
 
-- `polonius` — Runs with Polonius with `-Zpolonius`.
-- `chalk` — Runs with Chalk with `-Zchalk`.
+- `polonius` — Runs with Polonius with `-Zpolonius=next`.
+- `next-solver` — Runs with the next trait solver with `-Znext-solver`.
+- `next-solver-coherence` — Runs coherence with the next trait solver with `-Znext-solver=coherence`.
 - `split-dwarf` — Runs with unpacked split-DWARF with `-Csplit-debuginfo=unpacked`.
 - `split-dwarf-single` — Runs with packed split-DWARF with `-Csplit-debuginfo=packed`.
 

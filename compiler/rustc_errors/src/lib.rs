@@ -5,7 +5,6 @@
 // tidy-alphabetical-start
 #![allow(internal_features)]
 #![allow(rustc::direct_use_of_rustc_type_ir)]
-#![cfg_attr(bootstrap, feature(assert_matches))]
 #![feature(associated_type_defaults)]
 #![feature(default_field_values)]
 #![feature(macro_metavar_expr_concat)]
@@ -48,7 +47,7 @@ pub use emitter::ColorConfig;
 use emitter::{DynEmitter, Emitter};
 use rustc_data_structures::AtomicRef;
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
-use rustc_data_structures::stable_hasher::StableHasher;
+use rustc_data_structures::stable_hash::StableHasher;
 use rustc_data_structures::sync::{DynSend, Lock};
 pub use rustc_error_messages::{
     DiagArg, DiagArgFromDisplay, DiagArgMap, DiagArgName, DiagArgValue, DiagMessage, IntoDiagArg,
@@ -78,6 +77,7 @@ mod diagnostic_impls;
 pub mod emitter;
 pub mod formatting;
 pub mod json;
+pub mod lints;
 mod lock;
 pub mod markdown;
 pub mod timings;

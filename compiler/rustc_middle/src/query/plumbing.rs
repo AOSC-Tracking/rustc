@@ -11,7 +11,7 @@ use rustc_hir::def_id::LocalDefId;
 use rustc_span::Span;
 
 use crate::dep_graph::{DepKind, DepNodeIndex, QuerySideEffect, SerializedDepNodeIndex};
-use crate::ich::StableHashingContext;
+use crate::ich::StableHashState;
 use crate::queries::{ExternProviders, Providers, QueryArenas, QueryVTables, TaggedQueryKey};
 use crate::query::on_disk_cache::OnDiskCache;
 use crate::query::{IntoQueryKey, QueryCache, QueryJob, QueryStackFrame};
@@ -108,7 +108,7 @@ pub struct QueryVTable<'tcx, C: QueryCache> {
     /// Function pointer that hashes this query's result values.
     ///
     /// For `no_hash` queries, this function pointer is None.
-    pub hash_value_fn: Option<fn(&mut StableHashingContext<'_>, &C::Value) -> Fingerprint>,
+    pub hash_value_fn: Option<fn(&mut StableHashState<'_>, &C::Value) -> Fingerprint>,
 
     /// Function pointer that handles a cycle error. `error` must be consumed, e.g. with `emit` (if
     /// it should be emitted) or `delay_as_bug` (if it need not be emitted because an alternative
@@ -166,6 +166,8 @@ pub struct QuerySystem<'tcx> {
     pub extern_providers: ExternProviders,
 
     pub jobs: AtomicU64,
+
+    pub cycle_handler_nesting: Lock<u8>,
 }
 
 #[derive(Copy, Clone)]
@@ -446,6 +448,11 @@ macro_rules! define_callbacks {
                 }
             }
 
+            /// Calls `self.description` or returns a fallback if there was a fatal error
+            pub fn catch_description(&self, tcx: TyCtxt<'tcx>) -> String {
+                catch_fatal_errors(|| self.description(tcx)).unwrap_or_else(|_| format!("<error describing {}>", self.query_name()))
+            }
+
             /// Returns the default span for this query if `span` is a dummy span.
             pub fn default_span(&self, tcx: TyCtxt<'tcx>, span: Span) -> Span {
                 if !span.is_dummy() {
@@ -462,6 +469,11 @@ macro_rules! define_callbacks {
                             $crate::query::QueryKey::default_span(key, tcx),
                     )*
                 }
+            }
+
+            /// Calls `self.default_span` or returns `DUMMY_SP` if there was a fatal error
+            pub fn catch_default_span(&self, tcx: TyCtxt<'tcx>, span: Span) -> Span {
+                catch_fatal_errors(|| self.default_span(tcx, span)).unwrap_or(DUMMY_SP)
             }
         }
 

@@ -2,7 +2,7 @@
 //! Note that these are similar to but not always identical to LLVM's feature names,
 //! and Rust adds some features that do not correspond to LLVM features at all.
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_macros::HashStable_Generic;
+use rustc_macros::StableHash;
 use rustc_span::{Symbol, sym};
 
 use crate::spec::{Arch, FloatAbi, LlvmAbi, RustcAbi, Target};
@@ -12,11 +12,18 @@ use crate::spec::{Arch, FloatAbi, LlvmAbi, RustcAbi, Target};
 pub const RUSTC_SPECIFIC_FEATURES: &[&str] = &["crt-static"];
 
 /// Stability information for target features.
-#[derive(Debug, Copy, Clone, HashStable_Generic)]
+#[derive(Debug, Copy, Clone, StableHash)]
 pub enum Stability {
     /// This target feature is stable, it can be used in `#[target_feature]` and
     /// `#[cfg(target_feature)]`.
     Stable,
+    /// This target feature is cfg-stable. It can be used for `#[cfg(target_feature)]` on stable,
+    /// but using it in `#[target_feature]` requires the given nightly feature.
+    CfgStableToggleUnstable(
+        /// This must be a *language* feature, or else rustc will ICE when reporting a missing
+        /// feature gate!
+        Symbol,
+    ),
     /// This target feature is unstable. It is only present in `#[cfg(target_feature)]` on
     /// nightly and using it in `#[target_feature]` requires enabling the given nightly feature.
     Unstable(
@@ -37,7 +44,12 @@ impl Stability {
     /// (It might still be nightly-only even if this returns `true`, so make sure to also check
     /// `requires_nightly`.)
     pub fn in_cfg(&self) -> bool {
-        matches!(self, Stability::Stable | Stability::Unstable { .. })
+        matches!(
+            self,
+            Stability::Stable
+                | Stability::CfgStableToggleUnstable { .. }
+                | Stability::Unstable { .. }
+        )
     }
 
     /// Returns the nightly feature that is required to toggle this target feature via
@@ -48,12 +60,28 @@ impl Stability {
     /// Before calling this, ensure the feature is even permitted for this use:
     /// - for `#[target_feature]`/`-Ctarget-feature`, check `toggle_allowed()`
     /// - for `cfg(target_feature)`, check `in_cfg()`
-    pub fn requires_nightly(&self) -> Option<Symbol> {
+    ///
+    /// The `in_cfg` parameter is used to determine whether it will be used in
+    /// `cfg(target_feature)` (true) or `#[target_feature]`/`-Ctarget-feature` (false)
+    pub fn requires_nightly(&self, in_cfg: bool) -> Option<Symbol> {
         match *self {
             Stability::Unstable(nightly_feature) => Some(nightly_feature),
+            Stability::CfgStableToggleUnstable(nightly_feature) => {
+                if in_cfg {
+                    None
+                } else {
+                    Some(nightly_feature)
+                }
+            }
             Stability::Stable { .. } => None,
             Stability::Forbidden { .. } => panic!("forbidden features should not reach this far"),
         }
+    }
+
+    /// Returns whether the feature is cfg-stable but still requires a nightly feature gate to
+    /// be used in `#[target_feature]`/`-Ctarget-feature`.
+    pub fn is_cfg_stable_toggle_unstable(&self) -> bool {
+        matches!(self, Stability::CfgStableToggleUnstable { .. })
     }
 
     /// Returns whether the feature may be toggled via `#[target_feature]` or `-Ctarget-feature`.
@@ -61,7 +89,9 @@ impl Stability {
     /// `requires_nightly`.)
     pub fn toggle_allowed(&self) -> Result<(), &'static str> {
         match self {
-            Stability::Unstable(_) | Stability::Stable { .. } => Ok(()),
+            Stability::Unstable(_)
+            | Stability::CfgStableToggleUnstable(_)
+            | Stability::Stable { .. } => Ok(()),
             Stability::Forbidden { reason } => Err(reason),
         }
     }
@@ -422,6 +452,7 @@ static X86_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
     ("ermsb", Unstable(sym::ermsb_target_feature), &[]),
     ("f16c", Stable, &["avx"]),
     ("fma", Stable, &["avx"]),
+    ("fma4", Unstable(sym::fma4_target_feature), &["avx", "sse4a"]),
     ("fxsr", Stable, &[]),
     ("gfni", Stable, &["sse2"]),
     ("kl", Stable, &["sse2"]),
@@ -467,7 +498,7 @@ static X86_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
     ("vpclmulqdq", Stable, &["avx", "pclmulqdq"]),
     ("widekl", Stable, &["kl"]),
     ("x87", Unstable(sym::x87_target_feature), &[]),
-    ("xop", Unstable(sym::xop_target_feature), &[/*"fma4", */ "avx", "sse4a"]),
+    ("xop", Unstable(sym::xop_target_feature), &["fma4", "avx", "sse4a"]),
     ("xsave", Stable, &[]),
     ("xsavec", Stable, &["xsave"]),
     ("xsaveopt", Stable, &["xsave"]),
@@ -477,6 +508,7 @@ static X86_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
 
 const HEXAGON_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
     // tidy-alphabetical-start
+    ("audio", Unstable(sym::hexagon_target_feature), &[]),
     ("hvx", Unstable(sym::hexagon_target_feature), &[]),
     ("hvx-ieee-fp", Unstable(sym::hexagon_target_feature), &["hvx"]),
     ("hvx-length64b", Unstable(sym::hexagon_target_feature), &["hvx"]),
@@ -493,6 +525,17 @@ const HEXAGON_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
     ("hvxv73", Unstable(sym::hexagon_target_feature), &["hvxv71"]),
     ("hvxv75", Unstable(sym::hexagon_target_feature), &["hvxv73"]),
     ("hvxv79", Unstable(sym::hexagon_target_feature), &["hvxv75"]),
+    ("v60", Unstable(sym::hexagon_target_feature), &[]),
+    ("v62", Unstable(sym::hexagon_target_feature), &["v60"]),
+    ("v65", Unstable(sym::hexagon_target_feature), &["v62"]),
+    ("v66", Unstable(sym::hexagon_target_feature), &["v65"]),
+    ("v67", Unstable(sym::hexagon_target_feature), &["v66"]),
+    ("v68", Unstable(sym::hexagon_target_feature), &["v67"]),
+    ("v69", Unstable(sym::hexagon_target_feature), &["v68"]),
+    ("v71", Unstable(sym::hexagon_target_feature), &["v69"]),
+    ("v73", Unstable(sym::hexagon_target_feature), &["v71"]),
+    ("v75", Unstable(sym::hexagon_target_feature), &["v73"]),
+    ("v79", Unstable(sym::hexagon_target_feature), &["v75"]),
     ("zreg", Unstable(sym::hexagon_target_feature), &[]),
     // tidy-alphabetical-end
 ];
@@ -523,19 +566,7 @@ const MIPS_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
 
 const NVPTX_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
     // tidy-alphabetical-start
-    ("sm_20", Unstable(sym::nvptx_target_feature), &[]),
-    ("sm_21", Unstable(sym::nvptx_target_feature), &["sm_20"]),
-    ("sm_30", Unstable(sym::nvptx_target_feature), &["sm_21"]),
-    ("sm_32", Unstable(sym::nvptx_target_feature), &["sm_30"]),
-    ("sm_35", Unstable(sym::nvptx_target_feature), &["sm_32"]),
-    ("sm_37", Unstable(sym::nvptx_target_feature), &["sm_35"]),
-    ("sm_50", Unstable(sym::nvptx_target_feature), &["sm_37"]),
-    ("sm_52", Unstable(sym::nvptx_target_feature), &["sm_50"]),
-    ("sm_53", Unstable(sym::nvptx_target_feature), &["sm_52"]),
-    ("sm_60", Unstable(sym::nvptx_target_feature), &["sm_53"]),
-    ("sm_61", Unstable(sym::nvptx_target_feature), &["sm_60"]),
-    ("sm_62", Unstable(sym::nvptx_target_feature), &["sm_61"]),
-    ("sm_70", Unstable(sym::nvptx_target_feature), &["sm_62"]),
+    ("sm_70", Unstable(sym::nvptx_target_feature), &[]),
     ("sm_72", Unstable(sym::nvptx_target_feature), &["sm_70"]),
     ("sm_75", Unstable(sym::nvptx_target_feature), &["sm_72"]),
     ("sm_80", Unstable(sym::nvptx_target_feature), &["sm_75"]),
@@ -554,19 +585,7 @@ const NVPTX_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
     ("sm_120a", Unstable(sym::nvptx_target_feature), &["sm_120"]),
     // tidy-alphabetical-end
     // tidy-alphabetical-start
-    ("ptx32", Unstable(sym::nvptx_target_feature), &[]),
-    ("ptx40", Unstable(sym::nvptx_target_feature), &["ptx32"]),
-    ("ptx41", Unstable(sym::nvptx_target_feature), &["ptx40"]),
-    ("ptx42", Unstable(sym::nvptx_target_feature), &["ptx41"]),
-    ("ptx43", Unstable(sym::nvptx_target_feature), &["ptx42"]),
-    ("ptx50", Unstable(sym::nvptx_target_feature), &["ptx43"]),
-    ("ptx60", Unstable(sym::nvptx_target_feature), &["ptx50"]),
-    ("ptx61", Unstable(sym::nvptx_target_feature), &["ptx60"]),
-    ("ptx62", Unstable(sym::nvptx_target_feature), &["ptx61"]),
-    ("ptx63", Unstable(sym::nvptx_target_feature), &["ptx62"]),
-    ("ptx64", Unstable(sym::nvptx_target_feature), &["ptx63"]),
-    ("ptx65", Unstable(sym::nvptx_target_feature), &["ptx64"]),
-    ("ptx70", Unstable(sym::nvptx_target_feature), &["ptx65"]),
+    ("ptx70", Unstable(sym::nvptx_target_feature), &[]),
     ("ptx71", Unstable(sym::nvptx_target_feature), &["ptx70"]),
     ("ptx72", Unstable(sym::nvptx_target_feature), &["ptx71"]),
     ("ptx73", Unstable(sym::nvptx_target_feature), &["ptx72"]),
@@ -816,18 +835,18 @@ static LOONGARCH_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
     // tidy-alphabetical-start
     ("32s", Unstable(sym::loongarch_target_feature), &[]),
     ("d", Stable, &["f"]),
-    ("div32", Unstable(sym::loongarch_target_feature), &[]),
+    ("div32", Stable, &[]),
     ("f", Stable, &[]),
     ("frecipe", Stable, &[]),
-    ("lam-bh", Unstable(sym::loongarch_target_feature), &[]),
-    ("lamcas", Unstable(sym::loongarch_target_feature), &[]),
+    ("lam-bh", Stable, &[]),
+    ("lamcas", Stable, &[]),
     ("lasx", Stable, &["lsx"]),
     ("lbt", Stable, &[]),
-    ("ld-seq-sa", Unstable(sym::loongarch_target_feature), &[]),
+    ("ld-seq-sa", Stable, &[]),
     ("lsx", Stable, &["d"]),
     ("lvz", Stable, &[]),
     ("relax", Unstable(sym::loongarch_target_feature), &[]),
-    ("scq", Unstable(sym::loongarch_target_feature), &[]),
+    ("scq", Stable, &[]),
     ("ual", Unstable(sym::loongarch_target_feature), &[]),
     // tidy-alphabetical-end
 ];

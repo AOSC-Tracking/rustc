@@ -1,17 +1,17 @@
 use std::borrow::Cow;
 
 use rustc_ast::AttrStyle;
-use rustc_errors::{DiagArgValue, MultiSpan, StashKey};
+use rustc_errors::{DiagArgValue, Diagnostic, MultiSpan, StashKey};
 use rustc_feature::Features;
 use rustc_hir::attrs::AttributeKind;
-use rustc_hir::lints::AttributeLintKind;
 use rustc_hir::{AttrItem, Attribute, MethodKind, Target};
 use rustc_span::{BytePos, Span, Symbol, sym};
 
 use crate::AttributeParser;
-use crate::context::{AcceptContext, Stage};
+use crate::context::AcceptContext;
 use crate::errors::{
-    InvalidAttrAtCrateLevel, ItemFollowingInnerAttr, UnsupportedAttributesInWhere,
+    InvalidAttrAtCrateLevel, InvalidTargetLint, ItemFollowingInnerAttr,
+    UnsupportedAttributesInWhere,
 };
 use crate::session_diagnostics::InvalidTarget;
 use crate::target_checking::Policy::Allow;
@@ -87,11 +87,11 @@ pub(crate) enum Policy {
     Error(Target),
 }
 
-impl<'sess, S: Stage> AttributeParser<'sess, S> {
+impl<'sess> AttributeParser<'sess> {
     pub(crate) fn check_target(
         allowed_targets: &AllowedTargets,
         target: Target,
-        cx: &mut AcceptContext<'_, 'sess, S>,
+        cx: &mut AcceptContext<'_, 'sess>,
     ) {
         // For crate-level attributes we emit a specific set of lints to warn
         // people about accidentally not using them on the crate.
@@ -142,14 +142,19 @@ impl<'sess, S: Stage> AttributeParser<'sess, S> {
                 };
 
                 let attr_span = cx.attr_span;
-                cx.emit_lint(
+                cx.emit_lint_with_sess(
                     lint,
-                    AttributeLintKind::InvalidTarget {
-                        name: name.to_string(),
-                        target: target.plural_name(),
-                        only: if only { "only " } else { "" },
-                        applied,
-                        attr_span,
+                    move |dcx, level, _| {
+                        InvalidTargetLint {
+                            name: name.to_string(),
+                            target: target.plural_name(),
+                            only: if only { "only " } else { "" },
+                            applied: DiagArgValue::StrListSepByAnd(
+                                applied.iter().map(|i| Cow::Owned(i.to_string())).collect(),
+                            ),
+                            attr_span,
+                        }
+                        .into_diag(dcx, level)
                     },
                     attr_span,
                 );
@@ -171,20 +176,26 @@ impl<'sess, S: Stage> AttributeParser<'sess, S> {
         }
     }
 
-    pub(crate) fn check_crate_level(target: Target, cx: &mut AcceptContext<'_, 'sess, S>) {
+    pub(crate) fn check_crate_level(target: Target, cx: &mut AcceptContext<'_, 'sess>) {
         if target == Target::Crate {
             return;
         }
 
-        let kind = AttributeLintKind::InvalidStyle {
-            name: cx.attr_path.to_string(),
-            is_used_as_inner: cx.attr_style == AttrStyle::Inner,
-            target: target.name(),
-            target_span: cx.target_span,
-        };
+        let name = cx.attr_path.to_string();
+        let is_used_as_inner = cx.attr_style == AttrStyle::Inner;
+        let target_span = cx.target_span;
         let attr_span = cx.attr_span;
 
-        cx.emit_lint(rustc_session::lint::builtin::UNUSED_ATTRIBUTES, kind, attr_span);
+        cx.emit_lint(
+            rustc_session::lint::builtin::UNUSED_ATTRIBUTES,
+            crate::errors::InvalidAttrStyle {
+                name,
+                is_used_as_inner,
+                target_span: (!is_used_as_inner).then_some(target_span),
+                target: target.name(),
+            },
+            attr_span,
+        );
     }
 
     // FIXME: Fix "Cannot determine resolution" error and remove built-in macros
@@ -278,15 +289,16 @@ impl<'sess, S: Stage> AttributeParser<'sess, S> {
         // in where clauses. After that, this function would become useless.
         let spans = attrs
             .into_iter()
-            // FIXME: We shouldn't need to special-case `doc`!
-            .filter(|attr| {
-                matches!(
-                    attr,
-                    Attribute::Parsed(AttributeKind::DocComment { .. } | AttributeKind::Doc(_))
-                        | Attribute::Unparsed(_)
-                )
+            .filter_map(|attr| {
+                match attr {
+                    Attribute::Parsed(AttributeKind::DocComment { span, .. }) => Some(*span),
+                    // FIXME: We shouldn't need to special-case `doc`!
+                    Attribute::Parsed(AttributeKind::Doc(attr)) => Some(attr.first_span),
+                    // Checked during attribute parsing target checking
+                    Attribute::Parsed(_) => None,
+                    Attribute::Unparsed(attr) => Some(attr.span),
+                }
             })
-            .map(|attr| attr.span())
             .collect::<Vec<_>>();
         if !spans.is_empty() {
             self.dcx()

@@ -149,7 +149,7 @@ impl Cfg {
             | CfgEntry::All(..)
             | CfgEntry::NameValue { .. }
             | CfgEntry::Version(..)
-            | CfgEntry::Not(box CfgEntry::NameValue { .. }, _) => true,
+            | CfgEntry::Not(CfgEntry::NameValue { .. }, _) => true,
             CfgEntry::Not(..) | CfgEntry::Bool(..) => false,
         }
     }
@@ -386,7 +386,7 @@ impl Display<'_> {
 impl fmt::Display for Display<'_> {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
-            CfgEntry::Not(box CfgEntry::Any(sub_cfgs, _), _) => {
+            CfgEntry::Not(CfgEntry::Any(sub_cfgs, _), _) => {
                 let separator = if sub_cfgs.iter().all(is_simple_cfg) { " nor " } else { ", nor " };
                 fmt.write_str("neither ")?;
 
@@ -399,10 +399,10 @@ impl fmt::Display for Display<'_> {
                     })
                     .joined(separator, fmt)
             }
-            CfgEntry::Not(box simple @ CfgEntry::NameValue { .. }, _) => {
+            CfgEntry::Not(simple @ CfgEntry::NameValue { .. }, _) => {
                 write!(fmt, "non-{}", Display(simple, self.1))
             }
-            CfgEntry::Not(box c, _) => write!(fmt, "not ({})", Display(c, self.1)),
+            CfgEntry::Not(c, _) => write!(fmt, "not ({})", Display(c, self.1)),
 
             CfgEntry::Any(sub_cfgs, _) => {
                 let separator = if sub_cfgs.iter().all(is_simple_cfg) { " or " } else { ", or " };
@@ -423,6 +423,13 @@ impl fmt::Display for Display<'_> {
                     (sym::unix, None) => "Unix",
                     (sym::windows, None) => "Windows",
                     (sym::debug_assertions, None) => "debug-assertions enabled",
+                    (sym::target_object_format, Some(format)) => match self.1 {
+                        Format::LongHtml => {
+                            return write!(fmt, "object format <code>{format}</code>");
+                        }
+                        Format::LongPlain => return write!(fmt, "object format `{format}`"),
+                        Format::ShortHtml => return write!(fmt, "<code>{format}</code>"),
+                    },
                     (sym::target_os, Some(os)) => human_readable_target_os(*os).unwrap_or_default(),
                     (sym::target_arch, Some(arch)) => {
                         human_readable_target_arch(*arch).unwrap_or_default()
@@ -509,7 +516,7 @@ fn human_readable_target_os(os: Symbol) -> Option<&'static str> {
         Managarm => "Managarm",
         Motor => "Motor OS",
         NetBsd => "NetBSD",
-        None => "bare-metal", // FIXME(scrabsha): is this appropriate?
+        None => "bare-metal",
         Nto => "QNX Neutrino",
         NuttX => "NuttX",
         OpenBsd => "OpenBSD",
@@ -586,7 +593,7 @@ fn human_readable_target_env(env: Symbol) -> Option<&'static str> {
         // tidy-alphabetical-start
         Gnu => "GNU",
         MacAbi => "Catalyst",
-        Mlibc => "mac ABI",
+        Mlibc => "Managarm C Library",
         Msvc => "MSVC",
         Musl => "musl",
         Newlib => "Newlib",

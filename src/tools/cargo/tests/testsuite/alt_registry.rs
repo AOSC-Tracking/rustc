@@ -87,18 +87,21 @@ fn depend_on_alt_registry_depends_on_same_registry_no_index() {
         .publish();
 
     p.cargo("check")
-        .with_stderr_data(str![[r#"
+        .with_stderr_data(
+            str![[r#"
 [UPDATING] `alternative` index
 [LOCKING] 2 packages to latest compatible versions
 [DOWNLOADING] crates ...
-[DOWNLOADED] baz v0.0.1 (registry `alternative`)
 [DOWNLOADED] bar v0.0.1 (registry `alternative`)
+[DOWNLOADED] baz v0.0.1 (registry `alternative`)
 [CHECKING] baz v0.0.1 (registry `alternative`)
 [CHECKING] bar v0.0.1 (registry `alternative`)
 [CHECKING] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
-"#]])
+"#]]
+            .unordered(),
+        )
         .run();
 }
 
@@ -130,18 +133,21 @@ fn depend_on_alt_registry_depends_on_same_registry() {
         .publish();
 
     p.cargo("check")
-        .with_stderr_data(str![[r#"
+        .with_stderr_data(
+            str![[r#"
 [UPDATING] `alternative` index
 [LOCKING] 2 packages to latest compatible versions
 [DOWNLOADING] crates ...
-[DOWNLOADED] baz v0.0.1 (registry `alternative`)
 [DOWNLOADED] bar v0.0.1 (registry `alternative`)
+[DOWNLOADED] baz v0.0.1 (registry `alternative`)
 [CHECKING] baz v0.0.1 (registry `alternative`)
 [CHECKING] bar v0.0.1 (registry `alternative`)
 [CHECKING] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
-"#]])
+"#]]
+            .unordered(),
+        )
         .run();
 }
 

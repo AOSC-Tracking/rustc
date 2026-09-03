@@ -182,7 +182,7 @@ r[items.use.self]
 ## `self` imports
 
 r[items.use.self.intro]
-The keyword `self` may be used within [brace syntax](#brace-syntax) to create a binding of the parent entity under its own name.
+The keyword `self` may be used within [brace syntax] to create a binding of the parent entity under its own name.
 
 ```rust
 mod stuff {
@@ -201,7 +201,42 @@ mod example {
 ```
 
 > [!NOTE]
-> `self` may also be used as the first segment of a path. The usage of `self` as the first segment and inside a `use` brace is logically the same; it means the current module of the parent segment, or the current module if there is no parent segment. See [`self`] in the paths chapter for more information on the meaning of a leading `self`.
+> `self` may also be used as the first segment of a path. The use of `self` as the first segment and inside a `use` brace is logically the same; it means the current module of the parent segment, or the current module if there is no parent segment. See [`self`] in the paths chapter for more information on the meaning of a leading `self`.
+
+r[items.use.self.trailing]
+`self` may appear as the last segment of a `use` path, preceded by `::`. A path of the form `P::self` is equivalent to `P::{self}`, and `P::self as name` is equivalent to `P::{self as name}`.
+
+```rust
+mod m {
+    pub enum E { V1, V2 }
+}
+use m::self as _; // Equivalent to `use m::{self as _};`.
+use m::E::self; // Equivalent to `use m::E::{self};`.
+# fn main() {}
+```
+
+> [!NOTE]
+> See [paths.qualifiers.mod-self.trailing] for restrictions on the preceding path.
+
+r[items.use.self.module]
+When `self` is used within [brace syntax], the path preceding the brace group must resolve to a [module], [enumeration], or [trait].
+
+```rust
+mod m {
+    pub enum E { V1, V2 }
+    pub trait Tr { fn f(&self); }
+}
+use m::{self as _}; // OK: Modules can be parents of `self`.
+use m::E::{self, V1}; // OK: Enums can be parents of `self`.
+use m::Tr::{self}; // OK: Traits can be parents of `self`.
+# fn main() {}
+```
+
+```rust,compile_fail,E0432
+struct S {}
+use S::{self as _}; // ERROR: Structs cannot be parents of `self`.
+# fn main() {}
+```
 
 r[items.use.self.namespace]
 `self` only creates a binding from the [type namespace] of the parent entity. For example, in the following, only the `foo` mod is imported:
@@ -433,9 +468,11 @@ r[items.use.restrictions.variant]
 
 [`$crate`]: paths.qualifiers.macro-crate
 [Attributes]: ../attributes.md
+[brace syntax]: items.use.multiple-syntax
 [Built-in types]: ../types.md
 [Derive macros]: macro.proc.derive
 [Enum variants]: enumerations.md
+[enumeration]: items.enum
 [`extern crate`]: extern-crates.md
 [`macro_rules`]: ../macros-by-example.md
 [`self`]: ../paths.md#self
@@ -444,10 +481,12 @@ r[items.use.restrictions.variant]
 [generic parameters]: generics.md
 [items]: ../items.md
 [local variables]: ../variables.md
+[module]: items.mod
 [name resolution ambiguities]: names.resolution.expansion.imports.ambiguity
 [namespace]: ../names/namespaces.md
 [namespaces]: ../names/namespaces.md
 [paths]: ../paths.md
 [tool attributes]: ../attributes.md#tool-attributes
+[trait]: items.traits
 [type alias]: type-aliases.md
 [type namespace]: ../names/namespaces.md
