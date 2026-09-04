@@ -24,6 +24,7 @@ use super::job_queue::JobQueue;
 use super::layout::Layout;
 use super::lto::Lto;
 use super::unit_graph::UnitDep;
+use super::unused_deps::UnusedDepState;
 use super::{BuildContext, Compilation, CompileKind, CompileMode, Executor, FileFlavor};
 
 mod compilation_files;
@@ -89,6 +90,8 @@ pub struct BuildRunner<'a, 'gctx> {
     /// because it is continuously updated as the job progresses.
     pub failed_scrape_units: Arc<Mutex<HashSet<UnitHash>>>,
 
+    pub unused_dep_state: UnusedDepState,
+
     /// Manages locks for build units when fine grain locking is enabled.
     pub lock_manager: Arc<LockManager>,
 }
@@ -130,6 +133,7 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
             lto: HashMap::new(),
             metadata_for_doc_units: HashMap::new(),
             failed_scrape_units: Arc::new(Mutex::new(HashSet::new())),
+            unused_dep_state: UnusedDepState::new(bcx),
             lock_manager: Arc::new(LockManager::new()),
         })
     }
@@ -479,14 +483,25 @@ impl<'a, 'gctx> BuildRunner<'a, 'gctx> {
             }
             if self.bcx.gctx.cli_unstable().build_dir_new_layout {
                 for (unit, _) in self.bcx.unit_graph.iter() {
+                    if kind != unit.kind {
+                        continue;
+                    }
                     let dep_dir = self.files().deps_dir(unit);
                     paths::create_dir_all(&dep_dir)?;
-                    self.compilation.deps_output.insert(kind, dep_dir);
+                    if unit.target.is_dylib() {
+                        self.compilation
+                            .deps_output
+                            .entry(kind)
+                            .or_default()
+                            .insert(dep_dir);
+                    }
                 }
             } else {
                 self.compilation
                     .deps_output
-                    .insert(kind, layout.build_dir().legacy_deps().to_path_buf());
+                    .entry(kind)
+                    .or_default()
+                    .insert(layout.build_dir().legacy_deps().to_path_buf());
             }
         }
         Ok(())

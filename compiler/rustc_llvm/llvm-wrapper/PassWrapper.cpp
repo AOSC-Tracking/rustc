@@ -288,7 +288,11 @@ extern "C" void LLVMRustPrintTargetCPUs(LLVMTargetMachineRef TM,
   // Just print a bare list of target CPU names, and let Rust-side code handle
   // the full formatting of `--print=target-cpus`.
   for (auto &CPU : CPUTable) {
+#if LLVM_VERSION_GE(23, 0)
+    OS << CPU.key() << "\n";
+#else
     OS << CPU.Key << "\n";
+#endif
   }
 }
 
@@ -315,9 +319,15 @@ extern "C" void LLVMRustGetTargetFeature(LLVMTargetMachineRef TM, size_t Index,
 #endif
   const ArrayRef<SubtargetFeatureKV> FeatTable =
       MCInfo.getAllProcessorFeatures();
+#if LLVM_VERSION_GE(23, 0)
+  const SubtargetFeatureKV &Feat = FeatTable[Index];
+  *Feature = Feat.key();
+  *Desc = Feat.desc();
+#else
   const SubtargetFeatureKV Feat = FeatTable[Index];
   *Feature = Feat.Key;
   *Desc = Feat.Desc;
+#endif
 }
 
 extern "C" const char *LLVMRustGetHostCPUName(size_t *OutLen) {
@@ -1503,12 +1513,19 @@ extern "C" void LLVMRustComputeLTOCacheKey(RustStringRef KeyOut,
   DenseSet<GlobalValue::GUID> CfiFunctionDecls;
 
   // Based on the 'InProcessThinBackend' constructor in LLVM
+#if LLVM_VERSION_GE(23, 0)
+  CfiFunctionDefs.insert_range(
+      Data->Index.cfiFunctionDefs().getExportedThinLTOGUIDs());
+  CfiFunctionDecls.insert_range(
+      Data->Index.cfiFunctionDecls().getExportedThinLTOGUIDs());
+#else
   for (auto &Name : Data->Index.cfiFunctionDefs().symbols())
     CfiFunctionDefs.insert(GlobalValue::getGUIDAssumingExternalLinkage(
         GlobalValue::dropLLVMManglingEscape(Name)));
   for (auto &Name : Data->Index.cfiFunctionDecls().symbols())
     CfiFunctionDecls.insert(GlobalValue::getGUIDAssumingExternalLinkage(
         GlobalValue::dropLLVMManglingEscape(Name)));
+#endif
 
   Key = llvm::computeLTOCacheKey(conf, Data->Index, ModId, ImportList,
                                  ExportList, ResolvedODR, DefinedGlobals,

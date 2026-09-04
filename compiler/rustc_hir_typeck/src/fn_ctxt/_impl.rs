@@ -27,8 +27,8 @@ use rustc_middle::ty::adjustment::{
 };
 use rustc_middle::ty::{
     self, AdtKind, CanonicalUserType, GenericArgsRef, GenericParamDefKind, IsIdentity,
-    SizedTraitKind, Ty, TyCtxt, TypeFoldable, TypeVisitable, TypeVisitableExt, Unnormalized,
-    UserArgs, UserSelfTy,
+    SizedTraitKind, SplattedDef, Ty, TyCtxt, TypeFoldable, TypeVisitable, TypeVisitableExt,
+    Unnormalized, UserArgs, UserSelfTy,
 };
 use rustc_middle::{bug, span_bug};
 use rustc_session::lint;
@@ -42,7 +42,7 @@ use rustc_trait_selection::traits::{
 use tracing::{debug, instrument};
 
 use crate::callee::{self, DeferredCallResolution};
-use crate::errors::{self, CtorIsPrivate};
+use crate::diagnostics::{self, CtorIsPrivate};
 use crate::method::{self, MethodCallee};
 use crate::{BreakableCtxt, Diverges, Expectation, FnCtxt, LoweredTy};
 
@@ -143,7 +143,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// also select obligations if it seems useful, in an effort
     /// to get more type information.
     // FIXME(-Znext-solver): A lot of the calls to this method should
-    // probably be `try_structurally_resolve_type` or `structurally_resolve_type` instead.
+    // probably be `resolve_vars_with_obligations` or `structurally_resolve_type` instead.
     #[instrument(skip(self), level = "debug", ret)]
     pub(crate) fn resolve_vars_with_obligations<T: TypeFoldable<TyCtxt<'tcx>>>(
         &self,
@@ -237,6 +237,15 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     }
 
     #[instrument(level = "debug", skip(self))]
+    pub(crate) fn write_splatted_resolution(
+        &self,
+        hir_id: HirId,
+        r: Result<SplattedDef, ErrorGuaranteed>,
+    ) {
+        self.typeck_results.borrow_mut().splatted_defs_mut().insert(hir_id, r);
+    }
+
+    #[instrument(level = "debug", skip(self))]
     pub(crate) fn write_method_call_and_enforce_effects(
         &self,
         hir_id: HirId,
@@ -246,6 +255,32 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         self.enforce_context_effects(Some(hir_id), span, method.def_id, method.args);
         self.write_resolution(hir_id, Ok((DefKind::AssocFn, method.def_id)));
         self.write_args(hir_id, method.args);
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub(crate) fn write_splatted_call(
+        &self,
+        hir_id: HirId,
+        span: Span,
+        callee_def_id: Option<DefId>,
+        callee_generic_args: Option<GenericArgsRef<'tcx>>,
+        first_tupled_arg_index: u16,
+        tupled_args_count: u16,
+    ) {
+        // FIXME(const_trait_impl): enforce constness using enforce_context_effects() and add
+        // _and_enforce_effects to this method's name
+
+        self.write_splatted_resolution(
+            hir_id,
+            Ok(SplattedDef {
+                def_id: callee_def_id,
+                arg_index: first_tupled_arg_index,
+                arg_count: tupled_args_count,
+            }),
+        );
+        if let Some(callee_generic_args) = callee_generic_args {
+            self.write_args(hir_id, callee_generic_args);
+        }
     }
 
     fn write_args(&self, node_id: HirId, args: GenericArgsRef<'tcx>) {
@@ -657,13 +692,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         self.select_obligations_where_possible(|_| {});
 
         let defining_opaque_types_and_generators = match self.typing_mode() {
-            ty::TypingMode::Analysis { defining_opaque_types_and_generators } => {
+            ty::TypingMode::Typeck { defining_opaque_types_and_generators } => {
                 defining_opaque_types_and_generators
             }
             ty::TypingMode::Coherence
-            | ty::TypingMode::Borrowck { .. }
-            | ty::TypingMode::PostBorrowckAnalysis { .. }
-            | ty::TypingMode::PostAnalysis => {
+            | ty::TypingMode::PostTypeckUntilBorrowck { .. }
+            | ty::TypingMode::PostBorrowck { .. }
+            | ty::TypingMode::PostAnalysis
+            | ty::TypingMode::Codegen => {
                 bug!()
             }
         };
@@ -1157,7 +1193,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             })
             .all(|def_id| def_id != impl_def_id)
             {
-                let sugg = ty.normalized.ty_adt_def().map(|def| errors::ReplaceWithName {
+                let sugg = ty.normalized.ty_adt_def().map(|def| diagnostics::ReplaceWithName {
                     span: path_span,
                     name: self.tcx.item_name(def.did()).to_ident_string(),
                 });
@@ -1165,13 +1201,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     .tcx
                     .hir_node_by_def_id(self.tcx.hir_get_parent_item(hir_id).def_id)
                 {
-                    hir::Node::Item(item) => Some(errors::InnerItem {
+                    hir::Node::Item(item) => Some(diagnostics::InnerItem {
                         span: item.kind.ident().map(|i| i.span).unwrap_or(item.span),
                     }),
                     _ => None,
                 };
                 if ty.raw.has_param() {
-                    let guar = self.dcx().emit_err(errors::SelfCtorFromOuterItem {
+                    let guar = self.dcx().emit_err(diagnostics::SelfCtorFromOuterItem {
                         span: path_span,
                         impl_span: tcx.def_span(impl_def_id),
                         sugg,
@@ -1183,7 +1219,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         SELF_CONSTRUCTOR_FROM_OUTER_ITEM,
                         hir_id,
                         path_span,
-                        errors::SelfCtorFromOuterItemLint {
+                        diagnostics::SelfCtorFromOuterItemLint {
                             impl_span: tcx.def_span(impl_def_id),
                             sugg,
                             item,
@@ -1452,7 +1488,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let ct = self.resolve_vars_with_obligations(ct);
 
         if self.next_trait_solver()
-            && let ty::ConstKind::Unevaluated(..) = ct.kind()
+            && let ty::ConstKind::Alias(..) = ct.kind()
         {
             // We need to use a separate variable here as otherwise the temporary for
             // `self.fulfillment_cx.borrow_mut()` is alive in the `Err` branch, resulting

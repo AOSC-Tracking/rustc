@@ -3,15 +3,21 @@ use rustc_hir::attrs::{InlineAttr, InstructionSetAttr, OptimizeAttr, RtsanSettin
 use rustc_hir::def_id::DefId;
 use rustc_hir::find_attr;
 use rustc_middle::middle::codegen_fn_attrs::{
-    CodegenFnAttrFlags, CodegenFnAttrs, PatchableFunctionEntry, SanitizerFnAttrs, TargetFeature,
+    CodegenFnAttrFlags, CodegenFnAttrs, InstrumentFnAttr, PatchableFunctionEntry, SanitizerFnAttrs,
+    TargetFeature,
 };
-use rustc_middle::ty::{self, TyCtxt};
-use rustc_session::config::{BranchProtection, FunctionReturn, OptLevel, PAuthKey, PacRet};
+use rustc_middle::ty::{self, Instance, TyCtxt};
+use rustc_session::config::{
+    BranchProtection, FunctionReturn, InstrumentMcount, OptLevel, PAuthKey, PacRet,
+};
 use rustc_span::sym;
 use rustc_symbol_mangling::mangle_internal_symbol;
-use rustc_target::spec::{Arch, FramePointer, SanitizerSet, StackProbeType, StackProtector};
+use rustc_target::spec::{
+    Arch, FramePointer, LlvmAbi, SanitizerSet, StackProbeType, StackProtector,
+};
 use smallvec::SmallVec;
 
+use crate::common::pauth_fn_attrs;
 use crate::context::SimpleCx;
 use crate::errors::{PackedStackBackchainNeedsSoftfloat, SanitizerMemtagRequiresMte};
 use crate::llvm::AttributePlace::Function;
@@ -42,22 +48,31 @@ pub(crate) fn remove_string_attr_from_llfn(llfn: &Value, name: &str) {
 
 /// Get LLVM attribute for the provided inline heuristic.
 #[inline]
-fn inline_attr<'ll>(
+pub(crate) fn inline_attr<'tcx, 'll>(
     cx: &SimpleCx<'ll>,
-    sess: &Session,
-    inline: InlineAttr,
+    tcx: TyCtxt<'tcx>,
+    instance: Instance<'tcx>,
+    codegen_fn_attrs: &CodegenFnAttrs,
 ) -> Option<&'ll Attribute> {
-    if !sess.opts.unstable_opts.inline_llvm {
+    if !tcx.sess.opts.unstable_opts.inline_llvm {
         // disable LLVM inlining
         return Some(AttributeKind::NoInline.create_attr(cx.llcx));
     }
+
+    // `optnone` requires `noinline`
+    let inline = match (codegen_fn_attrs.inline, &codegen_fn_attrs.optimize) {
+        (_, OptimizeAttr::DoNotOptimize) => InlineAttr::Never,
+        (InlineAttr::None, _) if instance.def.requires_inline(tcx) => InlineAttr::Hint,
+        (inline, _) => inline,
+    };
+
     match inline {
         InlineAttr::Hint => Some(AttributeKind::InlineHint.create_attr(cx.llcx)),
         InlineAttr::Always | InlineAttr::Force { .. } => {
             Some(AttributeKind::AlwaysInline.create_attr(cx.llcx))
         }
         InlineAttr::Never => {
-            if sess.target.arch != Arch::AmdGpu {
+            if tcx.sess.target.arch != Arch::AmdGpu {
                 Some(AttributeKind::NoInline.create_attr(cx.llcx))
             } else {
                 None
@@ -74,11 +89,26 @@ fn patchable_function_entry_attrs<'ll>(
     attr: Option<PatchableFunctionEntry>,
 ) -> SmallVec<[&'ll Attribute; 2]> {
     let mut attrs = SmallVec::new();
-    let patchable_spec = attr.unwrap_or_else(|| {
-        PatchableFunctionEntry::from_config(sess.opts.unstable_opts.patchable_function_entry)
-    });
-    let entry = patchable_spec.entry();
-    let prefix = patchable_spec.prefix();
+
+    let mut entry = sess.opts.unstable_opts.patchable_function_entry.entry();
+    let mut prefix = sess.opts.unstable_opts.patchable_function_entry.prefix();
+    let mut section = sess.opts.unstable_opts.patchable_function_entry.section();
+    let section_sym;
+
+    // Apply attribute specified overrides, if any.
+    if let Some(patchable_spec) = attr {
+        if let Some(sym) = patchable_spec.section() {
+            section_sym = sym;
+            section = Some(section_sym.as_str());
+        }
+        // Override the nop counts if either is present. If only one is present, the
+        // other count is implied to be 0.
+        if patchable_spec.entry().is_some() || patchable_spec.prefix().is_some() {
+            entry = patchable_spec.entry().unwrap_or(0);
+            prefix = patchable_spec.prefix().unwrap_or(0);
+        }
+    }
+
     if entry > 0 {
         attrs.push(llvm::CreateAttrStringValue(
             cx.llcx,
@@ -91,6 +121,13 @@ fn patchable_function_entry_attrs<'ll>(
             cx.llcx,
             "patchable-function-prefix",
             &format!("{}", prefix),
+        ));
+    }
+    if let Some(section) = section {
+        attrs.push(llvm::CreateAttrStringValue(
+            cx.llcx,
+            "patchable-function-entry-section",
+            section,
         ));
     }
     attrs
@@ -156,22 +193,29 @@ pub(crate) fn uwtable_attr(llcx: &llvm::Context, use_sync_unwind: Option<bool>) 
     // NOTE: We should determine if we even need async unwind tables, as they
     // take have more overhead and if we can use sync unwind tables we
     // probably should.
+    //
+    // Similar logic exists for the per-module uwtable annotation in `context.rs`.
     let async_unwind = !use_sync_unwind.unwrap_or(false);
     llvm::CreateUWTableAttr(llcx, async_unwind)
+}
+
+pub(crate) fn frame_pointer(sess: &Session) -> FramePointer {
+    let mut fp = sess.target.frame_pointer;
+    let opts = &sess.opts;
+    // "mcount" function relies on stack pointer.
+    // See <https://sourceware.org/binutils/docs/gprof/Implementation.html>.
+    if opts.unstable_opts.instrument_mcount == InstrumentMcount::Mcount {
+        fp.ratchet(FramePointer::Always);
+    }
+    fp.ratchet(opts.cg.force_frame_pointers);
+    fp
 }
 
 pub(crate) fn frame_pointer_type_attr<'ll>(
     cx: &SimpleCx<'ll>,
     sess: &Session,
 ) -> Option<&'ll Attribute> {
-    let mut fp = sess.target.frame_pointer;
-    let opts = &sess.opts;
-    // "mcount" function relies on stack pointer.
-    // See <https://sourceware.org/binutils/docs/gprof/Implementation.html>.
-    if opts.unstable_opts.instrument_mcount {
-        fp.ratchet(FramePointer::Always);
-    }
-    fp.ratchet(opts.cg.force_frame_pointers);
+    let fp = frame_pointer(sess);
     let attr_value = match fp {
         FramePointer::Always => "all",
         FramePointer::NonLeaf => "non-leaf",
@@ -194,35 +238,67 @@ fn function_return_attr<'ll>(cx: &SimpleCx<'ll>, sess: &Session) -> Option<&'ll 
 fn instrument_function_attr<'ll>(
     cx: &SimpleCx<'ll>,
     sess: &Session,
+    instrument_fn: InstrumentFnAttr,
 ) -> SmallVec<[&'ll Attribute; 4]> {
     let mut attrs = SmallVec::new();
-    if sess.opts.unstable_opts.instrument_mcount {
+    if sess.opts.unstable_opts.instrument_mcount != InstrumentMcount::Disabled {
         // Similar to `clang -pg` behavior. Handled by the
         // `post-inline-ee-instrument` LLVM pass.
 
-        // The function name varies on platforms.
-        // See test/CodeGen/mcount.c in clang.
-        let mcount_name = match &sess.target.llvm_mcount_intrinsic {
-            Some(llvm_mcount_intrinsic) => llvm_mcount_intrinsic.as_ref(),
-            None => sess.target.mcount.as_ref(),
+        let instrument_entry = match instrument_fn {
+            InstrumentFnAttr::Default | InstrumentFnAttr::On => true,
+            InstrumentFnAttr::Off => false,
         };
 
-        attrs.push(llvm::CreateAttrStringValue(
-            cx.llcx,
-            "instrument-function-entry-inlined",
-            mcount_name,
-        ));
+        if instrument_entry {
+            match sess.opts.unstable_opts.instrument_mcount {
+                InstrumentMcount::Mcount => {
+                    // The function name varies on platforms.
+                    // See test/CodeGen/mcount.c in clang.
+                    let mcount_name = match &sess.target.llvm_mcount_intrinsic {
+                        Some(llvm_mcount_intrinsic) => llvm_mcount_intrinsic.as_ref(),
+                        None => sess.target.mcount.as_ref(),
+                    };
+
+                    attrs.push(llvm::CreateAttrStringValue(
+                        cx.llcx,
+                        "instrument-function-entry-inlined",
+                        mcount_name,
+                    ));
+                }
+                InstrumentMcount::Fentry => {
+                    attrs.push(llvm::CreateAttrStringValue(cx.llcx, "fentry-call", "true"));
+                }
+                InstrumentMcount::Disabled => {}
+            }
+        }
     }
     if let Some(options) = &sess.opts.unstable_opts.instrument_xray {
         // XRay instrumentation is similar to __cyg_profile_func_{enter,exit}.
         // Function prologue and epilogue are instrumented with NOP sleds,
         // a runtime library later replaces them with detours into tracing code.
-        if options.always {
-            attrs.push(llvm::CreateAttrStringValue(cx.llcx, "function-instrument", "xray-always"));
+
+        let mut never = options.never;
+        let mut always = options.always;
+
+        // always and never may be overridden by the #[instrument_fn = ...] attribute.
+        match instrument_fn {
+            InstrumentFnAttr::Default => {}
+            InstrumentFnAttr::On => {
+                always = true;
+            }
+            InstrumentFnAttr::Off => {
+                never = true;
+            }
         }
-        if options.never {
+
+        if never {
             attrs.push(llvm::CreateAttrStringValue(cx.llcx, "function-instrument", "xray-never"));
         }
+        if always {
+            attrs.push(llvm::CreateAttrStringValue(cx.llcx, "function-instrument", "xray-always"));
+        }
+
         if options.ignore_loops {
             attrs.push(llvm::CreateAttrString(cx.llcx, "xray-ignore-loops"));
         }
@@ -412,14 +488,7 @@ pub(crate) fn llfn_attrs_from_instance<'ll, 'tcx>(
     }
 
     if let Some(instance) = instance {
-        // `optnone` requires `noinline`
-        let inline = match (codegen_fn_attrs.inline, &codegen_fn_attrs.optimize) {
-            (_, OptimizeAttr::DoNotOptimize) => InlineAttr::Never,
-            (InlineAttr::None, _) if instance.def.requires_inline(tcx) => InlineAttr::Hint,
-            (inline, _) => inline,
-        };
-
-        to_add.extend(inline_attr(cx, sess, inline));
+        to_add.extend(inline_attr(cx, tcx, instance, codegen_fn_attrs));
     }
 
     if sess.must_emit_unwind_tables() {
@@ -433,7 +502,7 @@ pub(crate) fn llfn_attrs_from_instance<'ll, 'tcx>(
     // FIXME: none of these functions interact with source level attributes.
     to_add.extend(frame_pointer_type_attr(cx, sess));
     to_add.extend(function_return_attr(cx, sess));
-    to_add.extend(instrument_function_attr(cx, sess));
+    to_add.extend(instrument_function_attr(cx, sess, codegen_fn_attrs.instrument_fn));
     to_add.extend(nojumptables_attr(cx, sess));
     to_add.extend(probestack_attr(cx, tcx));
     to_add.extend(stackprotector_attr(cx, sess));
@@ -596,6 +665,12 @@ pub(crate) fn llfn_attrs_from_instance<'ll, 'tcx>(
                 codegen_fn_attrs.symbol_name.unwrap_or_else(|| tcx.item_name(instance.def_id()));
             let name = name.as_str();
             to_add.push(llvm::CreateAttrStringValue(cx.llcx, "wasm-import-name", name));
+        }
+    }
+
+    if sess.target.llvm_abiname == LlvmAbi::Pauthtest {
+        for &ptrauth_attr in pauth_fn_attrs() {
+            to_add.push(llvm::CreateAttrString(cx.llcx, ptrauth_attr));
         }
     }
 

@@ -30,6 +30,7 @@ unused = "1"
 not-inherited = "1"
 
 [workspace.lints.cargo]
+default = { level = "allow", priority = -1 }
 unused_workspace_dependencies = "warn"
 
 [package]
@@ -75,7 +76,7 @@ workspace = true
         .file("bar/src/main.rs", "fn main() {}")
         .build();
 
-    p.cargo("check -Zcargo-lints")
+    p.cargo("fetch -Zcargo-lints")
         .masquerade_as_nightly_cargo(&["cargo-lints"])
         .with_stderr_data(str![[r#"
 [WARNING] unused workspace dependency
@@ -85,53 +86,19 @@ workspace = true
    | ^^^^^^^^^^^^^
    |
    = [NOTE] `cargo::unused_workspace_dependencies` is set to `warn` in `[lints]`
-[HELP] consider removing the unused dependency
-   |
-12 - not-inherited = "1"
-   |
+[HELP] consider removing the unused workspace dependency
 [WARNING] unused workspace dependency
   --> Cargo.toml:11:1
    |
 11 | unused = "1"
    | ^^^^^^
    |
-[HELP] consider removing the unused dependency
-   |
-11 - unused = "1"
-   |
+[HELP] consider removing the unused workspace dependency
 [WARNING] workspace (manifest) generated 2 warnings
-[WARNING] unused dependency
- --> bar/Cargo.toml:9:1
-  |
-9 | build-dep.workspace = true
-  | ^^^^^^^^^
-  |
-  = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
-[HELP] remove the dependency
-  |
-9 - build-dep.workspace = true
-9 + .workspace = true
-  |
-[WARNING] `bar` (manifest) generated 1 warning
 [UPDATING] `dummy-registry` index
 [LOCKING] 6 packages to latest compatible versions
 [DOWNLOADING] crates ...
-[DOWNLOADED] in-package v1.0.0 (registry `dummy-registry`)
-[CHECKING] in-package v1.0.0
-[CHECKING] foo v0.0.1 ([ROOT]/foo)
-[WARNING] unused dependency
-  --> Cargo.toml:24:1
-   |
-24 | in-package.workspace = true
-   | ^^^^^^^^^^
-   |
-   = [NOTE] `cargo::unused_dependencies` is set to `warn` by default
-[HELP] remove the dependency
-   |
-24 - in-package.workspace = true
-24 + .workspace = true
-   |
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+...
 
 "#]])
         .run();

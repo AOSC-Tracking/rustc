@@ -332,7 +332,6 @@ language_item_table! {
     Start,                   sym::start,               start_fn,                   Target::Fn,             GenericRequirement::Exact(1);
 
     EhPersonality,           sym::eh_personality,      eh_personality,             Target::Fn,             GenericRequirement::None;
-    EhCatchTypeinfo,         sym::eh_catch_typeinfo,   eh_catch_typeinfo,          Target::Static,         GenericRequirement::None;
 
     // Profiling markers for move/copy operations (used by -Z annotate-moves)
     CompilerMove,            sym::compiler_move,       compiler_move_fn,           Target::Fn,             GenericRequirement::Exact(2);
@@ -448,6 +447,14 @@ language_item_table! {
 
     // Used to fallback `{float}` to `f32` when `f32: From<{float}>`
     From,                    sym::From,                from_trait,                 Target::Trait,          GenericRequirement::Exact(1);
+
+    // Runtime symbols
+    MemCpy,                  sym::memcpy_fn,           memcpy_fn,                  Target::Fn,             GenericRequirement::None;
+    MemMove,                 sym::memmove_fn,          memmove_fn,                 Target::Fn,             GenericRequirement::None;
+    MemSet,                  sym::memset_fn,           memset_fn,                  Target::Fn,             GenericRequirement::None;
+    MemCmp,                  sym::memcmp_fn,           memcmp_fn,                  Target::Fn,             GenericRequirement::None;
+    Bcmp,                    sym::bcmp_fn,             bcmp_fn,                    Target::Fn,             GenericRequirement::None;
+    StrLen,                  sym::strlen_fn,           strlen_fn,                  Target::Fn,             GenericRequirement::None;
 }
 
 /// The requirement imposed on the generics of a lang item

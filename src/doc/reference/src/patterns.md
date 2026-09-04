@@ -6,10 +6,10 @@ r[patterns.syntax]
 Pattern -> `|`? PatternNoTopAlt  ( `|` PatternNoTopAlt )*
 
 PatternNoTopAlt ->
-      PatternWithoutRange
-    | RangePattern
+      PatternWithoutModernRange
+    | ModernRangePattern
 
-PatternWithoutRange ->
+PatternWithoutModernRange ->
       LiteralPattern
     | IdentifierPattern
     | WildcardPattern
@@ -22,7 +22,10 @@ PatternWithoutRange ->
     | SlicePattern
     | PathPattern
     | MacroInvocation
+    | ObsoleteRangePattern[^obsolete-range-edition]
 ```
+
+[^obsolete-range-edition]: The [ObsoleteRangePattern] syntax is semantically invalid in the 2021 edition and beyond.
 
 r[patterns.intro]
 Patterns are used to match values against structures and to, optionally, bind variables to values inside these structures. They are also used in variable declarations and parameters for functions and closures.
@@ -289,7 +292,7 @@ if let Some(y) = x {
 ```
 
 r[patterns.ident.binding.non-reference]
-*Non-reference patterns* include all patterns except bindings, [wildcard patterns](#wildcard-pattern) (`_`), [`const` patterns](#path-patterns) of reference types, and [reference patterns](#reference-patterns).
+*Non-reference patterns* include all patterns except bindings, [wildcard patterns](#wildcard-pattern) (`_`), [`const` patterns](#constant-patterns) of reference types, and [reference patterns](#reference-patterns).
 
 r[patterns.ident.binding.default-mode]
 If a binding pattern does not explicitly have `ref`, `ref mut`, or `mut`, then it uses the *default binding mode* to determine how the variable is bound.
@@ -464,13 +467,12 @@ r[patterns.range]
 
 r[patterns.range.syntax]
 ```grammar,patterns
-RangePattern ->
+ModernRangePattern ->
       RangeExclusivePattern
     | RangeInclusivePattern
     | RangeFromPattern
     | RangeToExclusivePattern
     | RangeToInclusivePattern
-    | ObsoleteRangePattern[^obsolete-range-edition]
 
 RangeExclusivePattern ->
       RangePatternBound `..` RangePatternBound
@@ -494,8 +496,6 @@ RangePatternBound ->
       LiteralPattern
     | PathExpression
 ```
-
-[^obsolete-range-edition]: The [ObsoleteRangePattern] syntax has been removed in the 2021 edition.
 
 r[patterns.range.intro]
 *Range patterns* match scalar values within the range defined by their bounds. They comprise a *sigil* (`..` or `..=`) and a bound on one or both sides.
@@ -659,7 +659,7 @@ r[patterns.ref]
 
 r[patterns.ref.syntax]
 ```grammar,patterns
-ReferencePattern -> (`&`|`&&`) `mut`? PatternWithoutRange
+ReferencePattern -> (`&`|`&&`) `mut`? PatternWithoutModernRange
 ```
 
 r[patterns.ref.intro]

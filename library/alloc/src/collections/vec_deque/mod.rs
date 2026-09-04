@@ -226,9 +226,7 @@ impl<T, A: Allocator> VecDeque<T, A> {
     /// `range` must lie inside `0..self.capacity()`.
     #[inline]
     unsafe fn buffer_range(&self, range: Range<usize>) -> *mut [T] {
-        unsafe {
-            ptr::slice_from_raw_parts_mut(self.ptr().add(range.start), range.end - range.start)
-        }
+        unsafe { self.ptr().add(range.start).cast_slice(range.end - range.start) }
     }
 
     /// Returns `true` if the buffer is at full capacity.
@@ -269,7 +267,7 @@ impl<T, A: Allocator> VecDeque<T, A> {
     ///
     /// - Ranges must not overlap: `src.abs_diff(dst) >= count`.
     /// - Ranges must be in bounds of the logical buffer: `src + count <= self.capacity()` and `dst + count <= self.capacity()`.
-    /// - `head` must be in bounds: `head < self.capacity()`.
+    /// - `head` must be in bounds: `head < self.capacity()`, unless `self.capacity() == 0`, in which case `head == 0`.
     #[cfg(not(no_global_oom_handling))]
     unsafe fn nonoverlapping_ranges(
         &mut self,

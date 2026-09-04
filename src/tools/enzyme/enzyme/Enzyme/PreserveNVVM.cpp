@@ -387,6 +387,15 @@ bool preserveNVVM(bool Begin, Module &M) {
               continue;
             }
 
+            if (AS == "enzyme_elementwise_read" && Func) {
+              Func->addAttribute(AttributeList::FunctionIndex,
+                                 Attribute::get(Func->getContext(),
+                                                "enzyme_elementwise_read"));
+              changed = true;
+              replacements.push_back(Constant::getNullValue(CAOp->getType()));
+              continue;
+            }
+
             if (AS == "enzyme_shouldrecompute" && Func) {
               Func->addAttribute(
                   AttributeList::FunctionIndex,
@@ -512,7 +521,8 @@ bool preserveNVVM(bool Begin, Module &M) {
         }
       }
     }
-    if (g.getName().contains("__enzyme_inactivefn")) {
+    if (g.getName().contains("__enzyme_inactivefn") ||
+        g.getName().contains("__enzyme_inactivenoblockfn")) {
       if (g.hasInitializer()) {
         Value *V = g.getInitializer();
         while (1) {
@@ -529,6 +539,17 @@ bool preserveNVVM(bool Begin, Module &M) {
         if (auto F = cast<Function>(V)) {
           F->addAttribute(AttributeList::FunctionIndex,
                           Attribute::get(g.getContext(), "enzyme_inactive"));
+          auto MD = MDNode::get(F->getContext(), {});
+          for (auto &BB : *F) {
+            for (auto &I : BB) {
+              if (auto CB = dyn_cast<CallBase>(&I)) {
+                CB->addFnAttr(
+                    llvm::Attribute::get(F->getContext(), "enzyme_inactive"));
+              } else {
+                I.setMetadata("enzyme_inactive", MD);
+              }
+            }
+          }
           toErase.push_back(&g);
           changed = true;
         } else {

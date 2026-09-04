@@ -76,6 +76,7 @@ const fn max_iov() -> usize {
     target_os = "emscripten",
     target_os = "linux",
     target_os = "nto",
+    target_os = "qnx",
 ))]
 const fn max_iov() -> usize {
     libc::UIO_MAXIOV as usize
@@ -91,6 +92,7 @@ const fn max_iov() -> usize {
     target_os = "netbsd",
     target_os = "nuttx",
     target_os = "nto",
+    target_os = "qnx",
     target_os = "openbsd",
     target_os = "horizon",
     target_os = "vita",
@@ -173,7 +175,7 @@ impl FileDesc {
         .map(|n| n as usize)
     }
 
-    pub fn read_buf(&self, mut cursor: BorrowedCursor<'_>) -> io::Result<()> {
+    pub fn read_buf(&self, mut cursor: BorrowedCursor<'_, u8>) -> io::Result<()> {
         // SAFETY: `cursor.as_mut()` starts with `cursor.capacity()` writable bytes
         let ret = cvt(unsafe {
             libc::read(
@@ -190,7 +192,7 @@ impl FileDesc {
         Ok(())
     }
 
-    pub fn read_buf_at(&self, mut cursor: BorrowedCursor<'_>, offset: u64) -> io::Result<()> {
+    pub fn read_buf_at(&self, mut cursor: BorrowedCursor<'_, u8>, offset: u64) -> io::Result<()> {
         // SAFETY: `cursor.as_mut()` starts with `cursor.capacity()` writable bytes
         let ret = cvt(unsafe {
             pread64(
@@ -561,6 +563,7 @@ impl FileDesc {
         target_os = "redox",
         target_os = "vxworks",
         target_os = "nto",
+        target_os = "qnx",
         target_os = "wasi",
     )))]
     pub fn set_cloexec(&self) -> io::Result<()> {
@@ -585,6 +588,7 @@ impl FileDesc {
         target_os = "redox",
         target_os = "vxworks",
         target_os = "nto",
+        target_os = "qnx",
         target_os = "wasi",
     ))]
     pub fn set_cloexec(&self) -> io::Result<()> {
@@ -640,7 +644,7 @@ impl<'a> Read for &'a FileDesc {
         (**self).read(buf)
     }
 
-    fn read_buf(&mut self, cursor: BorrowedCursor<'_>) -> io::Result<()> {
+    fn read_buf(&mut self, cursor: BorrowedCursor<'_, u8>) -> io::Result<()> {
         (**self).read_buf(cursor)
     }
 

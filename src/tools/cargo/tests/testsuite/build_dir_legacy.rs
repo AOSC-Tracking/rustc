@@ -504,6 +504,45 @@ fn cargo_rustdoc_json_should_output_to_target_dir() {
     ]);
 }
 
+#[cargo_test(nightly, reason = "--output-format is unstable")]
+fn cargo_doc_json_should_output_to_target_dir() {
+    let p = project()
+        .file("src/lib.rs", "")
+        .file(
+            ".cargo/config.toml",
+            r#"
+            [build]
+            target-dir = "target-dir"
+            build-dir = "build-dir"
+            "#,
+        )
+        .build();
+
+    p.cargo("doc --no-deps -Zunstable-options --output-format json")
+        .masquerade_as_nightly_cargo(&["rustdoc-output-format"])
+        .enable_mac_dsym()
+        .run();
+
+    let docs_dir = p.root().join("target-dir/doc");
+
+    assert_exists(&docs_dir);
+    assert_exists(&docs_dir.join("foo.json"));
+
+    p.root().join("build-dir").assert_build_dir_layout(str![
+        r#"
+[ROOT]/foo/build-dir/.rustc_info.json
+[ROOT]/foo/build-dir/.rustdoc_fingerprint.json
+[ROOT]/foo/build-dir/CACHEDIR.TAG
+[ROOT]/foo/build-dir/debug/.cargo-build-lock
+[ROOT]/foo/build-dir/debug/.fingerprint/foo-[HASH]/doc-lib-foo
+[ROOT]/foo/build-dir/debug/.fingerprint/foo-[HASH]/doc-lib-foo.json
+[ROOT]/foo/build-dir/debug/.fingerprint/foo-[HASH]/invoked.timestamp
+[ROOT]/foo/build-dir/debug/build/foo-[HASH]/out/foo.json
+
+"#
+    ]);
+}
+
 #[cargo_test]
 fn cargo_package_should_build_in_build_dir_and_output_to_target_dir() {
     let p = project()
@@ -1179,6 +1218,121 @@ CARGO_BIN_FILE_BAR_bar=[ROOT]/foo/build-dir/debug/deps/artifact/bar-[HASH]/bin/b
 [ROOT]/foo/target-dir/debug/foo.d
 
 "#]]);
+}
+
+/// Verify multiple dylibs are properly added to the search path.
+/// Regression test for https://github.com/rust-lang/rust/issues/158526
+#[cargo_test]
+fn dylib_deps_output() {
+    let p = project()
+        .file(
+            ".cargo/config.toml",
+            r#"
+            [build]
+            target-dir = "target-dir"
+            build-dir = "build-dir"
+            rustflags = ["-C", "prefer-dynamic"]
+            "#,
+        )
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.0"
+                edition = "2021"
+                resolver = "2"
+
+                [dependencies]
+                bar = { path = "bar" }
+                baz = { path = "baz" }
+            "#,
+        )
+        .file(
+            "src/main.rs",
+            r#"
+                use bar::bar_value;
+                use baz::baz_value;
+
+                fn main() {
+                    println!("sum = {}", bar_value() + baz_value());
+                }
+            "#,
+        )
+        .file(
+            "tests/use_both_dylibs.rs",
+            r#"
+                use bar::bar_value;
+                use baz::baz_value;
+
+                #[test]
+                fn uses_both_dylibs() {
+                    assert_eq!(bar_value() + baz_value(), 300);
+                }
+            "#,
+        )
+        .file(
+            "bar/Cargo.toml",
+            r#"
+                [package]
+                name = "bar"
+                version = "0.1.0"
+                edition = "2021"
+                authors = []
+
+                [lib]
+                crate-type = ["dylib"]
+            "#,
+        )
+        .file("bar/src/lib.rs", r#"pub fn bar_value() -> i32 { 100 }"#)
+        .file(
+            "baz/Cargo.toml",
+            r#"
+                [package]
+                name = "baz"
+                version = "0.1.0"
+                edition = "2021"
+                authors = []
+
+                [lib]
+                crate-type = ["dylib"]
+            "#,
+        )
+        .file("baz/src/lib.rs", r#"pub fn baz_value() -> i32 { 200 }"#)
+        .build();
+
+    p.cargo("test")
+        .env("__CARGO_DEFAULT_LIB_METADATA", "repro")
+        .enable_mac_dsym()
+        .with_stderr_data(
+            str![[r#"
+[LOCKING] 2 packages to latest compatible versions
+[COMPILING] bar v0.1.0 ([ROOT]/foo/bar)
+[COMPILING] baz v0.1.0 ([ROOT]/foo/baz)
+[COMPILING] foo v0.0.0 ([ROOT]/foo)
+[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] unittests src/main.rs (build-dir/debug/deps/[..])
+[RUNNING] tests/use_both_dylibs.rs (build-dir/debug/deps/[..])
+
+"#]]
+            .unordered(),
+        )
+        .run();
+
+    assert_exists_pattern(
+        &p.root()
+            .join(format!(
+                "build-dir/debug/deps/{DLL_PREFIX}bar-*{DLL_SUFFIX}",
+            ))
+            .to_string_lossy(),
+    );
+    assert_exists_pattern(
+        &p.root()
+            .join(format!(
+                "build-dir/debug/deps/{DLL_PREFIX}baz-*{DLL_SUFFIX}",
+            ))
+            .to_string_lossy(),
+    );
 }
 
 fn parse_workspace_manifest_path_hash(hash_dir: &PathBuf) -> PathBuf {

@@ -1,6 +1,7 @@
 //! Tests for the `cargo build` command.
 
 use std::env;
+use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
 use std::fs;
 use std::io::Read;
 use std::process::Stdio;
@@ -483,9 +484,10 @@ fn cargo_compile_duplicate_build_targets() {
 
     p.cargo("build")
         .with_stderr_data(str![[r#"
-[WARNING] file `[ROOT]/foo/src/main.rs` found to be present in multiple build targets:
+[WARNING] Cargo.toml: file `[ROOT]/foo/src/main.rs` found to be present in multiple build targets:
   * `lib` target `main`
   * `bin` target `foo`
+[WARNING] `foo` (manifest) generated 1 warning
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -634,10 +636,8 @@ fn cargo_compile_with_bin_and_crate_type() {
     p.cargo("build")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
-
-Caused by:
-  the target `the_foo_bin` is a binary and can't have any crate-types set (currently "cdylib, rlib")
+[ERROR] Cargo.toml: the target `the_foo_bin` is a binary and can't have any crate-types set (currently "cdylib, rlib")
+[ERROR] could not parse `foo` (manifest) due to 1 previous error
 
 "#]])
         .run();
@@ -722,10 +722,8 @@ fn cargo_compile_with_bin_and_proc() {
     p.cargo("build")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
-
-Caused by:
-  the target `the_foo_bin` is a binary and can't have `proc-macro` set `true`
+[ERROR] Cargo.toml: the target `the_foo_bin` is a binary and can't have `proc-macro` set `true`
+[ERROR] could not parse `foo` (manifest) due to 1 previous error
 
 "#]])
         .run();
@@ -2004,8 +2002,9 @@ fn many_crate_types_old_style_lib_location() {
         .build();
     p.cargo("build")
         .with_stderr_data(str![[r#"
-[WARNING] path `src/foo.rs` was erroneously implicitly accepted for library `foo`,
+[WARNING] Cargo.toml: path `src/foo.rs` was erroneously implicitly accepted for library `foo`,
 please rename the file to `src/lib.rs` or set lib.path in Cargo.toml
+[WARNING] `foo` (manifest) generated 1 warning
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -5055,7 +5054,8 @@ fn target_edition() {
 
     p.cargo("build -v")
         .with_stderr_data(str![[r#"
-[WARNING] `edition` is set on library `foo` which is deprecated
+[WARNING] Cargo.toml: `edition` is set on library `foo` which is deprecated
+[WARNING] `foo` (manifest) generated 1 warning
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc [..]--edition=2018 [..]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -5242,7 +5242,7 @@ fn uplift_pdb_of_bin_on_windows() {
     assert!(!p.target_debug_dir().join("d.pdb").exists());
 }
 
-#[cargo_test]
+#[cargo_test(requires_host_split_debuginfo = "packed")]
 #[cfg(target_os = "linux")]
 fn uplift_dwp_of_bin_on_linux() {
     let p = project()
@@ -6537,6 +6537,184 @@ fn no_embed_metadata_invalidate() {
 [COMPILING] bar v0.5.0 ([ROOT]/foo/bar)
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn should_not_include_current_build_unit_path_in_rustc_args() {
+    let p = project()
+        .file("src/main.rs", r#"fn main() { println!("Hello, World!") }"#)
+        .file(
+            ".cargo/config.toml",
+            r#"
+            [build]
+            target-dir = "target-dir"
+            build-dir = "build-dir"
+            "#,
+        )
+        .build();
+
+    p.cargo("-Zbuild-dir-new-layout -v build")
+        .masquerade_as_nightly_cargo(&["new build-dir layout"])
+        .enable_mac_dsym()
+        // Don't pass any `-L` args if there are no dependencies (including our own `out` dir)
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..] --out-dir [ROOT]/foo/build-dir/debug/build/foo/[HASH]/out`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn should_not_include_build_script_out_dir_path_in_rustc_args() {
+    let p = project()
+        .file("src/main.rs", r#"fn main() { println!("Hello, World!") }"#)
+        .file("build.rs", r#"fn main() { }"#)
+        .file(
+            ".cargo/config.toml",
+            r#"
+            [build]
+            target-dir = "target-dir"
+            build-dir = "build-dir"
+            "#,
+        )
+        .build();
+
+    p.cargo("-Zbuild-dir-new-layout -v build")
+        .masquerade_as_nightly_cargo(&["new build-dir layout"])
+        .enable_mac_dsym()
+        // Don't pass build script `out` dirs and avoid bloating the rustc command args which can
+        // lead to problems on Windows.
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name build_script_build [..]`
+[RUNNING] `[ROOT]/foo/build-dir/debug/build/foo/[HASH]/out/build_script_build`
+[RUNNING] `rustc --crate-name foo [..] --out-dir [ROOT]/foo/build-dir/debug/build/foo/[HASH]/out`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test(
+    nightly,
+    reason = "Depends on https://github.com/rust-lang/rust/pull/155439/changes/61f3e086acc1c187bb262ab43cac71f44018c397"
+)]
+fn should_only_include_dylibs_on_lib_search_path() {
+    let envvar = dylib_path_envvar();
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.0"
+                edition = "2021"
+                authors = []
+                resolver = "2"
+
+                [dependencies]
+                bar = { path = "bar" }
+                baz = { path = "baz" }
+                qux = { path = "qux" }
+            "#,
+        )
+        .file(
+            "src/main.rs",
+            &format!(
+                r#"
+                    fn main() {{
+                        let search_path = std::env::var_os("{envvar}").unwrap();
+                        let paths: Vec<_> = std::env::split_paths(&search_path).collect();
+
+                        for (name, kind) in [("bar", "dylib"), ("baz", "rlib"), ("qux", "cdylib")] {{
+                            let found = paths.iter().any(|dir| artifact_exists(dir, name, kind));
+                            println!("{{name}} ({{kind}}) on search path: {{found}}");
+                        }}
+                    }}
+
+                    fn artifact_exists(dir: &std::path::Path, name: &str, kind: &str) -> bool {{
+                        let (prefix, suffix) = if kind == "rlib" {{
+                            (format!("lib{{name}}-"), ".rlib".to_string())
+                        }} else {{
+                            (format!("{DLL_PREFIX}{{name}}"), "{DLL_SUFFIX}".to_string())
+                        }};
+                        std::fs::read_dir(dir)
+                            .into_iter()
+                            .flatten()
+                            .flatten()
+                            .any(|e| {{
+                                let f = e.file_name();
+                                let f = f.to_string_lossy();
+                                f.starts_with(&prefix) && f.ends_with(&suffix)
+                            }})
+                    }}
+                "#
+            ),
+        )
+        .file(
+            "bar/Cargo.toml",
+            r#"
+                [package]
+                name = "bar"
+                version = "0.1.0"
+                edition = "2021"
+                authors = []
+
+                [lib]
+                crate-type = ["dylib"]
+            "#,
+        )
+        .file("bar/src/lib.rs", r#"pub fn bar_value() -> i32 { 100 }"#)
+        .file(
+            "baz/Cargo.toml",
+            r#"
+                [package]
+                name = "baz"
+                version = "0.1.0"
+                edition = "2021"
+                authors = []
+            "#,
+        )
+        .file("baz/src/lib.rs", r#"pub fn baz_value() -> i32 { 200 }"#)
+        .file(
+            "qux/Cargo.toml",
+            r#"
+                [package]
+                name = "qux"
+                version = "0.1.0"
+                edition = "2021"
+                authors = []
+
+                [lib]
+                crate-type = ["cdylib"]
+            "#,
+        )
+        .file("qux/src/lib.rs", r#"pub fn qux_value() -> i32 { 200 }"#)
+        .build();
+
+    p.cargo("-Zbuild-dir-new-layout -v run")
+        .masquerade_as_nightly_cargo(&["new build-dir layout"])
+        .enable_mac_dsym()
+        .with_stdout_data(str![[r#"
+bar (dylib) on search path: true
+baz (rlib) on search path: false
+qux (cdylib) on search path: false
+
+"#]])
+        .run();
+
+    // Legacy layout
+    p.cargo("-v run")
+        .enable_mac_dsym()
+        .with_stdout_data(str![[r#"
+bar (dylib) on search path: true
+baz (rlib) on search path: true
+qux (cdylib) on search path: true
 
 "#]])
         .run();

@@ -88,6 +88,8 @@ enum class ErrorType {
   NoTruncate = 10,
   GCRewrite = 11,
   NaNError = 12,
+  ShowInternalError = 12,
+  NoAccumulate = 13,
 };
 
 extern "C" {
@@ -400,13 +402,6 @@ enum class ProbProgMode {
   Likelihood = 0,
   Trace = 1,
   Condition = 2,
-};
-
-enum class MProbProgMode {
-  Call = 0,
-  Simulate = 1,
-  Generate = 2,
-  Regenerate = 3,
 };
 
 /// Classification of value as an original program
@@ -772,7 +767,8 @@ parseTrueType(const llvm::MDNode *, DerivativeMode, bool const_src);
 /// point memory
 llvm::Function *getOrInsertDifferentialFloatMemcpy(
     llvm::Module &M, llvm::Type *T, unsigned dstalign, unsigned srcalign,
-    unsigned dstaddr, unsigned srcaddr, unsigned bitwidth);
+    unsigned dstaddr, unsigned srcaddr, unsigned bitwidth,
+    bool runtimeActivity = false);
 
 /// Create function for type that performs memcpy with a stride using blas copy
 void callMemcpyStridedBlas(llvm::IRBuilder<> &B, llvm::Module &M, BlasInfo blas,
@@ -822,7 +818,8 @@ llvm::Function *getOrInsertDifferentialFloatMemcpyMat(
 /// point memory
 llvm::Function *getOrInsertDifferentialFloatMemmove(
     llvm::Module &M, llvm::Type *T, unsigned dstalign, unsigned srcalign,
-    unsigned dstaddr, unsigned srcaddr, unsigned bitwidth);
+    unsigned dstaddr, unsigned srcaddr, unsigned bitwidth,
+    bool runtimeActivity = false);
 
 llvm::Function *getOrInsertCheckedFree(llvm::Module &M, llvm::CallInst *call,
                                        llvm::Type *Type, unsigned width);
@@ -2436,7 +2433,48 @@ static inline std::string convertSRetTypeToString(llvm::Type *T) {
   return std::to_string((size_t)T);
 }
 
-static inline llvm::Type *convertSRetTypeFromString(llvm::StringRef str) {
+static inline llvm::Type *
+convertSRetTypeFromString(llvm::StringRef str, llvm::LLVMContext *C = nullptr) {
+  if (str == "test_type") {
+    assert(C);
+    llvm::SmallVector<llvm::Type *, 1> elts;
+#if LLVM_VERSION_MAJOR >= 17
+    elts.push_back(llvm::PointerType::get(*C, AddressSpace::Tracked));
+#else
+    elts.push_back(llvm::PointerType::get(llvm::StructType::get(*C, {}),
+                                          AddressSpace::Tracked));
+#endif
+    llvm::Type *inner = llvm::StructType::get(*C, elts);
+    llvm::SmallVector<llvm::Type *, 1> innerElts;
+    innerElts.push_back(inner);
+    return llvm::StructType::get(*C, innerElts);
+  }
+  if (str == "test_type2") {
+    assert(C);
+    return llvm::ArrayType::get(llvm::Type::getInt64Ty(*C), 6);
+  }
+  if (str == "test_type3") {
+    assert(C);
+    llvm::SmallVector<llvm::Type *, 1> elts;
+    elts.push_back(llvm::Type::getDoubleTy(*C));
+    return llvm::StructType::get(*C, elts);
+  }
+  if (str == "test_type4") {
+    assert(C);
+    llvm::SmallVector<llvm::Type *, 3> elts;
+    elts.push_back(llvm::ArrayType::get(llvm::Type::getDoubleTy(*C), 2));
+    elts.push_back(llvm::Type::getDoubleTy(*C));
+    elts.push_back(llvm::Type::getInt64Ty(*C));
+    return llvm::StructType::get(*C, elts);
+  }
+  if (str == "test_type5") {
+    assert(C);
+    llvm::SmallVector<llvm::Type *, 3> elts;
+    elts.push_back(llvm::ArrayType::get(llvm::Type::getDoubleTy(*C), 1));
+    elts.push_back(llvm::Type::getDoubleTy(*C));
+    elts.push_back(llvm::Type::getInt64Ty(*C));
+    return llvm::StructType::get(*C, elts);
+  }
   size_t idx;
   bool failed = str.consumeInteger(10, idx);
   (void)failed;
@@ -2514,5 +2552,13 @@ llvm::SmallVector<llvm::Value *, 1> getJuliaObjects(llvm::Value *v,
 // constant gep offsets and casts
 llvm::SmallVector<std::tuple<llvm::Instruction *, llvm::Value *, size_t>, 1>
 findAllUsersOf(llvm::Value *AI);
+
+static bool hasTerminator(llvm::BasicBlock *BB) {
+#if LLVM_VERSION_MAJOR >= 23
+  return BB->hasTerminator();
+#else
+  return BB->getTerminator();
+#endif
+}
 
 #endif // ENZYME_UTILS_H

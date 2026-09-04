@@ -294,7 +294,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         closure_kind: hir::ClosureKind,
     ) -> (Option<ExpectedSig<'tcx>>, Option<ty::ClosureKind>) {
         match *expected_ty.kind() {
-            ty::Alias(ty::AliasTy { kind: ty::Opaque { def_id }, args, .. }) => self
+            ty::Alias(_, ty::AliasTy { kind: ty::Opaque { def_id }, args, .. }) => self
                 .deduce_closure_signature_from_predicates(
                     expected_ty,
                     closure_kind,
@@ -720,6 +720,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // in this binder we are creating.
         assert!(!expected_sig.sig.skip_binder().has_vars_bound_above(ty::INNERMOST));
         let bound_sig = expected_sig.sig.map_bound(|sig| {
+            // Ignore splatting, it is unsupported on closures.
             let fn_sig_kind = FnSigKind::default()
                 .set_abi(ExternAbi::RustCall)
                 .set_safety(hir::Safety::Safe)
@@ -990,14 +991,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     get_future_output(obligation.predicate, obligation.cause.span)
                 })?
             }
-            ty::Alias(ty::AliasTy { kind: ty::Projection { .. }, .. }) => {
+            ty::Alias(_, ty::AliasTy { kind: ty::Projection { .. }, .. }) => {
                 return Some(Ty::new_error_with_message(
                     self.tcx,
                     closure_span,
                     "this projection should have been projected to an opaque type",
                 ));
             }
-            ty::Alias(ty::AliasTy { kind: ty::Opaque { def_id }, args, .. }) => self
+            ty::Alias(_, ty::AliasTy { kind: ty::Opaque { def_id }, args, .. }) => self
                 .tcx
                 .explicit_item_self_bounds(def_id)
                 .iter_instantiated_copied(self.tcx, args)
@@ -1056,7 +1057,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // The `Future` trait has only one associated item, `Output`,
         // so check that this is what we see.
         let output_assoc_item = self.tcx.associated_item_def_ids(trait_def_id)[0];
-        if output_assoc_item != predicate.projection_term.def_id() {
+        if output_assoc_item != predicate.def_id() {
             span_bug!(
                 cause_span,
                 "projecting associated item `{:?}` from future, which is not Output `{:?}`",

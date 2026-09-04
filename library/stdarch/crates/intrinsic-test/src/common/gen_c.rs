@@ -1,23 +1,28 @@
 use itertools::Itertools;
 
-use crate::common::intrinsic::Intrinsic;
+use crate::common::{SupportedArchitecture, intrinsic::Intrinsic};
 
-use super::intrinsic_helpers::IntrinsicTypeDefinition;
+use super::intrinsic_helpers::TypeDefinition;
 
-pub fn write_wrapper_c<T: IntrinsicTypeDefinition>(
+/// Generates a C source file containing wrapper functions around each specialisation of each
+/// intrinsic (that is, intrinsics with specific values for the the immediate arguments). Each
+/// wrapper function is invoked via FFI from the Rust binary doing the testing.
+///
+/// e.g.
+/// ```c
+/// void __crc32cd_wrapper(uint32_t* __dst, uint32_t a, uint64_t b) {
+///    *__dst = __crc32cd(a, b);
+/// }
+/// ```
+pub fn write_wrapper_c<A: SupportedArchitecture>(
     w: &mut impl std::io::Write,
-    notice: &str,
-    platform_headers: &[&str],
-    intrinsics: &[Intrinsic<T>],
+    intrinsics: &[Intrinsic<A>],
 ) -> std::io::Result<()> {
-    write!(w, "{notice}")?;
+    write!(w, "{}", A::NOTICE)?;
 
     writeln!(w, "#include <stdint.h>")?;
     writeln!(w, "#include <stddef.h>")?;
-
-    for header in platform_headers {
-        writeln!(w, "#include <{header}>")?;
-    }
+    writeln!(w, "{}", A::C_PRELUDE)?;
 
     for intrinsic in intrinsics {
         intrinsic.iter_specializations(|imm_values| {
