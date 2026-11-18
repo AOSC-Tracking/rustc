@@ -22,7 +22,7 @@ use crate::Session;
 use crate::lint::{Lint, LintId};
 
 /// Collected spans during parsing for places where a certain feature was
-/// used and should be feature gated accordingly in `check_crate`.
+/// used and should be feature gated accordingly in `check_crate` in `rustc_ast_passes`.
 #[derive(Default)]
 pub struct GatedSpans {
     pub spans: Lock<FxHashMap<Symbol, Vec<Span>>>,
@@ -148,7 +148,7 @@ impl ParseSess {
     }
 
     pub fn dyn_buffer_lint<
-        F: for<'a> FnOnce(DiagCtxtHandle<'a>, Level) -> Diag<'a, ()> + DynSync + DynSend + 'static,
+        F: for<'a> FnOnce(DiagCtxtHandle<'a>, Level) -> Diag<'a> + DynSync + DynSend + 'static,
     >(
         &self,
         lint: &'static Lint,
@@ -165,7 +165,7 @@ impl ParseSess {
     }
 
     pub fn dyn_buffer_lint_sess<
-        F: for<'a> FnOnce(DiagCtxtHandle<'a>, Level, &Session) -> Diag<'a, ()>
+        F: for<'a> FnOnce(DiagCtxtHandle<'a>, Level, &Session) -> Diag<'a>
             + DynSync
             + DynSend
             + 'static,

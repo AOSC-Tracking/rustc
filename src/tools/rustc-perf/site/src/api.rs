@@ -42,7 +42,6 @@ where
 }
 
 pub mod info {
-    use database::Date;
     use serde::Serialize;
 
     #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -53,8 +52,8 @@ pub mod info {
         /// Sorted list of known runtime metrics
         pub runtime_metrics: Vec<String>,
 
-        /// Chronologically last loaded run date.
-        pub as_of: Option<Date>,
+        /// List of known targets for compile-time benchmarks
+        pub compile_targets: Vec<String>,
     }
 }
 
@@ -66,6 +65,11 @@ pub mod dashboard {
         pub base_incr_averages: Vec<f64>,
         pub clean_incr_averages: Vec<f64>,
         pub println_incr_averages: Vec<f64>,
+    }
+
+    #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+    pub struct Request {
+        pub target: Option<String>,
     }
 
     #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -115,6 +119,8 @@ pub mod graphs {
         pub benchmark: Option<String>,
         pub scenario: Option<String>,
         pub profile: Option<String>,
+        pub backend: Option<String>,
+        pub target: Option<String>,
     }
 
     #[derive(Debug, PartialEq, Copy, Clone, Serialize, Deserialize)]
@@ -158,6 +164,8 @@ pub mod detail_graphs {
         pub benchmark: String,
         pub scenario: String,
         pub profile: String,
+        pub backend: String,
+        pub target: String,
         #[serde(deserialize_with = "vec_from_comma_separated")]
         pub kinds: Vec<GraphKind>,
     }
@@ -180,6 +188,8 @@ pub mod detail_sections {
         pub benchmark: String,
         pub scenario: String,
         pub profile: String,
+        pub backend: String,
+        pub target: String,
     }
 
     #[derive(Default, Debug, Clone, Serialize)]
@@ -216,6 +226,7 @@ pub mod runtime_detail_graphs {
         pub end: Bound,
         pub stat: String,
         pub benchmark: String,
+        pub target: String,
         #[serde(deserialize_with = "vec_from_comma_separated")]
         pub kinds: Vec<GraphKind>,
     }
@@ -227,7 +238,7 @@ pub mod runtime_detail_graphs {
     }
 }
 
-pub mod bootstrap {
+pub mod toolchain {
     use collector::Bound;
     use hashbrown::HashMap;
     use serde::{Deserialize, Serialize};
@@ -247,6 +258,8 @@ pub mod bootstrap {
         pub by_crate_build_times: HashMap<String, Vec<Option<u64>>>,
         // Each commit's total rustc build time in nanoseconds
         pub total_build_times: Vec<Option<u64>>,
+        // Artifact sizes of various components for the individual toolchains
+        pub artifact_sizes: HashMap<String, Vec<Option<u64>>>,
     }
 }
 
@@ -340,59 +353,12 @@ pub mod comparison {
     #[derive(Debug, Clone, Serialize)]
     pub struct RuntimeBenchmarkComparison {
         pub benchmark: String,
+        pub target: String,
         pub comparison: StatComparison,
     }
 }
 
 pub mod status {
-    use crate::load::MissingReason;
-    use database::ArtifactId;
-    use database::Commit;
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-    pub struct BenchmarkError {
-        pub name: String,
-        pub error: String,
-    }
-
-    #[derive(Serialize, Debug)]
-    pub struct Step {
-        pub step: String,
-        pub is_done: bool,
-        // Seconds
-        pub expected_duration: u64,
-        // Seconds since start
-        pub current_progress: u64,
-    }
-
-    #[derive(Serialize, Debug)]
-    pub struct CurrentState {
-        pub artifact: ArtifactId,
-        pub progress: Vec<Step>,
-    }
-
-    #[derive(Serialize, Debug)]
-    pub struct FinishedRun {
-        pub artifact: ArtifactId,
-        pub pr: Option<u32>,
-        pub errors: Vec<BenchmarkError>,
-        // In seconds
-        pub duration: u64,
-        // Unix timestamp
-        pub finished_at: u64,
-    }
-
-    #[derive(Serialize, Debug)]
-    pub struct Response {
-        // Ordered from newest to oldest
-        pub finished_runs: Vec<FinishedRun>,
-        pub current: Option<CurrentState>,
-        pub missing: Vec<(Commit, MissingReason)>,
-    }
-}
-
-pub mod status_new {
     use chrono::{DateTime, Utc};
     use hashbrown::HashMap;
     use serde::Serialize;
@@ -438,6 +404,7 @@ pub mod status_new {
     #[serde(rename_all = "camelCase")]
     pub struct BenchmarkJob {
         pub request_tag: String,
+        pub kind: String,
         pub target: String,
         pub backend: String,
         pub profile: String,
@@ -451,6 +418,14 @@ pub mod status_new {
 
     #[derive(Serialize, Debug)]
     #[serde(rename_all = "camelCase")]
+    pub struct PastRequestDuration {
+        pub request_tag: String,
+        /// Sum of (completed_at - started_at) for all jobs this collector ran for the request, in seconds.
+        pub job_duration_s: u64,
+    }
+
+    #[derive(Serialize, Debug)]
+    #[serde(rename_all = "camelCase")]
     pub struct Collector {
         pub name: String,
         pub target: String,
@@ -458,7 +433,9 @@ pub mod status_new {
         pub is_active: bool,
         pub last_heartbeat_at: DateTime<Utc>,
         pub date_added: DateTime<Utc>,
+        pub commit_sha: String,
         pub jobs: Vec<BenchmarkJob>,
+        pub past_request_durations: Vec<PastRequestDuration>,
     }
 
     #[derive(Serialize, Debug)]
@@ -478,16 +455,11 @@ pub mod self_profile_raw {
     pub struct Request {
         pub commit: String,
         pub benchmark: String,
+        pub profile: String,
         #[serde(alias = "run_name")]
         pub scenario: String,
-        pub cid: Option<i32>,
-    }
-
-    #[derive(Debug, Clone, Serialize)]
-    pub struct Response {
-        pub cids: Vec<i32>,
-        pub cid: i32,
-        pub url: String,
+        pub backend: String,
+        pub target: String,
     }
 }
 
@@ -509,18 +481,13 @@ pub mod self_profile_processed {
         pub benchmark: String,
         #[serde(alias = "run_name")]
         pub scenario: String,
-        pub cid: Option<i32>,
+        pub profile: String,
+        pub backend: String,
+        pub target: String,
         #[serde(rename = "type")]
         pub processor_type: ProcessorType,
         #[serde(default, flatten)]
         pub params: std::collections::HashMap<String, String>,
-    }
-
-    #[derive(Debug, Clone, Serialize)]
-    pub struct Response {
-        pub cids: Vec<i32>,
-        pub cid: i32,
-        pub url: String,
     }
 }
 
@@ -533,8 +500,15 @@ pub mod self_profile {
         pub commit: String,
         pub base_commit: Option<String>,
         pub benchmark: String,
+        pub profile: String,
         #[serde(alias = "run_name")]
         pub scenario: String,
+        // These fields are kept optional for backwards compatibility
+        // They can be made required in Q3 2026
+        #[serde(default)]
+        pub backend: Option<String>,
+        #[serde(default)]
+        pub target: Option<String>,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -613,6 +587,7 @@ pub mod github {
     #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
     pub struct User {
         pub id: u64,
+        pub login: String,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -639,40 +614,11 @@ pub mod github {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(untagged)]
     pub enum Request {
-        Issue { issue: Issue, comment: Comment },
-        Push(Push),
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct Push {
-        pub r#ref: String,
-        pub sender: Sender,
-        pub head_commit: HeadCommit,
-        pub before: String,
-        pub commits: Vec<Commit>,
-        pub repository: Repository,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct Repository {
-        pub default_branch: String,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct Commit {
-        #[serde(rename = "id")]
-        pub sha: String,
-        pub message: String,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct HeadCommit {
-        pub message: String,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct Sender {
-        pub login: String,
+        Issue {
+            action: String,
+            issue: Issue,
+            comment: Comment,
+        },
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

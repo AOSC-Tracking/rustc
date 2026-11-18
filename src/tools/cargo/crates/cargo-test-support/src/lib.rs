@@ -40,6 +40,7 @@
 //! ```
 
 #![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_types)]
 #![allow(clippy::print_stderr)]
 #![allow(clippy::print_stdout)]
 
@@ -444,7 +445,7 @@ impl Project {
             .join(&format!("{}{}", b, env::consts::EXE_SUFFIX))
     }
 
-    /// Path to a debug binary for a specific target triple.
+    /// Path to a debug binary for a specific target tuple.
     ///
     /// ex: `$CARGO_TARGET_TMPDIR/cit/t0/foo/target/i686-apple-darwin/debug/foo`
     pub fn target_bin(&self, target: &str, b: &str) -> PathBuf {
@@ -1324,7 +1325,7 @@ pub fn rustc_host() -> &'static str {
     &rustc_info().host
 }
 
-/// The host triple suitable for use in a cargo environment variable (uppercased).
+/// The host tuple suitable for use in a cargo environment variable (uppercased).
 pub fn rustc_host_env() -> String {
     rustc_host().to_uppercase().replace('-', "_")
 }
@@ -1438,6 +1439,7 @@ pub trait TestEnvCommandExt: Sized {
             .env("CARGO_INCREMENTAL", "0")
             // Don't read the system git config which is out of our control.
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("CI")
             .env_remove("__CARGO_DEFAULT_LIB_METADATA")
             .env_remove("ALL_PROXY")
             .env_remove("EMAIL")

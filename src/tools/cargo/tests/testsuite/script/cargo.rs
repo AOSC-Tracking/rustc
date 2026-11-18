@@ -613,6 +613,7 @@ args: []
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [HELP] to pin the edition, run `cargo fix --manifest-path [ROOT]/foo/s-h.w§c!.rs`
+...
 [COMPILING] s-h-w-c- v0.0.0 ([ROOT]/foo/s-h.w§c!.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `[ROOT]/home/.cargo/build/[HASH]/target/debug/s-h-w-c-[EXE]`
@@ -927,6 +928,9 @@ fn test_name_same_as_dependency() {
 ---
 [dependencies]
 script = "1.0.0"
+
+[lints.cargo]
+default = "allow"
 ---
 
 fn main() {
@@ -946,7 +950,7 @@ Hello world!
 [WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [HELP] to pin the edition, run `cargo fix --manifest-path [ROOT]/foo/script.rs`
 [UPDATING] `dummy-registry` index
-[LOCKING] 1 package to latest Rust [..] compatible version
+[LOCKING] 1 package to highest Rust [..] compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] script v1.0.0 (registry `dummy-registry`)
 [COMPILING] script v1.0.0
@@ -964,6 +968,9 @@ fn test_path_dep() {
 ---
 [dependencies]
 bar.path = "./bar"
+
+[lints.cargo]
+default = "allow"
 ---
 
 fn main() {
@@ -985,7 +992,7 @@ Hello world!
         .with_stderr_data(str![[r#"
 [WARNING] `package.edition` is unspecified, defaulting to the latest edition (currently `[..]`)
 [HELP] to pin the edition, run `cargo fix --manifest-path [ROOT]/foo/script.rs`
-[LOCKING] 1 package to latest Rust [..] compatible version
+[LOCKING] 1 package to highest Rust [..] compatible version
 [COMPILING] bar v0.0.1 ([ROOT]/foo/bar)
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -1770,7 +1777,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 [HELP] to pin the edition, run `cargo fix --manifest-path [ROOT]/foo/script.rs`
 [COMPILING] script v0.0.0 ([ROOT]/foo/script.rs)
 [FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[RUNNING] unittests script.rs ([ROOT]/home/.cargo/build/[HASH]/debug/deps/script-[HASH][EXE])
+[RUNNING] unittests script.rs ([ROOT]/home/.cargo/build/[HASH]/debug/build/script/[HASH]/out/script-[HASH][EXE])
 
 "#]])
         .run();

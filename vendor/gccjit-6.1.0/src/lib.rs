@@ -1,0 +1,253 @@
+//! # gccjit.rs - Idiomatic Rust bindings to gccjit
+//!
+//! This library aims to provide idiomatic Rust bindings to gccjit,
+//! the embeddable shared library that provides JIT compilation utilizing
+//! GCC's backend. See https://gcc.gnu.org/wiki/JIT for more information
+//! and for documentation of gccjit itself.
+//!
+//! Each one of the types provided in this crate corresponds to a pointer
+//! type provided by the libgccjit C API. Type conversions are handled by
+//! the ToRValue and ToLValue types, which represent values that can be
+//! rvalues and values that can be lvalues, respectively.
+//!
+//! In addition, these types are all statically verified by the Rust compiler to
+//! never outlive the Context object from which they came, a requirement
+//! to using libgccjit correctly.
+
+#![allow(clippy::needless_lifetimes)]
+
+extern crate gccjit_sys;
+
+mod asm;
+mod block;
+mod context;
+mod field;
+mod function;
+mod location;
+mod lvalue;
+mod object;
+mod parameter;
+#[cfg(feature = "master")]
+mod region;
+mod rvalue;
+mod structs;
+#[cfg(feature = "master")]
+mod target_info;
+mod types;
+
+#[cfg(any(feature = "dlopen", feature = "master"))]
+use std::ffi::CStr;
+#[cfg(feature = "dlopen")]
+use std::sync::OnceLock;
+
+#[cfg(feature = "master")]
+pub use block::clone_blocks;
+pub use block::{BinaryOp, Block, ComparisonOp, UnaryOp};
+pub use context::CType;
+pub use context::CompileResult;
+pub use context::Context;
+pub(crate) use context::ContextGetter;
+pub use context::GlobalKind;
+pub use context::OptimizationLevel;
+pub use context::OutputKind;
+pub use field::Field;
+#[cfg(feature = "master")]
+pub use function::FnAttribute;
+pub use function::{Function, FunctionType};
+pub use location::Location;
+pub use lvalue::{LValue, TlsModel, ToLValue};
+#[cfg(feature = "master")]
+pub use lvalue::{VarAttribute, Visibility};
+pub(crate) use object::ContextRef;
+pub use object::Object;
+pub use object::ToObject;
+pub use parameter::Parameter;
+#[cfg(feature = "master")]
+pub use region::Region;
+pub use rvalue::{RValue, ToRValue};
+pub use structs::Struct;
+#[cfg(feature = "master")]
+pub use target_info::TargetInfo;
+pub use types::FunctionPtrType;
+pub use types::Type;
+#[cfg(feature = "master")]
+pub use types::TypeAttribute;
+pub use types::Typeable;
+
+use gccjit_sys::Libgccjit;
+
+#[cfg(feature = "master")]
+pub fn set_global_personality_function_name(name: &'static [u8]) {
+    debug_assert!(name.ends_with(b"\0"), "Expecting a NUL-terminated C string");
+    with_lib_without_error_check(|lib| unsafe {
+        lib.gcc_jit_set_global_personality_function_name(name.as_ptr() as *const _);
+    })
+}
+
+#[derive(Debug)]
+pub struct Version {
+    pub major: i32,
+    pub minor: i32,
+    pub patch: i32,
+}
+
+impl Version {
+    pub fn get() -> Self {
+        with_lib_without_error_check(|lib| unsafe {
+            Self {
+                major: lib.gcc_jit_version_major(),
+                minor: lib.gcc_jit_version_minor(),
+                patch: lib.gcc_jit_version_patchlevel(),
+            }
+        })
+    }
+}
+
+#[cfg(feature = "master")]
+pub fn is_lto_supported() -> bool {
+    with_lib_without_error_check(|lib| unsafe { lib.gcc_jit_is_lto_supported() })
+}
+
+/// Runs a libgccjit call that returns a handle and is not expected to fail,
+/// panicking with libgccjit's own diagnostic when it does.
+#[track_caller]
+pub(crate) fn with_lib_handle<'ctx, C, T, F>(ctx: &C, callback: F) -> T
+where
+    C: context::ContextGetter<'ctx>,
+    F: FnOnce(&Libgccjit) -> Option<T>,
+{
+    match with_lib_without_error_check(callback) {
+        Some(handle) => {
+            panic_on_error(ctx);
+            handle
+        }
+        None => panic_on_null(ctx),
+    }
+}
+
+/// In libgccjit, get_last_error also returns warnings, so we try to not panic
+/// on warnings by checking the actual error count.
+#[track_caller]
+fn panic_on_error<'ctx, C: context::ContextGetter<'ctx>>(_ctx: &C) {
+    #[cfg(debug_assertions)]
+    {
+        #[cfg(feature = "master")]
+        fn show_error<'ctx>(ctx: &Context<'ctx>) -> bool {
+            ctx.get_error_count() > 0
+        }
+
+        #[cfg(not(feature = "master"))]
+        fn show_error<'ctx>(_ctx: &Context<'ctx>) -> bool {
+            true
+        }
+
+        let context = _ctx.context();
+        if show_error(&context) {
+            if let Ok(Some(error)) = context.get_last_error() {
+                panic!("{}", error);
+            }
+        }
+    }
+}
+
+#[cold]
+#[track_caller]
+fn panic_on_null<'ctx, C: context::ContextGetter<'ctx>>(ctx: &C) -> ! {
+    match ctx.context().get_last_error() {
+        Ok(Some(error)) => panic!("gccjit: {}", error),
+        _ => panic!("gccjit: call returned NULL (libgccjit recorded no error; see stderr)"),
+    }
+}
+
+#[track_caller]
+pub(crate) fn expect_handle_without_context<T>(handle: Option<T>, operation: &str) -> T {
+    match handle {
+        Some(handle) => handle,
+        None => panic_without_context(operation),
+    }
+}
+
+#[cold]
+#[track_caller]
+fn panic_without_context(operation: &str) -> ! {
+    panic!(
+        "gccjit: {} returned NULL (no context available to query; see stderr)",
+        operation
+    )
+}
+
+#[cfg(not(feature = "dlopen"))]
+#[cfg_attr(debug_assertions, track_caller)]
+fn with_lib<'ctx, C: context::ContextGetter<'ctx>, T, F: FnOnce(&Libgccjit) -> T>(
+    _ctx: &C,
+    callback: F,
+) -> T {
+    let ret = with_lib_without_error_check(callback);
+    panic_on_error(_ctx);
+    ret
+}
+
+#[cfg(not(feature = "dlopen"))]
+fn with_lib_without_error_check<T, F: FnOnce(&Libgccjit) -> T>(callback: F) -> T {
+    callback(&LIB)
+}
+
+#[cfg(feature = "dlopen")]
+#[cfg_attr(debug_assertions, track_caller)]
+fn with_lib<'ctx, C: context::ContextGetter<'ctx>, T, F: FnOnce(&Libgccjit) -> T>(
+    _ctx: &C,
+    callback: F,
+) -> T {
+    let ret = with_lib_without_error_check(callback);
+    panic_on_error(_ctx);
+    ret
+}
+
+#[cfg(feature = "dlopen")]
+fn with_lib_without_error_check<T, F: FnOnce(&Libgccjit) -> T>(callback: F) -> T {
+    let lib = LIB.get().and_then(|lib| lib.as_ref());
+    match lib {
+        Some(lib) => callback(lib),
+        None => panic!(
+            "libgccjit needs to be loaded by calling load() before attempting to do any operation"
+        ),
+    }
+}
+
+/// Returns true if the library was loaded correctly, false otherwise.
+#[cfg(feature = "dlopen")]
+pub fn load(path: &CStr) -> Result<(), String> {
+    let mut result = Ok(());
+    LIB.get_or_init(|| {
+        let lib = unsafe { Libgccjit::open(path) };
+        match lib {
+            Ok(lib) => Some(lib),
+            Err(error) => {
+                result = Err(error);
+                None
+            }
+        }
+    });
+    result
+}
+
+#[cfg(feature = "dlopen")]
+pub fn is_loaded() -> bool {
+    LIB.get().is_some()
+}
+
+#[cfg(feature = "dlopen")]
+pub static LIB: OnceLock<Option<Libgccjit>> = OnceLock::new();
+
+// Without the dlopen feature, we avoid using OnceLock as to not have any performance impact.
+#[cfg(not(feature = "dlopen"))]
+static LIB: Libgccjit = Libgccjit::new();
+
+#[cfg(feature = "master")]
+pub fn set_lang_name(lang_name: &'static CStr) {
+    unsafe {
+        with_lib_without_error_check(|lib| {
+            lib.gcc_jit_set_lang_name(lang_name.as_ptr());
+        });
+    }
+}

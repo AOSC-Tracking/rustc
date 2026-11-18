@@ -1,3 +1,4 @@
+use crate::pool::JobEnqueueResult;
 use crate::{
     BenchmarkJob, BenchmarkJobConclusion, BenchmarkJobKind, BenchmarkRequest,
     BenchmarkRequestStatus, BenchmarkSet, CodegenBackend, CollectorConfig, Connection, Profile,
@@ -40,7 +41,7 @@ impl RequestBuilder {
 
     pub async fn add_jobs(mut self, db: &dyn Connection, jobs: &[JobBuilder]) -> Self {
         for job in jobs {
-            let id = db
+            let id = match db
                 .enqueue_benchmark_job(
                     self.tag(),
                     job.target,
@@ -48,10 +49,14 @@ impl RequestBuilder {
                     job.profile,
                     job.benchmark_set,
                     job.kind,
+                    false,
                 )
                 .await
-                .unwrap();
-            self.jobs.push((job.clone(), id.unwrap()));
+            {
+                JobEnqueueResult::JobCreated(id) => id,
+                error => panic!("Unexpected job enqueue result: {error:?}"),
+            };
+            self.jobs.push((job.clone(), id));
         }
         self
     }
@@ -112,11 +117,17 @@ pub struct JobBuilder {
     benchmark_set: u32,
     conclusion: BenchmarkJobConclusion,
     kind: BenchmarkJobKind,
+    is_optional: bool,
 }
 
 impl JobBuilder {
     pub fn profile(mut self, profile: Profile) -> Self {
         self.profile = profile;
+        self
+    }
+
+    pub fn make_optional(mut self, is_optional: bool) -> Self {
+        self.is_optional = is_optional;
         self
     }
 }
@@ -130,6 +141,7 @@ impl Default for JobBuilder {
             benchmark_set: 0,
             conclusion: BenchmarkJobConclusion::Success,
             kind: BenchmarkJobKind::Compiletime,
+            is_optional: false,
         }
     }
 }

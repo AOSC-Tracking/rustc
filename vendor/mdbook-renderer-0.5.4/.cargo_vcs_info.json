@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "2ea30c00f00647d2b3f4c0f79b3e0e1eabc0b66d"
+  },
+  "path_in_vcs": "crates/mdbook-renderer"
+}

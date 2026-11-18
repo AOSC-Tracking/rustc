@@ -11,9 +11,9 @@ use crate::utils::cargo_exe;
 use crate::utils::cargo_process;
 use crate::utils::tools;
 use cargo::GlobalContext;
-use cargo::core::Workspace;
-use cargo::core::compiler::UserIntent;
+use cargo::compiler::UserIntent;
 use cargo::ops::CompileOptions;
+use cargo::workspace::Workspace;
 use cargo_test_support::compare::assert_e2e;
 use cargo_test_support::paths::root;
 use cargo_test_support::registry::Package;
@@ -128,7 +128,7 @@ fn cargo_compile_incremental() {
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
 [RUNNING] `rustc [..] -C incremental=[ROOT]/foo/target/debug/incremental[..]`
 [FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[RUNNING] `[ROOT]/foo/target/debug/deps/foo-[HASH][EXE]`
+[RUNNING] `[ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]`
 
 "#]])
         .run();
@@ -198,6 +198,26 @@ fn incremental_config() {
     p.cargo("build -v")
         .env("CARGO_INCREMENTAL", "1")
         .with_stderr_contains("[..]C incremental=[..]")
+        .run();
+}
+
+#[cargo_test]
+fn ci_implies_no_cargo_incremental() {
+    let p = project()
+        .file("Cargo.toml", &basic_bin_manifest("foo"))
+        .file("src/main.rs", &main_file(r#""i am foo""#, &[]))
+        .build();
+
+    p.cargo("build -v")
+        .env("CI", "1")
+        .env_remove("CARGO_INCREMENTAL")
+        .with_stderr_does_not_contain("[..]C incremental=[..]")
+        .run();
+
+    p.cargo("test -v")
+        .env("CI", "1")
+        .env_remove("CARGO_INCREMENTAL")
+        .with_stderr_does_not_contain("[..]C incremental=[..]")
         .run();
 }
 
@@ -321,7 +341,8 @@ fn chdir_gated() {
         .with_status(101)
         .run();
     // No masquerade should also fail.
-    p.cargo("-C foo -Z unstable-options build")
+    p.cargo("-C foo build")
+        .arg("-Zunstable-options")
         .cwd(p.root().parent().unwrap())
         .with_stderr_data(str![[r#"
 [ERROR] the `-C` flag is unstable, pass `-Z unstable-options` on the nightly channel to enable it
@@ -339,7 +360,8 @@ fn cargo_compile_directory_not_cwd() {
         .file(".cargo/config.toml", &"")
         .build();
 
-    p.cargo("-Zunstable-options -C foo build")
+    p.cargo("-C foo build")
+        .arg("-Zunstable-options")
         .masquerade_as_nightly_cargo(&["chdir"])
         .cwd(p.root().parent().unwrap())
         .run();
@@ -380,7 +402,8 @@ fn cargo_compile_directory_not_cwd_with_invalid_config() {
         .file(".cargo/config.toml", &"!")
         .build();
 
-    p.cargo("-Zunstable-options -C foo build")
+    p.cargo("-C foo build")
+        .arg("-Zunstable-options")
         .masquerade_as_nightly_cargo(&["chdir"])
         .cwd(p.root().parent().unwrap())
         .with_status(101)
@@ -625,7 +648,7 @@ fn cargo_compile_with_bin_and_crate_type() {
                 edition = "2015"
 
                 [[bin]]
-                name = "the_foo_bin"
+                name = "the-foo-bin"
                 path = "src/foo.rs"
                 crate-type = ["cdylib", "rlib"]
             "#,
@@ -636,7 +659,7 @@ fn cargo_compile_with_bin_and_crate_type() {
     p.cargo("build")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] Cargo.toml: the target `the_foo_bin` is a binary and can't have any crate-types set (currently "cdylib, rlib")
+[ERROR] Cargo.toml: the target `the-foo-bin` is a binary and can't have any crate-types set (currently "cdylib, rlib")
 [ERROR] could not parse `foo` (manifest) due to 1 previous error
 
 "#]])
@@ -711,7 +734,7 @@ fn cargo_compile_with_bin_and_proc() {
                 edition = "2015"
 
                 [[bin]]
-                name = "the_foo_bin"
+                name = "the-foo-bin"
                 path = "src/foo.rs"
                 proc-macro = true
             "#,
@@ -722,7 +745,7 @@ fn cargo_compile_with_bin_and_proc() {
     p.cargo("build")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] Cargo.toml: the target `the_foo_bin` is a binary and can't have `proc-macro` set `true`
+[ERROR] Cargo.toml: the target `the-foo-bin` is a binary and can't have `proc-macro` set `true`
 [ERROR] could not parse `foo` (manifest) due to 1 previous error
 
 "#]])
@@ -873,19 +896,16 @@ fn cargo_compile_with_invalid_code_in_deps() {
         .file("Cargo.toml", &basic_manifest("baz", "0.1.0"))
         .file("src/lib.rs", "invalid rust code!")
         .build();
-    p.cargo("build")
+    p.cargo("build -j1")
         .with_status(101)
-        .with_stderr_data(
-            str![[r#"
-[COMPILING] bar v0.1.0 ([ROOT]/bar)
-[COMPILING] baz v0.1.0 ([ROOT]/baz)
-[ERROR] could not compile `bar` (lib) due to 1 previous error
-[ERROR] could not compile `baz` (lib) due to 1 previous error
+        .with_stderr_data(str![[r#"
 ...
-
-"#]]
-            .unordered(),
-        )
+[COMPILING] ba[..] v0.1.0 ([ROOT]/ba[..])
+[ERROR] [..]
+...
+[ERROR] could not compile `ba[..]` (lib) due to 1 previous error
+...
+"#]])
         .run();
 }
 
@@ -945,7 +965,7 @@ fn cargo_compile_with_warnings_in_a_dep_package() {
 
     p.cargo("build")
         .with_stderr_data(str![[r#"
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [COMPILING] bar v0.5.0 ([ROOT]/foo/bar)
 [WARNING] [..]dead[..]
 ...
@@ -1291,6 +1311,7 @@ fn cargo_compile_with_dep_name_mismatch() {
 [ERROR] no matching package named `notquitebar` found
 location searched: [ROOT]/foo/bar
 required by package `foo v0.0.1 ([ROOT]/foo)`
+[HELP] package `bar` exists at `[ROOT]/foo/bar`
 
 "#]])
         .run();
@@ -1546,7 +1567,7 @@ fn cargo_default_env_metadata_env_var() {
                 path = "bar"
             "#,
         )
-        .file("src/lib.rs", "// hi")
+        .file("src/lib.rs", "extern crate bar;")
         .file(
             "bar/Cargo.toml",
             r#"
@@ -1572,7 +1593,7 @@ fn cargo_default_env_metadata_env_var() {
         .with_stderr_data(format!(
             "\
 ...
-[RUNNING] `rustc --crate-name foo [..]--extern bar=[ROOT]/foo/target/debug/deps/{dll_prefix}bar{dll_suffix}`
+[RUNNING] `rustc --crate-name foo [..]--extern bar=[ROOT]/foo/target/debug/build/bar/[HASH]/out/{dll_prefix}bar{dll_suffix}[..]`
 ...
 "))
         .run();
@@ -1585,7 +1606,7 @@ fn cargo_default_env_metadata_env_var() {
         .with_stderr_data(format!(
             "\
 ...
-[RUNNING] `rustc --crate-name foo [..]--extern bar=[ROOT]/foo/target/debug/deps/{dll_prefix}bar-[..]{dll_suffix}`
+[RUNNING] `rustc --crate-name foo [..]--extern bar=[ROOT]/foo/target/debug/build/bar/[HASH]/out/{dll_prefix}bar-[..]{dll_suffix}[..]`
 ...
 "))
         .run();
@@ -1690,6 +1711,9 @@ fn crate_env_vars() {
 
                     let exe: PathBuf = env::current_exe().unwrap().into();
                     let mut expected: PathBuf = exe.parent().unwrap()
+                        .parent().unwrap()
+                        .parent().unwrap()
+                        .parent().unwrap()
                         .parent().unwrap()
                         .parent().unwrap()
                         .into();
@@ -2826,7 +2850,7 @@ fn bad_platform_specific_dependency() {
     p.cargo("build")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
 error[E0463]: can't find crate for `bar`
 ...
@@ -3056,7 +3080,7 @@ fn transitive_dependencies_not_available() {
     p.cargo("build -v")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[LOCKING] 2 packages to latest compatible versions
+[LOCKING] 2 packages to highest compatible versions
 [COMPILING] bbbbb v0.0.1 ([ROOT]/foo/b)
 [RUNNING] `rustc [..]
 [COMPILING] aaaaa v0.0.1 ([ROOT]/foo/a)
@@ -3468,7 +3492,7 @@ fn invalid_spec() {
     p.cargo("build -p notAValidDep")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [ERROR] package ID specification `notAValidDep` did not match any packages
 
 "#]])
@@ -3601,7 +3625,7 @@ fn compiler_json_error_format() {
     "env": [],
     "linked_libs": [],
     "linked_paths": [],
-    "out_dir": "[ROOT]/foo/target/debug/build/foo-[HASH]/out",
+    "out_dir": "[ROOT]/foo/target/debug/build/foo/[HASH]/out",
     "package_id": "path+[ROOTURL]/foo#0.5.0",
     "reason": "build-script-executed"
   },
@@ -3845,6 +3869,9 @@ fn build_all_workspace() {
                 bar = { path = "bar" }
 
                 [workspace]
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/main.rs", "fn main() {}")
@@ -4326,6 +4353,9 @@ fn build_all_member_dependency_same_name() {
 
                 [dependencies]
                 a = "0.1.0"
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("a/src/lib.rs", "pub fn a() {}")
@@ -4336,7 +4366,7 @@ fn build_all_member_dependency_same_name() {
     p.cargo("build --workspace")
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] a v0.1.0 (registry `dummy-registry`)
 [COMPILING] a v0.1.0
@@ -4612,6 +4642,9 @@ fn rustc_wrapper_relative() {
 
                 [dependencies]
                 bar = "1.0"
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -4624,7 +4657,7 @@ fn rustc_wrapper_relative() {
         .env("RUSTC_WRAPPER", &relative_path)
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] bar v1.0.0 (registry `dummy-registry`)
 [COMPILING] bar v1.0.0
@@ -4737,7 +4770,18 @@ fn cdylib_not_lifted() {
 
     for file in files {
         println!("checking: {}", file);
-        assert!(p.root().join("target/debug/deps").join(&file).is_file());
+        assert_eq!(
+            glob::glob(
+                p.root()
+                    .join("target/debug/build/foo/*/out")
+                    .join(&file)
+                    .to_str()
+                    .unwrap()
+            )
+            .into_iter()
+            .count(),
+            1
+        );
     }
 }
 
@@ -4815,11 +4859,12 @@ fn no_dep_info_collision_when_cdylib_and_bin_coexist() {
         )
         .run();
 
-    let deps_dir = p.target_debug_dir().join("deps");
-    assert!(deps_dir.join("foo.d").exists());
-    let dep_info_count = deps_dir
+    let build_dir = p.target_debug_dir().join("build");
+    let dep_info_count = build_dir
         .read_dir()
         .unwrap()
+        .flat_map(|build_unit| build_unit.unwrap().path().read_dir().unwrap())
+        .flat_map(|hash_dir| hash_dir.unwrap().path().join("out").read_dir().unwrap())
         .filter(|e| {
             let filename = e.as_ref().unwrap().file_name();
             let filename = filename.to_str().unwrap();
@@ -4873,7 +4918,7 @@ fn deterministic_cfg_flags() {
         .with_stderr_data(str![[r#"
 [COMPILING] foo v0.1.0 ([ROOT]/foo)
 [RUNNING] `rustc [..]`
-[RUNNING] `[ROOT]/foo/target/debug/build/foo-[HASH]/build-script-build`
+[RUNNING] `[ROOT]/foo/target/debug/build/foo/[HASH]/out/build_script_build`
 [RUNNING] `rustc --crate-name foo [..] --cfg[..]default[..]--cfg[..]f_a[..]--cfg[..]f_b[..] --cfg[..]f_c[..]--cfg[..]f_d[..] --cfg cfg_a --cfg cfg_b --cfg cfg_c --cfg cfg_d --cfg cfg_e`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -5157,7 +5202,7 @@ fn building_a_dependent_crate_without_bin_should_fail() {
         .with_status(101)
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] testless v0.1.0 (registry `dummy-registry`)
 [ERROR] failed to download replaced source registry `crates-io`
@@ -5400,7 +5445,7 @@ fn no_linkable_target() {
         .build();
     p.cargo("build")
         .with_stderr_data(str![[r#"
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [WARNING] the package `the_lib` provides no linkable target
   |
   = [NOTE] this might cause `foo` to fail compilation
@@ -5444,7 +5489,8 @@ required by package `bar v0.1.0 ([ROOT]/foo)`
 
 "#]])
         .run();
-    p.cargo("build -Zavoid-dev-deps")
+    p.cargo("build")
+        .arg("-Zavoid-dev-deps")
         .masquerade_as_nightly_cargo(&["avoid-dev-deps"])
         .run();
 }
@@ -5680,7 +5726,7 @@ fn signal_display() {
 
     foo.cargo("build")
         .with_stderr_data(str![[r#"
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [COMPILING] pm v0.1.0 ([ROOT]/foo/pm)
 [COMPILING] foo v0.1.0 ([ROOT]/foo)
 [ERROR] could not compile `foo` (lib)
@@ -5738,7 +5784,7 @@ fn pipelining_works() {
     foo.cargo("build")
         .with_stdout_data(str![])
         .with_stderr_data(str![[r#"
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [COMPILING] bar v0.5.0 ([ROOT]/foo/bar)
 [COMPILING] foo v0.1.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -5869,7 +5915,7 @@ b
 
 "#]])
         .with_stderr_data(str![[r#"
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [COMPILING] bar v0.1.0 ([ROOT]/foo/bar)
 [COMPILING] foo v0.1.0 ([ROOT]/foo)
 c
@@ -5891,7 +5937,7 @@ fn build_lib_only() {
     p.cargo("build --lib -v")
         .with_stderr_data(str![[r#"
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `rustc --crate-name foo --edition=2015 src/lib.rs [..]--crate-type lib --emit=[..]link[..] -L dependency=[ROOT]/foo/target/debug/deps`
+[RUNNING] `rustc --crate-name foo --edition=2015 src/lib.rs [..]--crate-type lib --emit=[..]link[..]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -6404,8 +6450,8 @@ fn renamed_uplifted_artifact_remains_unmodified_after_rebuild() {
     assert!(not_the_same, "renamed uplifted artifact must be unmodified");
 }
 
-#[cargo_test(nightly, reason = "-Zno-embed-metadata is nightly only")]
-fn no_embed_metadata() {
+#[cargo_test(nightly, reason = "-Zembed-metadata is nightly only")]
+fn embed_metadata_no() {
     let p = project()
         .file(
             "Cargo.toml",
@@ -6432,20 +6478,21 @@ fn no_embed_metadata() {
         )
         .build();
 
-    p.cargo("build -Z no-embed-metadata")
-        .masquerade_as_nightly_cargo(&["-Z no-embed-metadata"])
+    p.cargo("build")
+        .arg("-Zembed-metadata=no")
+        .masquerade_as_nightly_cargo(&["-Z embed-metadata"])
         .arg("-v")
         .with_stderr_contains("[RUNNING] `[..]-Z embed-metadata=no[..]`")
         .with_stderr_contains(
-            "[RUNNING] `[..]--extern bar=[ROOT]/foo/target/debug/deps/libbar-[HASH].rmeta[..]`",
+"[RUNNING] `[..]--extern bar=[ROOT]/foo/target/debug/build/bar/[HASH]/out/libbar-[HASH].rmeta[..]`",
         )
         .run();
 }
 
 // Make sure that cargo passes --extern=<dep>.rmeta even if <dep>
 // is compiled as a dylib.
-#[cargo_test(nightly, reason = "-Zno-embed-metadata is nightly only")]
-fn no_embed_metadata_dylib_dep() {
+#[cargo_test(nightly, reason = "-Zembed-metadata is nightly only")]
+fn embed_metadata_no_dylib_dep() {
     let p = project()
         .file(
             "Cargo.toml",
@@ -6482,19 +6529,20 @@ fn no_embed_metadata_dylib_dep() {
         )
         .build();
 
-    p.cargo("build -Z no-embed-metadata")
-        .masquerade_as_nightly_cargo(&["-Z no-embed-metadata"])
+    p.cargo("build")
+        .arg("-Zembed-metadata=no")
+        .masquerade_as_nightly_cargo(&["-Z embed-metadata"])
         .arg("-v")
         .with_stderr_contains("[RUNNING] `[..]-Z embed-metadata=no[..]`")
         .with_stderr_contains(
-            "[RUNNING] `[..]--extern bar=[ROOT]/foo/target/debug/deps/libbar.rmeta[..]`",
+    "[RUNNING] `[..]--extern bar=[ROOT]/foo/target/debug/build/bar/[HASH]/out/libbar.rmeta[..]`",
         )
         .run();
 }
 
-#[cargo_test(nightly, reason = "-Zno-embed-metadata is nightly only")]
-fn no_embed_metadata_invalidate() {
-    // Invalidate all deps when -Zno-embed-metadata is toggled
+#[cargo_test(nightly, reason = "-Zembed-metadata is nightly only")]
+fn embed_metadata_no_invalidate() {
+    // Invalidate all deps when -Zembed-metadata is toggled
     let p = project()
         .file(
             "Cargo.toml",
@@ -6521,10 +6569,11 @@ fn no_embed_metadata_invalidate() {
         )
         .build();
 
-    p.cargo("build -Z no-embed-metadata")
-        .masquerade_as_nightly_cargo(&["-Z no-embed-metadata"])
+    p.cargo("build")
+        .arg("-Zembed-metadata=no")
+        .masquerade_as_nightly_cargo(&["-Z embed-metadata"])
         .with_stderr_data(str![[r#"
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [COMPILING] bar v0.5.0 ([ROOT]/foo/bar)
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -6532,7 +6581,8 @@ fn no_embed_metadata_invalidate() {
 "#]])
         .run();
     p.cargo("build")
-        .masquerade_as_nightly_cargo(&["-Z no-embed-metadata"])
+        .arg("-Zembed-metadata=yes")
+        .masquerade_as_nightly_cargo(&["-Z embed-metadata"])
         .with_stderr_data(str![[r#"
 [COMPILING] bar v0.5.0 ([ROOT]/foo/bar)
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
@@ -6556,13 +6606,12 @@ fn should_not_include_current_build_unit_path_in_rustc_args() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout -v build")
-        .masquerade_as_nightly_cargo(&["new build-dir layout"])
+    p.cargo("-v build")
         .enable_mac_dsym()
         // Don't pass any `-L` args if there are no dependencies (including our own `out` dir)
         .with_stderr_data(str![[r#"
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `rustc --crate-name foo [..] --out-dir [ROOT]/foo/build-dir/debug/build/foo/[HASH]/out`
+[RUNNING] `rustc --crate-name foo [..] --out-dir [ROOT]/foo/build-dir/debug/build/foo/[HASH]/out --force-warn=unused_crate_dependencies`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -6584,8 +6633,7 @@ fn should_not_include_build_script_out_dir_path_in_rustc_args() {
         )
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout -v build")
-        .masquerade_as_nightly_cargo(&["new build-dir layout"])
+    p.cargo("-v build")
         .enable_mac_dsym()
         // Don't pass build script `out` dirs and avoid bloating the rustc command args which can
         // lead to problems on Windows.
@@ -6593,17 +6641,14 @@ fn should_not_include_build_script_out_dir_path_in_rustc_args() {
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc --crate-name build_script_build [..]`
 [RUNNING] `[ROOT]/foo/build-dir/debug/build/foo/[HASH]/out/build_script_build`
-[RUNNING] `rustc --crate-name foo [..] --out-dir [ROOT]/foo/build-dir/debug/build/foo/[HASH]/out`
+[RUNNING] `rustc --crate-name foo [..] --out-dir [ROOT]/foo/build-dir/debug/build/foo/[HASH]/out --force-warn=unused_crate_dependencies`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
         .run();
 }
 
-#[cargo_test(
-    nightly,
-    reason = "Depends on https://github.com/rust-lang/rust/pull/155439/changes/61f3e086acc1c187bb262ab43cac71f44018c397"
-)]
+#[cargo_test]
 fn should_only_include_dylibs_on_lib_search_path() {
     let envvar = dylib_path_envvar();
     let p = project()
@@ -6697,8 +6742,7 @@ fn should_only_include_dylibs_on_lib_search_path() {
         .file("qux/src/lib.rs", r#"pub fn qux_value() -> i32 { 200 }"#)
         .build();
 
-    p.cargo("-Zbuild-dir-new-layout -v run")
-        .masquerade_as_nightly_cargo(&["new build-dir layout"])
+    p.cargo("-v run")
         .enable_mac_dsym()
         .with_stdout_data(str![[r#"
 bar (dylib) on search path: true
@@ -6711,11 +6755,298 @@ qux (cdylib) on search path: false
     // Legacy layout
     p.cargo("-v run")
         .enable_mac_dsym()
+        .env("__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT", "1")
         .with_stdout_data(str![[r#"
 bar (dylib) on search path: true
 baz (rlib) on search path: true
 qux (cdylib) on search path: true
 
 "#]])
+        .run();
+}
+
+#[cargo_test]
+fn should_not_include_proc_macro_deps_paths_in_rustc_args() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.0"
+                edition = "2021"
+                authors = []
+                resolver = "2"
+
+                [dependencies]
+                my-proc-macro = { path = "my-proc-macro" }
+
+                [lints.cargo]
+                default = "allow"
+            "#,
+        )
+        .file("src/main.rs", "fn main() {}")
+        .file(
+            "my-dylib/Cargo.toml",
+            r#"
+                [package]
+                name = "my-dylib"
+                version = "0.1.0"
+                edition = "2021"
+                authors = []
+
+                [lib]
+                crate-type = ["dylib"]
+
+                [lints.cargo]
+                default = "allow"
+            "#,
+        )
+        .file(
+            "my-dylib/src/lib.rs",
+            r#"pub fn value_from_dylib() -> i32 { 100 }"#,
+        )
+        .file(
+            "my-rlib/Cargo.toml",
+            r#"
+                [package]
+                name = "my-rlib"
+                version = "0.1.0"
+                edition = "2021"
+                authors = []
+
+                [lints.cargo]
+                default = "allow"
+            "#,
+        )
+        .file(
+            "my-rlib/src/lib.rs",
+            r#"pub fn value_from_rlib() -> i32 { 200 }"#,
+        )
+        .file(
+            "my-proc-macro/Cargo.toml",
+            r#"
+                [package]
+                name = "my-proc-macro"
+                version = "0.1.0"
+                edition = "2021"
+                authors = []
+
+                [lib]
+                proc-macro = true
+
+                [dependencies]
+                my-dylib = { path = "../my-dylib" }
+                my-rlib = { path = "../my-rlib" }
+
+                [lints.cargo]
+                default = "allow"
+            "#,
+        )
+        .file(
+            "my-proc-macro/src/lib.rs",
+            r#"
+                use proc_macro::TokenStream;
+                use my_dylib::value_from_dylib;
+                use my_rlib::value_from_rlib;
+
+                #[proc_macro]
+                pub fn make_bar(_item: TokenStream) -> TokenStream {
+                    let val = value_from_dylib() + value_from_rlib();
+                    format!("fn bar() -> u32 {{ {val} }}").parse().unwrap()
+                }
+        "#,
+        )
+        .build();
+
+    p.cargo("-v build")
+        .enable_mac_dsym()
+        // Verify that the proc-macro dependencies (my-rlib and my-dylib) are not added to the rustc
+        // invocation for the `foo` crate as `-L` args.
+        .with_stderr_data(str![[r#"
+[LOCKING] 3 packages to highest compatible versions
+[COMPILING] my-dylib v0.1.0 ([ROOT]/foo/my-dylib)
+[RUNNING] `rustc --crate-name my_dylib [..]`
+[COMPILING] my-rlib v0.1.0 ([ROOT]/foo/my-rlib)
+[RUNNING] `rustc --crate-name my_rlib [..]`
+[COMPILING] my-proc-macro v0.1.0 ([ROOT]/foo/my-proc-macro)
+[RUNNING] `rustc --crate-name my_proc_macro [..]`
+[COMPILING] foo v0.0.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..] --out-dir [ROOT]/foo/target/debug/build/foo/[HASH]/out --extern my_proc_macro=[ROOT]/foo/target/debug/build/my-proc-macro/[HASH]/out/[..] --force-warn=unused_crate_dependencies`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]].unordered())
+        .run();
+}
+
+#[cargo_test]
+fn should_not_include_direct_deps_paths_in_rustc_args() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.0"
+                edition = "2021"
+                authors = []
+                resolver = "2"
+
+                [dependencies]
+                my-direct-dep = { path = "my-direct-dep" }
+
+                [lints.cargo]
+                default = "allow"
+            "#,
+        )
+        .file(
+            "src/main.rs",
+            "fn main() { let _v = my_direct_dep::value_from_direct(); }",
+        )
+        .file(
+            "my-direct-dep/Cargo.toml",
+            r#"
+                [package]
+                name = "my-direct-dep"
+                version = "0.1.0"
+                edition = "2021"
+                authors = []
+
+                [dependencies]
+                my-indirect-dep = { path = "../my-indirect-dep" }
+
+                [lints.cargo]
+                default = "allow"
+            "#,
+        )
+        .file(
+            "my-direct-dep/src/lib.rs",
+            r#"pub fn value_from_direct() -> i32 { my_indirect_dep::value_from_indirect() }"#,
+        )
+        .file(
+            "my-indirect-dep/Cargo.toml",
+            r#"
+                [package]
+                name = "my-indirect-dep"
+                version = "0.1.0"
+                edition = "2021"
+                authors = []
+
+                [lints.cargo]
+                default = "allow"
+            "#,
+        )
+        .file(
+            "my-indirect-dep/src/lib.rs",
+            r#"pub fn value_from_indirect() -> i32 { 200 }"#,
+        )
+        .build();
+
+    // Graph: foo -> my-direct-dep -> my-indirect-dep
+    // We want to make sure `-L .../my-indirect-dep` is passed but not `-L .../my-direct-dep`
+    p.cargo("-v build")
+        .with_stderr_data(str![[r#"
+[LOCKING] 2 packages to highest compatible versions
+[COMPILING] my-indirect-dep v0.1.0 ([ROOT]/foo/my-indirect-dep)
+[RUNNING] `rustc --crate-name my_indirect_dep [..]`
+[COMPILING] my-direct-dep v0.1.0 ([ROOT]/foo/my-direct-dep)
+[RUNNING] `rustc --crate-name my_direct_dep [..]`
+[COMPILING] foo v0.0.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..] --out-dir [ROOT]/foo/target/debug/build/foo/[HASH]/out -L dependency=[ROOT]/foo/target/debug/build/my-indirect-dep/[HASH]/out --extern my_direct_dep=[ROOT]/foo/target/debug/build/my-direct-dep/[HASH]/out/[..] --force-warn=unused_crate_dependencies`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]].unordered())
+        .run();
+}
+
+/// Regression test of <https://github.com/rust-lang/cargo/issues/17579>.
+#[cargo_test]
+fn should_include_deps_paths_of_lib_crate_type_with_proc_macro_true() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.0"
+                edition = "2021"
+                authors = []
+                resolver = "2"
+
+                [dependencies]
+                my-direct-dep = { path = "my-direct-dep" }
+
+                [lints.cargo]
+                default = "allow"
+            "#,
+        )
+        .file(
+            "src/main.rs",
+            "fn main() { let _v = my_direct_dep::value_from_direct(); }",
+        )
+        .file(
+            "my-direct-dep/Cargo.toml",
+            r#"
+                [package]
+                name = "my-direct-dep"
+                version = "0.1.0"
+                edition = "2021"
+                authors = []
+
+                [lib]
+                crate-type = ["lib"]
+                proc-macro = true
+
+                [dependencies]
+                my-indirect-dep = { path = "../my-indirect-dep" }
+
+                [lints.cargo]
+                default = "allow"
+            "#,
+        )
+        .file(
+            "my-direct-dep/src/lib.rs",
+            r#"
+                // `proc_macro` is still in the extern prelude.
+                #[allow(unused_imports)]
+                use proc_macro::TokenStream;
+
+                pub fn value_from_direct() -> i32 { my_indirect_dep::value_from_indirect() }
+            "#,
+        )
+        .file(
+            "my-indirect-dep/Cargo.toml",
+            r#"
+                [package]
+                name = "my-indirect-dep"
+                version = "0.1.0"
+                edition = "2021"
+                authors = []
+
+                [lints.cargo]
+                default = "allow"
+            "#,
+        )
+        .file(
+            "my-indirect-dep/src/lib.rs",
+            r#"pub fn value_from_indirect() -> i32 { 200 }"#,
+        )
+        .build();
+
+    // Graph: foo -> my-direct-dep -> my-indirect-dep
+    // Explicit `crate-type` wins over `proc-macro = true` when invoking rustc,
+    // so `my-direct-dep` is an ordinary rlib and `-L .../my-indirect-dep` is needed.
+    p.cargo("-v build")
+        .with_stderr_data(str![[r#"
+[LOCKING] 2 packages to highest compatible versions
+[COMPILING] my-indirect-dep v0.1.0 ([ROOT]/foo/my-indirect-dep)
+[RUNNING] `rustc --crate-name my_indirect_dep [..]`
+[COMPILING] my-direct-dep v0.1.0 ([ROOT]/foo/my-direct-dep)
+[RUNNING] `rustc --crate-name my_direct_dep [..] --crate-type lib [..] --extern proc_macro [..]`
+[COMPILING] foo v0.0.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..] --out-dir [ROOT]/foo/target/debug/build/foo/[HASH]/out -L dependency=[ROOT]/foo/target/debug/build/my-indirect-dep/[HASH]/out --extern my_direct_dep=[ROOT]/foo/target/debug/build/my-direct-dep/[HASH]/out/[..] --force-warn=unused_crate_dependencies`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]].unordered())
         .run();
 }

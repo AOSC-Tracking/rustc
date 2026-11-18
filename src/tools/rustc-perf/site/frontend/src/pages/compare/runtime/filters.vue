@@ -6,8 +6,11 @@ import {deepCopy} from "../../../utils/copy";
 import {PREF_FILTERS_OPENED} from "../prefs";
 import {createPersistedRef} from "../../../storage";
 import {RuntimeBenchmarkFilter} from "./common";
+import {BenchmarkInfo} from "../../../api";
+import {Target} from "../compile/common";
 
 const props = defineProps<{
+  info: BenchmarkInfo;
   // When reset, set filter to this value
   defaultFilter: RuntimeBenchmarkFilter;
   // Initialize the filter with this value
@@ -21,6 +24,17 @@ const emit = defineEmits<{
 function reset() {
   // We must not change the default filter
   filter.value = deepCopy(props.defaultFilter);
+}
+function hasTarget(target: Target): boolean {
+  return filter.value.target.includes(target);
+}
+
+function toggleTarget(target: Target) {
+  if (hasTarget(target)) {
+    filter.value.target = filter.value.target.filter((t) => t !== target);
+  } else {
+    filter.value.target = [...filter.value.target, target];
+  }
 }
 
 let filter = ref(deepCopy(props.initialFilter));
@@ -44,6 +58,26 @@ const opened = createPersistedRef(PREF_FILTERS_OPENED);
           <div class="section">
             <div class="section-heading">Filter</div>
             <input id="filter" type="text" v-model="filter.name" />
+          </div>
+          <div class="section section-list-wrapper">
+            <div class="section-heading">
+              <div style="width: 160px">
+                <span>Targets</span>
+                <Tooltip>The target of the compiled benchmark. </Tooltip>
+              </div>
+            </div>
+            <ul class="states-list">
+              <li v-for="target in info.compile_targets" :key="target">
+                <label>
+                  <input
+                    type="checkbox"
+                    :checked="hasTarget(target)"
+                    @change="toggleTarget(target)"
+                  />
+                  <span class="label">{{ target }}</span>
+                </label>
+              </li>
+            </ul>
           </div>
           <div class="section">
             <div class="section-heading">

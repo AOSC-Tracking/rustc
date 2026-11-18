@@ -10,8 +10,8 @@ use tokio_postgres::Config;
 use crate::pool::postgres::make_client;
 use crate::tests::builder::CollectorBuilder;
 use crate::{
-    ArtifactId, ArtifactIdNumber, BenchmarkRequest, CollectorConfig, Commit, CommitType,
-    Connection, Date, Pool,
+    ArtifactId, ArtifactIdNumber, BenchmarkRequest, BenchmarkRequestInsertResult, CollectorConfig,
+    Commit, CommitType, Connection, Date, Pool,
 };
 
 enum TestDb {
@@ -100,6 +100,10 @@ impl TestContext {
         self.connection.as_ref()
     }
 
+    pub fn db_mut(&mut self) -> &mut dyn Connection {
+        self.connection.as_mut()
+    }
+
     async fn finish(self) {
         // Cleanup the test database
         // First, we need to stop using the database
@@ -135,7 +139,8 @@ impl TestContext {
         pr: u32,
     ) -> BenchmarkRequest {
         let req = BenchmarkRequest::create_master(sha, parent, pr, Utc::now());
-        self.db().insert_benchmark_request(&req).await.unwrap();
+        let result = self.db().insert_benchmark_request(&req).await.unwrap();
+        assert!(matches!(result, BenchmarkRequestInsertResult::Inserted));
         req
     }
 
@@ -148,7 +153,7 @@ impl TestContext {
 
     /// Create a new try benchmark request without artifacts and add it to the DB.
     pub async fn insert_try_request(&self, pr: u32) -> BenchmarkRequest {
-        let req = BenchmarkRequest::create_try_without_artifacts(pr, "", "");
+        let req = BenchmarkRequest::create_try_without_artifacts(pr, "", "", "");
         self.db().insert_benchmark_request(&req).await.unwrap();
         req
     }

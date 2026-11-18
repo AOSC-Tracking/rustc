@@ -23,12 +23,12 @@ mod trait_goals;
 use derive_where::derive_where;
 use rustc_type_ir::inherent::*;
 pub use rustc_type_ir::solve::*;
-use rustc_type_ir::{self as ty, Interner, TyVid};
+use rustc_type_ir::{self as ty, Const, Interner, Region, TypeVisitableExt};
 use tracing::instrument;
 
 pub use self::eval_ctxt::{
     EvalCtxt, GenerateProofTree, SolverDelegateEvalExt,
-    evaluate_root_goal_for_proof_tree_raw_provider,
+    evaluate_root_goal_for_proof_tree_raw_provider, fast_path,
 };
 use crate::delegate::SolverDelegate;
 use crate::solve::assembly::Candidate;
@@ -87,31 +87,44 @@ where
     #[instrument(level = "trace", skip(self))]
     fn compute_type_outlives_goal(
         &mut self,
-        goal: Goal<I, ty::OutlivesPredicate<I, I::Ty>>,
+        goal: Goal<I, ty::OutlivesClause<I, I::Ty>>,
     ) -> QueryResultOrRerunNonErased<I> {
-        let ty::OutlivesPredicate(ty, lt) = goal.predicate;
+        let ty::OutlivesClause(ty, lt) = goal.predicate;
+        let ty = self.normalize(GoalSource::Misc, goal.param_env, ty::Unnormalized::new_wip(ty))?;
 
         if self.cx().assumptions_on_binders() {
-            // FIXME(-Zassumptions-on-binders): we need to normalize `ty`
+            use rustc_type_ir::region_constraint::RegionConstraint;
+
             let constraint = self.destructure_type_outlives(ty, lt);
-            self.register_solver_region_constraint(constraint);
+            self.register_solver_region_constraint(RegionConstraint::new_from_or(constraint));
         } else {
             self.register_ty_outlives(ty, lt);
         }
 
-        self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+        // The normalized type can still contain non-rigid higher ranked aliases if their
+        // normalization ends up with ambiguity. Or we have non-rigid aliases inside rigid ones.
+        // Infer vars may be resolved to types/consts containing non-rigid aliases later.
+        // Thus we should stall this goal to avoid registering non-rigid type outlives into
+        // the outer infcx.
+        if ty.has_non_region_infer() || ty.has_non_rigid_aliases() {
+            self.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS)
+        } else {
+            self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+        }
     }
 
     #[instrument(level = "trace", skip(self))]
     fn compute_region_outlives_goal(
         &mut self,
-        goal: Goal<I, ty::OutlivesPredicate<I, I::Region>>,
+        goal: Goal<I, ty::OutlivesClause<I, Region<I>>>,
     ) -> QueryResultOrRerunNonErased<I> {
-        let ty::OutlivesPredicate(a, b) = goal.predicate;
+        let ty::OutlivesClause(a, b) = goal.predicate;
 
         if self.cx().assumptions_on_binders() {
+            use rustc_type_ir::region_constraint::{LeafRegionConstraint, RegionConstraint};
+
             let constraint =
-                rustc_type_ir::region_constraint::RegionConstraint::RegionOutlives(a, b);
+                RegionConstraint::new_leaf(LeafRegionConstraint::RegionOutlives(a, b, ()));
             self.register_solver_region_constraint(constraint);
         } else {
             self.register_region_outlives(a, b, VisibleForLeakCheck::Yes);
@@ -192,7 +205,7 @@ where
     #[instrument(level = "trace", skip(self))]
     fn compute_const_evaluatable_goal(
         &mut self,
-        Goal { param_env, predicate: ct }: Goal<I, I::Const>,
+        Goal { param_env, predicate: ct }: Goal<I, Const<I>>,
     ) -> QueryResultOrRerunNonErased<I> {
         match ct.kind() {
             ty::ConstKind::Alias(ty::IsRigid::Yes, _)
@@ -235,7 +248,7 @@ where
     #[instrument(level = "trace", skip(self), ret)]
     fn compute_const_arg_has_type_goal(
         &mut self,
-        goal: Goal<I, (I::Const, I::Ty)>,
+        goal: Goal<I, (Const<I>, I::Ty)>,
     ) -> QueryResultOrRerunNonErased<I> {
         let (ct, ty) = goal.predicate;
         let ct = self.structurally_normalize_const(goal.param_env, ct)?;
@@ -362,8 +375,8 @@ where
     fn structurally_normalize_const(
         &mut self,
         param_env: I::ParamEnv,
-        ct: I::Const,
-    ) -> Result<I::Const, NoSolutionOrRerunNonErased> {
+        ct: Const<I>,
+    ) -> Result<Const<I>, NoSolutionOrRerunNonErased> {
         self.structurally_normalize_term(param_env, ct.into()).map(|term| term.expect_const())
     }
 
@@ -385,13 +398,13 @@ where
             let projection_goal = Goal::new(
                 self.cx(),
                 param_env,
-                ty::ProjectionPredicate { projection_term: alias, term: normalized_term },
+                ty::ProjectionClause { projection_term: alias, term: normalized_term },
             );
             // We normalize the self type to be able to relate it with
             // types from candidates.
             self.add_goal(GoalSource::TypeRelating, projection_goal)?;
             self.try_evaluate_added_goals()?;
-            Ok(self.resolve_vars_if_possible(normalized_term))
+            Ok(self.deeply_resolve_ignoring_regions(normalized_term))
         } else {
             Ok(term)
         }
@@ -423,22 +436,4 @@ pub struct GoalEvaluation<I: Interner> {
     /// If the [`Certainty`] was `Maybe`, then keep track of whether the goal has changed
     /// before rerunning it.
     pub stalled_on: Option<GoalStalledOn<I>>,
-}
-
-/// The conditions that must change for a goal to warrant
-#[derive_where(Clone, Debug; I: Interner)]
-pub struct GoalStalledOn<I: Interner> {
-    pub num_opaques: usize,
-    pub stalled_vars: Vec<I::GenericArg>,
-    pub sub_roots: Vec<TyVid>,
-    /// The certainty that will be returned on subsequent evaluations if this
-    /// goal remains stalled.
-    pub stalled_certainty: Certainty,
-    pub previously_succeeded_in_erased: SucceededInErased<I>,
-}
-
-#[derive_where(Clone, Debug; I: Interner)]
-pub enum SucceededInErased<I: Interner> {
-    Yes { accessed_opaques: AccessedOpaques<I> },
-    No,
 }

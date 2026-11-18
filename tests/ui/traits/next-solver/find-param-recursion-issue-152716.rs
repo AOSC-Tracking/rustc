@@ -1,4 +1,6 @@
-//@ compile-flags: -Znext-solver
+//@ revisions: current next
+//@ ignore-compare-mode-next-solver (explicit revisions)
+//@[next] compile-flags: -Znext-solver
 
 // Regression test for <https://github.com/rust-lang/rust/issues/152716>.
 //
@@ -11,10 +13,11 @@ trait Proj<'a> {
     type Assoc;
 }
 fn foo<T>()
+//[current]~^ ERROR: overflow evaluating the requirement `for<'b> T: Proj<'b>`
 where
     T: for<'a> Proj<'a, Assoc = for<'b> fn(<T as Proj<'b>>::Assoc)>,
     (): Trait<<T as Proj<'static>>::Assoc>
-    //~^ ERROR: overflow evaluating the requirement `(): Trait<<T as Proj<'static>>::Assoc>`
+    //[next]~^ ERROR: overflow evaluating the requirement `(): Trait<<T as Proj<'static>>::Assoc>`
 {
 }
 

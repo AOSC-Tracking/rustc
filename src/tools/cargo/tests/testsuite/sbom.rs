@@ -54,8 +54,9 @@ fn simple() {
         .file("src/main.rs", r#"fn main() {}"#)
         .build();
 
-    p.cargo("build -Zsbom")
+    p.cargo("build")
         .env("CARGO_BUILD_SBOM", "true")
+        .arg("-Zsbom")
         .masquerade_as_nightly_cargo(&["sbom"])
         .run();
 
@@ -95,6 +96,42 @@ fn simple() {
 }
 
 #[cargo_test]
+fn enabling_sbom_invalidates_fingerprint() {
+    let p = project()
+        .file("Cargo.toml", &basic_bin_manifest("foo"))
+        .file("src/main.rs", r#"fn main() {}"#)
+        .build();
+
+    p.cargo("build").run();
+
+    let file = append_sbom_suffix(&p.bin("foo"));
+    assert!(!file.exists());
+
+    p.cargo("build")
+        .env("CARGO_BUILD_SBOM", "true")
+        .arg("-Zsbom")
+        .masquerade_as_nightly_cargo(&["sbom"])
+        .with_stderr_data(cargo_test_support::str![[r#"
+[COMPILING] foo v0.5.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+
+    assert!(file.is_file());
+
+    p.cargo("build")
+        .env("CARGO_BUILD_SBOM", "true")
+        .arg("-Zsbom")
+        .masquerade_as_nightly_cargo(&["sbom"])
+        .with_stderr_data(cargo_test_support::str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
 fn with_multiple_crate_types() {
     let p = project()
         .file(
@@ -112,8 +149,9 @@ fn with_multiple_crate_types() {
         .file("src/lib.rs", r#"pub fn give_five() -> i32 { 5 }"#)
         .build();
 
-    p.cargo("build -Zsbom")
+    p.cargo("build")
         .env("CARGO_BUILD_SBOM", "true")
+        .arg("-Zsbom")
         .masquerade_as_nightly_cargo(&["sbom"])
         .run();
 
@@ -174,8 +212,9 @@ fn with_simple_build_script() {
         )
         .build();
 
-    p.cargo("build -Zsbom")
+    p.cargo("build")
         .env("CARGO_BUILD_SBOM", "true")
+        .arg("-Zsbom")
         .masquerade_as_nightly_cargo(&["sbom"])
         .run();
 
@@ -262,8 +301,9 @@ fn with_build_dependencies() {
         .file("src/main.rs", "fn main() { let _i = bar::bar(); }")
         .build();
 
-    p.cargo("build -Zsbom")
+    p.cargo("build")
         .env("CARGO_BUILD_SBOM", "true")
+        .arg("-Zsbom")
         .masquerade_as_nightly_cargo(&["sbom"])
         .run();
 
@@ -387,8 +427,9 @@ fn crate_uses_different_features_for_build_and_normal_dependencies() {
         )
         .build();
 
-    p.cargo("build -Zsbom")
+    p.cargo("build")
         .env("CARGO_BUILD_SBOM", "true")
+        .arg("-Zsbom")
         .masquerade_as_nightly_cargo(&["sbom"])
         .run();
 
@@ -494,8 +535,10 @@ fn artifact_dep() {
                     assert!(&bar.is_file());
                 }"#)
         .build();
-    p.cargo("build -Z bindeps -Z sbom")
+    p.cargo("build")
         .env("CARGO_BUILD_SBOM", "true")
+        .arg("-Zbindeps")
+        .arg("-Zsbom")
         .masquerade_as_nightly_cargo(&["bindeps", "sbom"])
         .run();
 
@@ -609,8 +652,9 @@ fn proc_macro() {
         )
         .build();
 
-    p.cargo("build -Z sbom")
+    p.cargo("build")
         .env("CARGO_BUILD_SBOM", "true")
+        .arg("-Zsbom")
         .masquerade_as_nightly_cargo(&["sbom"])
         .run();
 
@@ -681,9 +725,10 @@ fn workspace_wrapper() {
         .file("Cargo.toml", &basic_bin_manifest("foo"))
         .file("src/main.rs", r#"fn main() {}"#)
         .build();
-    p.cargo("build -Zsbom")
+    p.cargo("build")
         .env("CARGO_BUILD_SBOM", "true")
         .env("RUSTC_WRAPPER", wrapper.bin("wrapper"))
+        .arg("-Zsbom")
         .masquerade_as_nightly_cargo(&["sbom"])
         .with_stderr_data(cargo_test_support::str![[r#"
 [COMPILING] foo v0.5.0 ([ROOT]/foo)

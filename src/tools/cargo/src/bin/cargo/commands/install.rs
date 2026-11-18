@@ -4,10 +4,10 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::format_err;
 use cargo::CargoResult;
-use cargo::core::{GitReference, SourceId, Workspace};
 use cargo::ops;
 use cargo::util::IntoUrl;
 use cargo::util::VersionExt;
+use cargo::workspace::{GitReference, SourceId, Workspace};
 use cargo_util_schemas::manifest::PackageName;
 use itertools::Itertools;
 use semver::VersionReq;
@@ -92,15 +92,13 @@ pub fn cli() -> Command {
         .arg_features()
         .arg_parallel()
         .arg(
-            flag(
-                "debug",
-                "Build in debug mode (with the 'dev' profile) instead of release mode",
-            )
-            .conflicts_with("profile"),
+            flag("debug", "Build in debug mode instead of release mode")
+                .conflicts_with("profile")
+                .help_heading(heading::COMPILATION_OPTIONS),
         )
         .arg_redundant_default_mode("release", "install", "debug")
         .arg_profile("Install artifacts with the specified profile")
-        .arg_target_triple("Build for the target triple")
+        .arg_target_triple("Build for the target tuple")
         .arg_target_dir()
         .arg_timings()
         .after_help(color_print::cstr!(

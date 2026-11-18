@@ -4,9 +4,9 @@ use std::path::Path;
 
 use crate::command_prelude::*;
 use crate::util::restricted_names::is_glob_pattern;
-use cargo::core::Workspace;
 use cargo::ops::{self, CompileFilter, Packages};
 use cargo::util::closest;
+use cargo::workspace::Workspace;
 use cargo_util::ProcessError;
 use cargo_util_terminal::Verbosity;
 use itertools::Itertools as _;
@@ -21,6 +21,7 @@ pub fn cli() -> Command {
                 .value_name("ARGS")
                 .help("Arguments for the binary or example to run")
                 .value_parser(value_parser!(OsString))
+                .value_hint(clap::ValueHint::AnyPath)
                 .num_args(0..)
                 .trailing_var_arg(true),
         )
@@ -35,7 +36,7 @@ pub fn cli() -> Command {
         .arg_parallel()
         .arg_release("Build artifacts in release mode, with optimizations")
         .arg_profile("Build artifacts with the specified profile")
-        .arg_target_triple("Build for the target triple")
+        .arg_target_triple("Build for the target tuple")
         .arg_target_dir()
         .arg_manifest_path()
         .arg_ignore_rust_version()
@@ -190,7 +191,7 @@ pub fn exec_manifest_command(gctx: &mut GlobalContext, cmd: &str, args: &[OsStri
     }
 
     let mut compile_opts =
-        cargo::ops::CompileOptions::new(gctx, cargo::core::compiler::UserIntent::Build)?;
+        cargo::ops::CompileOptions::new(gctx, cargo::compiler::UserIntent::Build)?;
     compile_opts.spec = cargo::ops::Packages::Default;
 
     cargo::ops::run(&ws, &compile_opts, args).map_err(|err| to_run_error(gctx, err))
@@ -249,6 +250,8 @@ fn to_run_error(gctx: &GlobalContext, err: anyhow::Error) -> CliError {
     if is_quiet {
         CliError::code(exit_code)
     } else {
+        // Ensure a newline between user and cargo's output, especially with trailing "\r"
+        let _ = writeln!(gctx.shell().err());
         CliError::new(err, exit_code)
     }
 }

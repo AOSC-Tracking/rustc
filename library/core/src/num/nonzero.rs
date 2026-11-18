@@ -73,7 +73,7 @@ impl_zeroable_primitive!(
 /// For example, `Option<NonZero<u32>>` is the same size as `u32`:
 ///
 /// ```
-/// use core::{num::NonZero};
+/// use core::num::NonZero;
 ///
 /// assert_eq!(size_of::<Option<NonZero<u32>>>(), size_of::<u32>());
 /// ```
@@ -82,7 +82,7 @@ impl_zeroable_primitive!(
 ///
 /// `NonZero<T>` is guaranteed to have the same layout and bit validity as `T`
 /// with the exception that the all-zero bit pattern is invalid.
-/// `Option<NonZero<T>>` is guaranteed to be compatible with `T`, including in
+/// `Option<NonZero<T>>` is guaranteed to be ABI-compatible with `T`, including in
 /// FFI.
 ///
 /// Thanks to the [null pointer optimization], `NonZero<T>` and
@@ -525,7 +525,7 @@ macro_rules! nonzero_integer {
         ///
         #[doc = concat!("`", stringify!($Ty), "` is guaranteed to have the same layout and bit validity as `", stringify!($Int), "`")]
         /// with the exception that `0` is not a valid instance.
-        #[doc = concat!("`Option<", stringify!($Ty), ">` is guaranteed to be compatible with `", stringify!($Int), "`,")]
+        #[doc = concat!("`Option<", stringify!($Ty), ">` is guaranteed to be ABI-compatible with `", stringify!($Int), "`,")]
         /// including in FFI.
         ///
         /// Thanks to the [null pointer optimization],
@@ -1262,7 +1262,7 @@ macro_rules! nonzero_integer {
             /// #
             /// # fn main() { test().unwrap(); }
             /// # fn test() -> Option<()> {
-            #[doc = concat!("assert_eq!(NonZero::<", stringify!($Int), ">::from_ascii(b\"+10\"), Ok(NonZero::new(10)?));")]
+            #[doc = concat!("assert_eq!(NonZero::<", stringify!($Int), ">::from_ascii_bytes(b\"+10\"), Ok(NonZero::new(10)?));")]
             /// # Some(())
             /// # }
             /// ```
@@ -1274,12 +1274,16 @@ macro_rules! nonzero_integer {
             ///
             /// # use std::num::NonZero;
             /// #
-            #[doc = concat!("assert!(NonZero::<", stringify!($Int), ">::from_ascii(b\"1 \").is_err());")]
+            #[doc = concat!("assert!(NonZero::<", stringify!($Int), ">::from_ascii_bytes(b\"1 \").is_err());")]
             /// ```
             #[unstable(feature = "int_from_ascii", issue = "134821")]
+            #[rustc_const_unstable(feature = "const_convert", issue = "143773")]
             #[inline]
-            pub const fn from_ascii(src: &[u8]) -> Result<Self, ParseIntError> {
-                Self::from_ascii_radix(src, 10)
+            pub const fn from_ascii_bytes<T>(src: T) -> Result<Self, ParseIntError>
+            where
+                T: [const] AsRef<[u8]> + [const] crate::marker::Destruct
+            {
+                Self::from_ascii_bytes_radix_impl(src.as_ref(), 10)
             }
 
             /// Parses a non-zero integer from an ASCII-byte slice with digits in a given base.
@@ -1317,7 +1321,7 @@ macro_rules! nonzero_integer {
             /// #
             /// # fn main() { test().unwrap(); }
             /// # fn test() -> Option<()> {
-            #[doc = concat!("assert_eq!(NonZero::<", stringify!($Int), ">::from_ascii_radix(b\"A\", 16), Ok(NonZero::new(10)?));")]
+            #[doc = concat!("assert_eq!(NonZero::<", stringify!($Int), ">::from_ascii_bytes_radix(b\"A\", 16), Ok(NonZero::new(10)?));")]
             /// # Some(())
             /// # }
             /// ```
@@ -1329,12 +1333,21 @@ macro_rules! nonzero_integer {
             ///
             /// # use std::num::NonZero;
             /// #
-            #[doc = concat!("assert!(NonZero::<", stringify!($Int), ">::from_ascii_radix(b\"1 \", 10).is_err());")]
+            #[doc = concat!("assert!(NonZero::<", stringify!($Int), ">::from_ascii_bytes_radix(b\"1 \", 10).is_err());")]
             /// ```
             #[unstable(feature = "int_from_ascii", issue = "134821")]
+            #[rustc_const_unstable(feature = "const_convert", issue = "143773")]
             #[inline]
-            pub const fn from_ascii_radix(src: &[u8], radix: u32) -> Result<Self, ParseIntError> {
-                let n = match <$Int>::from_ascii_radix(src, radix) {
+            pub const fn from_ascii_bytes_radix<T>(src: T, radix: u32) -> Result<Self, ParseIntError>
+            where
+                T: [const] AsRef<[u8]> + [const] crate::marker::Destruct
+            {
+                Self::from_ascii_bytes_radix_impl(src.as_ref(), radix)
+            }
+
+            #[inline]
+            const fn from_ascii_bytes_radix_impl(src: &[u8], radix: u32) -> Result<Self, ParseIntError> {
+                let n = match <$Int>::from_ascii_bytes_radix_impl(src, radix) {
                     Ok(n) => n,
                     Err(err) => return Err(err),
                 };
@@ -1394,13 +1407,49 @@ macro_rules! nonzero_integer {
             #[rustc_const_stable(feature = "nonzero_from_str_radix", since = "1.98.0")]
             #[inline]
             pub const fn from_str_radix(src: &str, radix: u32) -> Result<Self, ParseIntError> {
-                Self::from_ascii_radix(src.as_bytes(), radix)
+                Self::from_ascii_bytes_radix_impl(src.as_bytes(), radix)
             }
         }
 
         #[stable(feature = "nonzero_parse", since = "1.35.0")]
-        impl FromStr for NonZero<$Int> {
+        #[rustc_const_unstable(feature = "const_convert", issue = "143773")]
+        const impl FromStr for NonZero<$Int> {
             type Err = ParseIntError;
+
+            /// Parses a non-zero integer from a string slice with decimal digits.
+            ///
+            /// The characters are expected to be an optional
+            #[doc = sign_dependent_expr!{
+                $signedness ?
+                if signed {
+                    " `+` or `-` "
+                }
+                if unsigned {
+                    " `+` "
+                }
+            }]
+            /// sign followed by only digits. Leading and trailing non-digit characters (including
+            /// whitespace) represent an error. Underscores (which are accepted in Rust literals)
+            /// also represent an error.
+            ///
+            /// # Examples
+            ///
+            /// ```
+            /// use std::num::NonZero;
+            /// use std::str::FromStr;
+            ///
+            #[doc = concat!("assert_eq!(NonZero::<", stringify!($Int), ">::from_str(\"+10\"), Ok(NonZero::new(10).unwrap()));")]
+            /// ```
+            ///
+            /// Trailing space returns error:
+            ///
+            /// ```
+            /// use std::num::NonZero;
+            /// use std::str::FromStr;
+            ///
+            #[doc = concat!("assert!(NonZero::<", stringify!($Int), ">::from_str(\"1 \").is_err());")]
+            /// ```
+            #[inline]
             fn from_str(src: &str) -> Result<Self, Self::Err> {
                 Self::from_str_radix(src, 10)
             }
@@ -1522,35 +1571,6 @@ macro_rules! nonzero_integer_signedness_dependent_impls {
             #[inline]
             fn rem_assign(&mut self, other: NonZero<$Int>) {
                 *self = *self % other;
-            }
-        }
-
-        impl NonZero<$Int> {
-            /// Calculates the quotient of `self` and `rhs`, rounding the result towards positive infinity.
-            ///
-            /// The result is guaranteed to be non-zero.
-            ///
-            /// # Examples
-            ///
-            /// ```
-            /// # use std::num::NonZero;
-            #[doc = concat!("let one = NonZero::new(1", stringify!($Int), ").unwrap();")]
-            #[doc = concat!("let max = NonZero::new(", stringify!($Int), "::MAX).unwrap();")]
-            /// assert_eq!(one.div_ceil(max), one);
-            ///
-            #[doc = concat!("let two = NonZero::new(2", stringify!($Int), ").unwrap();")]
-            #[doc = concat!("let three = NonZero::new(3", stringify!($Int), ").unwrap();")]
-            /// assert_eq!(three.div_ceil(two), two);
-            /// ```
-            #[stable(feature = "unsigned_nonzero_div_ceil", since = "1.92.0")]
-            #[rustc_const_stable(feature = "unsigned_nonzero_div_ceil", since = "1.92.0")]
-            #[must_use = "this returns the result of the operation, \
-                          without modifying the original"]
-            #[inline]
-            pub const fn div_ceil(self, rhs: Self) -> Self {
-                let v = self.get().div_ceil(rhs.get());
-                // SAFETY: ceiled division of two positive integers can never be zero.
-                unsafe { Self::new_unchecked(v) }
             }
         }
     };
@@ -1718,6 +1738,36 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         pub const unsafe fn unchecked_add(self, other: $Int) -> Self {
             // SAFETY: The caller ensures there is no overflow.
             unsafe { Self::new_unchecked(self.get().unchecked_add(other)) }
+        }
+
+        /// Calculates the quotient of `self` and `rhs`, rounding the result towards positive infinity.
+        ///
+        /// The result is guaranteed to be non-zero.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// # use std::num::NonZero;
+        #[doc = concat!("let one = NonZero::new(1", stringify!($Int), ").unwrap();")]
+        #[doc = concat!("let max = NonZero::new(", stringify!($Int), "::MAX).unwrap();")]
+        /// assert_eq!(one.div_ceil(max), one);
+        ///
+        #[doc = concat!("let two = NonZero::new(2", stringify!($Int), ").unwrap();")]
+        #[doc = concat!("let three = NonZero::new(3", stringify!($Int), ").unwrap();")]
+        /// assert_eq!(three.div_ceil(two), two);
+        /// ```
+        #[stable(feature = "unsigned_nonzero_div_ceil", since = "1.92.0")]
+        #[rustc_const_stable(feature = "unsigned_nonzero_div_ceil", since = "1.92.0")]
+        #[must_use = "this returns the result of the operation, \
+                      without modifying the original"]
+        #[inline]
+        pub const fn div_ceil(self, rhs: Self) -> Self {
+            // An implementation of the function without calculating the remainder.
+            // It is better than the implementation for normal integers, but it can only
+            // be used here because of the possibility to subtract by one without overflow.
+            let v = (self.get() - 1) / rhs.get() + 1;
+            // SAFETY: ceiled division of two positive integers can never be zero.
+            unsafe { Self::new_unchecked(v) }
         }
 
         /// Returns the smallest power of two greater than or equal to `self`.

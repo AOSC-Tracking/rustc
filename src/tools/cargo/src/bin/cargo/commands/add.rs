@@ -1,17 +1,17 @@
+use crate::util::data_structures::IndexMap;
+use crate::util::data_structures::IndexSet;
 use cargo::sources::CRATES_IO_REGISTRY;
 use cargo::util::print_available_packages;
-use indexmap::IndexMap;
-use indexmap::IndexSet;
 
 use cargo::CargoResult;
-use cargo::core::FeatureValue;
-use cargo::core::dependency::DepKind;
 use cargo::ops::cargo_add::AddOptions;
 use cargo::ops::cargo_add::DepOp;
 use cargo::ops::cargo_add::add;
 use cargo::ops::resolve_ws;
 use cargo::util::command_prelude::*;
-use cargo::util::toml_mut::manifest::DepTable;
+use cargo::workspace::FeatureValue;
+use cargo::workspace::dependency::DepKind;
+use cargo::workspace::editor::manifest::DepTable;
 
 pub fn cli() -> Command {
     clap::Command::new("add")
@@ -308,7 +308,7 @@ fn parse_dependencies(gctx: &GlobalContext, matches: &ArgMatches) -> CargoResult
                     .first_mut()
                     .expect("always at least one crate")
                     .1
-                    .get_or_insert_with(IndexSet::new)
+                    .get_or_insert_with(IndexSet::default)
                     .insert(feature.to_owned());
             }
             FeatureValue::Dep { .. } => {
@@ -330,7 +330,7 @@ fn parse_dependencies(gctx: &GlobalContext, matches: &ArgMatches) -> CargoResult
                 crates.get_mut(&Some(dep_name.as_str().to_owned())).ok_or_else(|| {
                     anyhow::format_err!("feature `{dep_feature}` activated for crate `{dep_name}` but the crate wasn't specified")
                 })?
-                    .get_or_insert_with(IndexSet::new)
+                    .get_or_insert_with(IndexSet::default)
                     .insert(dep_feature.as_str().to_owned());
             }
         }

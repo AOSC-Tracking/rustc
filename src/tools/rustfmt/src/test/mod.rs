@@ -19,7 +19,7 @@ use crate::{
 };
 
 use rustfmt_config_proc_macro::nightly_only_test;
-use tracing::{debug, warn};
+use tracing::debug;
 
 mod configuration_snippet;
 mod mod_resolver;
@@ -165,6 +165,58 @@ fn verify_config_test_names() {
     }
 }
 
+// Collects all file and directory paths under `root` (relative to `root`).
+fn collect_paths(root: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).expect(&format!("couldn't read {}", dir.display())) {
+            let entry = entry.expect("couldn't get DirEntry");
+            let path = entry.path();
+            paths.push(path.strip_prefix(root).unwrap().to_path_buf());
+            if path.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    paths
+}
+
+#[test]
+fn no_case_insensitive_path_collisions() {
+    // Ensure no two paths in test directories differ only by case,
+    // which causes warnings when cloning on case-insensitive filesystems
+    // (e.g. Windows, macOS).
+    let test_dirs = [Path::new("tests/source"), Path::new("tests/target")];
+    let mut collisions = Vec::new();
+
+    for root in &test_dirs {
+        let mut seen: HashMap<String, PathBuf> = HashMap::new();
+        for path in collect_paths(root) {
+            let key = path.to_string_lossy().to_lowercase();
+            if let Some(existing) = seen.get(&key) {
+                if *existing != path {
+                    collisions.push(format!(
+                        "{}/{} collides with {}/{}",
+                        root.display(),
+                        existing.display(),
+                        root.display(),
+                        path.display(),
+                    ));
+                }
+            } else {
+                seen.insert(key, path);
+            }
+        }
+    }
+
+    assert!(
+        collisions.is_empty(),
+        "Case-insensitive path collisions found (these cause warnings on Windows/macOS):\n  {}",
+        collisions.join("\n  ")
+    );
+}
+
 // This writes to the terminal using the same approach (via `term::stdout` or
 // `println!`) that is used by `rustfmt::rustfmt_diff::print_diff`. Writing
 // using only one or the other will cause the output order to differ when
@@ -195,6 +247,47 @@ fn system_tests() {
             300
         )
     });
+}
+
+// Check formatting-specific warning/error emissions against snapshots.
+#[test]
+fn warning_tests() {
+    init_log();
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir_filter = regex::escape(manifest_dir.to_string_lossy().as_ref());
+    let files = get_test_files(Path::new("tests/warning/source"), true);
+
+    for file in &files {
+        let mut config = read_config(file);
+        config.set().error_on_line_overflow(true);
+        config.set().error_on_unformatted(true);
+
+        let snapshot_name = file.file_stem().unwrap().to_str().unwrap();
+        let (parsing_errors, _, report) = format_file(file, config.clone());
+        assert!(!parsing_errors, "{} failed to parse", file.display());
+        assert!(
+            report.has_warnings(),
+            "{} did not emit a warning or error",
+            file.display()
+        );
+        let warning = FormatReportFormatterBuilder::new(&report)
+            .build()
+            .to_string();
+
+        insta::with_settings!({
+            snapshot_path => manifest_dir.join("tests/warning/snapshots"),
+            prepend_module_to_snapshot => false,
+            omit_expression => true,
+            filters => vec![
+                (manifest_dir_filter.as_str(), "$$DIR"),
+                (r"\r\n", "\n"),
+                (r"\\", "/"),
+            ],
+            strip_ansi_escape_codes => true,
+        }, {
+            insta::assert_snapshot!(snapshot_name, warning);
+        });
+    }
 }
 
 // Do the same for tests/coverage-source directory.
@@ -393,7 +486,7 @@ fn self_tests() {
         files.push(path);
     }
     // for crates that need to be included but lies outside src
-    let external_crates = vec!["check_diff", "config_proc_macro"];
+    let external_crates = vec!["check_diff", "config_proc_macro", "ci"];
     for external_crate in external_crates {
         let mut path = PathBuf::from(external_crate);
         path.push("src");
@@ -411,6 +504,9 @@ fn self_tests() {
         for file in search_files {
             files.push(file);
         }
+
+        let mut tests_files = get_test_files(&PathBuf::from(external_crate).join("tests"), true);
+        files.append(&mut tests_files);
     }
     files.push(PathBuf::from("src/lib.rs"));
 
@@ -534,7 +630,9 @@ fn stdin_parser_panic_caught() {
     // See issue #3239.
     for text in ["{", "}"].iter().cloned().map(String::from) {
         let mut buf = vec![];
-        let mut session = Session::new(Default::default(), Some(&mut buf));
+        let mut config = Config::default();
+        config.set().show_parse_errors(false);
+        let mut session = Session::new(config, Some(&mut buf));
         let _ = session.format(Input::Text(text));
 
         assert!(session.has_parsing_errors());
@@ -702,6 +800,15 @@ fn check_files(files: Vec<PathBuf>, opt_config: &Option<PathBuf>) -> (Vec<Format
             continue;
         }
 
+        if sig_comments.contains_key("stable") && is_nightly_channel!() {
+            debug!(
+                "Skipping '{}' because nightly introduces formatting changes. \
+                 Formatting should be stable on the `stable` channel.",
+                file_name.display()
+            );
+            continue;
+        }
+
         debug!("Testing '{}'...", file_name.display());
 
         match idempotent_check(&file_name, opt_config) {
@@ -772,11 +879,8 @@ fn read_config(filename: &Path) -> Config {
     };
 
     for (key, val) in &sig_comments {
-        if key != "target" && key != "config" && key != "unstable" {
+        if key != "target" && key != "config" && key != "unstable" && key != "stable" {
             config.override_value(key, val);
-            if config.is_default(key) {
-                warn!("Default value {} used explicitly for {}", val, key);
-            }
         }
     }
 
@@ -1099,7 +1203,8 @@ fn rustfmt() -> PathBuf {
     assert!(
         me.is_file() || me.with_extension("exe").is_file(),
         "{}",
-        "no rustfmt bin, try running `cargo build` or `cargo build --release` before testing"
+        "no rustfmt bin, try running `cargo build --locked` or `cargo build --locked --release` \
+        before testing"
     );
     me
 }

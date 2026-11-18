@@ -910,7 +910,7 @@ fn required_features_host_dep() {
     p.cargo("run")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [ERROR] target `x` in package `foo` requires the features: `bdep/f1`
 Consider enabling them by passing, e.g., `--features="bdep/f1"`
 
@@ -1028,7 +1028,7 @@ fn required_features_inactive_dep() {
 
     p.cargo("check")
         .with_stderr_data(str![[r#"
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -1183,6 +1183,9 @@ fn proc_macro_ws() {
 
             [features]
             feat1 = []
+
+            [lints.cargo]
+            default = "allow"
             "#,
         )
         .file("foo/src/lib.rs", "")
@@ -1199,6 +1202,9 @@ fn proc_macro_ws() {
 
             [dependencies]
             foo = { path = "../foo", features=["feat1"] }
+
+            [lints.cargo]
+            default = "allow"
             "#,
         )
         .file("pm/src/lib.rs", "")
@@ -1283,7 +1289,7 @@ fn has_dev_dep_for_test() {
 
     p.cargo("check -v")
         .with_stderr_data(str![[r#"
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [CHECKING] foo v0.1.0 ([ROOT]/foo)
 [RUNNING] `rustc --crate-name foo [..]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -1649,6 +1655,9 @@ fn resolver_enables_new_features() {
 
             [target.'cfg(whatever)'.dependencies]
             common = {version = "1.0", features=["itarget"]}
+
+            [lints.cargo]
+            default = "allow"
             "#,
         )
         .file(
@@ -1679,6 +1688,9 @@ fn resolver_enables_new_features() {
 
             [features]
             ping = []
+
+            [lints.cargo]
+            default = "allow"
             "#,
         )
         .file(
@@ -1698,7 +1710,7 @@ fn resolver_enables_new_features() {
         .env("EXPECTED_FEATS", "1")
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] common v1.0.0 (registry `dummy-registry`)
 [COMPILING] common v1.0.0
@@ -2112,7 +2124,7 @@ fn doc_optional() {
         .with_stderr_data(
             str![[r#"
 [UPDATING] `dummy-registry` index
-[LOCKING] 3 packages to latest compatible versions
+[LOCKING] 3 packages to highest compatible versions
 [DOWNLOADING] crates ...
 [DOWNLOADED] spin v1.0.0 (registry `dummy-registry`)
 [DOWNLOADED] bar v1.0.0 (registry `dummy-registry`)
@@ -2210,6 +2222,9 @@ fn minimal_download() {
                 [target.'cfg(whatever)'.build-dependencies]
                 itarget_build_dep = "1.0"
                 itarget_build_dep_pm = "1.0"
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -2224,12 +2239,13 @@ fn minimal_download() {
 
     // none
     // Should be the same as `-Zfeatures=all`
-    p.cargo("check -Zfeatures=compare")
+    p.cargo("check")
+        .arg("-Zfeatures=compare")
         .masquerade_as_nightly_cargo(&["features=compare"])
         .with_stderr_data(
             str![[r#"
 [UPDATING] `dummy-registry` index
-[LOCKING] 14 packages to latest compatible versions
+[LOCKING] 14 packages to highest compatible versions
 [DOWNLOADING] crates ...
 [DOWNLOADED] normal_pm v1.0.0 (registry `dummy-registry`)
 [DOWNLOADED] normal v1.0.0 (registry `dummy-registry`)
@@ -2292,7 +2308,7 @@ fn minimal_download() {
 [COMPILING] dev_dep_pm v1.0.0
 [COMPILING] foo v0.1.0 ([ROOT]/foo)
 [FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[EXECUTABLE] unittests src/lib.rs (target/debug/deps/foo-[HASH][EXE])
+[EXECUTABLE] unittests src/lib.rs (target/debug/build/foo/[HASH]/out/foo-[HASH][EXE])
 
 "#]]
             .unordered(),
@@ -2403,6 +2419,9 @@ fn pm_with_int_shared() {
                 [dependencies]
                 pm = { path = "../pm" }
                 shared = { path = "../shared", features = ["norm-feat"] }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file(
@@ -2425,6 +2444,9 @@ fn pm_with_int_shared() {
 
                 [dependencies]
                 shared = { path = "../shared", features = ["host-feat"] }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file(
@@ -2452,6 +2474,9 @@ fn pm_with_int_shared() {
                 [features]
                 norm-feat = []
                 host-feat = []
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file(
@@ -2678,7 +2703,7 @@ fn all_features_merges_with_features() {
     p.cargo("run --example ex --all-features --features dep/feat1")
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] dep v0.1.0 (registry `dummy-registry`)
 [COMPILING] dep v0.1.0
@@ -2722,6 +2747,9 @@ fn dep_with_optional_host_deps_activated() {
 
                 [dependencies]
                 serde = { path = "serde", features = ["derive", "build"] }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -2742,6 +2770,9 @@ fn dep_with_optional_host_deps_activated() {
                 [features]
                 derive = ["dep:serde_derive"]
                 build = ["dep:serde_build"]
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("serde/src/lib.rs", "")
@@ -2756,6 +2787,9 @@ fn dep_with_optional_host_deps_activated() {
 
                 [lib]
                 proc-macro = true
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("serde_derive/src/lib.rs", "")
@@ -2768,7 +2802,7 @@ fn dep_with_optional_host_deps_activated() {
 
     p.cargo("check")
         .with_stderr_data(str![[r#"
-[LOCKING] 3 packages to latest compatible versions
+[LOCKING] 3 packages to highest compatible versions
 [COMPILING] serde_build v0.1.0 ([ROOT]/foo/serde_build)
 [COMPILING] serde_derive v0.1.0 ([ROOT]/foo/serde_derive)
 [COMPILING] serde v0.1.0 ([ROOT]/foo/serde)
@@ -2792,6 +2826,9 @@ fn dont_unify_proc_macro_example_from_dependency() {
 
                 [dependencies]
                 pm_helper = { path = "pm_helper" }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -2805,6 +2842,9 @@ fn dont_unify_proc_macro_example_from_dependency() {
                 name = "pm"
                 proc-macro = true
                 crate-type = ["proc-macro"]
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("pm_helper/src/lib.rs", "")
@@ -2813,7 +2853,7 @@ fn dont_unify_proc_macro_example_from_dependency() {
 
     p.cargo("check")
         .with_stderr_data(str![[r#"
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [CHECKING] pm_helper v0.0.0 ([ROOT]/foo/pm_helper)
 [CHECKING] foo v0.0.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s

@@ -1,6 +1,7 @@
 //! Execute benchmarks.
 
 use crate::compile::benchmark::codegen_backend::CodegenBackend;
+use crate::compile::benchmark::parallel_frontend::FrontendThreads;
 use crate::compile::benchmark::patch::Patch;
 use crate::compile::benchmark::profile::Profile;
 use crate::compile::benchmark::scenario::Scenario;
@@ -132,68 +133,140 @@ pub struct CargoProcess<'a> {
     pub touch_file: Option<String>,
     pub jobserver: Option<jobserver::Client>,
     pub target: Target,
+    pub frontend_threads: FrontendThreads,
     pub workspace_package: Option<String>,
 }
-/// Returns an optional list of Performance CPU cores, if the system has P and E cores.
-/// This list *should* be in a format suitable for the `taskset` command.
-#[cfg(target_os = "linux")]
-fn performance_cores() -> Option<&'static String> {
-    use std::sync::LazyLock;
-    static PERFORMANCE_CORES: LazyLock<Option<String>> = LazyLock::new(|| {
-        if std::fs::exists("/sys/devices/cpu").expect("Could not check the CPU architecture details: could not check if `/sys/devices/cpu` exists!") {
-        	// If /sys/devices/cpu exists, then this is not a "Performance-hybrid" CPU.
-		    None
-	    }
-	    else if std::fs::exists("/sys/devices/cpu_core").expect("Could not check the CPU architecture detali: could not check if `/sys/devices/cpu_core` exists!") {
-		    // If /sys/devices/cpu_core exists, then this is a "Performance-hybrid" CPU.
-		    eprintln!("WARNING: Performance-Hybrid CPU detected. `rustc-perf` can't run properly on Efficency cores: test suite will only use Performance cores!");
-		    Some(std::fs::read_to_string("/sys/devices/cpu_core/cpus").unwrap().trim().to_string())
-	    } else {
-		    // If neither dir exists, then something is wrong - `/sys/devices/cpu` has been in Linux for over a decade.
-		    eprintln!("WARNING: neither `/sys/devices/cpu` nor `/sys/devices/cpu_core` present, unable to determine if this CPU has a Performance-Hybrid architecture.");
-		    None
-	    }
-    });
-    (*PERFORMANCE_CORES).as_ref()
+
+// Some CPUs have a hybrid architecture with a mixture of P-cores (power) and E-cores (efficiency).
+// When benchmarking we use `taskset` to restrict execution to P-cores. Why?
+// 1. The instruction count info for E-cores is often incomplete, and a substantial chunk of events
+//    is lost.
+// 2. The performance characteristics of E-cores are less reliable, so excluding them from the
+//    benchmark makes things easier.
+// 3. An unpredictable mix of P-core and E-core execution can give inconsistent results.
+//
+// If a hybrid architecture is detected, this type is used to hold information about the P-cores.
+// The detection method used varies across platforms.
+#[derive(Debug)]
+struct PCores {
+    /// The number of P-cores.
+    len: usize,
+    /// The list of P-cores, in a form suitable for passing to `taskset`.
+    list: String,
 }
 
-#[cfg(not(target_os = "linux"))]
-// Modify this stub if you want to add support for P/E cores on more OSs
-fn performance_cores() -> Option<&'static String> {
-    None
-}
+static P_CORES: LazyLock<Option<PCores>> = LazyLock::new(p_cores);
 
-#[cfg(target_os = "linux")]
-/// Makes the benchmark run only on Performance cores.
-fn run_on_p_cores(path: &Path, cpu_list: &str) -> Command {
-    // Parse CPU list to extract the number of P cores!
-    // This assumes the P core id's are countinus, in format `fisrt_id-last_id`
-    let (core_start, core_end) = cpu_list
-        .split_once("-")
-        .unwrap_or_else(|| panic!("Unsuported P core list format: {cpu_list:?}."));
-    let core_start: u32 = core_start
-        .parse()
-        .expect("Expected a number when parsing the start of the P core list!");
-    let core_end: u32 = core_end
-        .parse()
-        .expect("Expected a number when parsing the end of the P core list!");
-    let core_count = core_end - core_start;
-    let mut cmd = Command::new("taskset");
-    // Set job count to P core count - this is done for 2 reasons:
-    // 1. The instruction count info for E core is often very incompleate - a substantial chunk of events is lost.
-    // 2. The performance charcteristics of E cores are less reliable, so excluding them from the benchmark makes things easier.
-    cmd.env("CARGO_BUILD_JOBS", format!("{core_count}"));
-    // pass the P core list to taskset to pin task to the P core.
-    cmd.arg("--cpu-list");
-    cmd.arg(cpu_list);
-    cmd.arg(path);
-    cmd
-}
+cfg_if::cfg_if! {
+    if #[cfg(all(target_os = "linux", target_arch = "x86_64"))] {
+        // On x86-64/Linux we look for the presence of `/sys/devices/cpu_core/` which indicates a
+        // hybrid architecture.
+        fn p_cores() -> Option<PCores> {
+            if std::fs::exists("/sys/devices/cpu").unwrap() {
+                // `/sys/devices/cpu` exists: this is not a hybrid CPU.
+                None
+            } else if std::fs::exists("/sys/devices/cpu_core").unwrap() {
+                // `/sys/devices/cpu_core/` exists: this is a hybrid CPU, and the `cpus` file
+                // within contains the list of P-cores. (`sys/devices/cpu_atom/cpus` contains
+                // the list of E-cores).
+                let list =
+                    std::fs::read_to_string("/sys/devices/cpu_core/cpus")
+                        .unwrap()
+                        .trim()
+                        .to_string();
+                eprintln!(
+                    "WARNING: hybrid Intel CPU detected; test suite will only use P-cores: {list}"
+                );
+                // Parse CPU list to extract the number of P-cores. This assumes the P-core ids are
+                // continuous, in format `m-n`.
+                let (first, last) = list
+                    .split_once("-")
+                    .unwrap_or_else(|| panic!("unsupported P-core list format: {list:?}."));
+                let first = first
+                    .parse::<usize>()
+                    .expect("expected a number at the start of the P-core list");
+                let last = last
+                    .parse::<usize>()
+                    .expect("expected a number at the end of the P-core list");
+                let len = last - first + 1; // e.g. "0-3" is four cores: [0, 1, 2, 3]
+                Some(PCores { len, list })
+            } else {
+                // Neither dir exists: something is wrong, because `/sys/devices/cpu` has been
+                // in Linux (on x86-64, at least) for over a decade.
+                eprintln!(
+                    "WARNING: `/sys/devices/{{cpu,cpu_core}}` not found; \
+                    unable to determine if CPU has a hybrid architecture"
+                );
+                None
+            }
+        }
+    } else if #[cfg(all(target_os = "linux", target_arch = "aarch64"))] {
+        // On ARM64/Linux there is no definitive way to distinguish P-cores from E-cores, so we
+        // must use a heuristic.
+        //
+        // Each core has a listed "capacity", a performance estimate relative to the most powerful
+        // core in the system (scaled 0-1024). For example, an ASUS GX10 Ascent has a Cortex-X925
+        // with 10 P-cores and a Cortex-A725 with 10 E-cores. The reported capacities are:
+        // * Cores  0- 4:  718  (E-cores in cluster 1 with 8MiB L3 cache)
+        // * Cores  5- 9:  997  (P-cores in cluster 1 with 8MiB L3 cache)
+        // * Cores 10-14:  731  (E-cores in cluster 2 with 16MiB L3 cache)
+        // * Cores 15-18: 1017  (P-cores in cluster 2 with 16MiB L3 cache)
+        // * Core     19: 1024  (P-core in cluster 2 with 16MiB L3 cache))
+        //
+        // The heuristic is that any core with a capacity at least 90% of the maximum capacity is
+        // considered a P-core, and any other core is considered an E-core. (The 718/731 and
+        // 997/1017 differences are presumably due to the L3 cache size. The reason for the
+        // 1017/1024 difference is unclear. Even though the P-cores are not all identical, they are
+        // close enough for our purposes.)
+        fn p_cores() -> Option<PCores> {
+            let mut caps = vec![];
+            for i in 0.. {
+                let path = format!("/sys/devices/system/cpu/cpu{i}/cpu_capacity");
+                if !std::fs::exists(&path).unwrap() {
+                    break;
+                }
+                let cap = std::fs::read_to_string(&path).unwrap().trim().parse::<usize>().unwrap();
+                caps.push((i, cap));
+            }
 
-#[cfg(not(target_os = "linux"))]
-// Modify this stub if you want to add support for P/E cores on more OSs
-fn run_on_p_cores(_path: &Path, _cpu_list: &str) -> Command {
-    todo!("Can't run commands on the P cores on this platform");
+            if let Some(max_cap) = caps.iter().map(|(_, cap)| cap).max() {
+                // Filter out cores that fail the 90% capacity check.
+                let cap_threshold = *max_cap as f64 * 0.9;
+                let p_cores: Vec<_> = caps.iter().filter_map(|(i, cap)| {
+                    if *cap as f64 >= cap_threshold {
+                        Some(i.to_string())
+                    } else {
+                        None
+                    }
+                }).collect();
+
+                if p_cores.len() == caps.len() {
+                    // All cores have roughly the same capacity; this is not a hybrid CPU.
+                    None
+                } else {
+                    let list = p_cores.join(",");
+                    eprintln!(
+                        "WARNING: hybrid ARM CPU detected; test suite will only use P-cores: {list}"
+                    );
+                    Some(PCores {
+                        len: p_cores.len(),
+                        list,
+                    })
+                }
+            } else {
+                eprintln!(
+                    "WARNING: `/sys/devices/system/cpu/cpu*/cpu_capacity` not found; \
+                    unable to determine if CPU has a hybrid architecture"
+                );
+                None
+            }
+        }
+    } else {
+        // Modify this stub if you want to add support for hybrid architectures on more platforms.
+        fn p_cores() -> Option<PCores> {
+            None
+        }
+    }
 }
 
 impl<'a> CargoProcess<'a> {
@@ -214,11 +287,17 @@ impl<'a> CargoProcess<'a> {
     }
 
     fn base_command(&self, cwd: &Path, subcommand: &str) -> Command {
-        // Processors with P and E cores require special handling
-        let mut cmd = if let Some(p_cores) = performance_cores() {
-            run_on_p_cores(Path::new(&self.toolchain.components.cargo), p_cores)
+        let cargo_path = Path::new(&self.toolchain.components.cargo);
+        let mut cmd = if let Some(p_cores) = (*P_CORES).as_ref() {
+            // Processors with P-cores and E-cores require special handling.
+            let mut cmd = Command::new("taskset");
+            cmd.env("CARGO_BUILD_JOBS", p_cores.len.to_string());
+            cmd.arg("--cpu-list");
+            cmd.arg(&p_cores.list);
+            cmd.arg(cargo_path);
+            cmd
         } else {
-            Command::new(Path::new(&self.toolchain.components.cargo))
+            Command::new(cargo_path)
         };
         cmd
             // Not all cargo invocations (e.g. `cargo clean`) need all of these
@@ -281,23 +360,32 @@ impl<'a> CargoProcess<'a> {
     // really.
     pub async fn run_rustc(&mut self, needs_final: bool) -> anyhow::Result<()> {
         log::info!(
-            "run_rustc with incremental={}, profile={:?}, scenario={:?}, patch={:?}, backend={:?}, target={:?}, phase={}",
+            "run_rustc with incremental={}, profile={:?}, scenario={:?}, patch={:?}, backend={:?}, target={:?}, frontend_threads={}, phase={}",
             self.incremental,
             self.profile,
             self.processor_etc.as_ref().map(|v| v.1),
             self.processor_etc.as_ref().and_then(|v| v.3),
             self.backend,
             self.target,
+            self.frontend_threads.get(),
             if needs_final { "benchmark" } else { "dependencies" }
         );
 
         loop {
             // Make sure that Cargo.lock isn't changed by the build
-            let _guard = EnsureImmutableFile::new(
-                &self.cwd.join("Cargo.lock"),
-                self.processor_name.0.clone(),
-            )
-            .context("cannot resolve Cargo.lock")?;
+            let _guard = if cfg!(target_os = "linux") {
+                Some(
+                    EnsureImmutableFile::new(
+                        &self.cwd.join("Cargo.lock"),
+                        self.processor_name.0.clone(),
+                    )
+                    .context("cannot resolve Cargo.lock")?,
+                )
+            } else {
+                // We develop on Linux; if we try to build on Windows, the lockfiles would be
+                // re-generated, so we just avoid checking
+                None
+            };
 
             // Get the subcommand. If it's not `rustc` it should be a
             // subcommand that itself invokes `rustc` (so that the `FAKE_RUSTC`
@@ -329,6 +417,15 @@ impl<'a> CargoProcess<'a> {
 
             let mut cmd = self.base_command(self.cwd, cargo_subcommand);
             cmd.arg("-p").arg(self.get_pkgid(self.cwd)?);
+
+            // FIXME: this is a hotfix for the -threads4 benchmark(s), until we finish support for
+            // parallel frontend benchmarks fully.
+            if !self.rustc_args.iter().any(|arg| arg.contains("-Zthreads")) {
+                cmd.env(
+                    "RUSTC_THREAD_COUNT",
+                    self.frontend_threads.get().to_string(),
+                );
+            }
             match self.profile {
                 Profile::Check => {
                     cmd.arg("--profile").arg("check");
@@ -460,6 +557,7 @@ impl<'a> CargoProcess<'a> {
                     patch,
                     backend: self.backend,
                     target: self.target,
+                    frontend_threads: self.frontend_threads,
                 };
                 match processor.process_output(&data, output).await {
                     Ok(Retry::No) => return Ok(()),
@@ -475,9 +573,10 @@ impl<'a> CargoProcess<'a> {
 
 static FAKE_RUSTC: LazyLock<PathBuf> = LazyLock::new(|| {
     let mut fake_rustc = env::current_exe().unwrap();
+    let extension = fake_rustc.extension().map(|ext| ext.to_owned());
     fake_rustc.pop();
     fake_rustc.push("rustc-fake");
-    fake_rustc
+    fake_rustc.with_extension(extension.unwrap_or_default())
 });
 static FAKE_RUSTDOC: LazyLock<PathBuf> = LazyLock::new(|| {
     let mut fake_rustdoc = env::current_exe().unwrap();
@@ -525,6 +624,7 @@ pub struct ProcessOutputData<'a> {
     patch: Option<&'a Patch>,
     backend: CodegenBackend,
     target: Target,
+    frontend_threads: FrontendThreads,
 }
 
 /// Trait used by `Benchmark::measure()` to provide different kinds of
@@ -594,7 +694,7 @@ enum DeserializeStatError {
     IOError(#[from] std::io::Error),
 }
 
-enum SelfProfileFiles {
+pub enum SelfProfileFiles {
     Eight { file: PathBuf },
 }
 
@@ -603,6 +703,11 @@ fn process_stat_output(
 ) -> Result<(Stats, Option<SelfProfile>, Option<SelfProfileFiles>), DeserializeStatError> {
     let stdout = String::from_utf8(output.stdout.clone()).expect("utf8 output");
     let mut stats = Stats::new();
+
+    // ARM P-core events have names like `armv8_pmuv3_0/instructions:u/` and
+    // `armv8_pmuv3_1/branche-misses/`.
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    let arm_p_core_events_re = regex::Regex::new(r"armv[0-9]_pmuv[0-9]_[0-9]/([^/]*)/").unwrap();
 
     let mut self_profile_dir: Option<PathBuf> = None;
     let mut self_profile_crate: Option<String> = None;
@@ -654,24 +759,43 @@ fn process_stat_output(
                 }
             };
         }
+
         let mut parts = line.split(';').map(|s| s.trim());
         let cnt = get!(parts.next());
-        let _unit = get!(parts.next());
-        let mut name = get!(parts.next());
-        // Map P-core events to normal events
-        if name == "cpu_core/instructions:u/" {
-            name = "instructions:u";
-        }
-        let _time = get!(parts.next());
-        let pct = get!(parts.next());
         if cnt == "<not supported>" || cnt == "<not counted>" || cnt.is_empty() {
             continue;
         }
+
+        let _unit = get!(parts.next());
+
+        #[allow(unused_mut)]
+        let mut name = get!(parts.next()).to_string();
+        // Map P-core event name to normal event names.
+        cfg_if::cfg_if! {
+            if #[cfg(all(target_os = "linux", target_arch = "x86_64"))] {
+                if name == "cpu_core/instructions:u/" {
+                    name = "instructions:u".to_string();
+                }
+            } else if #[cfg(all(target_os = "linux", target_arch = "aarch64"))] {
+                // ARM P-core events have names like `armv8_pmuv3_0/instructions:u/` and
+                // `armv8_pmuv3_1/branche-misses/`.
+                if let Some(event) = arm_p_core_events_re.captures(&name) {
+                    name = event[1].to_string();
+                }
+            }
+        }
+
+        let _time = get!(parts.next());
+
+        let pct = get!(parts.next());
         if !pct.starts_with("100.") {
+            // If this fails, it's probably because the CPU has a hybrid architecture and the
+            // metric is split across P-cores and E-cores. See `PCores`.
             panic!("measurement of `{name}` only active for {pct}% of the time");
         }
+
         stats.insert(
-            name.to_owned(),
+            name,
             cnt.parse()
                 .map_err(|e| DeserializeStatError::ParseError(cnt.to_string(), e))?,
         );

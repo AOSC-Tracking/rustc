@@ -419,6 +419,7 @@ td_library(
     includes = ["."],
     deps = [
         "@llvm-project//mlir:OpBaseTdFiles",
+        "@llvm-project//mlir:SideEffectInterfaces",
     ],
 )
 
@@ -505,7 +506,10 @@ gentbl_cc_library(
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
     td_file = "Enzyme/MLIR/Dialect/LLVMExt/LLVMExtOps.td",
-    deps = [":LLVMExtDialectTdFiles"],
+    deps = [
+        ":LLVMExtDialectTdFiles",
+        "@llvm-project//mlir:SideEffectInterfacesTdFiles"
+    ]
 )
 
 gentbl_cc_library(
@@ -961,6 +965,7 @@ cc_library(
         "Enzyme/MLIR/Interfaces/*.h",
         "Enzyme/MLIR/Analysis/*.h",
         "Enzyme/MLIR/Implementations/*.h",
+        "Enzyme/EnzymeCallMarkers.h",
         "Enzyme/Utils.h",
         "Enzyme/TypeAnalysis/*.h",
     ]),

@@ -1,7 +1,7 @@
 # Rust Compiler Performance Benchmarking and Profiling
 
 Hardware and software details of the machine that executes the CI details can be found
-[here](../docs/perf-runner.md). A glossary of relevant terms can be found
+[here](../docs/deployment.md). A glossary of relevant terms can be found
 [here](../docs/glossary.md).
 
 ## The benchmarks
@@ -33,6 +33,8 @@ This crate is only compatible with OpenSSL 1.0.1, 1.0.2, and 1.1.0, or LibreSSL
 2.5 and 2.6.0, but a different version of OpenSSL was found. The build is now
 aborting due to this version mismatch.
 ```
+
+For benchmarking using `perf`, you will also need to set `/proc/sys/kernel/perf_event_paranoid` to `-1`.
 
 ## Benchmarking
 
@@ -158,6 +160,9 @@ The following options alter the behaviour of the `bench_local` subcommand.
   `IncrUnchanged`, `IncrPatched`, and `All`. The default is `All`. Note that
   `IncrFull` is always run if either of `IncrUnchanged` or `IncrPatched` are
   run (even if not requested).
+- `--frontend-threads <FRONTEND_THREADS>`: comma-separated list of thread counts for
+  the parallel frontend. Maps directly to the `-Zthreads` rustc option.
+  The default is `1`.
 - `--backends <BACKENDS>`: the codegen backends to be benchmarked. The possible
   choices are one or more (comma-separated) of `Llvm`, `Cranelift`. The default
   is `Llvm`.
@@ -202,7 +207,7 @@ and discover all benchmarks within them. If you only want to run benchmark(s) fr
 you can use this to speed up the runtime benchmarking or profiling commands.
 
 The `bench_runtime_local` command also shares some options with the `bench_local` command, notably
-`--id`, `--db`, `--cargo`, `--cargo-config`, `--include`, `--exclude` and `--iterations`. 
+`--id`, `--db`, `--cargo`, `--cargo-config`, `--include`, `--exclude` and `--iterations`.
 
 ### How to view the measurements on your own machine
 
@@ -487,6 +492,7 @@ The following options alter the behaviour of the `profile_local` subcommand.
   diff files will also be produced.
 - `--rustdoc <RUSTDOC>` as for `bench_local`.
 - `--scenarios <SCENARIOS>`: as for `bench_local`.
+- `--frontend-threads <FRONTEND_THREADS>`: as for `bench_local`.
 - `--backends <BACKENDS>`: as for `bench_local`.
 - `--jobs <JOB-COUNT>`: execute `<JOB-COUNT>` benchmarks in parallel. This is only allowed for certain
 profilers whose results are not affected by system noise (e.g. `callgrind` or `eprintln`).
@@ -509,7 +515,7 @@ build directory (at least Valgrind 3.22 is required), like this:
 
 ```
 DEP_VALGRIND=<path-to-valgrind-install>/include cargo run --release --bin collector \
-  --features precise-cachegrind profile_runtime cachegrind <RUSTC> <BENCHMARK_NAME> 
+  --features precise-cachegrind profile_runtime cachegrind <RUSTC> <BENCHMARK_NAME>
 ```
 
 ## Codegen diff
@@ -532,7 +538,7 @@ binary artifacts (executables, libraries). You can compare the binary statistics
       [--profile <Debug|Opt>] \
       [--backend <Llvm|Cranelift>]
   ```
-  
+
   You can also compare (diff) the size statistics between two compilers:
   ```bash
   ./target/release/collector binary_stats compile `<rustc>` --include <benchmark name> --rustc2 <rustc2>

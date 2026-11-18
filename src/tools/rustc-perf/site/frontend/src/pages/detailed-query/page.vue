@@ -189,16 +189,26 @@ function storeSortToUrl() {
 
 async function loadData() {
   const params = getUrlParams();
-  const {commit, base_commit, benchmark, scenario} = params;
+  const {commit, base_commit, benchmark, scenario, backend, target} = params;
 
   // Load sort state from URL
   loadSortFromUrl(params);
 
+  // To maintain backwards compatibility of URLs, parse the profile from the
+  // benchmark URL parameter
+  // We turn <benchmark>-<profile> into two separate parameters for the backend
+  const parts = benchmark.split("-");
+  const profile = parts[parts.length - 1];
+  const benchmarkSeparate = parts.slice(0, parts.length - 1).join("-");
+
   const currentSelector: Selector = {
     commit,
     base_commit: base_commit ?? null,
-    benchmark,
+    benchmark: benchmarkSeparate,
     scenario,
+    profile,
+    backend,
+    target,
   };
   selector.value = currentSelector;
 

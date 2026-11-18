@@ -1,0 +1,111 @@
+# TODO: test more stuff on Windows.
+
+name: CI
+
+on:
+  - push
+  - pull_request
+
+permissions:
+  contents: read
+
+env:
+  # Enable backtraces for easier debugging
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os:
+          - ubuntu-24.04
+          - windows-2025
+
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: clippy
+
+      - name: Download and install GCC fork
+        if: ${{ matrix.os == 'ubuntu-24.04' }}
+        run: |
+          curl -LO https://github.com/rust-lang/gcc/releases/latest/download/gcc-15.deb
+          sudo dpkg --force-overwrite -i gcc-15.deb
+
+      - name: Set env
+        run: |
+          echo "workspace="$GITHUB_WORKSPACE >> $GITHUB_ENV
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry2-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo target dir
+        uses: actions/cache@v3
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('rust-toolchain') }}
+
+      - name: rustfmt
+        run: |
+          cargo fmt --check
+          cd gccjit_sys
+          cargo fmt --check
+
+      - name: Build
+        if: ${{ matrix.os == 'ubuntu-24.04' }}
+        run: |
+          cargo build
+          cargo build --features master,dlopen
+          cargo build --examples
+
+      - name: Build
+        if: ${{ matrix.os == 'windows-2025' }}
+        run: cargo build --features master,dlopen
+
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --features master,dlopen -- -D warnings
+
+      # The error checks are `#[cfg(debug_assertions)]`, so a release build
+      # exercises different code. Without these, `unused`/`dead_code`
+      # warnings that only appear in release go unnoticed.
+      - run: cargo clippy --release --all-targets -- -D warnings
+      - run: cargo clippy --release --all-targets --features master,dlopen -- -D warnings
+
+      - run: |
+          cd gccjit_sys
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy --all-targets --features master,dlopen -- -D warnings
+          cargo clippy --release --all-targets -- -D warnings
+          cargo clippy --release --all-targets --features master,dlopen -- -D warnings
+
+      - name: Test
+        if: ${{ matrix.os == 'ubuntu-24.04' }}
+        run: |
+          cargo test
+          # Everything behind the `master` feature (the region API,
+          # `clone_blocks`, `Block::get_successors`, ...) is otherwise only
+          # compiled, never executed.
+          cargo test --features master
+          cd examples/factorial
+          cargo build
+          cd ../brainfuck
+          cargo build
+          cd ../hello_world
+          cargo build
+          cd ../square_function
+          cargo build

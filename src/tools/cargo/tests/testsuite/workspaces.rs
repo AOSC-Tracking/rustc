@@ -674,6 +674,9 @@ fn share_dependencies() {
 
                 [workspace]
                 members = ["bar"]
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/main.rs", "fn main() {}")
@@ -688,6 +691,9 @@ fn share_dependencies() {
 
                 [dependencies]
                 dep1 = "< 0.1.5"
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("bar/src/main.rs", "fn main() {}");
@@ -699,7 +705,7 @@ fn share_dependencies() {
     p.cargo("check")
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [ADDING] dep1 v0.1.3 (available: v0.1.8)
 [DOWNLOADING] crates ...
 [DOWNLOADED] dep1 v0.1.3 (registry `dummy-registry`)
@@ -749,7 +755,7 @@ fn fetch_fetches_all() {
     p.cargo("fetch")
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] dep1 v0.1.3 (registry `dummy-registry`)
 
@@ -774,6 +780,9 @@ fn lock_works_for_everyone() {
 
                 [workspace]
                 members = ["bar"]
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/main.rs", "fn main() {}")
@@ -788,6 +797,9 @@ fn lock_works_for_everyone() {
 
                 [dependencies]
                 dep1 = "0.1"
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("bar/src/main.rs", "fn main() {}");
@@ -799,7 +811,7 @@ fn lock_works_for_everyone() {
     p.cargo("generate-lockfile")
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
-[LOCKING] 2 packages to latest compatible versions
+[LOCKING] 2 packages to highest compatible versions
 
 "#]])
         .run();
@@ -2020,6 +2032,9 @@ fn dep_used_with_separate_features() {
 
                 [features]
                 myfeature = []
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("feat_lib/src/lib.rs", "")
@@ -2034,6 +2049,9 @@ fn dep_used_with_separate_features() {
 
                 [dependencies]
                 feat_lib = { path = "../feat_lib" }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("caller1/src/main.rs", "fn main() {}")
@@ -2050,6 +2068,9 @@ fn dep_used_with_separate_features() {
                 [dependencies]
                 feat_lib = { path = "../feat_lib", features = ["myfeature"] }
                 caller1 = { path = "../caller1" }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("caller2/src/main.rs", "fn main() {}")
@@ -2345,7 +2366,6 @@ fn ws_err_unused() {
         "[features]",
         "[target]",
         "[badges]",
-        "[lints]",
     ] {
         let key = table.trim_start_matches('[').trim_end_matches(']');
         let p = project()
@@ -2371,6 +2391,55 @@ fn ws_err_unused() {
 
 Caused by:
   this virtual manifest specifies a `{key}` section, which is not allowed
+",
+            ))
+            .run();
+    }
+}
+
+#[cargo_test]
+fn ws_err_unused_similar_suggest() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "[lints]",
+            "[HELP] a similar field exists: `[workspace.lints]`",
+        ),
+        (
+            "[lints.rust]",
+            "[HELP] a similar field exists: `[workspace.lints]`",
+        ),
+        (
+            "[lints.clippy]",
+            "[HELP] a similar field exists: `[workspace.lints]`",
+        ),
+    ];
+    for (table, suggestion) in cases {
+        let key = table.trim_start_matches('[').trim_end_matches(']');
+        let key = key.split_once('.').map(|p| p.0).unwrap_or(key);
+        let p = project()
+            .file(
+                "Cargo.toml",
+                &format!(
+                    r#"
+                    [workspace]
+                    members = ["a"]
+
+                    {table}
+                    "#,
+                ),
+            )
+            .file("a/Cargo.toml", &basic_lib_manifest("a"))
+            .file("a/src/lib.rs", "")
+            .build();
+        p.cargo("check")
+            .with_status(101)
+            .with_stderr_data(&format!(
+                "\
+[ERROR] failed to parse manifest at `[..]/foo/Cargo.toml`
+
+Caused by:
+  this virtual manifest specifies a `{key}` section, which is not allowed
+  {suggestion}
 ",
             ))
             .run();
@@ -2479,19 +2548,9 @@ fn invalid_missing() {
     p.cargo("check -q")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] failed to get `x` as a dependency of package `foo v0.1.0 ([ROOT]/foo)`
-
-Caused by:
-  failed to load source for dependency `x`
-
-Caused by:
-  unable to update [ROOT]/foo/x
-
-Caused by:
-  failed to read `[ROOT]/foo/x/Cargo.toml`
-
-Caused by:
-  [NOT_FOUND]
+[ERROR] no matching package named `x` found
+location searched: [ROOT]/foo/x
+required by package `foo v0.1.0 ([ROOT]/foo)`
 
 "#]])
         .run();

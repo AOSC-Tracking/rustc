@@ -49,6 +49,7 @@ def check_output(actual, path, name):
     if expected == actual:
         return True
     print(f"{name} output did not match reference in {path}!")
+    print("Run `./run-test.py --bless` to update reference files.")
     print(f"--- BEGIN diff {name} ---")
     for text in difflib.unified_diff(expected.split("\n"), actual.split("\n")):
         print(text)
@@ -175,6 +176,14 @@ def test_cargo_miri_test():
         "test.workspace.stdout.ref", "test.workspace.stderr.ref",
         env={'MIRIFLAGS': "-Zmiri-disable-isolation"},
     )
+    # FIXME: test is disabled for cross-compiled targets because it fails to link.
+    # Related to <https://github.com/rust-lang/cargo/issues/17200>.
+    if not os.environ.get('MIRI_TESTS_CROSS_COMPILED'):
+        test("`cargo miri test` (entire workspace, no isolation, host-config)",
+            cargo_miri("test") + ["--workspace", "-Ztarget-applies-to-host", "-Zhost-config"],
+            "test.workspace.stdout.ref", "test.workspace.stderr.ref",
+            env={'MIRIFLAGS': "-Zmiri-disable-isolation"},
+        )
     test("`cargo miri test` (custom target dir)",
         cargo_miri("test") + ["--target-dir=custom-test"],
         "test.default.stdout.ref", "test.empty.ref",

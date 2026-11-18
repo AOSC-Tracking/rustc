@@ -19,6 +19,34 @@ pub use pool::{Connection, Pool};
 
 intern!(pub struct Metric);
 intern!(pub struct Benchmark);
+intern!(pub struct TargetName);
+
+#[derive(Serialize, Deserialize, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct FrontendThreads(pub u32);
+
+impl FrontendThreads {
+    // Default thread counts for the parallel frontend
+    pub fn default_threads_counts() -> Vec<FrontendThreads> {
+        vec![FrontendThreads(1)]
+    }
+    pub fn single(self) -> bool {
+        self.0 == 1
+    }
+}
+
+impl std::str::FromStr for FrontendThreads {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let v: u32 = s
+            .parse()
+            .map_err(|e: std::num::ParseIntError| e.to_string())?;
+        Ok(Self(v))
+    }
+}
+
+pub fn intern_target_name(target: &str) -> TargetName {
+    intern(target)
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct QueuedCommit {
@@ -230,7 +258,24 @@ impl Profile {
 
     /// Set of default profiles that should be benchmarked for a master/try artifact.
     pub fn default_profiles() -> Vec<Self> {
-        vec![Profile::Check, Profile::Debug, Profile::Doc, Profile::Opt]
+        vec![
+            Profile::Check,
+            Profile::Debug,
+            Profile::Opt,
+            Profile::Doc,
+            Profile::DocJson,
+        ]
+    }
+
+    pub fn all_values() -> &'static [Self] {
+        &[
+            Self::Check,
+            Self::Debug,
+            Self::Opt,
+            Self::Doc,
+            Self::DocJson,
+            Self::Clippy,
+        ]
     }
 }
 
@@ -355,31 +400,53 @@ impl PartialOrd for Scenario {
 /// their support see;
 /// https://doc.rust-lang.org/nightly/rustc/platform-support.html
 ///
-/// Presently we only support x86_64
+/// We separate "first-party" targets for which we have additional support, and a fallback
+/// that can be used to use rustc-perf for any target.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Target {
     /// `x86_64-unknown-linux-gnu`
     X86_64UnknownLinuxGnu,
+
+    /// `aarch64-unknown-linux-gnu`
+    AArch64UnknownLinuxGnu,
+    Custom(TargetName),
 }
 
 impl Target {
     pub fn as_str(self) -> &'static str {
         match self {
             Target::X86_64UnknownLinuxGnu => "x86_64-unknown-linux-gnu",
+            Target::AArch64UnknownLinuxGnu => "aarch64-unknown-linux-gnu",
+            Target::Custom(name) => name.as_str(),
         }
     }
 
-    pub fn all() -> Vec<Self> {
+    /// Targets that we primarily support in the website.
+    pub fn primary_targets() -> Vec<Self> {
+        vec![Self::X86_64UnknownLinuxGnu, Self::AArch64UnknownLinuxGnu]
+    }
+
+    /// Targets that will be benchmarked by default in benchmark requests when no explicit target
+    /// is specified.
+    pub fn default_targets() -> Vec<Self> {
         vec![Self::X86_64UnknownLinuxGnu]
+    }
+
+    // 2026/01/12 (Jamesbarford) - presently rustc-perf only support `x86_64`'s
+    // in the pipeline and has two machines running. AArch64 will be run in
+    // the background and we do not want to wait for it to complete benchmarking
+    pub fn is_optional(&self) -> bool {
+        *self != Target::X86_64UnknownLinuxGnu
     }
 }
 
 impl FromStr for Target {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s.to_ascii_lowercase().as_str() {
+        Ok(match s {
             "x86_64-unknown-linux-gnu" => Target::X86_64UnknownLinuxGnu,
-            _ => return Err(format!("{s} is not a valid target")),
+            "aarch64-unknown-linux-gnu" => Target::AArch64UnknownLinuxGnu,
+            other => Target::Custom(intern(other)),
         })
     }
 }
@@ -405,6 +472,10 @@ impl CodegenBackend {
             CodegenBackend::Llvm => "llvm",
             CodegenBackend::Cranelift => "cranelift",
         }
+    }
+
+    pub fn all_values() -> &'static [Self] {
+        &[Self::Llvm, Self::Cranelift]
     }
 }
 
@@ -520,9 +591,17 @@ pub struct Index {
     artifacts: Indexed<Box<str>>,
     /// Id lookup of compile stat description ids
     /// For legacy reasons called `pstat_series` in the database, and so the name is kept here.
-    pstat_series: Indexed<(Benchmark, Profile, Scenario, CodegenBackend, Target, Metric)>,
+    pstat_series: Indexed<(
+        Benchmark,
+        Profile,
+        Scenario,
+        CodegenBackend,
+        Target,
+        FrontendThreads,
+        Metric,
+    )>,
     /// Id lookup of runtime stat description ids
-    runtime_pstat_series: Indexed<(Benchmark, Metric)>,
+    runtime_pstat_series: Indexed<(Benchmark, Target, Metric)>,
 }
 
 /// An index lookup
@@ -634,7 +713,7 @@ mod index_serde {
     }
 }
 
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum DbLabel {
     StatisticDescription {
         benchmark: Benchmark,
@@ -642,6 +721,7 @@ pub enum DbLabel {
         scenario: Scenario,
         backend: CodegenBackend,
         target: Target,
+        frontend_threads: FrontendThreads,
         metric: Metric,
     },
 }
@@ -660,11 +740,18 @@ impl Lookup for DbLabel {
                 profile,
                 scenario,
                 backend,
-                metric,
                 target,
-            } => index
-                .pstat_series
-                .get(&(*benchmark, *profile, *scenario, *backend, *target, *metric)),
+                frontend_threads,
+                metric,
+            } => index.pstat_series.get(&(
+                *benchmark,
+                *profile,
+                *scenario,
+                *backend,
+                *target,
+                *frontend_threads,
+                *metric,
+            )),
         }
     }
 }
@@ -680,6 +767,15 @@ impl Lookup for ArtifactId {
 }
 
 pub type StatisticalDescriptionId = u32;
+pub type CompileStatisticDescription = (
+    Benchmark,
+    Profile,
+    Scenario,
+    CodegenBackend,
+    Target,
+    FrontendThreads,
+    Metric,
+);
 
 impl Index {
     pub async fn load(conn: &mut dyn pool::Connection) -> Index {
@@ -706,15 +802,13 @@ impl Index {
         commits
     }
 
-    // FIXME: in theory this won't scale indefinitely as there's potentially
-    // millions of queries and labels and iterating all of them is eventually
-    // going to be impractical. But for now it performs quite well, so we'll go
-    // for it as keeping indices around would be annoying.
+    // Note: this function (same as the functions below) iterate through all possible combinations
+    // of benchmark parameters, so they should ideally not be called very often.
     pub fn compile_metrics(&self) -> Vec<String> {
         self.pstat_series
             .map
             .keys()
-            .map(|(_, _, _, _, _, metric)| metric)
+            .map(|(_, _, _, _, _, _, metric)| metric)
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .map(|s| s.to_string())
@@ -725,10 +819,22 @@ impl Index {
         self.runtime_pstat_series
             .map
             .keys()
-            .map(|(_, metric)| metric)
+            .map(|(_, _, metric)| metric)
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// All targets for which we have some compile-time benchmark result data.
+    pub fn compile_targets(&self) -> Vec<Target> {
+        self.pstat_series
+            .map
+            .keys()
+            .map(|(_, _, _, _, target, _, _)| target)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .cloned()
             .collect()
     }
 
@@ -738,12 +844,7 @@ impl Index {
     // for it as keeping indices around would be annoying.
     pub fn compile_statistic_descriptions(
         &self,
-    ) -> impl Iterator<
-        Item = (
-            &(Benchmark, Profile, Scenario, CodegenBackend, Target, Metric),
-            StatisticalDescriptionId,
-        ),
-    > + '_ {
+    ) -> impl Iterator<Item = (&CompileStatisticDescription, StatisticalDescriptionId)> + '_ {
         self.pstat_series
             .map
             .iter()
@@ -752,7 +853,7 @@ impl Index {
 
     pub fn runtime_statistic_descriptions(
         &self,
-    ) -> impl Iterator<Item = (&(Benchmark, Metric), StatisticalDescriptionId)> + '_ {
+    ) -> impl Iterator<Item = (&(Benchmark, Target, Metric), StatisticalDescriptionId)> + '_ {
         self.runtime_pstat_series
             .map
             .iter()
@@ -781,12 +882,21 @@ pub struct Step {
     pub expected: Duration,
 }
 
-#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+#[derive(Debug, Hash, PartialEq, Eq, Copy, Clone)]
 pub struct CollectionId(i32);
 
 impl fmt::Display for CollectionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl CollectionId {
+    pub fn from_inner(cid: i32) -> Self {
+        Self(cid)
+    }
+    pub fn as_inner(&self) -> i32 {
+        self.0
     }
 }
 
@@ -898,6 +1008,7 @@ pub struct BenchmarkRequest {
     status: BenchmarkRequestStatus,
     backends: String,
     profiles: String,
+    targets: String,
 }
 
 impl BenchmarkRequest {
@@ -912,11 +1023,17 @@ impl BenchmarkRequest {
             status: BenchmarkRequestStatus::ArtifactsReady,
             backends: String::new(),
             profiles: String::new(),
+            targets: String::new(),
         }
     }
 
     /// Create a try request that is in the `WaitingForArtifacts` status.
-    pub fn create_try_without_artifacts(pr: u32, backends: &str, profiles: &str) -> Self {
+    pub fn create_try_without_artifacts(
+        pr: u32,
+        backends: &str,
+        profiles: &str,
+        targets: &str,
+    ) -> Self {
         Self {
             commit_type: BenchmarkRequestType::Try {
                 pr,
@@ -928,6 +1045,7 @@ impl BenchmarkRequest {
             status: BenchmarkRequestStatus::WaitingForArtifacts,
             backends: backends.to_string(),
             profiles: profiles.to_string(),
+            targets: targets.to_string(),
         }
     }
 
@@ -944,6 +1062,7 @@ impl BenchmarkRequest {
             status: BenchmarkRequestStatus::ArtifactsReady,
             backends: String::new(),
             profiles: String::new(),
+            targets: String::new(),
         }
     }
 
@@ -1009,12 +1128,7 @@ impl BenchmarkRequest {
             return Ok(vec![CodegenBackend::Llvm]);
         }
 
-        self.backends
-            .split(',')
-            .map(|s| {
-                CodegenBackend::from_str(s).map_err(|_| anyhow::anyhow!("Invalid backend: {s}"))
-            })
-            .collect()
+        parse_backends(&self.backends).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     /// Get the profiles for the request
@@ -1024,11 +1138,16 @@ impl BenchmarkRequest {
             return Ok(Profile::default_profiles());
         }
 
-        self.profiles
-            .split(',')
-            .map(Profile::from_str)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| anyhow::anyhow!("Invalid backend: {e}"))
+        parse_profiles(&self.profiles).map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// Get the targets for the request
+    pub fn targets(&self) -> anyhow::Result<Vec<Target>> {
+        if self.targets.trim().is_empty() {
+            return Ok(Target::default_targets());
+        }
+
+        parse_targets(&self.targets).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     pub fn is_completed(&self) -> bool {
@@ -1038,6 +1157,43 @@ impl BenchmarkRequest {
     pub fn is_in_progress(&self) -> bool {
         matches!(self.status, BenchmarkRequestStatus::InProgress)
     }
+}
+
+/// Result of inserting into the database
+#[derive(Debug, Clone, PartialEq)]
+pub enum BenchmarkRequestInsertResult {
+    /// The request was inserted into the database and is a unique instance
+    Inserted,
+    /// The request was not inserted into the database as something else already
+    /// existed that clashed with the unique clause
+    NothingInserted,
+}
+
+fn parse_comma_separated<T>(raw_string: &str, name: &str) -> Result<Vec<T>, String>
+where
+    T: FromStr,
+{
+    raw_string
+        .split(',')
+        .map(|s| T::from_str(s).map_err(|_| format!("Invalid {name}: {s}")))
+        .collect()
+}
+
+pub fn parse_backends(backends: &str) -> Result<Vec<CodegenBackend>, String> {
+    parse_comma_separated(backends, "backend")
+}
+
+pub fn parse_profiles(profiles: &str) -> Result<Vec<Profile>, String> {
+    parse_comma_separated(profiles, "profile")
+}
+
+pub fn parse_targets(targets: &str) -> Result<Vec<Target>, String> {
+    let primary = Target::primary_targets();
+    let targets = parse_comma_separated(targets, "target")?;
+    if !targets.iter().all(|t| primary.contains(t)) {
+        return Err("Only primary targets can be specified".to_string());
+    }
+    Ok(targets)
 }
 
 /// Cached information about benchmark requests in the DB
@@ -1055,6 +1211,7 @@ impl BenchmarkRequestIndex {
 
 /// Contains pending (ArtifactsReady or InProgress) benchmark requests, and a set of their parents
 /// that are already completed.
+#[derive(Debug)]
 pub struct PendingBenchmarkRequests {
     pub requests: Vec<BenchmarkRequest>,
     pub completed_parent_tags: HashSet<String>,
@@ -1133,6 +1290,7 @@ pub struct BenchmarkJob {
     status: BenchmarkJobStatus,
     deque_counter: u32,
     kind: BenchmarkJobKind,
+    is_optional: bool,
 }
 
 impl BenchmarkJob {
@@ -1183,6 +1341,10 @@ impl BenchmarkJob {
 
     pub fn kind(&self) -> BenchmarkJobKind {
         self.kind
+    }
+
+    pub fn is_optional(&self) -> bool {
+        self.is_optional
     }
 }
 

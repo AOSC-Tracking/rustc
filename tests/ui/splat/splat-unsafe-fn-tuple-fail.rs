@@ -4,11 +4,11 @@
 #![feature(splat)]
 
 unsafe fn unsafe_wrong_type(#[rustc_splat] _x: u32) {}
-//~^ ERROR cannot use splat attribute; the splatted argument type must be a tuple or unit, not a u32
+//~^ ERROR cannot use `rustc_splat` attribute; the splatted argument type must be a tuple or unit, not a u32
 
 unsafe fn unsafe_multi_splat(
     #[rustc_splat] (_a, _b): (u32, i8),
-    //~^ ERROR multiple `#[rustc_splat]`s are not allowed in the same function
+    //~^ ERROR multiple `#[rustc_splat]`s are not allowed in the same function argument list
     #[rustc_splat] (_c, _d): (u32, i8),
 ) {}
 

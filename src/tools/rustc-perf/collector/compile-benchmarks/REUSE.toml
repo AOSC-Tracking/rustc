@@ -53,6 +53,11 @@ SPDX-FileCopyrightText = "clap contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
 [[annotations]]
+path = "clap_derive-4.5.32-nll/**"
+SPDX-FileCopyrightText = "clap contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
 path = "coercions/**"
 SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-lang.org)"
 SPDX-License-Identifier = "MIT"
@@ -78,12 +83,22 @@ SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-l
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
+path = "deeply-nested-multi-new-solver/**"
+SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-lang.org)"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
 path = "derive/**"
 SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-lang.org)"
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
 path = "diesel-2.2.10/**"
+SPDX-FileCopyrightText = "diesel contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
+path = "diesel-2.2.10-new-solver/**"
 SPDX-FileCopyrightText = "diesel contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
@@ -231,6 +246,11 @@ SPDX-FileCopyrightText = "ripgrep contributors"
 SPDX-License-Identifier = "MIT OR Unlicense"
 
 [[annotations]]
+path = "ripgrep-14.1.1-nll/**"
+SPDX-FileCopyrightText = "ripgrep contributors"
+SPDX-License-Identifier = "MIT OR Unlicense"
+
+[[annotations]]
 path = "ripgrep-14.1.1-tiny/**"
 SPDX-FileCopyrightText = "ripgrep contributors"
 SPDX-License-Identifier = "MIT OR Unlicense"
@@ -242,6 +262,11 @@ SPDX-License-Identifier = "MIT OR Apache-2.0"
 
 [[annotations]]
 path = "serde-1.0.219-new-solver/**"
+SPDX-FileCopyrightText = "serde contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
+path = "serde-1.0.219-nll/**"
 SPDX-FileCopyrightText = "serde contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
@@ -310,6 +335,11 @@ SPDX-FileCopyrightText = "typenum contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
 [[annotations]]
+path = "typenum-1.18.0-new-solver/**"
+SPDX-FileCopyrightText = "typenum contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
 path = "ucd/**"
 SPDX-FileCopyrightText = "ucd contributors"
 SPDX-License-Identifier = "MIT OR Unicode-DFS-2016"
@@ -336,5 +366,10 @@ SPDX-License-Identifier = "MIT"
 
 [[annotations]]
 path = "wg-grammar/**"
+SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-lang.org)"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+[[annotations]]
+path = "wg-grammar-new-solver/**"
 SPDX-FileCopyrightText = "The Rust Project Developers (see https://thanks.rust-lang.org)"
 SPDX-License-Identifier = "MIT OR Apache-2.0"

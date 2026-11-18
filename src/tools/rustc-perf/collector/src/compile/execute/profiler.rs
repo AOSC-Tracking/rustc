@@ -65,6 +65,18 @@ impl Profiler {
         }
     }
 
+    /// A file prefix added to all (second-stage) files of this profiler.
+    pub fn prefix2(&self) -> &'static str {
+        use Profiler::*;
+        match self {
+            Cachegrind => "cgann",
+            DepGraph => "dep-graph",
+
+            SelfProfile | PerfRecord | Oprofile | Samply | Callgrind | Dhat | DhatCopy | Massif
+            | Bytehound | Eprintln | LlvmLines | MonoItems | LlvmIr => "",
+        }
+    }
+
     /// A postfix added to the file that gets diffed.
     pub fn postfix(&self) -> &'static str {
         use Profiler::*;
@@ -119,11 +131,16 @@ impl Processor for ProfileProcessor<'_> {
         Box::pin(async move {
             fs::create_dir_all(self.output_dir)?;
 
-            // Produce a name of the form $PREFIX-$ID-$BENCHMARK-$PROFILE-$SCENARIO.
+            // Produce a name of the form $PREFIX-$ID-$BENCHMARK-$PROFILE-$SCENARIO-$FRONTEND_THREADS_<N>.
             let out_file = |prefix: &str| -> String {
                 format!(
-                    "{}-{}-{}-{:?}-{}",
-                    prefix, self.id, data.name, data.profile, data.scenario_str
+                    "{}-{}-{}-{:?}-{}-Threads{}",
+                    prefix,
+                    self.id,
+                    data.name,
+                    data.profile,
+                    data.scenario_str,
+                    data.frontend_threads.get(),
                 )
             };
 

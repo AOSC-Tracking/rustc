@@ -26,7 +26,15 @@ pub struct Team {
     pub github: Option<TeamGitHub>,
     pub website_data: Option<TeamWebsite>,
     pub roles: Vec<MemberRole>,
-    pub discord: Vec<TeamDiscord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub google_workspace_saml_group: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GoogleWorkspace {
+    pub first_name: String,
+    pub last_name: String,
+    pub account_handle: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -37,6 +45,8 @@ pub struct TeamMember {
     pub is_lead: bool,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub roles: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub google_workspace: Option<GoogleWorkspace>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -58,7 +68,6 @@ pub struct TeamWebsite {
     pub page: String,
     pub email: Option<String>,
     pub repo: Option<String>,
-    pub discord: Option<DiscordInvite>,
     pub zulip_stream: Option<String>,
     pub matrix_room: Option<String>,
     pub weight: i64,
@@ -68,19 +77,6 @@ pub struct TeamWebsite {
 pub struct MemberRole {
     pub id: String,
     pub description: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TeamDiscord {
-    pub name: String,
-    pub members: Vec<u64>,
-    pub color: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct DiscordInvite {
-    pub channel: String,
-    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -127,6 +123,26 @@ pub struct ZulipGroups {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ZulipStream {
+    pub name: String,
+    pub members: Vec<ZulipStreamMember>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ZulipStreamMember {
+    // TODO(rylev): this variant can be removed once
+    // it is verified that no one is relying on it
+    Email(String),
+    Id(u64),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ZulipStreams {
+    pub streams: IndexMap<String, ZulipStream>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Permission {
     pub people: Vec<PermissionPerson>,
     pub github_users: Vec<String>,
@@ -168,13 +184,32 @@ pub struct Repo {
     pub bots: Vec<Bot>,
     pub teams: Vec<RepoTeam>,
     pub members: Vec<RepoMember>,
+    /// These are rulesets, not branch protections.
+    /// The name is unchanged to keep the API retro-compatible.
     pub branch_protections: Vec<BranchProtection>,
+    pub crates: Vec<Crate>,
+    pub environments: IndexMap<String, Environment>,
     pub archived: bool,
     // This attribute is not synced by sync-team.
     pub private: bool,
     // Is the GitHub "Auto-merge" option enabled?
     // https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/incorporating-changes-from-a-pull-request/automatically-merging-a-pull-request
     pub auto_merge_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CrateTeamOwner {
+    pub org: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Crate {
+    pub name: String,
+    pub crates_io_publishing: Option<CratesIoPublishing>,
+    pub trusted_publishing_only: bool,
+    /// GitHub teams that have access to this crate on crates.io
+    pub teams: Vec<CrateTeamOwner>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -185,7 +220,13 @@ pub enum Bot {
     Rustbot,
     RustTimer,
     Rfcbot,
+    Craterbot,
+    Glacierbot,
+    LogAnalyzer,
+    Datadog,
     Renovate,
+    ForkingRenovate,
+    HerokuDeployAccess,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -210,12 +251,112 @@ pub enum RepoPermission {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchProtectionMode {
+    PrRequired {
+        ci_checks: Vec<String>,
+        required_approvals: u32,
+    },
+    PrNotRequired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeBot {
+    Homu,
+    RustTimer,
+    Bors,
+    WorkflowsCratesIo,
+    PromoteRelease,
+}
+
+impl MergeBot {
+    pub fn app_id(&self) -> Option<i64> {
+        match self {
+            MergeBot::WorkflowsCratesIo => Some(2201425),
+            MergeBot::Bors => Some(278306),
+            MergeBot::PromoteRelease => Some(217112),
+            // These are user-based bots, not GitHub Apps
+            MergeBot::RustTimer | MergeBot::Homu => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtectionTarget {
+    #[default]
+    Branch,
+    Tag,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeQueueMethod {
+    #[default]
+    Merge,
+    Squash,
+    Rebase,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BranchProtection {
     pub pattern: String,
-    pub ci_checks: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_branch_target")]
+    pub target: ProtectionTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub dismiss_stale_review: bool,
-    pub required_approvals: u32,
+    #[serde(default)]
+    pub require_conversation_resolution: bool,
+    #[serde(default)]
+    pub require_linear_history: bool,
+    pub mode: BranchProtectionMode,
     pub allowed_merge_teams: Vec<String>,
+    pub merge_bots: Vec<MergeBot>,
+    pub allowed_merge_apps: Vec<MergeBot>,
+    pub require_up_to_date_branches: bool,
+    pub merge_queue: bool,
+    #[serde(default, skip_serializing_if = "is_default_merge_queue_method")]
+    pub merge_queue_method: MergeQueueMethod,
+    #[serde(
+        default = "default_merge_queue_max_entries_to_build",
+        skip_serializing_if = "is_default_merge_queue_max_entries_to_build"
+    )]
+    pub merge_queue_max_entries_to_build: u32,
+    #[serde(
+        default = "default_merge_queue_min_entries_to_merge_wait_minutes",
+        skip_serializing_if = "is_default_merge_queue_min_entries_to_merge_wait_minutes"
+    )]
+    pub merge_queue_min_entries_to_merge_wait_minutes: u32,
+    #[serde(
+        default = "default_merge_queue_max_entries_to_merge",
+        skip_serializing_if = "is_default_merge_queue_max_entries_to_merge"
+    )]
+    pub merge_queue_max_entries_to_merge: u32,
+    #[serde(
+        default = "default_merge_queue_check_response_timeout_minutes",
+        skip_serializing_if = "is_default_merge_queue_check_response_timeout_minutes"
+    )]
+    pub merge_queue_check_response_timeout_minutes: u32,
+    pub prevent_creation: bool,
+    pub prevent_update: bool,
+    pub prevent_deletion: bool,
+    pub prevent_force_push: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CratesIoPublishing {
+    pub workflow_file: String,
+    pub environment: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Environment {
+    #[serde(default)]
+    pub branches: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -223,10 +364,51 @@ pub struct Person {
     pub name: String,
     pub email: Option<String>,
     pub github_id: u64,
+    pub github_sponsors: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct People {
     /// GitHub name as key.
     pub people: IndexMap<String, Person>,
+}
+
+fn is_branch_target(target: &ProtectionTarget) -> bool {
+    matches!(target, ProtectionTarget::Branch)
+}
+
+fn is_default_merge_queue_method(method: &MergeQueueMethod) -> bool {
+    matches!(method, MergeQueueMethod::Merge)
+}
+
+fn default_merge_queue_max_entries_to_build() -> u32 {
+    5
+}
+
+fn is_default_merge_queue_max_entries_to_build(value: &u32) -> bool {
+    *value == default_merge_queue_max_entries_to_build()
+}
+
+fn default_merge_queue_min_entries_to_merge_wait_minutes() -> u32 {
+    5
+}
+
+fn is_default_merge_queue_min_entries_to_merge_wait_minutes(value: &u32) -> bool {
+    *value == default_merge_queue_min_entries_to_merge_wait_minutes()
+}
+
+fn default_merge_queue_max_entries_to_merge() -> u32 {
+    5
+}
+
+fn is_default_merge_queue_max_entries_to_merge(value: &u32) -> bool {
+    *value == default_merge_queue_max_entries_to_merge()
+}
+
+fn default_merge_queue_check_response_timeout_minutes() -> u32 {
+    60
+}
+
+fn is_default_merge_queue_check_response_timeout_minutes(value: &u32) -> bool {
+    *value == default_merge_queue_check_response_timeout_minutes()
 }

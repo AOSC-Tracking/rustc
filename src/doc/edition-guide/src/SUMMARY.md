@@ -61,7 +61,7 @@
   - [Cargo](rust-2024/cargo.md)
     - [Cargo: Rust-version aware resolver](rust-2024/cargo-resolver.md)
     - [Cargo: Table and key name consistency](rust-2024/cargo-table-key-names.md)
-    - [Cargo: Reject unused inherited default-features](rust-2024/cargo-inherited-default-features.md)
+    - [Cargo: Override inherited default-features](rust-2024/cargo-inherited-default-features.md)
   - [Rustdoc](rust-2024/rustdoc.md)
     - [Rustdoc combined tests](rust-2024/rustdoc-doctests.md)
     - [Rustdoc nested `include!` change](rust-2024/rustdoc-nested-includes.md)

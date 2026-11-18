@@ -1,6 +1,6 @@
 use rustc_ast::{LitIntType, LitKind};
+use rustc_attr_ir::UnrollAttr;
 use rustc_feature::AttributeStability;
-use rustc_hir::attrs::UnrollAttr;
 
 use super::prelude::*;
 
@@ -48,7 +48,7 @@ impl SingleAttributeParser for UnrollParser {
             ArgParser::NameValue(_) => {
                 let inner_span = cx.inner_span;
                 cx.adcx().expected_list_or_no_args(inner_span);
-                return None;
+                None
             }
         }
     }

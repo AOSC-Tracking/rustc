@@ -12,6 +12,9 @@ def : InactiveOp<"LLVM", "StackRestoreOp">;
 def : InactiveOp<"LLVM", "NoAliasScopeDeclOp">;
 def : InactiveOp<"LLVM", "LifetimeStartOp">;
 def : InactiveOp<"LLVM", "LifetimeEndOp">;
+def : InactiveOp<"LLVM", "DbgValueOp">;
+def : InactiveOp<"LLVM", "DbgDeclareOp">;
+def : InactiveOp<"LLVM", "DbgLabelOp">;
 def : InactiveOp<"LLVM", "Prefetch">;
 def : InactiveOp<"LLVM", "MemsetOp">;
 
@@ -34,3 +37,13 @@ def : MLIRDerivative<"LLVM", "ExpOp", (Op $x),
                       (LlvmCheckedMulF (DiffeRet), (LlvmExpF $x))
                     ]
                   >;
+
+def : MLIRDerivative<"LLVM", "SelectOp", (Op $pred, $x, $y),
+                    [
+                      (AssertingInactiveArg),
+                      (Llvm_Select $pred, (DiffeRet), (ConstantFP<"0","arith","ConstantOp"> $x)),
+                      (Llvm_Select $pred, (ConstantFP<"0","arith","ConstantOp"> $x), (DiffeRet)),
+                    ]
+                  >;
+
+def : CallOp<"LLVM", "CallOp">;

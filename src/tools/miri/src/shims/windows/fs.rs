@@ -13,10 +13,15 @@ use crate::*;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 enum CreationDisposition {
+    /// Truncates the file if it exists; create it if it is missing.
     CreateAlways,
+    /// Fails if the file already exists; create it if it is missing.
     CreateNew,
+    /// Create the file if it is missing.
     OpenAlways,
+    /// Fail if the file is missing.
     OpenExisting,
+    /// Truncates the file if it exists; fails if it is missing.
     TruncateExisting,
 }
 
@@ -152,6 +157,13 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         {
             throw_machine_stop!(TerminationInfo::Abort("Invalid CreateFileW argument combination: FILE_FLAG_OPEN_REPARSE_POINT with CREATE_ALWAYS".to_string()));
         }
+        if attributes.contains(FileAttributes::OPEN_REPARSE) && creation_disposition != CreateNew {
+            // We have no logic to "open" a symlink below, but std uses FILE_FLAG_OPEN_REPARSE_POINT
+            // to implement `create_new` so we have to support that specific combination.
+            throw_unsup_format!(
+                "CreateFileW: FILE_FLAG_OPEN_REPARSE_POINT is only supported with CREATE_NEW"
+            );
+        }
 
         if template_file != 0 {
             throw_unsup_format!("CreateFileW: Template files are not supported");
@@ -213,7 +225,6 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                         return interp_ok(Handle::Invalid);
                     }
                 };
-                #[cfg(not(bootstrap))]
                 if !dir.metadata().unwrap().is_dir() {
                     // This changed from a directory to a file. Retry.
                     continue;
@@ -224,7 +235,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                     this.set_last_error(IoError::WindowsError("ERROR_ALREADY_EXISTS"))?;
                 }
 
-                let fd_num = this.machine.fds.insert_new(DirHandle { dir, path: file_name });
+                let fd_num = this.machine.fds.insert_new(DirHandle { dir });
                 return interp_ok(Handle::File(fd_num));
             } else {
                 // Per the documentation:
@@ -246,9 +257,12 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 options.write(desired_write);
                 match creation_disposition {
                     CreateAlways | OpenAlways => {
-                        // We verify `exists_already`: if we expect it to already exist, we set no
-                        // flag, thus failing if it doesn't exist. If we expect the file to not
-                        // exist, we use `create_new` to fail if it does exist.
+                        // These two create the file if it is missing, but also succeed if it
+                        // already exists. As explained above we cannot just always set `create_new`
+                        // here, so we only do that if we think it is needed.
+                        // We later verify our `exists_already` guess: if we expect it to already
+                        // exist, we set no flag, thus failing if it doesn't exist. If we expect the
+                        // file to not exist, we use `create_new` to fail if it does exist.
                         if !exists_already {
                             options.create_new(true);
                         }

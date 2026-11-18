@@ -171,9 +171,10 @@ impl RustcInternal for RigidTy {
                 mutability.internal(tables, tcx),
             ),
             RigidTy::Foreign(def) => rustc_ty::TyKind::Foreign(def.0.internal(tables, tcx)),
-            RigidTy::FnDef(def, args) => {
-                rustc_ty::TyKind::FnDef(def.0.internal(tables, tcx), args.internal(tables, tcx))
-            }
+            RigidTy::FnDef(def, args) => rustc_ty::TyKind::FnDef(
+                def.0.internal(tables, tcx),
+                rustc_middle::ty::Binder::dummy(args.internal(tables, tcx)),
+            ),
             RigidTy::FnPtr(sig) => {
                 let (sig_tys, hdr) = sig.internal(tables, tcx).split();
                 rustc_ty::TyKind::FnPtr(sig_tys, hdr)
@@ -613,7 +614,7 @@ impl RustcInternal for Abi {
             Abi::AvrNonBlockingInterrupt => rustc_abi::ExternAbi::AvrNonBlockingInterrupt,
             Abi::System { unwind } => rustc_abi::ExternAbi::System { unwind },
             Abi::RustCall => rustc_abi::ExternAbi::RustCall,
-            Abi::Unadjusted => rustc_abi::ExternAbi::Unadjusted,
+            Abi::LlvmIntrinsic => rustc_abi::ExternAbi::LlvmIntrinsic,
             Abi::RustCold => rustc_abi::ExternAbi::RustCold,
             Abi::RustInvalid => rustc_abi::ExternAbi::RustInvalid,
             Abi::RiscvInterruptM => rustc_abi::ExternAbi::RiscvInterruptM,

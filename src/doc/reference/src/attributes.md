@@ -20,7 +20,7 @@ r[attributes.intro]
 An _attribute_ is a general, free-form metadatum that is interpreted according to name, convention, language, and compiler version. Attributes are modeled on Attributes in [ECMA-335], with the syntax coming from [ECMA-334] \(C#).
 
 r[attributes.inner]
-_Inner attributes_, written with a bang (`!`) after the hash (`#`), apply to the form that the attribute is declared within.
+_Inner attributes_ apply to the form that the attribute is declared within.
 
 > [!EXAMPLE]
 > ```rust
@@ -38,7 +38,7 @@ _Inner attributes_, written with a bang (`!`) after the hash (`#`), apply to the
 > ```
 
 r[attributes.outer]
-_Outer attributes_, written without the bang after the hash, apply to the form that follows the attribute.
+_Outer attributes_ apply to the form that follows the attribute.
 
 > [!EXAMPLE]
 > ```rust
@@ -142,7 +142,7 @@ fn foo() {}
 r[attributes.meta.builtin]
 Various built-in attributes use different subsets of the meta item syntax to specify their inputs. The following grammar rules show some commonly used forms:
 
-r[attributes.meta.builtin.syntax]
+r[attributes.meta.builtin-syntax]
 ```grammar,attributes
 @root MetaWord ->
     IDENTIFIER

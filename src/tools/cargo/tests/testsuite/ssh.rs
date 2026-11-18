@@ -5,13 +5,14 @@
 //!
 //! NOTE: The container tests almost certainly won't work on Windows.
 
+#![allow(unused_attributes)]
+
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
 use crate::prelude::*;
 use cargo_test_support::containers::{Container, ContainerHandle, MkFile};
-use cargo_test_support::git::cargo_uses_gitoxide;
 use cargo_test_support::{Project, paths, process, project, str};
 
 fn ssh_repo_url(container: &ContainerHandle, name: &str) -> String {
@@ -124,6 +125,7 @@ fn foo_bar_project(url: &str) -> Project {
 }
 
 #[cargo_test(container_test)]
+#[ignore = "SSH fixture assumes ECDSA host keys, but libssh2-sys 0.3.4 prefers ED25519"]
 fn no_known_host() {
     // When host is not known, it should show an error.
     let sshd = Container::new("sshd").launch();
@@ -164,6 +166,7 @@ Caused by:
 }
 
 #[cargo_test(container_test)]
+#[ignore = "SSH fixture assumes ECDSA host keys, but libssh2-sys 0.3.4 prefers ED25519"]
 fn known_host_works() {
     // The key displayed in the error message should work when added to known_hosts.
     let agent = Agent::launch();
@@ -203,13 +206,14 @@ fn known_host_works() {
         .env("SSH_AUTH_SOCK", &agent.sock)
         .with_stderr_data(str![[r#"
 [UPDATING] git repository `ssh://testuser@127.0.0.1:[..]/repos/bar.git`
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 
 "#]])
         .run();
 }
 
 #[cargo_test(container_test)]
+#[ignore = "SSH fixture assumes ECDSA host keys, but libssh2-sys 0.3.4 prefers ED25519"]
 fn same_key_different_hostname() {
     // The error message should mention if an identical key was found.
     let agent = Agent::launch();
@@ -275,13 +279,14 @@ fn known_host_without_port() {
         .env("SSH_AUTH_SOCK", &agent.sock)
         .with_stderr_data(str![[r#"
 [UPDATING] git repository `ssh://testuser@127.0.0.1:[..]/repos/bar.git`
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 
 "#]])
         .run();
 }
 
 #[cargo_test(container_test)]
+#[ignore = "SSH fixture assumes ECDSA host keys, but libssh2-sys 0.3.4 prefers ED25519"]
 fn hostname_case_insensitive() {
     // hostname checking should be case-insensitive.
     let agent = Agent::launch();
@@ -312,7 +317,7 @@ fn hostname_case_insensitive() {
         .with_stderr_data(&format!(
             "\
 [UPDATING] git repository `ssh://testuser@{hostname}:{port}/repos/bar.git`
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 "
         ))
         .run();
@@ -383,7 +388,7 @@ Caused by:
         .env("SSH_AUTH_SOCK", &agent.sock)
         .with_stderr_data(str![[r#"
 [UPDATING] git repository `ssh://testuser@127.0.0.1:[..]/repos/bar.git`
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 
 "#]])
         .run();
@@ -401,7 +406,7 @@ fn invalid_github_key() {
     let known_hosts = "\
         github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLqLMclVr7MDuaVsm3sEnnq2OrGxTFiHSw90wd6N14BU8xVC9cZldC3rJ58Wmw6bEVKPjk7foNG0lHwS5bCKX+U=\n\
         github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDgi+8rMcyFCBq5y7BXrb2aaYGhMjlU3QDy7YDvtNL5KSecYOsaqQHaXr87Bbx0EEkgbhK4kVMkmThlCoNITQS9Vc3zIMQ+Tg6+O4qXx719uCzywl50Tb5tDqPGMj54jcq3VUiu/dvse0yeehyvzoPNWewgGWLx11KI4A4wOwMnc6guhculEWe9DjGEjUQ34lPbmdfu/Hza7ZVu/RhgF/wc43uzXWB2KpMEqtuY1SgRlCZqTASoEtfKZi0AuM7AEdOwE5aTotS4CQZHWimb1bMFpF4DAq92CZ8Jhrm4rWETbO29WmjviCJEA3KNQyd3oA7H9AE9z/22PJaVEmjiZZ+wyLgwyIpOlsnHYNEdGeQMQ4SgLRkARLwcnKmByv1AAxsBW4LI3Os4FpwxVPdXHcBebydtvxIsbtUVkkq99nbsIlnSRFSTvb0alrdzRuKTdWpHtN1v9hagFqmeCx/kJfH76NXYBbtaWZhSOnxfEbhLYuOb+IS4jYzHAIkzy9FjVuk=\n\
-        ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEeMB6BUAW6FfvfLxRO3kGASe0yXnrRT4kpqncsup2b2\n";
+        github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEeMB6BUAW6FfvfLxRO3kGASe0yXnrRT4kpqncsup2b2\n";
     fs::write(ssh_dir.join("known_hosts"), known_hosts).unwrap();
     let p = project()
         .file(
@@ -420,19 +425,11 @@ fn invalid_github_key() {
         .build();
     p.cargo("fetch")
         .with_status(101)
-        .with_stderr_data(if cargo_uses_gitoxide() {
-            str![[r#"
-...
-  git@github.com: Permission denied (publickey).
-...
-"#]]
-        } else {
-            str![[r#"
+        .with_stderr_data(str![[r#"
 ...
   [ERROR] SSH host key has changed for `github.com`
 ...
-"#]]
-        })
+"#]])
         .run();
 }
 
@@ -465,37 +462,7 @@ fn bundled_github_works() {
         )
         .file("src/lib.rs", "")
         .build();
-    let expected = if cargo_uses_gitoxide() {
-        str![[r#"
-[UPDATING] git repository `ssh://git@github.com/rust-lang/bitflags.git`
-[ERROR] failed to get `bitflags` as a dependency of package `foo v0.1.0 ([ROOT]/foo)`
-
-Caused by:
-  failed to load source for dependency `bitflags`
-
-Caused by:
-  unable to update ssh://git@github.com/rust-lang/bitflags.git?tag=1.3.2
-
-Caused by:
-  failed to clone into: [ROOT]/home/.cargo/git/db/bitflags-[HASH]
-
-Caused by:
-  failed to authenticate when downloading repository
-
-  * attempted to find username/password via `credential.helper`, but maybe the found credentials were incorrect
-
-  if the git CLI succeeds then `net.git-fetch-with-cli` may help here
-  https://doc.rust-lang.org/cargo/reference/config.html#netgit-fetch-with-cli
-
-Caused by:
-[CREDENTIAL]s provided for "ssh://git@github.com/rust-lang/bitflags.git" were not accepted by the remote
-
-Caused by:
-  git@github.com: Permission denied (publickey).
-
-"#]]
-    } else {
-        str![[r#"
+    let expected = str![[r#"
 [UPDATING] git repository `ssh://git@github.com/rust-lang/bitflags.git`
 [ERROR] failed to get `bitflags` as a dependency of package `foo v0.1.0 ([ROOT]/foo)`
 
@@ -519,45 +486,14 @@ Caused by:
 Caused by:
   no authentication methods succeeded
 
-"#]]
-    };
+"#]];
     p.cargo("fetch")
         .env("SSH_AUTH_SOCK", &bogus_auth_sock)
         .with_status(101)
         .with_stderr_data(expected)
         .run();
 
-    let expected = if cargo_uses_gitoxide() {
-        str![[r#"
-[UPDATING] git repository `ssh://git@github.com:22/rust-lang/bitflags.git`
-[ERROR] failed to get `bitflags` as a dependency of package `foo v0.1.0 ([ROOT]/foo)`
-
-Caused by:
-  failed to load source for dependency `bitflags`
-
-Caused by:
-  unable to update ssh://git@github.com:22/rust-lang/bitflags.git?tag=1.3.2
-
-Caused by:
-  failed to clone into: [ROOT]/home/.cargo/git/db/bitflags-[HASH]
-
-Caused by:
-  failed to authenticate when downloading repository
-
-  * attempted to find username/password via `credential.helper`, but maybe the found credentials were incorrect
-
-  if the git CLI succeeds then `net.git-fetch-with-cli` may help here
-  https://doc.rust-lang.org/cargo/reference/config.html#netgit-fetch-with-cli
-
-Caused by:
-[CREDENTIAL]s provided for "ssh://git@github.com:22/rust-lang/bitflags.git" were not accepted by the remote
-
-Caused by:
-  git@github.com: Permission denied (publickey).
-
-"#]]
-    } else {
-        str![[r#"
+    let expected = str![[r#"
 [UPDATING] git repository `ssh://git@github.com:22/rust-lang/bitflags.git`
 [ERROR] failed to get `bitflags` as a dependency of package `foo v0.1.0 ([ROOT]/foo)`
 
@@ -581,8 +517,7 @@ Caused by:
 Caused by:
   no authentication methods succeeded
 
-"#]]
-    };
+"#]];
 
     // Explicit :22 should also work with bundled.
     p.change_file(
@@ -605,6 +540,7 @@ Caused by:
 }
 
 #[cargo_test(container_test)]
+#[ignore = "SSH fixture assumes ECDSA host keys, but libssh2-sys 0.3.4 prefers ED25519"]
 fn ssh_key_in_config() {
     // known_host in config works.
     let agent = Agent::launch();
@@ -628,7 +564,7 @@ fn ssh_key_in_config() {
         .env("SSH_AUTH_SOCK", &agent.sock)
         .with_stderr_data(str![[r#"
 [UPDATING] git repository `ssh://testuser@127.0.0.1:[..]/repos/bar.git`
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 
 "#]])
         .run();

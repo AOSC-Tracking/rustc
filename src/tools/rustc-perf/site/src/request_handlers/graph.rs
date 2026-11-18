@@ -1,19 +1,20 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
-use collector::Bound;
+use collector::{Bound, SelfProfileId};
 
 use crate::api::detail_sections::CompilationSections;
 use crate::api::graphs::GraphKind;
 use crate::api::{detail_graphs, detail_sections, graphs, runtime_detail_graphs, ServerResult};
 use crate::load::SiteCtxt;
-use crate::self_profile::get_or_download_self_profile;
+use crate::self_profile::fetch_self_profile;
 
-use database::interpolate::IsInterpolated;
 use database::selector::{
     CompileBenchmarkQuery, CompileTestCase, RuntimeBenchmarkQuery, Selector, SeriesResponse,
 };
-use database::{self, ArtifactId, Profile, Scenario};
+use database::{self, ArtifactId, CodegenBackend, Profile, Scenario, Target};
+use database::{interpolate::IsInterpolated, FrontendThreads};
 
 /// Returns data for before/after graphs when comparing a single test result comparison
 /// for a compile-time benchmark.
@@ -36,6 +37,8 @@ pub async fn handle_compile_detail_graphs(
                 .benchmark(Selector::One(request.benchmark.clone()))
                 .profile(Selector::One(request.profile.parse()?))
                 .scenario(Selector::One(scenario))
+                .backend(Selector::One(request.backend.parse()?))
+                .target(Selector::One(request.target.parse()?))
                 .metric(Selector::One(request.stat.parse()?)),
             artifact_ids.clone(),
         )
@@ -82,16 +85,31 @@ pub async fn handle_compile_detail_sections(
             request.end
         ))?;
 
-    let scenario = request.scenario.parse()?;
+    let scenario: Scenario = request.scenario.parse()?;
+    let profile: Profile = request.profile.parse()?;
+    let backend: CodegenBackend = request.backend.parse()?;
+    let target: Target = request.target.parse()?;
 
     async fn calculate_sections(
         ctxt: &SiteCtxt,
         aid: ArtifactId,
         benchmark: &str,
-        profile: &str,
+        profile: Profile,
         scenario: Scenario,
+        backend: CodegenBackend,
+        target: Target,
     ) -> Option<CompilationSections> {
-        get_or_download_self_profile(ctxt, aid, benchmark, profile, scenario, None)
+        const MOCK_FRONTEND_THREADS: FrontendThreads = FrontendThreads(1);
+        let id = SelfProfileId::Simple {
+            artifact_id: aid,
+            benchmark: benchmark.into(),
+            profile,
+            scenario,
+            backend,
+            target,
+            frontend_threads: MOCK_FRONTEND_THREADS,
+        };
+        fetch_self_profile(ctxt, id, None)
             .await
             .ok()
             .map(|profile| CompilationSections {
@@ -99,22 +117,31 @@ pub async fn handle_compile_detail_sections(
             })
     }
 
+    let is_doc = match profile {
+        Profile::Check | Profile::Debug | Profile::Opt | Profile::Clippy => false,
+        Profile::Doc | Profile::DocJson => true,
+    };
+
     // Doc queries are not split into the classic frontend/backend/linker parts.
-    let (before, after) = if request.profile != "doc" {
+    let (before, after) = if !is_doc {
         tokio::join!(
             calculate_sections(
                 &ctxt,
                 start_artifact,
                 &request.benchmark,
-                &request.profile,
+                profile,
                 scenario,
+                backend,
+                target
             ),
             calculate_sections(
                 &ctxt,
                 end_artifact,
                 &request.benchmark,
-                &request.profile,
+                profile,
                 scenario,
+                backend,
+                target
             )
         )
     } else {
@@ -140,6 +167,7 @@ pub async fn handle_runtime_detail_graphs(
         .statistic_series(
             RuntimeBenchmarkQuery::default()
                 .benchmark(Selector::One(request.benchmark.clone()))
+                .target(Selector::One(request.target.parse()?))
                 .metric(Selector::One(request.stat.parse()?)),
             artifact_ids.clone(),
         )
@@ -180,6 +208,8 @@ pub async fn handle_graphs(
             benchmark: None,
             scenario: None,
             profile: None,
+            backend: None,
+            target: None,
         };
 
     if is_default_query {
@@ -208,17 +238,23 @@ async fn create_graphs(
     ));
     let mut benchmarks = HashMap::new();
 
-    let create_selector = |filter: &Option<String>| -> Selector<String> {
+    fn create_selector<T: FromStr>(filter: &Option<String>) -> Option<Result<Selector<T>, T::Err>> {
         filter
             .as_ref()
             .map(|value| Selector::One(value.clone()))
-            .unwrap_or(Selector::All)
-    };
+            .map(|s| s.try_map(|v| v.parse::<T>()))
+    }
 
-    let benchmark_selector = create_selector(&request.benchmark);
-    let profile_selector = create_selector(&request.profile).try_map(|v| v.parse::<Profile>())?;
-    let scenario_selector =
-        create_selector(&request.scenario).try_map(|v| v.parse::<Scenario>())?;
+    let benchmark_selector = create_selector(&request.benchmark)
+        .unwrap_or(Ok(Selector::All))
+        .unwrap();
+    let profile_selector = create_selector(&request.profile)
+        .unwrap_or_else(|| Ok(Selector::Subset(Profile::default_profiles())))?;
+    let scenario_selector = create_selector(&request.scenario).unwrap_or(Ok(Selector::All))?;
+    let target_selector = create_selector(&request.target)
+        .unwrap_or(Ok(Selector::One(Target::X86_64UnknownLinuxGnu)))?;
+    let backend_selector =
+        create_selector(&request.backend).unwrap_or(Ok(Selector::One(CodegenBackend::Llvm)))?;
 
     let interpolated_responses: Vec<_> = ctxt
         .statistic_series(
@@ -226,6 +262,8 @@ async fn create_graphs(
                 .benchmark(benchmark_selector)
                 .profile(profile_selector)
                 .scenario(scenario_selector)
+                .backend(backend_selector)
+                .target(target_selector)
                 .metric(Selector::One(request.stat.parse()?)),
             artifact_ids.clone(),
         )
@@ -301,10 +339,7 @@ fn create_summary(
     let mut summary_benchmark = HashMap::new();
     let summary_query_cases = iproduct!(
         ctxt.summary_scenarios(),
-        profile.map_or_else(
-            || vec![Profile::Check, Profile::Debug, Profile::Opt, Profile::Doc],
-            |p| vec![p]
-        )
+        profile.map_or_else(Profile::default_profiles, |p| vec![p])
     );
     for (scenario, profile) in summary_query_cases {
         let baseline = match baselines.entry((profile, scenario)) {

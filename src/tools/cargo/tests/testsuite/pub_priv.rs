@@ -79,7 +79,7 @@ fn exported_pub_dep() {
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] pub_dep v0.1.0 (registry `dummy-registry`)
 [CHECKING] pub_dep v0.1.0
@@ -133,6 +133,9 @@ fn requires_feature() {
 
                 [dependencies]
                 pub_dep = { version = "0.1.0", public = true }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -144,7 +147,7 @@ fn requires_feature() {
 [WARNING] Cargo.toml: ignoring `public` on dependency pub_dep, pass `-Zpublic-dependency` to enable support for it
 [WARNING] `foo` (manifest) generated 1 warning
 [UPDATING] `dummy-registry` index
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] pub_dep v0.1.0 (registry `dummy-registry`)
 [CHECKING] pub_dep v0.1.0
@@ -231,7 +234,7 @@ fn pub_dev_dependency_without_feature() {
 [WARNING] Cargo.toml: 'public' specifier can only be used on regular dependencies, not dev-dependencies
 [WARNING] `foo` (manifest) generated 1 warning
 [UPDATING] `dummy-registry` index
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -330,7 +333,7 @@ fn allow_priv_in_tests() {
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] priv_dep v0.1.0 (registry `dummy-registry`)
 [CHECKING] priv_dep v0.1.0
@@ -375,7 +378,7 @@ fn allow_priv_in_benches() {
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] priv_dep v0.1.0 (registry `dummy-registry`)
 [CHECKING] priv_dep v0.1.0
@@ -421,7 +424,7 @@ fn allow_priv_in_bins() {
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] priv_dep v0.1.0 (registry `dummy-registry`)
 [CHECKING] priv_dep v0.1.0
@@ -467,7 +470,7 @@ fn allow_priv_in_examples() {
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] priv_dep v0.1.0 (registry `dummy-registry`)
 [CHECKING] priv_dep v0.1.0
@@ -514,7 +517,7 @@ fn allow_priv_in_custom_build() {
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(str![[r#"
 [UPDATING] `dummy-registry` index
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] priv_dep v0.1.0 (registry `dummy-registry`)
 [COMPILING] priv_dep v0.1.0
@@ -569,7 +572,7 @@ fn publish_package_with_public_dependency() {
         .with_stderr_data(
             str![[r#"
 [UPDATING] `dummy-registry` index
-[LOCKING] 2 packages to latest compatible versions
+[LOCKING] 2 packages to highest compatible versions
 [DOWNLOADING] crates ...
 [DOWNLOADED] bar v0.1.0 (registry `dummy-registry`)
 [DOWNLOADED] pub_bar v0.1.0 (registry `dummy-registry`)
@@ -624,7 +627,8 @@ fn verify_mix_cargo_feature_z() {
         )
         .build();
 
-    p.cargo("check -Zpublic-dependency --message-format=short")
+    p.cargo("check --message-format=short")
+        .arg("-Zpublic-dependency")
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(str![[r#"
 ...
@@ -674,7 +678,8 @@ fn verify_z_public_dependency() {
         )
         .build();
 
-    p.cargo("check -Zpublic-dependency --message-format=short")
+    p.cargo("check --message-format=short")
+        .arg("-Zpublic-dependency")
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(
             str![[r#"
@@ -716,7 +721,8 @@ fn z_public_dependency_invalidates_fingerprint() {
         )
         .build();
 
-    p.cargo("check -Zpublic-dependency --message-format=short")
+    p.cargo("check --message-format=short")
+        .arg("-Zpublic-dependency")
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(str![[r#"
 ...
@@ -741,7 +747,8 @@ src/lib.rs:3:13: [WARNING] type `FromDep` from private dependency 'dep' in publi
 "#]])
         .run();
 
-    p.cargo("check -Zpublic-dependency --message-format=short")
+    p.cargo("check --message-format=short")
+        .arg("-Zpublic-dependency")
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(str![[r#"
 [CHECKING] foo v0.0.1 ([ROOT]/foo)
@@ -786,7 +793,8 @@ fn manifest_location() {
         )
         .build();
 
-    p.cargo("check -Zpublic-dependency")
+    p.cargo("check")
+        .arg("-Zpublic-dependency")
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(
             str![[r#"
@@ -854,7 +862,8 @@ fn renamed_dependency() {
         )
         .build();
 
-    p.cargo("check -Zpublic-dependency")
+    p.cargo("check")
+        .arg("-Zpublic-dependency")
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(
             str![[r#"
@@ -925,7 +934,8 @@ fn duplicate_renamed_dependency() {
         )
         .build();
 
-    p.cargo("check -Zpublic-dependency")
+    p.cargo("check")
+        .arg("-Zpublic-dependency")
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(
             str![[r#"
@@ -999,7 +1009,8 @@ fn dependency_location_in_target_table() {
         )
         .build();
 
-    p.cargo("check -Zpublic-dependency")
+    p.cargo("check")
+        .arg("-Zpublic-dependency")
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(
             str![[r#"
@@ -1033,7 +1044,8 @@ fn dependency_location_in_target_table() {
         )
         .run();
 
-    p.cargo(&format!("check -Zpublic-dependency --target={alt}"))
+    p.cargo(&format!("check --target={alt}"))
+        .arg("-Zpublic-dependency")
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(
             str![[r#"
@@ -1117,7 +1129,8 @@ fn dependency_location_in_target_table_with_cfg() {
         )
         .build();
 
-    p.cargo("check -Zpublic-dependency")
+    p.cargo("check")
+        .arg("-Zpublic-dependency")
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(
             str![[r#"
@@ -1151,7 +1164,8 @@ fn dependency_location_in_target_table_with_cfg() {
         )
         .run();
 
-    p.cargo(&format!("check -Zpublic-dependency --target={alt}"))
+    p.cargo(&format!("check --target={alt}"))
+        .arg("-Zpublic-dependency")
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(
             str![[r#"
@@ -1222,7 +1236,8 @@ fn dependency_location_in_workspace() {
         )
     });
     git::commit(&repo);
-    p.cargo(&format!("check -Zpublic-dependency"))
+    p.cargo("check")
+        .arg("-Zpublic-dependency")
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(str![[r#"
 ...
@@ -1271,8 +1286,9 @@ fn relative_display_path() {
         ",
         )
         .build();
-    p.cargo("check -Zpublic-dependency")
+    p.cargo("check")
         .cwd("foo")
+        .arg("-Zpublic-dependency")
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stderr_data(str![[r#"
 ...

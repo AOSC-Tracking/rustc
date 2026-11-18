@@ -10,7 +10,6 @@ import {
 } from "../../utils/navigation";
 import {renderPlots} from "../../graph/render";
 import {BenchmarkInfo, loadBenchmarkInfo} from "../../api";
-import AsOf from "../../components/as-of.vue";
 import {loadGraphs} from "../../graph/api";
 
 function loadSelectorFromUrl(urlParams: Dict<string>): GraphsSelector {
@@ -21,6 +20,8 @@ function loadSelectorFromUrl(urlParams: Dict<string>): GraphsSelector {
   const benchmark = urlParams["benchmark"] ?? null;
   const scenario = urlParams["scenario"] ?? null;
   const profile = urlParams["profile"] ?? null;
+  const target = urlParams["target"] ?? null;
+  const backend = urlParams["backend"] ?? null;
   return {
     start,
     end,
@@ -29,6 +30,8 @@ function loadSelectorFromUrl(urlParams: Dict<string>): GraphsSelector {
     benchmark,
     scenario,
     profile,
+    backend,
+    target,
   };
 }
 
@@ -130,6 +133,7 @@ function updateSelection(params: SelectionParams) {
       end: params.end,
       kind: params.kind,
       stat: params.stat,
+      target: params.target,
     }).searchParams
   );
 }
@@ -151,6 +155,7 @@ loadGraphData(selector, loading);
     :kind="selector.kind"
     :stat="selector.stat"
     :info="info"
+    :target="selector.target"
     @change="updateSelection"
   ></DataSelector>
   <div>
@@ -178,7 +183,6 @@ loadGraphData(selector, loading);
         </div>
         <div id="size-charts"></div>
       </div>
-      <AsOf :info="info" />
     </div>
   </div>
 </template>

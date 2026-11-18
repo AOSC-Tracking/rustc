@@ -211,6 +211,9 @@ r[glossary.uninhabited]
 
 A type is uninhabited if it has no constructors and therefore can never be instantiated. An uninhabited type is "empty" in the sense that there are no values of the type. The canonical example of an uninhabited type is the [never type] `!`, or an enum with no variants `enum Never { }`. Opposite of [Inhabited](#inhabited).
 
+> [!NOTE]
+> Uninhabited types are not necessarily [zero sized]. For example, `enum Never { }` is uninhabited and zero sized, but `(u8, Never)` is uninhabited and not zero sized.
+
 r[glossary.zst]
 ### Zero-sized type (ZST)
 
@@ -220,8 +223,11 @@ A type is zero sized (a ZST) if its size is 0. Such types have at most one possi
 - [Function items] (see [type.fn-item.intro]).
 - The constructors of [tuple-like structs] (see [type.fn-item.intro]).
 - The constructors of [tuple-like enum variants] (see [type.fn-item.intro]).
+- `repr(Rust)` [structs] with no fields or where all fields are zero sized (see [layout.repr.rust.struct-zst]).
 - `repr(C)` [structs] with no fields or where all fields are zero-sized (see [layout.repr.c.struct.size-field-offset]).
 - `repr(transparent)` [structs] with no fields or where all fields are zero-sized (see [layout.repr.transparent.layout-abi]).
+- `repr(Rust)` [enums] (without a [primitive representation] specified) with no variants (see [layout.repr.rust.enum-empty-zst]).
+- `repr(Rust)` [enums] (without a [primitive representation] specified) with a single [field-struct-like variant], a single [unit-struct-like variant], or a single [tuple-struct-like variant] and where the struct-like thing has no fields or where all of the fields are zero sized (see [layout.repr.rust.enum-struct-like-zst]).
 - [Arrays] of zero-sized types (see [layout.array]).
 - [Arrays] of length zero (see [layout.array]).
 - [Unions] of zero-sized types (see [items.union.common-storage]).
@@ -231,6 +237,13 @@ A type is zero sized (a ZST) if its size is 0. Such types have at most one possi
 fn f() {}
 struct S(u8);
 enum E { V(u8) }
+struct UnitLike;
+struct NoFields {}
+struct OnlyZST {
+    f1: (),
+    f2: [(); 10],
+    f3: [u8; 0],
+}
 #[repr(C)]
 struct C1 {}
 #[repr(C)]
@@ -253,10 +266,38 @@ union U {
     f2: [(); 10],
     f3: [u8; 0],
 }
+# /// An enum with a single field-struct-like variant with all fields
+# /// being ZSTs.
+enum E2 {
+    V1 { f1: (), f2: [(); 10] },
+}
+# /// An enum with a single field-struct-like variant with no fields.
+enum E3 {
+    V1 {},
+}
+# /// An enum with a single unit-struct-like variant.
+enum E4 {
+    V1,
+}
+# /// An enum with a single tuple-struct-like variant with all fields
+# /// being ZSTs.
+enum E5 {
+    V1 ((), [(); 10]),
+}
+# /// An enum with a single tuple-struct-like variant with no fields.
+enum E6 {
+    V1 (),
+}
+# /// An enum with no variants.
+enum E7 {}
+
 assert_eq!(0, size_of::<()>());
 assert_eq!(0, size_of_val(&f));
 assert_eq!(0, size_of_val(&S));
 assert_eq!(0, size_of_val(&E::V));
+assert_eq!(0, size_of::<UnitLike>());
+assert_eq!(0, size_of::<NoFields>());
+assert_eq!(0, size_of::<OnlyZST>());
 assert_eq!(0, size_of::<C1>());
 assert_eq!(0, size_of::<C2>());
 assert_eq!(0, size_of::<T1>());
@@ -264,6 +305,12 @@ assert_eq!(0, size_of::<T2>());
 assert_eq!(0, size_of::<[(); 10]>());
 assert_eq!(0, size_of::<[u8; 0]>());
 assert_eq!(0, size_of::<U>());
+assert_eq!(0, size_of::<E2>());
+assert_eq!(0, size_of::<E3>());
+assert_eq!(0, size_of::<E4>());
+assert_eq!(0, size_of::<E5>());
+assert_eq!(0, size_of::<E6>());
+assert_eq!(0, size_of::<E7>());
 ```
 
 [`extern` blocks]: items.extern
@@ -276,6 +323,7 @@ assert_eq!(0, size_of::<U>());
 [crate]: crates-and-source-files.md
 [dyn compatibility]: items/traits.md#dyn-compatibility
 [enums]: items/enumerations.md
+[field-struct-like variant]: EnumVariantStruct
 [fields]: expressions/field-expr.md
 [free item]: #free-item
 [function items]: type.fn-item
@@ -300,10 +348,12 @@ assert_eq!(0, size_of::<U>());
 [never type]: types/never.md
 [*path*]: paths.md
 [Paths]: paths.md
+[primitive representation]: layout.repr.primitive
 [*scope*]: names/scopes.md
 [structs]: items/structs.md
 [tuple-like enum variants]: items.enum.constructor-namespace
 [tuple-like structs]: items.struct.tuple
+[tuple-struct-like variant]: EnumVariantTuple
 [trait object types]: types/trait-object.md
 [traits]: items/traits.md
 [turbofish test]: https://github.com/rust-lang/rust/blob/1.58.0/src/test/ui/parser/bastion-of-the-turbofish.rs
@@ -312,5 +362,7 @@ assert_eq!(0, size_of::<U>());
 [undefined-behavior]: behavior-considered-undefined.md
 [unions]: items/unions.md
 [unit type]: type.tuple.unit
+[unit-struct-like variant]: EnumVariant
 [variable bindings]: patterns.md
 [visibility rules]: visibility-and-privacy.md
+[zero sized]: glossary.zst

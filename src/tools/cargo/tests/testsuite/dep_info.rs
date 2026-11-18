@@ -205,6 +205,9 @@ fn relative_depinfo_paths_ws() {
             [build-dependencies]
             bdep = "0.1"
             bar = {path = "../bar"}
+
+            [lints.cargo]
+            default = "allow"
             "#,
         )
         .file(
@@ -233,6 +236,9 @@ fn relative_depinfo_paths_ws() {
 
             [dependencies]
             pmdep = "0.1"
+
+            [lints.cargo]
+            default = "allow"
             "#,
         )
         .file(
@@ -254,8 +260,9 @@ fn relative_depinfo_paths_ws() {
         .build();
 
     let host = rustc_host();
-    p.cargo("build -Z binary-dep-depinfo --target")
+    p.cargo("build --target")
         .arg(&host)
+        .arg("-Zbinary-dep-depinfo")
         .masquerade_as_nightly_cargo(&["binary-dep-depinfo"])
         .with_stderr_data(str![[r#"
 ...
@@ -266,37 +273,47 @@ fn relative_depinfo_paths_ws() {
 
     assert_deps_contains(
         &p,
-        "target/debug/.fingerprint/pm-*/dep-lib-pm",
-        &[(0, "src/lib.rs"), (1, "debug/deps/libpmdep-*.rlib")],
-    );
-
-    assert_deps_contains(
-        &p,
-        &format!("target/{}/debug/.fingerprint/foo-*/dep-bin-foo", host),
+        "target/debug/build/pm/*/fingerprint/dep-lib-pm",
         &[
-            (0, "src/main.rs"),
-            (
-                1,
-                &format!(
-                    "debug/deps/{}pm-*.{}",
-                    paths::get_lib_prefix("proc-macro"),
-                    paths::get_lib_extension("proc-macro")
-                ),
-            ),
-            (1, &format!("{}/debug/deps/libbar-*.rlib", host)),
-            (1, &format!("{}/debug/deps/libregdep-*.rlib", host)),
+            (0, "src/lib.rs"),
+            (1, "debug/build/pmdep/*/out/libpmdep-*.rlib"),
         ],
     );
 
     assert_deps_contains(
         &p,
-        "target/debug/.fingerprint/foo-*/dep-build-script-build-script-build",
-        &[(0, "build.rs"), (1, "debug/deps/libbdep-*.rlib")],
+        &format!("target/{}/debug/build/foo/*/fingerprint/dep-bin-foo", host),
+        &[
+            (0, "src/main.rs"),
+            (
+                1,
+                &format!(
+                    "debug/build/pm/*/out/{}pm-*.{}",
+                    paths::get_lib_prefix("proc-macro"),
+                    paths::get_lib_extension("proc-macro")
+                ),
+            ),
+            (1, &format!("{}/debug/build/bar/*/out/libbar-*.rlib", host)),
+            (
+                1,
+                &format!("{}/debug/build/regdep/*/out/libregdep-*.rlib", host),
+            ),
+        ],
+    );
+
+    assert_deps_contains(
+        &p,
+        "target/debug/build/foo/*/fingerprint/dep-build-script-build-script-build",
+        &[
+            (0, "build.rs"),
+            (1, "debug/build/bdep/*/out/libbdep-*.rlib"),
+        ],
     );
 
     // Make sure it stays fresh.
-    p.cargo("build -Z binary-dep-depinfo --target")
+    p.cargo("build --target")
         .arg(&host)
+        .arg("-Zbinary-dep-depinfo")
         .masquerade_as_nightly_cargo(&["binary-dep-depinfo"])
         .with_stderr_data(str![[r#"
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -337,6 +354,9 @@ fn relative_depinfo_paths_no_ws() {
             [build-dependencies]
             bdep = "0.1"
             bar = {path = "bar"}
+
+            [lints.cargo]
+            default = "allow"
             "#,
         )
         .file(
@@ -365,6 +385,9 @@ fn relative_depinfo_paths_no_ws() {
 
             [dependencies]
             pmdep = "0.1"
+
+            [lints.cargo]
+            default = "allow"
             "#,
         )
         .file(
@@ -385,7 +408,8 @@ fn relative_depinfo_paths_no_ws() {
         .file("bar/src/lib.rs", "pub fn f() {}")
         .build();
 
-    p.cargo("build -Z binary-dep-depinfo")
+    p.cargo("build")
+        .arg("-Zbinary-dep-depinfo")
         .masquerade_as_nightly_cargo(&["binary-dep-depinfo"])
         .with_stderr_data(str![[r#"
 ...
@@ -396,36 +420,43 @@ fn relative_depinfo_paths_no_ws() {
 
     assert_deps_contains(
         &p,
-        "target/debug/.fingerprint/pm-*/dep-lib-pm",
-        &[(0, "src/lib.rs"), (1, "debug/deps/libpmdep-*.rlib")],
-    );
-
-    assert_deps_contains(
-        &p,
-        "target/debug/.fingerprint/foo-*/dep-bin-foo",
+        "target/debug/build/pm/*/fingerprint/dep-lib-pm",
         &[
-            (0, "src/main.rs"),
-            (
-                1,
-                &format!(
-                    "debug/deps/{}pm-*.{}",
-                    paths::get_lib_prefix("proc-macro"),
-                    paths::get_lib_extension("proc-macro")
-                ),
-            ),
-            (1, "debug/deps/libbar-*.rlib"),
-            (1, "debug/deps/libregdep-*.rlib"),
+            (0, "src/lib.rs"),
+            (1, "debug/build/pmdep/*/out/libpmdep-*.rlib"),
         ],
     );
 
     assert_deps_contains(
         &p,
-        "target/debug/.fingerprint/foo-*/dep-build-script-build-script-build",
-        &[(0, "build.rs"), (1, "debug/deps/libbdep-*.rlib")],
+        "target/debug/build/foo/*/fingerprint/dep-bin-foo",
+        &[
+            (0, "src/main.rs"),
+            (
+                1,
+                &format!(
+                    "debug/build/pm/*/out/{}pm-*.{}",
+                    paths::get_lib_prefix("proc-macro"),
+                    paths::get_lib_extension("proc-macro")
+                ),
+            ),
+            (1, "debug/build/bar/*/out/libbar-*.rlib"),
+            (1, "debug/build/regdep/*/out/libregdep-*.rlib"),
+        ],
+    );
+
+    assert_deps_contains(
+        &p,
+        "target/debug/build/foo/*/fingerprint/dep-build-script-build-script-build",
+        &[
+            (0, "build.rs"),
+            (1, "debug/build/bdep/*/out/libbdep-*.rlib"),
+        ],
     );
 
     // Make sure it stays fresh.
-    p.cargo("build -Z binary-dep-depinfo")
+    p.cargo("build")
+        .arg("-Zbinary-dep-depinfo")
         .masquerade_as_nightly_cargo(&["binary-dep-depinfo"])
         .with_stderr_data(str![[r#"
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -460,7 +491,7 @@ fn reg_dep_source_not_tracked() {
 
     assert_deps(
         &p,
-        "target/debug/.fingerprint/regdep-*/dep-lib-regdep",
+        "target/debug/build/regdep/*/fingerprint/dep-lib-regdep",
         |info_path, entries| {
             for (kind, path) in entries {
                 if *kind == 1 {
@@ -502,14 +533,18 @@ fn canonical_path() {
     real.mkdir_p();
     p.symlink(real, "target");
 
-    p.cargo("check -Z binary-dep-depinfo")
+    p.cargo("check")
+        .arg("-Zbinary-dep-depinfo")
         .masquerade_as_nightly_cargo(&["binary-dep-depinfo"])
         .run();
 
     assert_deps_contains(
         &p,
-        "target/debug/.fingerprint/foo-*/dep-lib-foo",
-        &[(0, "src/lib.rs"), (1, "debug/deps/libregdep-*.rmeta")],
+        "target/debug/build/foo/*/fingerprint/dep-lib-foo",
+        &[
+            (0, "src/lib.rs"),
+            (1, "debug/build/regdep/*/out/libregdep-*.rmeta"),
+        ],
     );
 }
 

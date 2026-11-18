@@ -61,7 +61,7 @@ where
 
             BackendRepr::SimdScalableVector { .. } => panic!("scalable vectors are unsupported"),
 
-            BackendRepr::ScalarPair(..) | BackendRepr::Memory { .. } => {
+            BackendRepr::ScalarPair { .. } | BackendRepr::Memory { .. } => {
                 for i in 0..layout.fields.count() {
                     let field_off = off + layout.fields.offset(i);
                     classify(cx, layout.field(cx, i), cls, field_off)?;
@@ -247,6 +247,11 @@ where
                     arg.cast_to(cast_target(cls, size));
                 } else if is_arg || cx.target_spec().is_like_darwin {
                     arg.extend_integer_width_to(32);
+                }
+                // The x86_64 psABI requires bools to be zero-extended to 8-bits, with high bits unspecified.
+                // zeroext i1 has this behavior in the LLVM X86 backend.
+                if !is_arg && arg.layout.backend_repr.is_bool() {
+                    arg.extend_integer_width_to(8);
                 }
             }
         }

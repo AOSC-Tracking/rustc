@@ -1,13 +1,14 @@
-use rustc_abi::{Align, BackendRepr, CVariadicStatus, Endian, HasDataLayout, Primitive, Size};
-use rustc_codegen_ssa::MemFlags;
+use rustc_abi::{
+    Align, BackendRepr, CVariadicStatus, Endian, Float, HasDataLayout, Integer, Primitive, Size,
+};
 use rustc_codegen_ssa::common::IntPredicate;
 use rustc_codegen_ssa::mir::operand::OperandRef;
 use rustc_codegen_ssa::traits::{
     BaseTypeCodegenMethods, BuilderMethods, ConstCodegenMethods, LayoutTypeCodegenMethods,
 };
-use rustc_middle::bug;
 use rustc_middle::ty::Ty;
 use rustc_middle::ty::layout::{HasTyCtxt, LayoutOf, TyAndLayout};
+use rustc_span::bug;
 use rustc_target::spec::{Arch, Env, LlvmAbi, RustcAbi};
 
 use crate::builder::Builder;
@@ -77,6 +78,35 @@ fn emit_direct_ptr_va_arg<'ll, 'tcx>(
     }
 }
 
+/// Some backends apply special alignment rules to c-variadic arguments.
+fn get_param_type_alignment<'ll, 'tcx>(
+    bx: &mut Builder<'_, 'll, 'tcx>,
+    layout: TyAndLayout<'tcx>,
+) -> Align {
+    let BackendRepr::Scalar(scalar) = layout.backend_repr else {
+        bug!("unexpected backend repr {:?}", layout.backend_repr);
+    };
+
+    match bx.cx.tcx.sess.target.arch {
+        Arch::PowerPC64 => match scalar.primitive() {
+            Primitive::Int(integer, _) => match integer {
+                Integer::I8 | Integer::I16 => unreachable!(),
+                Integer::I32 | Integer::I64 => { /* fall through */ }
+                Integer::I128 => return Align::EIGHT,
+            },
+            Primitive::Float(float) => match float {
+                Float::F16 | Float::F16B | Float::F32 => unreachable!(),
+                Float::F64 => { /* fall through */ }
+                Float::F128 => return Align::from_bytes(16).unwrap(),
+            },
+            Primitive::Pointer(_) => { /* fall through */ }
+        },
+        _ => { /* fall through */ }
+    }
+
+    layout.align.abi
+}
+
 enum PassMode {
     Direct,
     Indirect,
@@ -120,7 +150,7 @@ enum ForceRightAdjust {
 fn emit_ptr_va_arg<'ll, 'tcx>(
     bx: &mut Builder<'_, 'll, 'tcx>,
     list: OperandRef<'tcx, &'ll Value>,
-    target_ty: Ty<'tcx>,
+    layout: TyAndLayout<'tcx>,
     pass_mode: PassMode,
     slot_size: SlotSize,
     allow_higher_align: AllowHigherAlign,
@@ -131,28 +161,27 @@ fn emit_ptr_va_arg<'ll, 'tcx>(
     let force_right_adjust = matches!(force_right_adjust, ForceRightAdjust::Yes);
     let slot_size = Align::from_bytes(slot_size as u64).unwrap();
 
-    let layout = bx.cx.layout_of(target_ty);
     let (llty, size, align) = if indirect {
         (
-            bx.cx.layout_of(Ty::new_imm_ptr(bx.cx.tcx, target_ty)).llvm_type(bx.cx),
+            bx.cx.layout_of(Ty::new_imm_ptr(bx.cx.tcx, layout.ty)).llvm_type(bx.cx),
             bx.cx.data_layout().pointer_size(),
-            bx.cx.data_layout().pointer_align(),
+            bx.cx.data_layout().pointer_align().abi,
         )
     } else {
-        (layout.llvm_type(bx.cx), layout.size, layout.align)
+        (layout.llvm_type(bx.cx), layout.size, get_param_type_alignment(bx, layout))
     };
     let (addr, addr_align) = emit_direct_ptr_va_arg(
         bx,
         list,
         size,
-        align.abi,
+        align,
         slot_size,
         allow_higher_align,
         force_right_adjust,
     );
     if indirect {
         let tmp_ret = bx.load(llty, addr, addr_align);
-        bx.load(layout.llvm_type(bx.cx), tmp_ret, align.abi)
+        bx.load(layout.llvm_type(bx.cx), tmp_ret, align)
     } else {
         bx.load(llty, addr, addr_align)
     }
@@ -161,7 +190,7 @@ fn emit_ptr_va_arg<'ll, 'tcx>(
 fn emit_aapcs_va_arg<'ll, 'tcx>(
     bx: &mut Builder<'_, 'll, 'tcx>,
     list: OperandRef<'tcx, &'ll Value>,
-    target_ty: Ty<'tcx>,
+    layout: TyAndLayout<'tcx>,
 ) -> &'ll Value {
     let dl = bx.cx.data_layout();
 
@@ -188,8 +217,6 @@ fn emit_aapcs_va_arg<'ll, 'tcx>(
     let gr_offs = bx.inbounds_ptradd(va_list_addr, bx.cx.const_usize(3 * ptr_offset));
     let vr_offs = bx.inbounds_ptradd(va_list_addr, bx.cx.const_usize(3 * ptr_offset + i32_offset));
 
-    let layout = bx.cx.layout_of(target_ty);
-
     let maybe_reg = bx.append_sibling_block("va_arg.maybe_reg");
     let in_reg = bx.append_sibling_block("va_arg.in_reg");
     let on_stack = bx.append_sibling_block("va_arg.on_stack");
@@ -197,7 +224,7 @@ fn emit_aapcs_va_arg<'ll, 'tcx>(
     let zero = bx.const_i32(0);
     let offset_align = Align::from_bytes(4).unwrap();
 
-    let gr_type = target_ty.is_any_ptr() || target_ty.is_integral();
+    let gr_type = layout.ty.is_any_ptr() || layout.ty.is_integral();
     let (reg_off, reg_top, slot_size) = if gr_type {
         let nreg = layout.size.bytes().div_ceil(8);
         (gr_offs, gr_top, nreg * 8)
@@ -249,7 +276,7 @@ fn emit_aapcs_va_arg<'ll, 'tcx>(
     let stack_value = emit_ptr_va_arg(
         bx,
         list,
-        target_ty,
+        layout,
         PassMode::Direct,
         SlotSize::Bytes8,
         AllowHigherAlign::Yes,
@@ -267,7 +294,7 @@ fn emit_aapcs_va_arg<'ll, 'tcx>(
 fn emit_powerpc_va_arg<'ll, 'tcx>(
     bx: &mut Builder<'_, 'll, 'tcx>,
     list: OperandRef<'tcx, &'ll Value>,
-    target_ty: Ty<'tcx>,
+    layout: TyAndLayout<'tcx>,
 ) -> &'ll Value {
     let dl = bx.cx.data_layout();
 
@@ -281,15 +308,7 @@ fn emit_powerpc_va_arg<'ll, 'tcx>(
     let va_list_addr = list.immediate();
 
     // Peel off any newtype wrappers.
-    let layout = {
-        let mut layout = bx.cx.layout_of(target_ty);
-
-        while let Some((_, inner)) = layout.non_1zst_field(bx.cx) {
-            layout = inner;
-        }
-
-        layout
-    };
+    let layout = layout.peel_transparent_wrappers(bx.cx);
 
     // Rust does not currently support any powerpc softfloat targets.
     let target = &bx.cx.tcx.sess.target;
@@ -405,7 +424,7 @@ fn emit_powerpc_va_arg<'ll, 'tcx>(
 fn emit_s390x_va_arg<'ll, 'tcx>(
     bx: &mut Builder<'_, 'll, 'tcx>,
     list: OperandRef<'tcx, &'ll Value>,
-    target_ty: Ty<'tcx>,
+    layout: TyAndLayout<'tcx>,
 ) -> &'ll Value {
     let dl = bx.cx.data_layout();
 
@@ -430,21 +449,35 @@ fn emit_s390x_va_arg<'ll, 'tcx>(
     let reg_save_area =
         bx.inbounds_ptradd(va_list_addr, bx.cx.const_usize(2 * i64_offset + ptr_offset));
 
-    let layout = bx.cx.layout_of(target_ty);
-
     let in_reg = bx.append_sibling_block("va_arg.in_reg");
     let in_mem = bx.append_sibling_block("va_arg.in_mem");
     let end = bx.append_sibling_block("va_arg.end");
     let ptr_align_abi = dl.pointer_align().abi;
 
     // FIXME: vector ABI not yet supported.
-    let target_ty_size = bx.cx.size_of(target_ty).bytes();
+    let target_ty_size = layout.size.bytes();
     let indirect: bool = target_ty_size > 8 || !target_ty_size.is_power_of_two();
     let unpadded_size = if indirect { 8 } else { target_ty_size };
     let padded_size = 8;
     let padding = padded_size - unpadded_size;
 
-    let gpr_type = indirect || !layout.is_single_fp_element(bx.cx);
+    // NOTE: if we ever allow aggregate types, this should handle structs with a single fp element.
+    let is_single_fp_element = |layout: TyAndLayout<'_>| -> bool {
+        match layout.layout.backend_repr() {
+            BackendRepr::Scalar(scalar) => match scalar.primitive() {
+                Primitive::Float(Float::F16 | Float::F32 | Float::F64) => true,
+                Primitive::Float(Float::F128) => false,
+                Primitive::Int(_, _) | Primitive::Pointer(_) => false,
+                Primitive::Float(Float::F16B) => {
+                    bug!("`f16b` use in varadics unsupported on s390x")
+                }
+            },
+
+            _ => false,
+        }
+    };
+
+    let gpr_type = indirect || !is_single_fp_element(layout);
     let (max_regs, reg_count, reg_save_index, reg_padding) =
         if gpr_type { (5, gpr, 2, padding) } else { (4, fpr, 16, 0) };
 
@@ -493,7 +526,7 @@ fn emit_s390x_va_arg<'ll, 'tcx>(
 fn emit_x86_64_sysv64_va_arg<'ll, 'tcx>(
     bx: &mut Builder<'_, 'll, 'tcx>,
     list: OperandRef<'tcx, &'ll Value>,
-    target_ty: Ty<'tcx>,
+    layout: TyAndLayout<'tcx>,
 ) -> &'ll Value {
     let dl = bx.cx.data_layout();
 
@@ -528,15 +561,7 @@ fn emit_x86_64_sysv64_va_arg<'ll, 'tcx>(
     // #[repr(C)]
     // struct Foo([Empty; 8], i32);
     // ```
-    let layout = {
-        let mut layout = bx.cx.layout_of(target_ty);
-
-        while let Some((_, inner)) = layout.non_1zst_field(bx.cx) {
-            layout = inner;
-        }
-
-        layout
-    };
+    let layout = layout.peel_transparent_wrappers(bx.cx);
 
     // AMD64-ABI 3.5.7p5: Step 1. Determine whether type may be passed
     // in the registers. If not go to step 7.
@@ -564,7 +589,7 @@ fn emit_x86_64_sysv64_va_arg<'ll, 'tcx>(
         BackendRepr::Scalar(scalar) => {
             registers_for_primitive(scalar.primitive());
         }
-        BackendRepr::ScalarPair(scalar1, scalar2) => {
+        BackendRepr::ScalarPair { a: scalar1, b: scalar2, b_offset: _ } => {
             registers_for_primitive(scalar1.primitive());
             registers_for_primitive(scalar2.primitive());
         }
@@ -585,8 +610,10 @@ fn emit_x86_64_sysv64_va_arg<'ll, 'tcx>(
     // registers. In the case: l->gp_offset > 48 - num_gp * 8 or
     // l->fp_offset > 176 - num_fp * 16 go to step 7.
 
+    // We support x86_64-unknown-linux-gnux32 which uses 4-byte pointers.
     let unsigned_int_offset = 4;
-    let ptr_offset = 8;
+    let ptr_offset = bx.tcx().data_layout.pointer_size().bytes();
+
     let gp_offset_ptr = va_list_addr;
     let fp_offset_ptr = bx.inbounds_ptradd(va_list_addr, bx.cx.const_usize(unsigned_int_offset));
 
@@ -641,7 +668,7 @@ fn emit_x86_64_sysv64_va_arg<'ll, 'tcx>(
             }
             Primitive::Float(_) => bx.inbounds_ptradd(reg_save_area_v, fp_offset_v),
         },
-        BackendRepr::ScalarPair(scalar1, scalar2) => {
+        BackendRepr::ScalarPair { a: scalar1, b: scalar2, b_offset: offset } => {
             let ty_lo = bx.cx().scalar_pair_element_backend_type(layout, 0, false);
             let ty_hi = bx.cx().scalar_pair_element_backend_type(layout, 1, false);
 
@@ -660,14 +687,13 @@ fn emit_x86_64_sysv64_va_arg<'ll, 'tcx>(
                     let reg_hi_addr = bx.inbounds_ptradd(reg_lo_addr, bx.const_i32(16));
 
                     let align = layout.layout.align().abi;
-                    let tmp = bx.alloca(layout.layout.size(), align);
+                    let tmp = bx.alloca(layout.size, layout.align.abi);
 
                     let reg_lo = bx.load(ty_lo, reg_lo_addr, align_lo);
                     let reg_hi = bx.load(ty_hi, reg_hi_addr, align_hi);
 
-                    let offset = scalar1.size(bx.cx).align_to(align_hi).bytes();
                     let field0 = tmp;
-                    let field1 = bx.inbounds_ptradd(tmp, bx.const_u32(offset as u32));
+                    let field1 = bx.inbounds_ptradd(tmp, bx.const_u32(offset.bytes() as u32));
 
                     bx.store(reg_lo, field0, align);
                     bx.store(reg_hi, field1, align);
@@ -683,14 +709,13 @@ fn emit_x86_64_sysv64_va_arg<'ll, 'tcx>(
                         Primitive::Int(_, _) | Primitive::Pointer(_) => (gp_addr, fp_addr),
                     };
 
-                    let tmp = bx.alloca(layout.layout.size(), layout.layout.align().abi);
+                    let tmp = bx.alloca(layout.size, layout.align.abi);
 
                     let reg_lo = bx.load(ty_lo, reg_lo_addr, align_lo);
                     let reg_hi = bx.load(ty_hi, reg_hi_addr, align_hi);
 
-                    let offset = scalar1.size(bx.cx).align_to(align_hi).bytes();
                     let field0 = tmp;
-                    let field1 = bx.inbounds_ptradd(tmp, bx.const_u32(offset as u32));
+                    let field1 = bx.inbounds_ptradd(tmp, bx.const_u32(offset.bytes() as u32));
 
                     bx.store(reg_lo, field0, align_lo);
                     bx.store(reg_hi, field1, align_hi);
@@ -751,16 +776,12 @@ fn copy_to_temporary_if_more_aligned<'ll, 'tcx>(
     src_align: Align,
 ) -> &'ll Value {
     if layout.layout.align.abi > src_align {
-        let tmp = bx.alloca(layout.layout.size(), layout.layout.align().abi);
-        bx.memcpy(
-            tmp,
-            layout.layout.align.abi,
-            reg_addr,
-            src_align,
-            bx.const_u32(layout.layout.size().bytes() as u32),
-            MemFlags::empty(),
-            None,
-        );
+        assert!(layout.ty.is_integral());
+
+        // A memcpy below optimizes poorly for 128-bit integers.
+        let tmp = bx.alloca(layout.size, layout.align.abi);
+        let val = bx.load(layout.llvm_type(bx), reg_addr, src_align);
+        bx.store(val, tmp, layout.align.abi);
         tmp
     } else {
         reg_addr
@@ -782,9 +803,14 @@ fn x86_64_sysv64_va_arg_from_memory<'ll, 'tcx>(
     // byte boundary if alignment needed by type exceeds 8 byte boundary.
     // It isn't stated explicitly in the standard, but in practice we use
     // alignment greater than 16 where necessary.
-    if layout.layout.align.bytes() > 8 {
-        unreachable!("all instances of VaArgSafe have an alignment <= 8");
-    }
+    // The AMD64 psABI leaves unspecified what to do for alignments above 16, but
+    // this behavior for 32+ alignment matches clang.
+    // It currently (2026 July) can only occur for 16-byte-aligned types.
+    let overflow_arg_area_v = if layout.layout.align.bytes() > 8 {
+        round_pointer_up_to_alignment(bx, overflow_arg_area_v, layout.layout.align.abi)
+    } else {
+        overflow_arg_area_v
+    };
 
     // AMD64-ABI 3.5.7p5: Step 8. Fetch type from l->overflow_arg_area.
     let mem_addr = overflow_arg_area_v;
@@ -804,7 +830,7 @@ fn x86_64_sysv64_va_arg_from_memory<'ll, 'tcx>(
 fn emit_hexagon_va_arg_musl<'ll, 'tcx>(
     bx: &mut Builder<'_, 'll, 'tcx>,
     list: OperandRef<'tcx, &'ll Value>,
-    target_ty: Ty<'tcx>,
+    layout: TyAndLayout<'tcx>,
 ) -> &'ll Value {
     // Implementation of va_arg for Hexagon musl target.
     // Based on LLVM's HexagonBuiltinVaList implementation.
@@ -818,7 +844,6 @@ fn emit_hexagon_va_arg_musl<'ll, 'tcx>(
     // All variadic arguments are passed on the stack, but the musl implementation
     //  uses a register save area for compatibility.
     let va_list_addr = list.immediate();
-    let layout = bx.cx.layout_of(target_ty);
     let ptr_align_abi = bx.tcx().data_layout.pointer_align().abi;
     let ptr_size = bx.tcx().data_layout.pointer_size().bytes();
 
@@ -838,7 +863,7 @@ fn emit_hexagon_va_arg_musl<'ll, 'tcx>(
 
     // Align current pointer based on argument type size (following LLVM's implementation)
     // Arguments <= 32 bits (4 bytes) use 4-byte alignment, > 32 bits use 8-byte alignment
-    let type_size_bits = bx.cx.size_of(target_ty).bits();
+    let type_size_bits = layout.size.bits();
     let arg_align = if type_size_bits > 32 {
         Align::from_bytes(8).unwrap()
     } else {
@@ -888,14 +913,13 @@ fn emit_hexagon_va_arg_musl<'ll, 'tcx>(
 fn emit_hexagon_va_arg_bare_metal<'ll, 'tcx>(
     bx: &mut Builder<'_, 'll, 'tcx>,
     list: OperandRef<'tcx, &'ll Value>,
-    target_ty: Ty<'tcx>,
+    layout: TyAndLayout<'tcx>,
 ) -> &'ll Value {
     // Implementation of va_arg for Hexagon bare-metal (non-musl) targets.
     // Based on LLVM's EmitVAArgForHexagon implementation.
     //
     // va_list is a simple pointer (char *)
     let va_list_addr = list.immediate();
-    let layout = bx.cx.layout_of(target_ty);
     let ptr_align_abi = bx.tcx().data_layout.pointer_align().abi;
 
     // Load current pointer from va_list
@@ -926,7 +950,7 @@ fn emit_hexagon_va_arg_bare_metal<'ll, 'tcx>(
 fn emit_xtensa_va_arg<'ll, 'tcx>(
     bx: &mut Builder<'_, 'll, 'tcx>,
     list: OperandRef<'tcx, &'ll Value>,
-    target_ty: Ty<'tcx>,
+    layout: TyAndLayout<'tcx>,
 ) -> &'ll Value {
     // Implementation of va_arg for Xtensa. There doesn't seem to be an authoritative source for
     // this, other than "what GCC does".
@@ -946,7 +970,6 @@ fn emit_xtensa_va_arg<'ll, 'tcx>(
     // primitive value and va_ndx = 20, we instead bump the offset and read everything from va_stk.
     let va_list_addr = list.immediate();
     // FIXME: handle multi-field structs that split across regsave/stack?
-    let layout = bx.cx.layout_of(target_ty);
     let from_stack = bx.append_sibling_block("va_arg.from_stack");
     let from_regsave = bx.append_sibling_block("va_arg.from_regsave");
     let end = bx.append_sibling_block("va_arg.end");
@@ -1028,71 +1051,89 @@ fn emit_xtensa_va_arg<'ll, 'tcx>(
 pub(super) fn emit_va_arg<'ll, 'tcx>(
     bx: &mut Builder<'_, 'll, 'tcx>,
     addr: OperandRef<'tcx, &'ll Value>,
-    target_ty: Ty<'tcx>,
+    layout: TyAndLayout<'tcx>,
 ) -> &'ll Value {
-    let layout = bx.cx.layout_of(target_ty);
-    let target_ty_size = layout.layout.size().bytes();
-
     // Some ABIs have special behavior for zero-sized types. currently `VaArgSafe` is not
     // implemented for any zero-sized types, so this assert should always hold.
-    assert!(!bx.layout_of(target_ty).is_zst());
+    assert!(!layout.is_zst());
 
     let target = &bx.cx.tcx.sess.target;
     let stability = target.supports_c_variadic_definitions();
 
     match target.arch {
-        Arch::X86 => emit_ptr_va_arg(
-            bx,
-            addr,
-            target_ty,
-            PassMode::Direct,
-            SlotSize::Bytes4,
-            if target.is_like_windows { AllowHigherAlign::No } else { AllowHigherAlign::Yes },
-            ForceRightAdjust::No,
-        ),
+        Arch::X86 => {
+            // A small deviation from clang to get the right behavior for f128.
+            //
+            // Note that i64 and f64 have an alignment of only 4 on this architecture.
+            // We need to be careful when adding future types with an alignment bigger
+            // than 4 (e.g. i128), clang has a bunch of custom logic for them.
+            let allow_higher_align = if layout.ty == bx.tcx().types.f128 {
+                AllowHigherAlign::Yes
+            } else {
+                AllowHigherAlign::No
+            };
+
+            emit_ptr_va_arg(
+                bx,
+                addr,
+                layout,
+                PassMode::Direct,
+                SlotSize::Bytes4,
+                allow_higher_align,
+                ForceRightAdjust::No,
+            )
+        }
         Arch::Arm64EC => emit_ptr_va_arg(
             bx,
             addr,
-            target_ty,
-            PassMode::Direct,
+            layout,
+            // MS x64 ABI requirement: "Any argument that doesn't fit in 8 bytes, or is
+            // not 1, 2, 4, or 8 bytes, must be passed by reference."
+            if layout.size.bytes() > 8 || !layout.size.bytes().is_power_of_two() {
+                PassMode::Indirect
+            } else {
+                PassMode::Direct
+            },
             SlotSize::Bytes8,
-            if target.is_like_windows { AllowHigherAlign::No } else { AllowHigherAlign::Yes },
+            AllowHigherAlign::No,
             ForceRightAdjust::No,
         ),
         Arch::AArch64 if target.is_like_windows || target.is_like_darwin => emit_ptr_va_arg(
             bx,
             addr,
-            target_ty,
+            layout,
             PassMode::Direct,
             SlotSize::Bytes8,
-            if target.is_like_windows { AllowHigherAlign::No } else { AllowHigherAlign::Yes },
+            AllowHigherAlign::Yes,
             ForceRightAdjust::No,
         ),
-        Arch::AArch64 => emit_aapcs_va_arg(bx, addr, target_ty),
+        Arch::AArch64 => emit_aapcs_va_arg(bx, addr, layout),
         Arch::Arm => {
             // Types wider than 16 bytes are not currently supported. Clang has special logic for
-            // such types, but `VaArgSafe` is not implemented for any type that is this large.
-            assert!(bx.cx.size_of(target_ty).bytes() <= 16);
+            // such types, but `VaArgSafe` is not implemented for any type that is this large on
+            // arm (i.e. 32-bit) targets.
+            assert!(layout.size.bytes() <= 16);
 
             emit_ptr_va_arg(
                 bx,
                 addr,
-                target_ty,
+                layout,
                 PassMode::Direct,
                 SlotSize::Bytes4,
                 AllowHigherAlign::Yes,
                 ForceRightAdjust::No,
             )
         }
-        Arch::S390x => emit_s390x_va_arg(bx, addr, target_ty),
-        Arch::PowerPC => emit_powerpc_va_arg(bx, addr, target_ty),
+        Arch::S390x => emit_s390x_va_arg(bx, addr, layout),
+        Arch::PowerPC => emit_powerpc_va_arg(bx, addr, layout),
         Arch::PowerPC64 => emit_ptr_va_arg(
             bx,
             addr,
-            target_ty,
+            layout,
             PassMode::Direct,
             SlotSize::Bytes8,
             AllowHigherAlign::Yes,
+            // ForceRightAdjust only takes effect on big-endian architectures.
             ForceRightAdjust::Yes,
         ),
         Arch::RiscV32 if target.llvm_abiname == LlvmAbi::Ilp32e => {
@@ -1108,8 +1149,8 @@ pub(super) fn emit_va_arg<'ll, 'tcx>(
         Arch::RiscV32 | Arch::LoongArch32 => emit_ptr_va_arg(
             bx,
             addr,
-            target_ty,
-            if target_ty_size > 2 * 4 { PassMode::Indirect } else { PassMode::Direct },
+            layout,
+            if layout.size.bytes() > 2 * 4 { PassMode::Indirect } else { PassMode::Direct },
             SlotSize::Bytes4,
             AllowHigherAlign::Yes,
             ForceRightAdjust::No,
@@ -1117,8 +1158,8 @@ pub(super) fn emit_va_arg<'ll, 'tcx>(
         Arch::RiscV64 | Arch::LoongArch64 => emit_ptr_va_arg(
             bx,
             addr,
-            target_ty,
-            if target_ty_size > 2 * 8 { PassMode::Indirect } else { PassMode::Direct },
+            layout,
+            if layout.size.bytes() > 2 * 8 { PassMode::Indirect } else { PassMode::Direct },
             SlotSize::Bytes8,
             AllowHigherAlign::Yes,
             ForceRightAdjust::No,
@@ -1126,7 +1167,7 @@ pub(super) fn emit_va_arg<'ll, 'tcx>(
         Arch::AmdGpu => emit_ptr_va_arg(
             bx,
             addr,
-            target_ty,
+            layout,
             PassMode::Direct,
             SlotSize::Bytes4,
             AllowHigherAlign::No,
@@ -1135,7 +1176,7 @@ pub(super) fn emit_va_arg<'ll, 'tcx>(
         Arch::Nvptx64 => emit_ptr_va_arg(
             bx,
             addr,
-            target_ty,
+            layout,
             PassMode::Direct,
             SlotSize::Bytes1,
             AllowHigherAlign::Yes,
@@ -1144,7 +1185,7 @@ pub(super) fn emit_va_arg<'ll, 'tcx>(
         Arch::Wasm32 | Arch::Wasm64 => emit_ptr_va_arg(
             bx,
             addr,
-            target_ty,
+            layout,
             if layout.is_aggregate() || layout.is_zst() || layout.is_1zst() {
                 PassMode::Indirect
             } else {
@@ -1157,7 +1198,7 @@ pub(super) fn emit_va_arg<'ll, 'tcx>(
         Arch::CSky => emit_ptr_va_arg(
             bx,
             addr,
-            target_ty,
+            layout,
             PassMode::Direct,
             SlotSize::Bytes4,
             AllowHigherAlign::Yes,
@@ -1167,8 +1208,8 @@ pub(super) fn emit_va_arg<'ll, 'tcx>(
         Arch::X86_64 if target.is_like_windows => emit_ptr_va_arg(
             bx,
             addr,
-            target_ty,
-            if target_ty_size > 8 || !target_ty_size.is_power_of_two() {
+            layout,
+            if layout.size.bytes() > 8 || !layout.size.bytes().is_power_of_two() {
                 PassMode::Indirect
             } else {
                 PassMode::Direct
@@ -1178,26 +1219,48 @@ pub(super) fn emit_va_arg<'ll, 'tcx>(
             ForceRightAdjust::No,
         ),
         // This includes `target.is_like_darwin`, which on x86_64 targets is like sysv64.
-        Arch::X86_64 => emit_x86_64_sysv64_va_arg(bx, addr, target_ty),
-        Arch::Xtensa => emit_xtensa_va_arg(bx, addr, target_ty),
+        Arch::X86_64 => emit_x86_64_sysv64_va_arg(bx, addr, layout),
+        Arch::Xtensa => emit_xtensa_va_arg(bx, addr, layout),
         Arch::Hexagon => match target.env {
-            Env::Musl => emit_hexagon_va_arg_musl(bx, addr, target_ty),
-            _ => emit_hexagon_va_arg_bare_metal(bx, addr, target_ty),
+            Env::Musl => emit_hexagon_va_arg_musl(bx, addr, layout),
+            _ => emit_hexagon_va_arg_bare_metal(bx, addr, layout),
         },
         Arch::Sparc64 => emit_ptr_va_arg(
             bx,
             addr,
-            target_ty,
-            if target_ty_size > 2 * 8 { PassMode::Indirect } else { PassMode::Direct },
+            layout,
+            if layout.size.bytes() > 2 * 8 { PassMode::Indirect } else { PassMode::Direct },
             SlotSize::Bytes8,
             AllowHigherAlign::Yes,
             // sparc64 is a big-endian target and stores variable arguments right-adjusted.
             ForceRightAdjust::Yes,
         ),
+        Arch::Sparc => {
+            std::assert_matches!(stability, CVariadicStatus::Unstable { .. });
+
+            // f128 is passed indirectly.
+            let pass_mode = match layout.layout.backend_repr() {
+                BackendRepr::Scalar(scalar) => match scalar.primitive() {
+                    Primitive::Float(Float::F128) => PassMode::Indirect,
+                    _ => PassMode::Direct,
+                },
+                _ => PassMode::Direct,
+            };
+
+            emit_ptr_va_arg(
+                bx,
+                addr,
+                layout,
+                pass_mode,
+                SlotSize::Bytes4,
+                AllowHigherAlign::No,
+                ForceRightAdjust::Yes,
+            )
+        }
         Arch::Mips | Arch::Mips32r6 | Arch::Mips64 | Arch::Mips64r6 => emit_ptr_va_arg(
             bx,
             addr,
-            target_ty,
+            layout,
             PassMode::Direct,
             match &target.llvm_abiname {
                 LlvmAbi::N32 | LlvmAbi::N64 => SlotSize::Bytes8,
@@ -1217,11 +1280,11 @@ pub(super) fn emit_va_arg<'ll, 'tcx>(
         Arch::Bpf => bug!("bpf does not support c-variadic functions"),
         Arch::SpirV => bug!("spirv does not support c-variadic functions"),
 
-        Arch::Sparc | Arch::Avr | Arch::M68k | Arch::Msp430 => {
+        Arch::Avr | Arch::M68k | Arch::Msp430 => {
             std::assert_matches!(stability, CVariadicStatus::Unstable { .. });
 
             // Clang uses the LLVM implementation for these architectures.
-            bx.va_arg(addr.immediate(), bx.cx.layout_of(target_ty).llvm_type(bx.cx))
+            bx.va_arg(addr.immediate(), layout.llvm_type(bx.cx))
         }
 
         Arch::Other(ref arch) => {

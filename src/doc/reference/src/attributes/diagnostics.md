@@ -1,12 +1,14 @@
 r[attributes.diagnostics]
 # Diagnostic attributes
 
+r[attributes.diagnostics.intro]
 The following [attributes] are used for controlling or generating diagnostic
 messages during compilation.
 
 r[attributes.diagnostics.lint]
 ## Lint check attributes
 
+r[attributes.diagnostics.lint.intro]
 A lint check names a potentially undesirable coding pattern, such as
 unreachable code or omitted documentation.
 
@@ -227,9 +229,11 @@ pub fn another_example() {
 r[attributes.diagnostics.lint.group]
 ### Lint groups
 
-Lints may be organized into named groups so that the level of related lints
-can be adjusted together. Using a named group is equivalent to listing out the
-lints within that group.
+r[attributes.diagnostics.lint.group.intro]
+Lints may be organized into named groups so that the level of related lints can be adjusted together.
+
+r[attributes.diagnostics.lint.group.equivalence]
+Using a named group is equivalent to listing out the lints within that group.
 
 ```rust,compile_fail
 // This allows all lints in the "unused" group.
@@ -321,7 +325,7 @@ The `deprecated` attribute has several forms:
     message. This is typically used to provide an explanation about the
     deprecation and preferred alternatives.
 
-r[attributes.diagnostic.deprecated.allowed-positions]
+r[attributes.diagnostics.deprecated.allowed-positions]
 The `deprecated` attribute may be applied to any [item], [trait item], [enum
 variant], [struct field], [external block item], or [macro definition]. It
 cannot be applied to [trait implementation items][trait-impl]. When applied to an item
@@ -395,17 +399,16 @@ struct MustUse();
 MustUse(); // ERROR: Unused value that must be used.
 ```
 
-r[attributes.diagnostics.must_use.type.uninhabited]
+r[attributes.diagnostics.must_use.type-uninhabited]
 As an exception to [attributes.diagnostics.must_use.type], the lint does not fire for `Result<(), E>` when `E` is [uninhabited] or for `ControlFlow<B, ()>` when `B` is [uninhabited]. A `#[non_exhaustive]` type from an external crate is not considered uninhabited for this purpose, because it may gain constructors in the future.
 
 ```rust
 #![deny(unused_must_use)]
 # use core::ops::ControlFlow;
-enum Empty {}
-fn f1() -> Result<(), Empty> { Ok(()) }
-f1(); // OK: `Empty` is uninhabited.
-fn f2() -> ControlFlow<Empty, ()> { ControlFlow::Continue(()) }
-f2(); // OK: `Empty` is uninhabited.
+fn f1() -> Result<(), !> { Ok(()) }
+f1(); // OK: `!` is uninhabited.
+fn f2() -> ControlFlow<!, ()> { ControlFlow::Continue(()) }
+f2(); // OK: `!` is uninhabited.
 ```
 
 r[attributes.diagnostics.must_use.fn]

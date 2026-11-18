@@ -1,7 +1,6 @@
 //! Tests for some invalid .cargo/config files.
 
 use crate::prelude::*;
-use cargo_test_support::git::cargo_uses_gitoxide;
 use cargo_test_support::registry::{self, Package};
 use cargo_test_support::{Project, basic_bin_manifest, basic_manifest, project, rustc_host, str};
 
@@ -423,8 +422,7 @@ fn bad_git_dependency() {
     let p = project()
         .file(
             "Cargo.toml",
-            &format!(
-                r#"
+            r#"
                 [package]
                 name = "foo"
                 version = "0.0.0"
@@ -432,43 +430,15 @@ fn bad_git_dependency() {
                 authors = []
 
                 [dependencies]
-                foo = {{ git = "{url}" }}
+                foo = { git = "file:.." }
             "#,
-                url = if cargo_uses_gitoxide() {
-                    "git://host.xz"
-                } else {
-                    "file:.."
-                }
-            ),
         )
         .file("src/lib.rs", "")
         .build();
 
-    if cargo_uses_gitoxide() {
-        p.cargo("check -v")
-            .with_status(101)
-            .with_stderr_data(str![[r#"
-[UPDATING] git repository `git://host.xz`
-[ERROR] failed to get `foo` as a dependency of package `foo v0.0.0 ([ROOT]/foo)`
-
-Caused by:
-  failed to load source for dependency `foo`
-
-Caused by:
-  unable to update git://host.xz
-
-Caused by:
-  failed to clone into: [ROOT]/home/.cargo/git/db/_empty-[HASH]
-
-Caused by:
-  URL "git://host.xz" does not specify a path to a repository
-
-"#]])
-            .run();
-    } else {
-        p.cargo("check -v")
-            .with_status(101)
-            .with_stderr_data(str![[r#"
+    p.cargo("check -v")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
 [UPDATING] git repository `file:///`
 [ERROR] failed to get `foo` as a dependency of package `foo v0.0.0 ([ROOT]/foo)`
 
@@ -485,8 +455,7 @@ Caused by:
   'file:///' is not a valid local file URI; class=Config (7)
 
 "#]])
-            .run();
-    };
+        .run();
 }
 
 #[cargo_test]
@@ -985,7 +954,7 @@ fn dev_dependencies2() {
 [WARNING] Cargo.toml: `dev_dependencies` is deprecated in favor of `dev-dependencies` and will not work in the 2024 edition
 (in the `foo` package)
 [WARNING] `foo` (manifest) generated 1 warning
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [CHECKING] foo v0.1.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -1064,7 +1033,7 @@ fn dev_dependencies2_conflict() {
     p.cargo("check").with_stderr_data(str![[r#"
 [WARNING] Cargo.toml: `dev_dependencies` is redundant with `dev-dependencies`, preferring `dev-dependencies` in the `foo` package
 [WARNING] `foo` (manifest) generated 1 warning
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [CHECKING] foo v0.1.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -1084,6 +1053,9 @@ fn build_dependencies2() {
 
                 [build_dependencies]
                 a = {path = "a"}
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -1094,6 +1066,9 @@ fn build_dependencies2() {
                 name = "a"
                 version = "0.0.1"
                 edition = "2015"
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("a/src/lib.rs", "")
@@ -1102,7 +1077,7 @@ fn build_dependencies2() {
 [WARNING] Cargo.toml: `build_dependencies` is deprecated in favor of `build-dependencies` and will not work in the 2024 edition
 (in the `foo` package)
 [WARNING] `foo` (manifest) generated 1 warning
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [CHECKING] foo v0.1.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -1164,6 +1139,9 @@ fn build_dependencies2_conflict() {
                 a = {path = "a"}
                 [build_dependencies]
                 a = {path = "a"}
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -1174,6 +1152,9 @@ fn build_dependencies2_conflict() {
                 name = "a"
                 version = "0.0.1"
                 edition = "2015"
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("a/src/lib.rs", "")
@@ -1181,7 +1162,7 @@ fn build_dependencies2_conflict() {
     p.cargo("check").with_stderr_data(str![[r#"
 [WARNING] Cargo.toml: `build_dependencies` is redundant with `build-dependencies`, preferring `build-dependencies` in the `foo` package
 [WARNING] `foo` (manifest) generated 1 warning
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [CHECKING] foo v0.1.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -1557,7 +1538,7 @@ fn cargo_platform_build_dependencies2() {
 [WARNING] Cargo.toml: `build_dependencies` is deprecated in favor of `build-dependencies` and will not work in the 2024 edition
 (in the `[HOST_TARGET]` platform target)
 [WARNING] `foo` (manifest) generated 1 warning
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [COMPILING] build v0.5.0 ([ROOT]/foo/build)
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -1646,7 +1627,7 @@ fn cargo_platform_build_dependencies2_conflict() {
         .with_stderr_data(str![[r#"
 [WARNING] Cargo.toml: `build_dependencies` is redundant with `build-dependencies`, preferring `build-dependencies` in the `[HOST_TARGET]` platform target
 [WARNING] `foo` (manifest) generated 1 warning
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [COMPILING] build v0.5.0 ([ROOT]/foo/build)
 [COMPILING] foo v0.5.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -1690,7 +1671,7 @@ fn cargo_platform_dev_dependencies2() {
 [WARNING] Cargo.toml: `dev_dependencies` is deprecated in favor of `dev-dependencies` and will not work in the 2024 edition
 (in the `[HOST_TARGET]` platform target)
 [WARNING] `foo` (manifest) generated 1 warning
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [CHECKING] foo v0.5.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -1775,7 +1756,7 @@ fn cargo_platform_dev_dependencies2_conflict() {
         .with_stderr_data(str![[r#"
 [WARNING] Cargo.toml: `dev_dependencies` is redundant with `dev-dependencies`, preferring `dev-dependencies` in the `[HOST_TARGET]` platform target
 [WARNING] `foo` (manifest) generated 1 warning
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [CHECKING] foo v0.5.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -1797,6 +1778,9 @@ fn default_features2() {
 
                 [dependencies]
                 a = { path = "a", features = ["f1"], default_features = false }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -1812,6 +1796,9 @@ fn default_features2() {
                 [features]
                 default = ["f1"]
                 f1 = []
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("a/src/lib.rs", "")
@@ -1821,7 +1808,7 @@ fn default_features2() {
 [WARNING] Cargo.toml: `default_features` is deprecated in favor of `default-features` and will not work in the 2024 edition
 (in the `a` dependency)
 [WARNING] `foo` (manifest) generated 1 warning
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [CHECKING] a v0.1.0 ([ROOT]/foo/a)
 [CHECKING] foo v0.1.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -1890,6 +1877,9 @@ fn default_features2_conflict() {
 
                 [dependencies]
                 a = { path = "a", features = ["f1"], default-features = false, default_features = false }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -1905,6 +1895,9 @@ fn default_features2_conflict() {
                 [features]
                 default = ["f1"]
                 f1 = []
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("a/src/lib.rs", "")
@@ -1913,7 +1906,7 @@ fn default_features2_conflict() {
     p.cargo("check").with_stderr_data(str![[r#"
 [WARNING] Cargo.toml: `default_features` is redundant with `default-features`, preferring `default-features` in the `a` dependency
 [WARNING] `foo` (manifest) generated 1 warning
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [CHECKING] a v0.1.0 ([ROOT]/foo/a)
 [CHECKING] foo v0.1.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -1946,6 +1939,9 @@ fn workspace_default_features2() {
 
                 [dependencies]
                 dep_workspace_only.workspace = true
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("workspace_only/src/lib.rs", "")
@@ -1957,6 +1953,9 @@ fn workspace_default_features2() {
                 version = "0.1.0"
                 edition = "2015"
                 authors = []
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("dep_workspace_only/src/lib.rs", "")
@@ -1971,6 +1970,9 @@ fn workspace_default_features2() {
 
                 [dependencies]
                 dep_package_only = { workspace = true, default_features = true }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("package_only/src/lib.rs", "")
@@ -1982,6 +1984,9 @@ fn workspace_default_features2() {
                 version = "0.1.0"
                 edition = "2015"
                 authors = []
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("dep_package_only/src/lib.rs", "")
@@ -2363,10 +2368,9 @@ Caused by:
 Caused by:
   unable to update https://github.com/rust-lang/does-not-exist/pull/123
 ...
-  [NOTE] GitHub url https://github.com/rust-lang/does-not-exist/pull/123 is not a repository. 
-  [HELP] Replace the dependency with 
-         `git = "https://github.com/rust-lang/does-not-exist.git" rev = "refs/pull/123/head"` 
-     to specify pull requests as dependencies' revision.
+  [NOTE] GitHub url https://github.com/rust-lang/does-not-exist/pull/123 is not a repository
+  [HELP] to specify a pull request as a dependency, replace the dependency with:
+         `git = "https://github.com/rust-lang/does-not-exist.git" rev = "refs/pull/123/head"`
 ...
 "#]])
         .run();
@@ -2393,9 +2397,6 @@ fn fragment_in_git_url() {
 
     p.cargo("check -v")
         .with_status(101)
-        // the following is needed as gitoxide has a different error message
-        // ...
-        // [..]127.0.0.1[..]
         .with_stderr_data(str![[r#"
 [WARNING] Cargo.toml: URL fragment `#foo` in git URL is ignored for dependency (bar). If you were trying to specify a specific git revision, use `rev = "foo"` in the dependency declaration.
 [WARNING] `foo` (manifest) generated 1 warning
@@ -2987,6 +2988,9 @@ fn warn_semver_metadata() {
 
             [dependencies]
             bar = "1.0.0+1234"
+
+            [lints.cargo]
+            default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -2995,7 +2999,7 @@ fn warn_semver_metadata() {
 [WARNING] Cargo.toml: version requirement `1.0.0+1234` for dependency `bar` includes semver metadata which will be ignored, removing the metadata is recommended to avoid confusion
 [WARNING] `foo` (manifest) generated 1 warning
 [UPDATING] `dummy-registry` index
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [DOWNLOADING] crates ...
 [DOWNLOADED] bar v1.0.0 (registry `dummy-registry`)
 [CHECKING] bar v1.0.0
@@ -3259,11 +3263,12 @@ fn bad_trim_paths() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("check -Ztrim-paths")
+    p.cargo("check")
+        .arg("-Ztrim-paths")
         .masquerade_as_nightly_cargo(&["trim-paths"])
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] expected a boolean, "none", "diagnostics", "macro", "object", "all", or an array with these options
+[ERROR] unknown variant `split-debuginfo`, expected one of `none`, `object`, `all`
  --> Cargo.toml:8:30
   |
 8 |                 trim-paths = "split-debuginfo"

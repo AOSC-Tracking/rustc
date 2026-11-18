@@ -162,8 +162,6 @@ pub struct MiriConfig {
     pub address_reuse_cross_thread_rate: f64,
     /// Round Robin scheduling with no preemption.
     pub fixed_scheduling: bool,
-    /// Always prefer the intrinsic fallback body over the native Miri implementation.
-    pub force_intrinsic_fallback: bool,
     /// Whether floating-point operations can behave non-deterministically.
     pub float_nondet: bool,
     /// Whether floating-point operations can have a non-deterministic rounding error.
@@ -210,7 +208,6 @@ impl Default for MiriConfig {
             address_reuse_rate: 0.5,
             address_reuse_cross_thread_rate: 0.1,
             fixed_scheduling: false,
-            force_intrinsic_fallback: false,
             float_nondet: true,
             float_rounding_error: FloatRoundingErrorMode::Random,
             short_fd_operations: true,
@@ -461,11 +458,13 @@ fn call_main<'tcx>(
     // Call start function.
     match entry_type {
         MiriEntryFnType::Rustc(EntryFnType::Main { .. }) => {
+            let entry_sig = tcx.fn_sig(entry_id).no_bound_vars().unwrap();
+            let main_ret_ty = entry_sig.output();
+            let main_ret_ty = main_ret_ty.no_bound_vars().unwrap();
+
             let start_id = tcx.lang_items().start_fn().unwrap_or_else(|| {
                 tcx.dcx().fatal("could not find start lang item");
             });
-            let main_ret_ty = tcx.fn_sig(entry_id).no_bound_vars().unwrap().output();
-            let main_ret_ty = main_ret_ty.no_bound_vars().unwrap();
             let start_instance = ty::Instance::try_resolve(
                 tcx,
                 ecx.typing_env(),
@@ -487,8 +486,7 @@ fn call_main<'tcx>(
                 &[
                     ImmTy::from_scalar(
                         Scalar::from_pointer(main_ptr, ecx),
-                        // FIXME use a proper fn ptr type
-                        ecx.machine.layouts.const_raw_ptr,
+                        ecx.layout_of(Ty::new_fn_ptr(tcx, entry_sig)).unwrap(),
                     ),
                     argc,
                     argv,
@@ -513,8 +511,8 @@ fn call_main<'tcx>(
 }
 
 /// Evaluates the entry function specified by `entry_id`.
-/// Returns `Some(return_code)` if program execution completed.
-/// Returns `None` if an evaluation error occurred.
+/// Returns `Ok(())` if program execution completed with exit code 0.
+/// Returns `Err(code)` if an evaluation error occurred or the program returned a non-0 exit code.
 pub fn eval_entry<'tcx>(
     tcx: TyCtxt<'tcx>,
     entry_id: DefId,

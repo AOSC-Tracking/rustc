@@ -6,40 +6,40 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, LazyLock};
-use std::time::Instant;
 use std::{fmt, str};
 
-use futures::{future::FutureExt, stream::StreamExt};
-use headers::{Authorization, CacheControl, ContentType, ETag, Header, HeaderMapExt, IfNoneMatch};
+use headers::{CacheControl, ContentType, ETag, HeaderMapExt, IfNoneMatch};
 use http::header::CACHE_CONTROL;
+use http_body_util::{BodyExt, Full, Limited};
+use hyper::body::{Bytes, Incoming};
 use hyper::StatusCode;
-use log::{debug, error, info};
-use parking_lot::{Mutex, RwLock};
+use hyper_util::rt::TokioIo;
+use log::{error, info};
+use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use uuid::Uuid;
 
 pub use crate::api::{
-    self, bootstrap, comparison, dashboard, github, graphs, info, self_profile, self_profile_raw,
-    status, triage, ServerResult,
+    self, comparison, dashboard, github, graphs, info, self_profile, status, toolchain, triage,
+    ServerResult,
 };
 use crate::load::{Config, SiteCtxt};
 use crate::request_handlers;
 use crate::resources::{Payload, ResourceResolver};
 
-use database::{self, ArtifactId};
+use crate::job_queue::build_queue;
 
-pub type Request = http::Request<hyper::Body>;
-pub type Response = http::Response<hyper::Body>;
+pub type Request = http::Request<Incoming>;
+pub type Response = http::Response<Bytes>;
 
 macro_rules! check_http_method {
     ($lhs: expr, $rhs: expr) => {
         if $lhs != $rhs {
             return Ok(http::Response::builder()
                 .status(StatusCode::METHOD_NOT_ALLOWED)
-                .body(hyper::Body::empty())
+                .body(Bytes::default())
                 .unwrap());
         }
     };
@@ -49,53 +49,29 @@ macro_rules! check_http_method {
 #[derive(Clone)]
 struct Server {
     ctxt: Arc<RwLock<Option<Arc<SiteCtxt>>>>,
-    updating: UpdatingStatus,
 }
 
 impl Server {
     fn new(ctxt: Arc<RwLock<Option<Arc<SiteCtxt>>>>) -> Self {
-        Self {
-            ctxt,
-            updating: UpdatingStatus::new(),
-        }
+        Self { ctxt }
     }
 }
 
-#[derive(Clone)]
-struct UpdatingStatus(Arc<AtomicBool>);
-
-struct IsUpdating(Arc<AtomicBool>, hyper::body::Sender);
-
-impl Drop for IsUpdating {
-    fn drop(&mut self) {
-        self.0.store(false, AtomicOrdering::SeqCst);
-        if std::thread::panicking() {
-            let _ = self.1.try_send_data("panicked, try again".into());
-        } else {
-            let _ = self.1.try_send_data("done".into());
-        }
-    }
+#[derive(Debug, Serialize)]
+struct ServerJsonError {
+    error: String,
 }
 
-impl UpdatingStatus {
-    fn new() -> Self {
-        UpdatingStatus(Arc::new(AtomicBool::new(false)))
-    }
-
-    // Returns previous state
-    fn set_updating(&self) -> bool {
-        match self
-            .0
-            .compare_exchange(false, true, AtomicOrdering::SeqCst, AtomicOrdering::SeqCst)
-        {
-            Ok(b) => b,
-            Err(b) => b,
-        }
-    }
-
-    fn release_on_drop(&self, channel: hyper::body::Sender) -> IsUpdating {
-        IsUpdating(self.0.clone(), channel)
-    }
+pub fn json_error_response(status: StatusCode, message: impl Into<String>) -> Response {
+    let payload = ServerJsonError {
+        error: message.into(),
+    };
+    let body = Bytes::from(serde_json::to_vec(&payload).unwrap());
+    http::Response::builder()
+        .status(status)
+        .header_typed(ContentType::json())
+        .body(body)
+        .unwrap()
 }
 
 impl Server {
@@ -112,28 +88,7 @@ impl Server {
         let result = handler(ctxt);
         Ok(http::Response::builder()
             .header_typed(ContentType::json())
-            .body(hyper::Body::from(serde_json::to_string(&result).unwrap()))
-            .unwrap())
-    }
-
-    /// Handle an asynchrnous HTTP GET request
-    async fn handle_get_async<F, R, S>(
-        &self,
-        req: &Request,
-        handler: F,
-    ) -> Result<Response, ServerError>
-    where
-        F: FnOnce(Arc<SiteCtxt>) -> R,
-        R: std::future::Future<Output = S> + Send,
-        S: Serialize,
-    {
-        check_http_method!(*req.method(), http::Method::GET);
-        let ctxt = self.ctxt.clone();
-        let ctxt = ctxt.read().as_ref().unwrap().clone();
-        let result = handler(ctxt).await;
-        Ok(http::Response::builder()
-            .header_typed(ContentType::json())
-            .body(hyper::Body::from(serde_json::to_string(&result).unwrap()))
+            .body(Bytes::from(serde_json::to_string(&result).unwrap()))
             .unwrap())
     }
 
@@ -161,51 +116,33 @@ impl Server {
                 let body = serde_json::to_vec(&result).unwrap();
                 maybe_compressed_response(response, body, compression)
             }
-            Err(err) => http::Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .header_typed(ContentType::text_utf8())
-                .header_typed(CacheControl::new().with_no_cache().with_no_store())
-                .body(hyper::Body::from(err.into()))
-                .unwrap(),
+            Err(err) => {
+                let message = String::from_utf8_lossy(&err.into()).to_string();
+                json_error_response(StatusCode::INTERNAL_SERVER_ERROR, message)
+            }
         };
         Ok(response)
-    }
-
-    fn check_auth(&self, req: &http::request::Parts) -> bool {
-        if let Some(auth) = req
-            .headers
-            .get(Authorization::<headers::authorization::Bearer>::name())
-        {
-            let ctxt = self.ctxt.read();
-            let ctxt = ctxt.as_ref().unwrap();
-            let auth = Authorization::<headers::authorization::Bearer>::decode(
-                &mut Some(auth).into_iter(),
-            )
-            .unwrap();
-            return auth.0.token() == *ctxt.config.keys.github_webhook_secret.as_ref().unwrap();
-        }
-
-        false
     }
 
     async fn handle_metrics(&self, _req: Request) -> Response {
         use prometheus::Encoder;
         let ctxt: Arc<SiteCtxt> = self.ctxt.read().as_ref().unwrap().clone();
-        let idx = ctxt.index.load();
 
         let mut buffer = Vec::new();
         let r = prometheus::Registry::new();
 
-        let missing_commits = ctxt.missing_commits().await;
+        let queue = build_queue(ctxt.pool.connection().await.as_mut())
+            .await
+            .unwrap_or_default();
         let queue_length =
             prometheus::IntGauge::new("rustc_perf_queue_length", "queue length").unwrap();
-        queue_length.set(missing_commits.len() as i64);
+        queue_length.set(queue.len() as i64);
         r.register(Box::new(queue_length)).unwrap();
 
         let queue_try_commits =
             prometheus::IntGauge::new("rustc_perf_queue_try_commits", "queued try commits")
                 .unwrap();
-        queue_try_commits.set(missing_commits.iter().filter(|(c, _)| c.is_try()).count() as i64);
+        queue_try_commits.set(queue.iter().filter(|req| req.is_try()).count() as i64);
         r.register(Box::new(queue_try_commits)).unwrap();
 
         // Stores cache hits and misses of the self profile cache
@@ -228,86 +165,12 @@ impl Server {
             self_profile_cache_misses.set(self_profile_stats.get_misses() as i64);
             r.register(Box::new(self_profile_cache_misses)).unwrap();
         }
-        if let Some(last_commit) = idx.commits().last().cloned() {
-            let conn = ctxt.conn().await;
-            let steps = conn.in_progress_steps(&ArtifactId::from(last_commit)).await;
-            let g = prometheus::IntGaugeVec::new(
-                prometheus::core::Opts {
-                    namespace: "rustc_perf".to_string(),
-                    subsystem: String::new(),
-                    name: String::from("step_duration_seconds"),
-                    help: String::from("step duration"),
-                    const_labels: HashMap::new(),
-                    variable_labels: vec![],
-                },
-                &["step"],
-            )
-            .unwrap();
-            for step in steps {
-                g.with_label_values(&[&step.name])
-                    .set(step.expected.as_secs() as i64);
-            }
-            r.register(Box::new(g)).unwrap();
-        }
 
         let encoder = prometheus::TextEncoder::new();
         let metric_families = r.gather();
         encoder.encode(&metric_families, &mut buffer).unwrap();
 
         Response::new(buffer.into())
-    }
-
-    async fn handle_push(&self, _req: Request) -> Response {
-        static LAST_UPDATE: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(|| Mutex::new(None));
-
-        let last = *LAST_UPDATE.lock();
-        if let Some(last) = last {
-            let min = 60; // 1 minutes
-            let elapsed = last.elapsed();
-            if elapsed < std::time::Duration::from_secs(min) {
-                return http::Response::builder()
-                    .status(StatusCode::OK)
-                    .header_typed(ContentType::text_utf8())
-                    .body(hyper::Body::from(format!(
-                        "Refreshed too recently ({elapsed:?} ago). Please wait."
-                    )))
-                    .unwrap();
-            }
-        }
-        *LAST_UPDATE.lock() = Some(Instant::now());
-
-        // set to updating
-        let was_updating = self.updating.set_updating();
-
-        if was_updating {
-            return http::Response::builder()
-                .status(StatusCode::OK)
-                .header_typed(ContentType::text_utf8())
-                .body(hyper::Body::from("Already updating!"))
-                .unwrap();
-        }
-
-        debug!("received onpush hook");
-
-        let (channel, body) = hyper::Body::channel();
-
-        let ctxt: Arc<SiteCtxt> = self.ctxt.read().as_ref().unwrap().clone();
-        let _updating = self.updating.release_on_drop(channel);
-        let mut conn = ctxt.conn().await;
-        let index = database::Index::load(&mut *conn).await;
-        eprintln!("index has {} commits", index.commits().len());
-        ctxt.index.store(Arc::new(index));
-
-        // Refresh the landing page
-        ctxt.landing_page.store(Arc::new(None));
-
-        // Spawn off a task to post the results of any commit results that we
-        // are now aware of.
-        tokio::spawn(async move {
-            crate::github::post_finished(&ctxt).await;
-        });
-
-        Response::new(body)
     }
 }
 
@@ -325,13 +188,13 @@ impl std::error::Error for ServerError {}
 async fn serve_req(server: Server, req: Request) -> Result<Response, ServerError> {
     // Don't attempt to get lock if we're updating
     if server.ctxt.read().is_none() {
-        return Ok(Response::new(hyper::Body::from("no data yet, please wait")));
+        return Ok(Response::new(Bytes::from("no data yet, please wait")));
     }
 
     if req.method() == http::Method::OPTIONS {
         return Ok(http::Response::builder()
             .status(StatusCode::NO_CONTENT)
-            .body(hyper::Body::empty())
+            .body(Bytes::default())
             .unwrap());
     }
     let path = req.uri().path().to_owned();
@@ -373,35 +236,28 @@ async fn serve_req(server: Server, req: Request) -> Result<Response, ServerError
     match path {
         "/perf/info" => return server.handle_get(&req, request_handlers::handle_info),
         "/perf/dashboard" => {
+            let query = check!(parse_query_string(req.uri()));
             return server
-                .handle_get_async(&req, request_handlers::handle_dashboard)
+                .handle_fallible_get_async(&req, &compression, |c| {
+                    request_handlers::handle_dashboard(query, c)
+                })
                 .await;
         }
         "/perf/status_page" => {
-            return server
-                .handle_get_async(&req, request_handlers::handle_status_page)
-                .await;
-        }
-        "/perf/status_page_new" => {
             let ctxt: Arc<SiteCtxt> = server.ctxt.read().as_ref().unwrap().clone();
-            let result = request_handlers::handle_status_page_new(ctxt).await;
+            let result = request_handlers::handle_status_page(ctxt).await;
             return match result {
                 Ok(result) => Ok(http::Response::builder()
                     .header_typed(ContentType::json())
-                    .body(hyper::Body::from(serde_json::to_string(&result).unwrap()))
+                    .body(Bytes::from(serde_json::to_string(&result).unwrap()))
                     .unwrap()),
                 Err(err) => Ok(http::Response::builder()
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
                     .header_typed(ContentType::text_utf8())
                     .header_typed(CacheControl::new().with_no_cache().with_no_store())
-                    .body(hyper::Body::from(format!("{err:?}")))
+                    .body(Bytes::from(format!("{err:?}")))
                     .unwrap()),
             };
-        }
-        "/perf/next_artifact" => {
-            return server
-                .handle_get_async(&req, request_handlers::handle_next_artifact)
-                .await;
         }
         "/perf/triage" if *req.method() == http::Method::GET => {
             let ctxt: Arc<SiteCtxt> = server.ctxt.read().as_ref().unwrap().clone();
@@ -445,9 +301,6 @@ async fn serve_req(server: Server, req: Request) -> Result<Response, ServerError
         "/perf/metrics" => {
             return Ok(server.handle_metrics(req).await);
         }
-        "/perf/onpush" => {
-            return Ok(server.handle_push(req).await);
-        }
         "/perf/download-raw-self-profile" => {
             let ctxt: Arc<SiteCtxt> = server.ctxt.read().as_ref().unwrap().clone();
             let req = check!(parse_query_string(req.uri()));
@@ -468,44 +321,34 @@ async fn serve_req(server: Server, req: Request) -> Result<Response, ServerError
     }
 
     // POST requests
-    let (req, mut body_stream) = req.into_parts();
+    let (req, body) = req.into_parts();
     check_http_method!(req.method, http::Method::POST);
     let ctxt: Arc<SiteCtxt> = server.ctxt.read().as_ref().unwrap().clone();
-    let mut body = Vec::new();
-    while let Some(chunk) = body_stream.next().await {
-        let chunk = chunk.map_err(|e| ServerError(format!("failed to read chunk: {e:?}")))?;
-        body.extend_from_slice(&chunk);
-        // More than 10 MB of data
-        if body.len() > 1024 * 1024 * 10 {
+    let body = match Limited::new(body, 1024 * 1024 * 10).collect().await {
+        Ok(body) => body.to_bytes(),
+        Err(err)
+            if err
+                .downcast_ref::<http_body_util::LengthLimitError>()
+                .is_some() =>
+        {
             return Ok(http::Response::builder()
                 .status(StatusCode::PAYLOAD_TOO_LARGE)
-                .body(hyper::Body::empty())
-                .unwrap());
+                .body(Bytes::default())
+                .unwrap())
         }
-    }
+        Err(err) => return Err(ServerError(format!("failed to read body: {err}"))),
+    };
 
     match path {
         "/perf/get" => Ok(to_response(
             crate::comparison::handle_compare(check!(parse_body(&body)), &ctxt).await,
             &compression,
         )),
-        "/perf/collected" => {
-            if !server.check_auth(&req) {
-                return Ok(http::Response::builder()
-                    .status(StatusCode::UNAUTHORIZED)
-                    .body(hyper::Body::empty())
-                    .unwrap());
-            }
-            Ok(to_response(
-                request_handlers::handle_collected().await,
-                &compression,
-            ))
-        }
         "/perf/github-hook" => {
             if !verify_gh(&ctxt.config, &req, &body) {
                 return Ok(http::Response::builder()
                     .status(StatusCode::UNAUTHORIZED)
-                    .body(hyper::Body::empty())
+                    .body(Bytes::default())
                     .unwrap());
             }
             let event = req.headers.get("X-GitHub-Event").cloned();
@@ -515,18 +358,22 @@ async fn serve_req(server: Server, req: Request) -> Result<Response, ServerError
                 None => {
                     return Ok(http::Response::builder()
                         .status(StatusCode::OK)
-                        .body(hyper::Body::from("missing event header"))
+                        .body(Bytes::from("missing event header"))
                         .unwrap())
                 }
             };
             match event.as_str() {
                 "issue_comment" | "push" => Ok(to_response(
-                    request_handlers::handle_github(check!(parse_body(&body)), ctxt.clone()).await,
+                    request_handlers::handle_github_webhook(
+                        check!(parse_body(&body)),
+                        ctxt.clone(),
+                    )
+                    .await,
                     &compression,
                 )),
                 _ => Ok(http::Response::builder()
                     .status(StatusCode::OK)
-                    .body(hyper::Body::from(format!("unknown event: {event}")))
+                    .body(Bytes::from(format!("unknown event: {event}")))
                     .unwrap()),
             }
         }
@@ -534,12 +381,8 @@ async fn serve_req(server: Server, req: Request) -> Result<Response, ServerError
             request_handlers::handle_self_profile(check!(parse_body(&body)), &ctxt).await,
             &compression,
         )),
-        "/perf/self-profile-raw" => Ok(to_response(
-            request_handlers::handle_self_profile_raw(check!(parse_body(&body)), &ctxt).await,
-            &compression,
-        )),
-        "/perf/bootstrap" => Ok(
-            match request_handlers::handle_bootstrap(check!(parse_body(&body)), &ctxt).await {
+        "/perf/toolchain" => Ok(
+            match request_handlers::handle_toolchain(check!(parse_body(&body)), &ctxt).await {
                 Ok(result) => {
                     let mut response = http::Response::builder()
                         .header_typed(ContentType::json())
@@ -549,20 +392,20 @@ async fn serve_req(server: Server, req: Request) -> Result<Response, ServerError
                         hyper::header::HeaderValue::from_static("*"),
                     );
                     let body = serde_json::to_vec(&result).unwrap();
-                    response.body(hyper::Body::from(body)).unwrap()
+                    response.body(Bytes::from(body)).unwrap()
                 }
                 Err(err) => http::Response::builder()
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
                     .header_typed(ContentType::text_utf8())
                     .header_typed(CacheControl::new().with_no_cache().with_no_store())
-                    .body(hyper::Body::from(err))
+                    .body(Bytes::from(err))
                     .unwrap(),
             },
         ),
         _ => Ok(http::Response::builder()
             .header_typed(ContentType::html())
             .status(StatusCode::NOT_FOUND)
-            .body(hyper::Body::empty())
+            .body(Bytes::default())
             .unwrap()),
     }
 }
@@ -583,7 +426,7 @@ where
             Err(http::Response::builder()
                 .header_typed(ContentType::text_utf8())
                 .status(StatusCode::BAD_REQUEST)
-                .body(hyper::Body::from(format!(
+                .body(Bytes::from(format!(
                     "Failed to deserialize request: {err:?}"
                 )))
                 .unwrap())
@@ -610,7 +453,7 @@ where
         Err(err) => Err(http::Response::builder()
             .header_typed(ContentType::text_utf8())
             .status(StatusCode::BAD_REQUEST)
-            .body(hyper::Body::from(format!(
+            .body(Bytes::from(format!(
                 "Failed to deserialize request {uri}: {err:?}",
             )))
             .unwrap()),
@@ -622,11 +465,7 @@ static TEMPLATES: LazyLock<ResourceResolver> =
     LazyLock::new(|| ResourceResolver::new().expect("Cannot load resources"));
 
 /// Handle the case where the path is to a static file
-async fn handle_fs_path(
-    req: &Request,
-    path: &str,
-    use_compression: bool,
-) -> Option<http::Response<hyper::Body>> {
+async fn handle_fs_path(req: &Request, path: &str, use_compression: bool) -> Option<Response> {
     if path.contains("./") | path.contains("../") {
         return Some(not_found());
     }
@@ -653,12 +492,13 @@ async fn handle_fs_path(
     let relative_path = path.trim_start_matches('/');
     let source = match path {
         "" | "/" | "/index.html" => resolve_template("graphs.html").await,
-        "/bootstrap.html"
-        | "/compare.html"
+        // /bootstrap.html is kept for backwards compatibility, the URL was renamed to
+        // /toolchain.html
+        "/toolchain.html" | "/bootstrap.html" => resolve_template("toolchain.html").await,
+        "/compare.html"
         | "/dashboard.html"
         | "/detailed-query.html"
         | "/help.html"
-        | "/status_new.html"
         | "/status.html" => resolve_template(relative_path).await,
         _ => match TEMPLATES.get_static_asset(relative_path, use_compression)? {
             Payload::Compressed(data) => {
@@ -687,21 +527,21 @@ async fn handle_fs_path(
         }
     }
 
-    Some(response.body(hyper::Body::from(source)).unwrap())
+    Some(response.body(Bytes::from(source)).unwrap())
 }
 
-fn not_modified(response: http::response::Builder) -> http::Response<hyper::Body> {
+fn not_modified(response: http::response::Builder) -> Response {
     response
         .status(StatusCode::NOT_MODIFIED)
-        .body(hyper::Body::empty())
+        .body(Bytes::default())
         .unwrap()
 }
 
-fn not_found() -> http::Response<hyper::Body> {
+fn not_found() -> Response {
     http::Response::builder()
         .header_typed(ContentType::html())
         .status(StatusCode::NOT_FOUND)
-        .body(hyper::Body::empty())
+        .body(Bytes::default())
         .unwrap()
 }
 
@@ -718,6 +558,8 @@ fn verify_gh(config: &Config, req: &http::request::Parts, body: &[u8]) -> bool {
 }
 
 fn verify_gh_sig(cfg: &Config, header: &str, body: &[u8]) -> Option<bool> {
+    use hmac::KeyInit;
+
     type HmacSha256 = Hmac<Sha256>;
 
     let mut mac =
@@ -749,7 +591,7 @@ where
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header_typed(ContentType::text_utf8())
             .header_typed(CacheControl::new().with_no_cache().with_no_store())
-            .body(hyper::Body::from(err))
+            .body(Bytes::from(err))
             .unwrap(),
     }
 }
@@ -760,14 +602,14 @@ pub fn maybe_compressed_response(
     compression: &Option<BrotliEncoderParams>,
 ) -> Response {
     match compression {
-        None => response.body(hyper::Body::from(body)).unwrap(),
+        None => response.body(Bytes::from(body)).unwrap(),
         Some(brotli_params) => {
             let compressed = compress_bytes(&body, brotli_params);
             let response = response.header(
                 hyper::header::CONTENT_ENCODING,
                 hyper::header::HeaderValue::from_static("br"),
             );
-            response.body(hyper::Body::from(compressed)).unwrap()
+            response.body(Bytes::from(compressed)).unwrap()
         }
     }
 }
@@ -782,51 +624,64 @@ fn to_triage_response(result: ServerResult<api::triage::Response>) -> Response {
     match result {
         Ok(result) => {
             let response = http::Response::builder().header_typed(ContentType::text());
-            response.body(hyper::Body::from(result.0)).unwrap()
+            response.body(Bytes::from(result.0)).unwrap()
         }
         Err(err) => http::Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header_typed(ContentType::text_utf8())
-            .body(hyper::Body::from(err))
+            .body(Bytes::from(err))
             .unwrap(),
     }
 }
 
-async fn run_server(ctxt: Arc<RwLock<Option<Arc<SiteCtxt>>>>, addr: SocketAddr) {
+async fn run_server(
+    ctxt: Arc<RwLock<Option<Arc<SiteCtxt>>>>,
+    addr: SocketAddr,
+) -> anyhow::Result<()> {
     let server = Server::new(ctxt);
-    let svc = hyper::service::make_service_fn(move |_conn| {
-        let ctx = server.clone();
-        async move {
-            Ok::<_, hyper::Error>(hyper::service::service_fn(move |req| {
-                let start = std::time::Instant::now();
-                let desc = format!("{} {}", req.method(), req.uri());
-                serve_req(ctx.clone(), req)
-                    .inspect(move |r| {
-                        let dur = start.elapsed();
-                        info!("{}: {:?} {:?}", desc, r.as_ref().map(|r| r.status()), dur)
-                    })
-                    .map(|mut r| {
-                        if let Ok(r) = &mut r {
-                            r.headers_mut().insert(
-                                hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN,
-                                hyper::header::HeaderValue::from_static("*"),
-                            );
-                        }
-                        r
-                    })
-            }))
-        }
-    });
-    let server = hyper::server::Server::bind(&addr).serve(svc);
-    if let Err(e) = server.await {
-        eprintln!("server error: {e:?}");
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                eprintln!("accept error: {e:?}");
+                continue;
+            }
+        };
+        let server = server.clone();
+        tokio::spawn(async move {
+            let svc = hyper::service::service_fn(move |req: Request| {
+                let ctx = server.clone();
+                async move {
+                    let start = std::time::Instant::now();
+                    let desc = format!("{} {}", req.method(), req.uri());
+                    let mut r = serve_req(ctx, req).await;
+                    let dur = start.elapsed();
+                    info!("{}: {:?} {:?}", desc, r.as_ref().map(|r| r.status()), dur);
+                    if let Ok(r) = &mut r {
+                        r.headers_mut().insert(
+                            hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                            hyper::header::HeaderValue::from_static("*"),
+                        );
+                    }
+                    r.map(|r| r.map(Full::new))
+                }
+            });
+            if let Err(e) =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection(TokioIo::new(stream), svc)
+                    .await
+            {
+                eprintln!("connection error: {e:?}");
+            }
+        });
     }
 }
 
-pub async fn start(ctxt: Arc<RwLock<Option<Arc<SiteCtxt>>>>, port: u16) {
+pub async fn start(ctxt: Arc<RwLock<Option<Arc<SiteCtxt>>>>, port: u16) -> anyhow::Result<()> {
     let mut server_address: SocketAddr = "0.0.0.0:2346".parse().unwrap();
     server_address.set_port(port);
-    run_server(ctxt, server_address).await;
+    run_server(ctxt, server_address).await
 }
 
 pub trait ResponseHeaders {

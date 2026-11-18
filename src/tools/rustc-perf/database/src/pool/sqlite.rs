@@ -1,12 +1,15 @@
-use crate::pool::{Connection, ConnectionManager, ManagedConnection, Transaction};
-use crate::selector::CompileTestCase;
-use crate::{
-    ArtifactCollection, ArtifactId, Benchmark, BenchmarkJob, BenchmarkJobConclusion,
-    BenchmarkJobKind, BenchmarkRequest, BenchmarkRequestIndex, BenchmarkRequestStatus,
-    BenchmarkRequestWithErrors, BenchmarkSet, CodegenBackend, CollectionId, CollectorConfig,
-    Commit, CommitType, CompileBenchmark, Date, PendingBenchmarkRequests, Profile, Target,
+use crate::pool::{
+    Connection, ConnectionManager, JobEnqueueResult, ManagedConnection, Transaction,
 };
-use crate::{ArtifactIdNumber, Index, QueuedCommit};
+use crate::selector::{CompileTestCase, RuntimeTestCase};
+use crate::{
+    ArtifactId, Benchmark, BenchmarkJob, BenchmarkJobConclusion, BenchmarkJobKind,
+    BenchmarkRequest, BenchmarkRequestIndex, BenchmarkRequestInsertResult, BenchmarkRequestStatus,
+    BenchmarkRequestWithErrors, BenchmarkSet, CodegenBackend, CollectionId, CollectorConfig,
+    Commit, CommitType, CompileBenchmark, Date, FrontendThreads, PendingBenchmarkRequests, Profile,
+    Target,
+};
+use crate::{ArtifactIdNumber, Index};
 use chrono::{DateTime, TimeZone, Utc};
 use hashbrown::{HashMap, HashSet};
 use rusqlite::params;
@@ -431,6 +434,40 @@ static MIGRATIONS: &[Migration] = &[
         CREATE INDEX error_artifact_idx ON error(aid);
         "#,
     ),
+    // Add runtime target as a unique constraint, defaulting to 'x86_64-unknown-linux-gnu'
+    Migration::without_foreign_key_constraints(
+        r#"
+        CREATE TABLE runtime_pstat_series_with_target(
+            id integer primary key not null,
+            benchmark text not null,
+            target text not null default 'x86_64-unknown-linux-gnu',
+            metric text not null,
+            UNIQUE(benchmark, target, metric)
+        );
+        INSERT INTO runtime_pstat_series_with_target SELECT id, benchmark, 'x86_64-unknown-linux-gnu', metric FROM runtime_pstat_series;
+        DROP TABLE runtime_pstat_series;
+        ALTER TABLE runtime_pstat_series_with_target RENAME TO runtime_pstat_series;
+    "#,
+    ),
+    // Add frontend_threads as an unique constraint, defaulting to '1'
+    Migration::without_foreign_key_constraints(
+        r#"
+        CREATE TABLE pstat_series_with_frontend_threads(
+            id               INTEGER PRIMARY KEY NOT NULL,
+            crate            TEXT NOT NULL REFERENCES benchmark(name) ON DELETE CASCADE ON UPDATE CASCADE,
+            profile          TEXT NOT NULL,
+            scenario         TEXT NOT NULL,
+            backend          TEXT NOT NULL,
+            target           TEXT NOT NULL DEFAULT 'x86_64-unknown-linux-gnu',
+            frontend_threads INTEGER NOT NULL DEFAULT 1,
+            metric           TEXT NOT NULL,
+            UNIQUE(crate, profile, scenario, backend, target, frontend_threads, metric)
+        );
+        INSERT INTO pstat_series_with_frontend_threads select id, crate, profile, scenario, backend, 'x86_64-unknown-linux-gnu', 1, metric FROM pstat_series;
+        DROP TABLE pstat_series;
+        ALTER TABLE pstat_series_with_frontend_threads RENAME TO pstat_series;
+    "#,
+    ),
 ];
 
 #[async_trait::async_trait]
@@ -558,7 +595,7 @@ impl Connection for SqliteConnection {
         let pstat_series = self
             .raw()
             .prepare(
-                "select id, crate, profile, scenario, backend, target, metric from pstat_series;",
+                "select id, crate, profile, scenario, backend, target, frontend_threads, metric from pstat_series;",
             )
             .unwrap()
             .query_map(params![], |row| {
@@ -570,7 +607,8 @@ impl Connection for SqliteConnection {
                         row.get::<_, String>(3)?.as_str().parse().unwrap(),
                         CodegenBackend::from_str(row.get::<_, String>(4)?.as_str()).unwrap(),
                         Target::from_str(row.get::<_, String>(5)?.as_str()).unwrap(),
-                        row.get::<_, String>(6)?.as_str().into(),
+                        FrontendThreads(row.get::<_, i32>(6)? as u32),
+                        row.get::<_, String>(7)?.as_str().into(),
                     ),
                 ))
             })
@@ -579,14 +617,15 @@ impl Connection for SqliteConnection {
             .collect();
         let runtime_pstat_series = self
             .raw()
-            .prepare("select id, benchmark, metric from runtime_pstat_series;")
+            .prepare("SELECT id, benchmark, target, metric FROM runtime_pstat_series;")
             .unwrap()
             .query_map(params![], |row| {
                 Ok((
                     row.get::<_, i32>(0)? as u32,
                     (
                         row.get::<_, String>(1)?.as_str().into(),
-                        row.get::<_, String>(2)?.as_str().into(),
+                        Target::from_str(row.get::<_, String>(2)?.as_str()).unwrap(),
+                        row.get::<_, String>(3)?.as_str().into(),
                     ),
                 ))
             })
@@ -661,15 +700,6 @@ impl Connection for SqliteConnection {
         Some(parse_artifact_id(ty.as_str(), artifact, date))
     }
 
-    async fn record_duration(&self, artifact: ArtifactIdNumber, duration: Duration) {
-        self.raw_ref()
-            .prepare_cached(
-                "insert or ignore into artifact_collection_duration (aid, date_recorded, duration) VALUES (?, strftime('%s','now'), ?)",
-            )
-            .unwrap()
-            .execute(params![artifact.0, duration.as_secs() as i64])
-            .unwrap();
-    }
     async fn collection_id(&self, version: &str) -> CollectionId {
         let raw = self.raw_ref();
         raw.execute(
@@ -714,6 +744,7 @@ impl Connection for SqliteConnection {
         scenario: crate::Scenario,
         backend: CodegenBackend,
         target: Target,
+        frontend_threads: FrontendThreads,
         metric: &str,
         value: f64,
     ) {
@@ -721,20 +752,22 @@ impl Connection for SqliteConnection {
         let scenario = scenario.to_string();
         let backend = backend.to_string();
         let target = target.to_string();
-        self.raw_ref().execute("insert or ignore into pstat_series (crate, profile, scenario, backend, target, metric) VALUES (?, ?, ?, ?, ?, ?)", params![
+        self.raw_ref().execute("insert or ignore into pstat_series (crate, profile, scenario, backend, target, frontend_threads, metric) VALUES (?, ?, ?, ?, ?, ?, ?)", params![
             &benchmark,
             &profile,
             &scenario,
             &backend,
             &target,
+            &frontend_threads.0,
             &metric,
         ]).unwrap();
-        let sid: i32 = self.raw_ref().query_row("select id from pstat_series where crate = ? and profile = ? and scenario = ? and backend = ? and target = ? and metric = ?", params![
+        let sid: i32 = self.raw_ref().query_row("select id from pstat_series where crate = ? and profile = ? and scenario = ? and backend = ? and target = ? and frontend_threads = ? and metric = ?", params![
             &benchmark,
             &profile,
             &scenario,
             &backend,
             &target,
+            &frontend_threads.0,
             &metric,
         ], |r| r.get(0)).unwrap();
         self.raw_ref()
@@ -750,44 +783,30 @@ impl Connection for SqliteConnection {
         artifact: ArtifactIdNumber,
         benchmark: &str,
         metric: &str,
+        target: Target,
         value: f64,
     ) {
+        let target = target.to_string();
         self.raw_ref()
             .execute(
-                "insert or ignore into runtime_pstat_series (benchmark, metric) VALUES (?, ?)",
-                params![&benchmark, &metric,],
+                "INSERT OR IGNORE INTO runtime_pstat_series (benchmark, target, metric) VALUES (?, ?, ?)",
+                params![&benchmark, &target, &metric],
             )
             .unwrap();
         let sid: i32 = self
             .raw_ref()
             .query_row(
-                "select id from runtime_pstat_series where benchmark = ? and metric = ?",
-                params![&benchmark, &metric,],
+                "SELECT id FROM runtime_pstat_series WHERE benchmark = ? AND target = ? AND metric = ?",
+                params![&benchmark, &target, &metric],
                 |r| r.get(0),
             )
             .unwrap();
         self.raw_ref()
             .execute(
-                "insert into runtime_pstat (series, aid, cid, value) VALUES (?, ?, ?, ?)",
+                "INSERT INTO runtime_pstat (series, aid, cid, value) VALUES (?, ?, ?, ?)",
                 params![&sid, &artifact.0, &collection.0, &value],
             )
             .unwrap();
-    }
-    async fn record_raw_self_profile(
-        &self,
-        _collection: CollectionId,
-        _artifact: ArtifactIdNumber,
-        _benchmark: &str,
-        _profile: Profile,
-        _scenario: crate::Scenario,
-    ) {
-        #![allow(clippy::diverging_sub_expression)]
-
-        // FIXME: this is left for the future, if we ever need to support it. It
-        // shouldn't be too hard, but we may also want to just intern the raw
-        // self profile files into sqlite database or something like that, not
-        // yet clear.
-        unimplemented!("recording raw self profile files is not implemented for sqlite")
     }
 
     async fn record_error(
@@ -832,7 +851,7 @@ impl Connection for SqliteConnection {
             .execute(
                 "insert or replace into artifact_size (aid, component, size)\
                 values (?, ?, ?)",
-                params![&artifact.0, &component, &size],
+                params![&artifact.0, &component, &(size as i64)],
             )
             .unwrap();
     }
@@ -842,11 +861,44 @@ impl Connection for SqliteConnection {
             .prepare("select component, size from artifact_size where aid = ?")
             .unwrap()
             .query_map(params![&aid.0], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
             })
             .unwrap()
             .map(|r| r.unwrap())
             .collect()
+    }
+
+    async fn get_artifacts_size(
+        &self,
+        aids: &[ArtifactIdNumber],
+    ) -> HashMap<String, Vec<Option<u64>>> {
+        let mut results = HashMap::new();
+
+        for (idx, aid) in aids.iter().copied().enumerate() {
+            let rows: Vec<(String, i64)> = self
+                .raw_ref()
+                .prepare(
+                    r#"
+            SELECT component, MIN(size)
+            FROM artifact_size WHERE aid = ?
+            GROUP BY component"#,
+                )
+                .unwrap()
+                .query_map(params![&aid.0], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            for (component, size) in rows {
+                let v = results
+                    .entry(component)
+                    .or_insert_with(|| vec![None; aids.len()]);
+                v[idx] = Some(size as u64);
+            }
+        }
+
+        results
     }
 
     async fn get_bootstrap(&self, aids: &[ArtifactIdNumber]) -> Vec<Option<Duration>> {
@@ -901,7 +953,6 @@ impl Connection for SqliteConnection {
 
         results
     }
-
     async fn get_pstats(
         &self,
         series: &[u32],
@@ -967,6 +1018,7 @@ impl Connection for SqliteConnection {
             })
             .collect()
     }
+
     async fn get_error(&self, aid: crate::ArtifactIdNumber) -> HashMap<String, String> {
         self.raw_ref()
             .prepare_cached("select context, message from error where aid = ?")
@@ -976,275 +1028,13 @@ impl Connection for SqliteConnection {
             .collect::<Result<_, _>>()
             .unwrap()
     }
-    async fn queue_pr(
-        &self,
-        pr: u32,
-        include: Option<&str>,
-        exclude: Option<&str>,
-        runs: Option<i32>,
-        backends: Option<&str>,
-    ) {
-        self.raw_ref()
-            .prepare_cached(
-                "insert into pull_request_build (pr, complete, requested, include, exclude, runs, backends) VALUES (?, 0, strftime('%s','now'), ?, ?, ?, ?)",
-            )
-            .unwrap()
-            .execute(params![pr, include, exclude, &runs, backends])
-            .unwrap();
-    }
-    async fn pr_attach_commit(
-        &self,
-        pr: u32,
-        sha: &str,
-        parent_sha: &str,
-        commit_date: Option<DateTime<Utc>>,
-    ) -> bool {
-        let timestamp = commit_date.map(|d| d.timestamp());
-        self.raw_ref()
-            .prepare_cached(
-                "update pull_request_build SET bors_sha = ?, parent_sha = ?, commit_date = ?
-                where pr = ? and bors_sha is null",
-            )
-            .unwrap()
-            .execute(params![sha, parent_sha, timestamp, pr])
-            .unwrap()
-            > 0
-    }
-    async fn queued_commits(&self) -> Vec<QueuedCommit> {
-        self.raw_ref()
-            .prepare_cached(
-                "select pr, bors_sha, parent_sha, include, exclude, runs, commit_date, backends from pull_request_build
-                where complete is false and bors_sha is not null
-                order by requested asc",
-            )
-            .unwrap()
-            .query(params![])
-            .unwrap()
-            .mapped(|row| {
-                Ok(QueuedCommit {
-                    pr: row.get(0).unwrap(),
-                    sha: row.get(1).unwrap(),
-                    parent_sha: row.get(2).unwrap(),
-                    include: row.get(3).unwrap(),
-                    exclude: row.get(4).unwrap(),
-                    runs: row.get(5).unwrap(),
-                    commit_date: row.get::<_, Option<i64>>(6).unwrap().map(|timestamp| Date(DateTime::from_timestamp(timestamp, 0).unwrap())),
-                    backends: row.get(7).unwrap(),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
-    }
-    async fn mark_complete(&self, sha: &str) -> Option<QueuedCommit> {
-        let count = self
-            .raw_ref()
-            .execute(
-                "update pull_request_build SET complete = 1 where bors_sha = ? and complete = 0",
-                params![sha],
-            )
-            .unwrap();
-        if count == 0 {
-            return None;
-        }
-        assert_eq!(count, 1, "sha is unique column");
-        self.raw_ref()
-            .query_row(
-                "select pr, bors_sha, parent_sha, include, exclude, runs, commit_date, backends from pull_request_build
-            where bors_sha = ?",
-                params![sha],
-                |row| {
-                    Ok(QueuedCommit {
-                        pr: row.get(0).unwrap(),
-                        sha: row.get(1).unwrap(),
-                        parent_sha: row.get(2).unwrap(),
-                        include: row.get(3).unwrap(),
-                        exclude: row.get(4).unwrap(),
-                        runs: row.get(5).unwrap(),
-                        commit_date: row.get::<_, Option<i64>>(6).unwrap().map(|timestamp| Date(DateTime::from_timestamp(timestamp, 0).unwrap())),
-                        backends: row.get(7).unwrap(),
-                    })
-                },
-            )
-            .optional()
-            .unwrap()
-    }
-    async fn collector_start(&self, aid: ArtifactIdNumber, steps: &[String]) {
-        // Clean out any leftover unterminated steps.
-        self.raw_ref()
-            .execute_batch("delete from collector_progress where start is null or end is null;")
-            .unwrap();
 
-        // Populate unstarted and unfinished steps into collector_progress.
-        for step in steps {
-            self.raw_ref()
-                .execute(
-                    "insert or ignore into collector_progress(aid, step) VALUES (?, ?)",
-                    params![&aid.0, step],
-                )
-                .unwrap();
-        }
-    }
-    async fn collector_start_step(&self, aid: ArtifactIdNumber, step: &str) -> bool {
-        self.raw_ref()
-            .execute(
-                "update collector_progress set start = strftime('%s','now') \
-                where aid = ? and step = ? and start is null and end is null;",
-                params![&aid.0, &step],
-            )
-            .unwrap()
-            == 1
+    async fn parent_of(&self, _sha: &str) -> Option<String> {
+        None
     }
 
-    async fn collector_end_step(&self, aid: ArtifactIdNumber, step: &str) {
-        self.raw_ref()
-            .execute(
-                "update collector_progress set end = strftime('%s','now') \
-                where aid = ? and step = ? and start is not null;",
-                params![&aid.0, &step],
-            )
-            .unwrap();
-    }
-
-    async fn collector_remove_step(&self, aid: ArtifactIdNumber, step: &str) {
-        self.raw_ref()
-            .execute(
-                "delete from collector_progress \
-                where aid = ? and step = ?",
-                params![&aid.0, &step],
-            )
-            .unwrap();
-    }
-
-    async fn in_progress_artifacts(&self) -> Vec<ArtifactId> {
-        let conn = self.raw_ref();
-        let mut aids = conn
-            .prepare(
-                "select distinct aid from collector_progress \
-                where end is null order by aid limit 1",
-            )
-            .unwrap();
-
-        let aids = aids.query_map(params![], |r| r.get::<_, i32>(0)).unwrap();
-
-        let mut artifacts = Vec::new();
-        for aid in aids {
-            let aid = aid.unwrap();
-            let (name, date, ty) = conn
-                .query_row(
-                    "select name, date, type from artifact where id = ?",
-                    params![&aid],
-                    |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, Option<i64>>(1)?,
-                            r.get::<_, String>(2)?,
-                        ))
-                    },
-                )
-                .unwrap();
-
-            artifacts.push(match ty.as_str() {
-                "try" | "master" => ArtifactId::Commit(Commit {
-                    sha: name,
-                    date: date
-                        .map(|d| Utc.timestamp_opt(d, 0).unwrap())
-                        .map(Date)
-                        .unwrap_or_else(|| Date::ymd_hms(2001, 1, 1, 0, 0, 0)),
-                    r#type: CommitType::from_str(&ty).unwrap(),
-                }),
-                "release" => ArtifactId::Tag(name),
-                _ => {
-                    log::error!("unknown ty {:?}", ty);
-                    continue;
-                }
-            });
-        }
-        artifacts
-    }
-    async fn in_progress_steps(&self, artifact: &ArtifactId) -> Vec<crate::Step> {
-        let aid = self.artifact_id(artifact).await;
-
-        self.raw_ref()
-            .prepare(
-                "
-                select
-                    step,
-                    end is not null,
-                    coalesce(end, strftime('%s', 'now')) - start,
-                    (select end - start
-                        from collector_progress as cp
-                            where
-                                cp.step = collector_progress.step
-                                and cp.start is not null
-                                and cp.end is not null
-                            limit 1
-                    )
-                from collector_progress where aid = ? order by step
-            ",
-            )
-            .unwrap()
-            .query_map(params![&aid.0], |row| {
-                Ok(crate::Step {
-                    name: row.get(0)?,
-                    is_done: row.get(1)?,
-                    duration: Duration::from_secs(row.get::<_, i64>(2).unwrap_or_default() as u64),
-                    expected: Duration::from_secs(row.get::<_, i64>(3).unwrap_or_default() as u64),
-                })
-            })
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect()
-    }
-
-    async fn last_n_artifact_collections(&self, n: u32) -> Vec<ArtifactCollection> {
-        self.raw_ref()
-            .prepare_cached(
-                "select art.name, art.date, art.type, acd.date_recorded, acd.duration \
-                from artifact_collection_duration as acd \
-                join artifact as art on art.id = acd.aid \
-                order by date_recorded desc \
-                limit ?;",
-            )
-            .unwrap()
-            .query(params![&n])
-            .unwrap()
-            .mapped(|r| {
-                let sha = r.get::<_, String>(0)?;
-                let date = r.get::<_, Option<i64>>(1)?;
-                let ty = r.get::<_, String>(2)?;
-
-                Ok(ArtifactCollection {
-                    artifact: parse_artifact_id(&ty, &sha, date),
-                    end_time: Utc.timestamp_opt(r.get(3)?, 0).unwrap(),
-                    duration: Duration::from_secs(r.get(4)?),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
-    }
-
-    async fn parent_of(&self, sha: &str) -> Option<String> {
-        let mut shas = self
-            .raw_ref()
-            .prepare_cached("select parent_sha from pull_request_build where bors_sha = ?")
-            .unwrap()
-            .query(params![sha])
-            .unwrap()
-            .mapped(|row| Ok(row.get(0).unwrap()))
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        shas.pop()
-    }
-
-    async fn pr_of(&self, sha: &str) -> Option<u32> {
-        self.raw_ref()
-            .query_row(
-                "select pr from pull_request_build where bors_sha = ?",
-                params![sha],
-                |row| Ok(row.get(0).unwrap()),
-            )
-            .optional()
-            .unwrap()
+    async fn pr_of(&self, _sha: &str) -> Option<u32> {
+        None
     }
 
     async fn list_self_profile(
@@ -1253,7 +1043,7 @@ impl Connection for SqliteConnection {
         crate_: &str,
         profile: &str,
         scenario: &str,
-    ) -> Vec<(ArtifactIdNumber, i32)> {
+    ) -> Vec<(ArtifactIdNumber, CollectionId)> {
         self.raw_ref()
             .prepare(
                 "select aid, cid from raw_self_profile where
@@ -1273,7 +1063,12 @@ impl Connection for SqliteConnection {
                         ArtifactId::Tag(a) => a,
                     }
                 ],
-                |r| Ok((ArtifactIdNumber(r.get::<_, i32>(0)? as u32), r.get(1)?)),
+                |r| {
+                    Ok((
+                        ArtifactIdNumber(r.get::<_, i32>(0)? as u32),
+                        CollectionId(r.get(1)?),
+                    ))
+                },
             )
             .unwrap()
             .collect::<Result<_, _>>()
@@ -1287,18 +1082,12 @@ impl Connection for SqliteConnection {
         self.raw_ref()
             .execute("delete from artifact where name = ?1", [info.name])
             .unwrap();
-        self.raw_ref()
-            .execute(
-                "delete from pull_request_build where bors_sha = ?1",
-                [info.name],
-            )
-            .unwrap();
     }
 
     async fn insert_benchmark_request(
         &self,
         _benchmark_request: &BenchmarkRequest,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<BenchmarkRequestInsertResult> {
         no_queue_implementation_abort!()
     }
 
@@ -1326,7 +1115,7 @@ impl Connection for SqliteConnection {
         _sha: &str,
         _parent_sha: &str,
         _commit_date: DateTime<Utc>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         no_queue_implementation_abort!()
     }
 
@@ -1338,19 +1127,8 @@ impl Connection for SqliteConnection {
         _profile: Profile,
         _benchmark_set: u32,
         _kind: BenchmarkJobKind,
-    ) -> anyhow::Result<Option<u32>> {
-        no_queue_implementation_abort!()
-    }
-
-    async fn enqueue_parent_benchmark_job(
-        &self,
-        _parent_sha: &str,
-        _target: Target,
-        _backend: CodegenBackend,
-        _profile: Profile,
-        _benchmark_set: u32,
-        _kind: BenchmarkJobKind,
-    ) -> (bool, anyhow::Result<u32>) {
+        _is_optional: bool,
+    ) -> JobEnqueueResult {
         no_queue_implementation_abort!()
     }
 
@@ -1361,7 +1139,7 @@ impl Connection for SqliteConnection {
         Ok(self
             .raw_ref()
             .prepare_cached(
-                "SELECT DISTINCT crate, profile, scenario, backend, target
+                "SELECT DISTINCT crate, profile, scenario, backend, target, frontend_threads
                 FROM pstat_series
                 WHERE id IN (
                     SELECT DISTINCT series
@@ -1376,6 +1154,31 @@ impl Connection for SqliteConnection {
                     scenario: row.get::<_, String>(2)?.parse().unwrap(),
                     backend: row.get::<_, String>(3)?.parse().unwrap(),
                     target: row.get::<_, String>(4)?.parse().unwrap(),
+                    frontend_threads: FrontendThreads(row.get::<_, i32>(5)? as u32),
+                })
+            })?
+            .collect::<Result<_, _>>()?)
+    }
+
+    async fn get_runtime_benchmarks_with_measurements(
+        &self,
+        artifact_row_id: &ArtifactIdNumber,
+    ) -> anyhow::Result<HashSet<RuntimeTestCase>> {
+        Ok(self
+            .raw_ref()
+            .prepare_cached(
+                "SELECT DISTINCT benchmark, target
+                FROM runtime_pstat_series
+                WHERE id IN (
+                    SELECT DISTINCT series
+                    FROM runtime_pstat
+                    WHERE aid = ?
+                );",
+            )?
+            .query_map(params![artifact_row_id.0], |row| {
+                Ok(RuntimeTestCase {
+                    benchmark: Benchmark::from(row.get::<_, String>(0)?.as_str()),
+                    target: row.get::<_, String>(1)?.parse().unwrap(),
                 })
             })?
             .collect::<Result<_, _>>()?)
@@ -1423,6 +1226,13 @@ impl Connection for SqliteConnection {
     async fn get_jobs_of_in_progress_benchmark_requests(
         &self,
     ) -> anyhow::Result<HashMap<String, Vec<BenchmarkJob>>> {
+        no_queue_implementation_abort!()
+    }
+
+    async fn get_jobs_of_benchmark_requests(
+        &self,
+        _tags: &[String],
+    ) -> anyhow::Result<Vec<BenchmarkJob>> {
         no_queue_implementation_abort!()
     }
 

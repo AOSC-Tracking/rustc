@@ -2,12 +2,16 @@ import {
   chromeProfileUrl,
   processedSelfProfileRelativeUrl,
 } from "../../self-profile";
+import {cargo_collector_command} from "../../utils/cargo";
 
 export interface Selector {
   commit: string;
   base_commit: string | null;
   benchmark: string;
+  profile: string;
   scenario: string;
+  backend: string;
+  target: string;
 }
 
 export interface ProfileElement {
@@ -76,9 +80,19 @@ export function createDelta(
 export function perfettoProfilerData(
   commit: string,
   benchmark: string,
-  scenario: string
+  scenario: string,
+  profile: string,
+  backend: string,
+  target: string
 ): {link: string; traceTitle: string} {
-  const link = chromeProfileUrl(commit, benchmark, scenario);
+  const link = chromeProfileUrl(
+    commit,
+    benchmark,
+    scenario,
+    profile,
+    backend,
+    target
+  );
   const traceTitle = `${benchmark}-${scenario} (${commit})`;
   return {link, traceTitle};
 }
@@ -99,8 +113,9 @@ export function createTitleData(selector: Selector | null): {
   let selfHref = "";
 
   if (state.base_commit) {
-    selfHref = `/detailed-query.html?commit=${state.commit}&scenario=${state.scenario}&benchmark=${state.benchmark}`;
-    baseHref = `/detailed-query.html?commit=${state.base_commit}&scenario=${state.scenario}&benchmark=${state.benchmark}`;
+    const args = `&scenario=${state.scenario}&benchmark=${state.benchmark}-${state.profile}&backend=${state.backend}&target=${state.target}`;
+    selfHref = `/detailed-query.html?commit=${state.commit}${args}`;
+    baseHref = `/detailed-query.html?commit=${state.base_commit}${args}`;
   }
 
   return {text, baseHref, selfHref};
@@ -141,17 +156,16 @@ export function createDownloadLinksData(selector: Selector | null): {
     };
 
   const state = selector;
-  const profile = (b: string) =>
-    b.endsWith("-opt")
+  const profile = (p: string) =>
+    p == "opt"
       ? "Opt"
-      : b.endsWith("-doc")
+      : p == "doc"
       ? "Doc"
-      : b.endsWith("-debug")
+      : p == "debug"
       ? "Debug"
-      : b.endsWith("-check")
+      : p == "check"
       ? "Check"
       : "???";
-  const benchName = (b: string) => b.replace(/-[^-]*$/, "");
   const scenarioFilter = (s: string) =>
     s == "full"
       ? "Full"
@@ -164,28 +178,51 @@ export function createDownloadLinksData(selector: Selector | null): {
       : "???";
 
   const createLinks = (commit: string) => ({
-    raw: `/perf/download-raw-self-profile?commit=${commit}&benchmark=${state.benchmark}&scenario=${state.scenario}`,
+    raw: `/perf/download-raw-self-profile?commit=${commit}&benchmark=${state.benchmark}&profile=${state.profile}&scenario=${state.scenario}&backend=${state.backend}&target=${state.target}`,
     flamegraph: processedSelfProfileRelativeUrl(
       commit,
       state.benchmark,
       state.scenario,
+      state.profile,
+      state.backend,
+      state.target,
       "flamegraph"
     ),
     crox: processedSelfProfileRelativeUrl(
       commit,
       state.benchmark,
       state.scenario,
+      state.profile,
+      state.backend,
+      state.target,
       "crox"
     ),
     codegen: processedSelfProfileRelativeUrl(
       commit,
       state.benchmark,
       state.scenario,
+      state.profile,
+      state.backend,
+      state.target,
       "codegen-schedule"
     ),
-    perfetto: perfettoProfilerData(commit, state.benchmark, state.scenario),
+    perfetto: perfettoProfilerData(
+      commit,
+      state.benchmark,
+      state.scenario,
+      state.profile,
+      state.backend,
+      state.target
+    ),
     firefox: `https://profiler.firefox.com/from-url/${encodeURIComponent(
-      chromeProfileUrl(commit, state.benchmark, state.scenario)
+      chromeProfileUrl(
+        commit,
+        state.benchmark,
+        state.scenario,
+        state.profile,
+        state.backend,
+        state.target
+      )
     )}/marker-chart/?v=5`,
   });
 
@@ -193,35 +230,29 @@ export function createDownloadLinksData(selector: Selector | null): {
   const newLinks = createLinks(state.commit);
 
   const diffLink = state.base_commit
-    ? `/perf/processed-self-profile?commit=${state.commit}&base_commit=${state.base_commit}&benchmark=${state.benchmark}&scenario=${state.scenario}&type=codegen-schedule`
+    ? `/perf/processed-self-profile?commit=${state.commit}&base_commit=${state.base_commit}&benchmark=${state.benchmark}&profile=${state.profile}&scenario=${state.scenario}&backend=${state.backend}&target=${state.target}&type=codegen-schedule`
     : "";
 
+  function cachegrindCommand(
+    commit: string,
+    baseCommit: string | null = null
+  ): string {
+    let cmd = `${cargo_collector_command()} profile_local cachegrind`;
+    if (baseCommit !== null) {
+      cmd += ` +${baseCommit} --rustc2 +${commit}`;
+    } else {
+      cmd += ` +${commit}`;
+    }
+    cmd += ` --exact-match ${state.benchmark}`;
+    cmd += ` --profiles ${profile(state.profile)}`;
+    cmd += ` --scenarios ${scenarioFilter(state.scenario)}`;
+    return cmd;
+  }
+
   const localCommands = {
-    base: state.base_commit
-      ? `cargo run --release --bin collector profile_local cachegrind
-                    +${state.base_commit} --exact-match ${benchName(
-          state.benchmark
-        )} --profiles
-                ${profile(state.benchmark)} --scenarios ${scenarioFilter(
-          state.scenario
-        )}`
-      : "",
-    new: `cargo run --release --bin collector profile_local cachegrind
-                +${state.commit} --exact-match ${benchName(
-      state.benchmark
-    )} --profiles
-                ${profile(state.benchmark)} --scenarios ${scenarioFilter(
-      state.scenario
-    )}`,
-    diff: state.base_commit
-      ? `cargo run --release --bin collector profile_local cachegrind
-                +${state.base_commit} --rustc2 +${
-          state.commit
-        } --exact-match ${benchName(state.benchmark)} --profiles
-                ${profile(state.benchmark)} --scenarios ${scenarioFilter(
-          state.scenario
-        )}`
-      : "",
+    base: state.base_commit ? cachegrindCommand(state.base_commit) : "",
+    new: cachegrindCommand(state.commit),
+    diff: cachegrindCommand(state.commit, state.base_commit),
   };
 
   return {baseLinks, newLinks, diffLink, localCommands};

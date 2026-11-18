@@ -355,7 +355,7 @@ fn rustc_check_err() {
     foo.cargo("rustc --profile check -- --emit=metadata")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [CHECKING] bar v0.1.0 ([ROOT]/bar)
 [CHECKING] foo v0.0.1 ([ROOT]/foo)
 error[E0425]: [..]
@@ -773,21 +773,33 @@ fn check_artifacts() {
     assert!(!p.root().join("target/debug/libfoo.rmeta").is_file());
     assert!(!p.root().join("target/debug/libfoo.rlib").is_file());
     assert!(!p.root().join("target/debug").join(exe("foo")).is_file());
-    assert_eq!(p.glob("target/debug/deps/libfoo-*.rmeta").count(), 2);
+    assert_eq!(
+        p.glob("target/debug/build/foo/*/out/libfoo-*.rmeta")
+            .count(),
+        2
+    );
 
     p.root().join("target").rm_rf();
     p.cargo("check --lib").run();
     assert!(!p.root().join("target/debug/libfoo.rmeta").is_file());
     assert!(!p.root().join("target/debug/libfoo.rlib").is_file());
     assert!(!p.root().join("target/debug").join(exe("foo")).is_file());
-    assert_eq!(p.glob("target/debug/deps/libfoo-*.rmeta").count(), 1);
+    assert_eq!(
+        p.glob("target/debug/build/foo/*/out/libfoo-*.rmeta")
+            .count(),
+        1
+    );
 
     p.root().join("target").rm_rf();
     p.cargo("check --bin foo").run();
     assert!(!p.root().join("target/debug/libfoo.rmeta").is_file());
     assert!(!p.root().join("target/debug/libfoo.rlib").is_file());
     assert!(!p.root().join("target/debug").join(exe("foo")).is_file());
-    assert_eq!(p.glob("target/debug/deps/libfoo-*.rmeta").count(), 2);
+    assert_eq!(
+        p.glob("target/debug/build/foo/*/out/libfoo-*.rmeta")
+            .count(),
+        2
+    );
 
     p.root().join("target").rm_rf();
     p.cargo("check --test t1").run();
@@ -795,8 +807,15 @@ fn check_artifacts() {
     assert!(!p.root().join("target/debug/libfoo.rlib").is_file());
     assert!(!p.root().join("target/debug").join(exe("foo")).is_file());
     assert_eq!(p.glob("target/debug/t1-*").count(), 0);
-    assert_eq!(p.glob("target/debug/deps/libfoo-*.rmeta").count(), 1);
-    assert_eq!(p.glob("target/debug/deps/libt1-*.rmeta").count(), 1);
+    assert_eq!(
+        p.glob("target/debug/build/foo/*/out/libfoo-*.rmeta")
+            .count(),
+        1
+    );
+    assert_eq!(
+        p.glob("target/debug/build/foo/*/out/libt1-*.rmeta").count(),
+        1
+    );
 
     p.root().join("target").rm_rf();
     p.cargo("check --example ex1").run();
@@ -808,8 +827,16 @@ fn check_artifacts() {
             .join(exe("ex1"))
             .is_file()
     );
-    assert_eq!(p.glob("target/debug/deps/libfoo-*.rmeta").count(), 1);
-    assert_eq!(p.glob("target/debug/examples/libex1-*.rmeta").count(), 1);
+    assert_eq!(
+        p.glob("target/debug/build/foo/*/out/libfoo-*.rmeta")
+            .count(),
+        1
+    );
+    assert_eq!(
+        p.glob("target/debug/build/foo/*/out/libex1-*.rmeta")
+            .count(),
+        1
+    );
 
     p.root().join("target").rm_rf();
     p.cargo("check --bench b1").run();
@@ -817,8 +844,15 @@ fn check_artifacts() {
     assert!(!p.root().join("target/debug/libfoo.rlib").is_file());
     assert!(!p.root().join("target/debug").join(exe("foo")).is_file());
     assert_eq!(p.glob("target/debug/b1-*").count(), 0);
-    assert_eq!(p.glob("target/debug/deps/libfoo-*.rmeta").count(), 1);
-    assert_eq!(p.glob("target/debug/deps/libb1-*.rmeta").count(), 1);
+    assert_eq!(
+        p.glob("target/debug/build/foo/*/out/libfoo-*.rmeta")
+            .count(),
+        1
+    );
+    assert_eq!(
+        p.glob("target/debug/build/foo/*/out/libb1-*.rmeta").count(),
+        1
+    );
 }
 
 #[cargo_test]
@@ -1174,6 +1208,9 @@ fn git_manifest_package_and_project() {
             name = "bar"
             version = "0.0.1"
             edition = "2015"
+
+            [lints.cargo]
+            default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -1193,6 +1230,9 @@ fn git_manifest_package_and_project() {
                 version = "0.0.1"
                 git  = '{}'
 
+
+                [lints.cargo]
+                default = "allow"
             "#,
                 git_project.url()
             ),
@@ -1203,7 +1243,7 @@ fn git_manifest_package_and_project() {
     p.cargo("check")
         .with_stderr_data(str![[r#"
 [UPDATING] git repository `[ROOTURL]/bar`
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [CHECKING] bar v0.0.1 ([ROOTURL]/bar#[..])
 [CHECKING] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -1242,6 +1282,9 @@ fn git_manifest_with_project() {
                 version = "0.0.1"
                 git  = '{}'
 
+
+                [lints.cargo]
+                default = "allow"
             "#,
                 git_project.url()
             ),
@@ -1252,7 +1295,7 @@ fn git_manifest_with_project() {
     p.cargo("check")
         .with_stderr_data(str![[r#"
 [UPDATING] git repository `[ROOTURL]/bar`
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [CHECKING] bar v0.0.1 ([ROOTURL]/bar#[..])
 [CHECKING] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -1599,6 +1642,9 @@ fn check_unused_manifest_keys() {
 
             [target.bar.build-dependencies]
             foo = { version = "0.1.0", wxz = "wxz" }
+
+            [lints.cargo]
+            default = "allow"
         "#,
         )
         .file("src/main.rs", "fn main() {}")
@@ -1616,7 +1662,7 @@ fn check_unused_manifest_keys() {
 [WARNING] Cargo.toml: unused manifest key: target.wasm32-wasip1.dev-dependencies.foo.wxz
 [WARNING] `bar` (manifest) generated 7 warnings
 [UPDATING] `dummy-registry` index
-[LOCKING] 2 packages to latest compatible versions
+[LOCKING] 2 packages to highest compatible versions
 [DOWNLOADING] crates ...
 [DOWNLOADED] foo v0.1.0 (registry `dummy-registry`)
 [DOWNLOADED] dep v0.1.0 (registry `dummy-registry`)

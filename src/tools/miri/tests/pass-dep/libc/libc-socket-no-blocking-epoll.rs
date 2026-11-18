@@ -30,6 +30,7 @@ fn main() {
     test_readiness_after_short_write();
     test_readable_after_read_shutdown_and_short_read();
     test_writable_after_write_shutdown_with_full_buffer();
+    test_initial_readiness();
 }
 
 /// Test that connecting to a server socket works when the client
@@ -109,7 +110,7 @@ fn test_accept_nonblock() {
 
         // Ensure that the server is no longer readable because we just
         // attempted to accept without an incoming connection.
-        assert_eq!(current_epoll_readiness::<8>(server_sockfd, EPOLLIN | EPOLLET), 0);
+        assert_eq!(current_epoll_readiness(server_sockfd, EPOLLIN | EPOLLET), 0);
     });
 
     // Yield to server thread such that it actually needs to wait for an
@@ -165,7 +166,7 @@ fn test_connect_nonblock_err() {
     assert!(errno != 0);
 
     // Ensure that error readiness is cleared after reading SO_ERROR.
-    let readiness = current_epoll_readiness::<8>(client_sockfd, EPOLLET | EPOLLOUT | EPOLLERR);
+    let readiness = current_epoll_readiness(client_sockfd, EPOLLET | EPOLLOUT | EPOLLERR);
     assert!(readiness & EPOLLERR == 0);
 }
 
@@ -249,7 +250,7 @@ fn test_recv_nonblock() {
 
     // Ensure that the client is no longer readable because
     // we just got an EWOULDBLOCK from a receive call.
-    assert_eq!(current_epoll_readiness::<8>(client_sockfd, EPOLLIN | EPOLLET), 0);
+    assert_eq!(current_epoll_readiness(client_sockfd, EPOLLIN | EPOLLET), 0);
 
     server_thread.join().unwrap();
 }
@@ -297,7 +298,7 @@ fn test_send_nonblock() {
                 if written as usize == fill_buf.len() {
                     // When we didn't have a short write we should still be able to write more.
                     // Ensure the socket is still writable.
-                    let readiness = current_epoll_readiness::<8>(client_sockfd, EPOLLOUT | EPOLLET);
+                    let readiness = current_epoll_readiness(client_sockfd, EPOLLOUT | EPOLLET);
                     if cfg!(miri) {
                         // With Miri we keep the writable readiness until EWOULDBLOCK is returned.
                         assert_eq!(readiness, EPOLLOUT);
@@ -317,7 +318,7 @@ fn test_send_nonblock() {
 
     // The buffer should be filled up because we received an EWOULDBLOCK.
     // This also means that the client socket should no longer be writable.
-    assert_eq!(current_epoll_readiness::<8>(client_sockfd, EPOLLOUT | EPOLLET), 0);
+    assert_eq!(current_epoll_readiness(client_sockfd, EPOLLOUT | EPOLLET), 0);
 
     let peerfd = server_thread.join().unwrap();
 
@@ -547,7 +548,7 @@ fn test_readiness_after_short_peek() {
     assert_eq!(bytes_read, TEST_BYTES.len());
 
     // Ensure that the readable readiness is still set.
-    assert_eq!(current_epoll_readiness::<8>(client_sockfd, EPOLLIN | EPOLLET), EPOLLIN);
+    assert_eq!(current_epoll_readiness(client_sockfd, EPOLLIN | EPOLLET), EPOLLIN);
 
     // We should be able to read the buffer without blocking indefinitely.
     let bytes_read = unsafe {
@@ -699,7 +700,7 @@ fn test_readable_after_read_shutdown_and_short_read() {
 
     // Ensure that the "readable" and "read closed" readiness flags are still set.
     assert_eq!(
-        current_epoll_readiness::<8>(client_sockfd, EPOLLIN | EPOLLET | EPOLLRDHUP),
+        current_epoll_readiness(client_sockfd, EPOLLIN | EPOLLET | EPOLLRDHUP),
         EPOLLIN | EPOLLRDHUP
     );
 
@@ -777,4 +778,16 @@ fn test_writable_after_write_shutdown_with_full_buffer() {
     let result =
         unsafe { errno_result(libc::write(client_sockfd, buffer.as_ptr().cast(), buffer.len())) };
     assert_eq!(result.unwrap_err().kind(), ErrorKind::BrokenPipe);
+}
+
+/// Test that a socket reports the EPOLLHUP and EPOLLOUT readiness
+/// directly after being created.
+fn test_initial_readiness() {
+    let sockfd =
+        unsafe { errno_result(libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0)) }.unwrap();
+    let epfd = errno_result(unsafe { libc::epoll_create1(0) }).unwrap();
+
+    epoll_ctl_add(epfd, sockfd, EPOLLOUT | EPOLLIN | EPOLLHUP | EPOLLRDHUP).unwrap();
+
+    check_epoll_wait(epfd, &[Ev { events: EPOLLOUT | EPOLLHUP, data: sockfd }], -1);
 }

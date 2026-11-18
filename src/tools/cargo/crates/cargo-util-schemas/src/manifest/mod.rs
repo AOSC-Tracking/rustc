@@ -41,7 +41,7 @@ pub struct TomlManifest {
     pub package: Option<Box<TomlPackage>>,
     pub project: Option<Box<TomlPackage>>,
     pub badges: Option<BTreeMap<String, BTreeMap<String, String>>>,
-    pub features: Option<BTreeMap<FeatureName, Vec<String>>>,
+    pub features: Option<BTreeMap<FeatureName, FeatureDefinition>>,
     pub lib: Option<TomlLibTarget>,
     pub bin: Option<Vec<TomlBinTarget>>,
     pub example: Option<Vec<TomlExampleTarget>>,
@@ -112,7 +112,7 @@ impl TomlManifest {
             .or(self.build_dependencies2.as_ref())
     }
 
-    pub fn features(&self) -> Option<&BTreeMap<FeatureName, Vec<String>>> {
+    pub fn features(&self) -> Option<&BTreeMap<FeatureName, FeatureDefinition>> {
         self.features.as_ref()
     }
 
@@ -703,6 +703,11 @@ impl<'de> de::Deserialize<'de> for InheritableDependency {
             D::Error,
         >::new(value.clone()))
         {
+            if w._unused_keys.get("builtin").is_some() {
+                return Err(de::Error::custom(
+                    "`builtin` cannot be combined with `workspace = true`",
+                ));
+            }
             return if w.workspace {
                 Ok(InheritableDependency::Inherit(w))
             } else {
@@ -843,6 +848,14 @@ pub struct TomlDetailedDependency<P: Clone = String> {
     pub branch: Option<String>,
     pub tag: Option<String>,
     pub rev: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_builtin",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    #[cfg_attr(feature = "unstable-schema", schemars(extend("const" = true)))]
+    pub builtin: bool,
+
     pub features: Option<Vec<String>>,
     pub optional: Option<bool>,
     pub default_features: Option<bool>,
@@ -866,6 +879,14 @@ pub struct TomlDetailedDependency<P: Clone = String> {
     pub _unused_keys: BTreeMap<String, toml::Value>,
 }
 
+fn deserialize_builtin<'de, D: de::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    if bool::deserialize(deserializer)? {
+        Ok(true)
+    } else {
+        Err(de::Error::custom("`builtin` cannot be false"))
+    }
+}
+
 impl<P: Clone> TomlDetailedDependency<P> {
     pub fn default_features(&self) -> Option<bool> {
         self.default_features.or(self.default_features2)
@@ -877,6 +898,7 @@ impl<P: Clone> Default for TomlDetailedDependency<P> {
     fn default() -> Self {
         Self {
             version: Default::default(),
+            builtin: Default::default(),
             registry: Default::default(),
             registry_index: Default::default(),
             path: Default::default(),
@@ -1122,12 +1144,38 @@ impl<'de> de::Deserialize<'de> for TomlOptLevel {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "unstable-schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "unstable-schema", schemars(rename_all = "kebab-case"))]
+#[cfg_attr(feature = "unstable-schema", schemars(transform = Self::schema_add_aliases))]
 pub enum TomlDebugInfo {
     None,
     LineDirectivesOnly,
     LineTablesOnly,
     Limited,
     Full,
+}
+
+#[cfg(feature = "unstable-schema")]
+impl TomlDebugInfo {
+    fn schema_add_aliases(schema: &mut schemars::Schema) {
+        use serde_json::Value;
+
+        if let Some(obj) = schema.as_object_mut() {
+            obj.get_mut("type").map(|v| match v {
+                Value::Array(v) => v.extend_from_slice(&["integer".into(), "boolean".into()]),
+                Value::String(s) => {
+                    let s = std::mem::replace(s, String::with_capacity(0));
+                    *v = Value::Array(vec![s.into(), "integer".into(), "boolean".into()])
+                }
+                _ => *v = Value::Array(vec!["string".into(), "integer".into(), "boolean".into()]),
+            });
+
+            if let Some(variants) = obj.get_mut("enum").and_then(|v| v.as_array_mut()) {
+                variants.reserve(5);
+                variants.extend((0..=2).map(Into::into));
+                variants.extend_from_slice(&[false.into(), true.into()]);
+            }
+        }
+    }
 }
 
 impl Display for TomlDebugInfo {
@@ -1207,119 +1255,30 @@ impl<'de> de::Deserialize<'de> for TomlDebugInfo {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Ord, PartialOrd, Hash, Serialize)]
-#[serde(untagged, rename_all = "kebab-case")]
+#[derive(Clone, Debug, PartialEq, Eq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 #[cfg_attr(feature = "unstable-schema", derive(schemars::JsonSchema))]
 pub enum TomlTrimPaths {
-    Values(Vec<TomlTrimPathsValue>),
+    None,
+    Object,
     All,
 }
 
 impl TomlTrimPaths {
-    pub fn none() -> Self {
-        TomlTrimPaths::Values(Vec::new())
-    }
-
     pub fn is_none(&self) -> bool {
-        match self {
-            TomlTrimPaths::Values(v) => v.is_empty(),
-            TomlTrimPaths::All => false,
-        }
+        matches!(self, TomlTrimPaths::None)
     }
-}
 
-impl<'de> de::Deserialize<'de> for TomlTrimPaths {
-    fn deserialize<D>(d: D) -> Result<TomlTrimPaths, D::Error>
-    where
-        D: de::Deserializer<'de>,
-    {
-        use serde::de::Error as _;
-        let expecting = r#"a boolean, "none", "diagnostics", "macro", "object", "all", or an array with these options"#;
-        UntaggedEnumVisitor::new()
-            .expecting(expecting)
-            .bool(|value| {
-                Ok(if value {
-                    TomlTrimPaths::All
-                } else {
-                    TomlTrimPaths::none()
-                })
-            })
-            .string(|v| match v {
-                "none" => Ok(TomlTrimPaths::none()),
-                "all" => Ok(TomlTrimPaths::All),
-                v => {
-                    let d = v.into_deserializer();
-                    let err = |_: D::Error| {
-                        serde_untagged::de::Error::custom(format!("expected {expecting}"))
-                    };
-                    TomlTrimPathsValue::deserialize(d)
-                        .map_err(err)
-                        .map(|v| v.into())
-                }
-            })
-            .seq(|seq| {
-                let seq: Vec<String> = seq.deserialize()?;
-                let seq: Vec<_> = seq
-                    .into_iter()
-                    .map(|s| TomlTrimPathsValue::deserialize(s.into_deserializer()))
-                    .collect::<Result<_, _>>()?;
-                Ok(seq.into())
-            })
-            .deserialize(d)
+    fn as_str(&self) -> &'static str {
+        match self {
+            TomlTrimPaths::None => "none",
+            TomlTrimPaths::Object => "object",
+            TomlTrimPaths::All => "all",
+        }
     }
 }
 
 impl fmt::Display for TomlTrimPaths {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TomlTrimPaths::All => write!(f, "all"),
-            TomlTrimPaths::Values(v) if v.is_empty() => write!(f, "none"),
-            TomlTrimPaths::Values(v) => {
-                let mut iter = v.iter();
-                if let Some(value) = iter.next() {
-                    write!(f, "{value}")?;
-                }
-                for value in iter {
-                    write!(f, ",{value}")?;
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-impl From<TomlTrimPathsValue> for TomlTrimPaths {
-    fn from(value: TomlTrimPathsValue) -> Self {
-        TomlTrimPaths::Values(vec![value])
-    }
-}
-
-impl From<Vec<TomlTrimPathsValue>> for TomlTrimPaths {
-    fn from(value: Vec<TomlTrimPathsValue>) -> Self {
-        TomlTrimPaths::Values(value)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-#[cfg_attr(feature = "unstable-schema", derive(schemars::JsonSchema))]
-pub enum TomlTrimPathsValue {
-    Diagnostics,
-    Macro,
-    Object,
-}
-
-impl TomlTrimPathsValue {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            TomlTrimPathsValue::Diagnostics => "diagnostics",
-            TomlTrimPathsValue::Macro => "macro",
-            TomlTrimPathsValue::Object => "object",
-        }
-    }
-}
-
-impl fmt::Display for TomlTrimPathsValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.as_str())
     }
@@ -1531,6 +1490,66 @@ impl TomlPlatform {
             .as_ref()
             .or(self.build_dependencies2.as_ref())
     }
+}
+
+/// Definition of a feature.
+#[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "unstable-schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum FeatureDefinition {
+    /// Features that this feature enables.
+    Array(Vec<String>),
+    /// Unstable feature `feature-metadata`. Metadata of this feature.
+    Metadata(FeatureMetadata),
+}
+
+// Implementing `Deserialize` manually allows for a better error message when the `enables` key is
+// missing.
+impl<'de> de::Deserialize<'de> for FeatureDefinition {
+    fn deserialize<D>(d: D) -> Result<FeatureDefinition, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        UntaggedEnumVisitor::new()
+            .seq(|seq| {
+                seq.deserialize::<Vec<String>>()
+                    .map(FeatureDefinition::Array)
+            })
+            .map(|seq| {
+                seq.deserialize::<FeatureMetadata>()
+                    .map(FeatureDefinition::Metadata)
+            })
+            .deserialize(d)
+    }
+}
+
+impl FeatureDefinition {
+    /// Returns the features that this feature enables.
+    pub fn enables(&self) -> &[String] {
+        match self {
+            Self::Array(features) => features,
+            Self::Metadata(FeatureMetadata {
+                enables: features, ..
+            }) => features,
+        }
+    }
+}
+
+/// Unstable feature `feature-metadata`. Metadata of a feature.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "unstable-schema", derive(schemars::JsonSchema))]
+pub struct FeatureMetadata {
+    /// Features that this feature enables.
+    pub enables: Vec<String>,
+
+    /// Documentation for the feature.
+    pub doc: Option<String>,
+
+    /// This is here to provide a way to see the "unused manifest keys" when deserializing
+    #[serde(skip_serializing)]
+    #[serde(flatten)]
+    #[cfg_attr(feature = "unstable-schema", schemars(skip))]
+    pub _unused_keys: BTreeMap<String, toml::Value>,
 }
 
 #[derive(Serialize, Debug, Clone)]

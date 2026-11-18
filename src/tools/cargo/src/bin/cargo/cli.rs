@@ -1,11 +1,11 @@
+use crate::util::data_structures::HashMap;
 use anyhow::{Context as _, anyhow};
-use cargo::core::{CliUnstable, features};
-use cargo::util::context::TermConfig;
+use cargo::context::TermConfig;
+use cargo::workspace::{CliUnstable, features};
 use cargo::{CargoResult, drop_print, drop_println};
 use cargo_util_terminal::report::Level;
 use clap::builder::UnknownArgumentValueParser;
 use itertools::Itertools;
-use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fmt::Write;
@@ -94,7 +94,7 @@ pub fn main(gctx: &mut GlobalContext) -> CliResult {
             global_args,
             Some(&exec),
         )?;
-        super::init_git(gctx);
+        super::init_git();
 
         exec.exec(gctx, subcommand_args)?;
     }
@@ -153,7 +153,7 @@ fn print_list(gctx: &GlobalContext, is_verbose: bool) {
     // to their description, for the help page. Reserved for external
     // subcommands that are core within the rust ecosystem (esp ones that
     // might become internal in the future).
-    let known_external_command_descriptions = HashMap::from([
+    let known_external_command_descriptions = HashMap::from_iter([
         (
             "clippy",
             "Checks a package to catch common mistakes and improve your Rust code.",
@@ -568,7 +568,7 @@ impl GlobalArgs {
 #[tracing::instrument(skip_all)]
 pub fn cli(gctx: &GlobalContext) -> Command {
     // Don't let config errors get in the way of parsing arguments
-    let term = gctx.get::<TermConfig>("term").unwrap_or_default();
+    let term = gctx.get::<TermConfig>(["term"]).unwrap_or_default();
     let color = term
         .color
         .and_then(|c| c.parse().ok())
@@ -739,18 +739,22 @@ See '<bright-cyan,bold>cargo help</> <cyan><<command>></>' for more information 
 }
 
 fn get_toolchains_from_rustup() -> Vec<String> {
-    let output = std::process::Command::new("rustup")
+    let Ok(output) = std::process::Command::new("rustup")
         .arg("toolchain")
         .arg("list")
         .arg("-q")
         .output()
-        .unwrap();
+    else {
+        return vec![];
+    };
 
     if !output.status.success() {
         return vec![];
     }
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let Ok(stdout) = String::from_utf8(output.stdout) else {
+        return vec![];
+    };
 
     stdout.lines().map(|line| format!("+{}", line)).collect()
 }

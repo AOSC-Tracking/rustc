@@ -2,21 +2,21 @@ use crate::command_prelude::*;
 use crate::util::cache_lock::CacheLockMode;
 use crate::util::time_span::parse_time_span;
 
-use cargo::core::gc::Gc;
-use cargo::core::gc::GcOpts;
-use cargo::core::gc::parse_human_size;
-use cargo::core::global_cache_tracker::GlobalCacheTracker;
+use crate::util::data_structures::IndexSet;
 use cargo::ops::CleanContext;
 use cargo::ops::{self, CleanOptions};
 use cargo::util::print_available_packages;
+use cargo::workspace::gc::Gc;
+use cargo::workspace::gc::GcOpts;
+use cargo::workspace::gc::parse_human_size;
+use cargo::workspace::global_cache_tracker::GlobalCacheTracker;
 use clap_complete::ArgValueCandidates;
-use indexmap::IndexSet;
 use std::time::Duration;
 
 pub fn cli() -> Command {
     subcommand("clean")
         .about("Remove artifacts that cargo has generated in the past")
-        .arg_doc("Whether or not to clean just the documentation directory")
+        .arg_doc("Clean only the documentation directory")
         .arg_silent_suggestion()
         .arg_package_spec_simple(
             "Package to clean artifacts for",
@@ -26,9 +26,9 @@ pub fn cli() -> Command {
             flag("workspace", "Clean artifacts of the workspace members")
                 .help_heading(heading::PACKAGE_SELECTION),
         )
-        .arg_release("Whether or not to clean release artifacts")
-        .arg_profile("Clean artifacts of the specified profile")
-        .arg_target_triple("Target triple to clean output for")
+        .arg_release("Clean only release artifacts")
+        .arg_profile("Clean only artifacts of the specified profile")
+        .arg_target_triple("Target tuple to clean output for")
         .arg_target_dir()
         .arg_manifest_path()
         .arg_dry_run("Display what would be deleted without deleting anything")

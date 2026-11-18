@@ -13,7 +13,6 @@
 edition = "2018"
 name = "rust_team_data"
 version = "1.0.0"
-authors = ["Pietro Albini <pietro@pietroalbini.org>"]
 build = false
 autolib = false
 autobins = false
@@ -25,21 +24,27 @@ license = "MIT OR Apache-2.0"
 
 [features]
 email-encryption = [
-    "chacha20poly1305",
-    "getrandom",
-    "hex",
+    "dep:chacha20poly1305",
+    "dep:x25519-dalek",
+    "dep:blake3",
+    "dep:getrandom",
+    "dep:hex",
 ]
 
 [lib]
 name = "rust_team_data"
 path = "src/lib.rs"
 
+[dependencies.blake3]
+version = "1.8.3"
+optional = true
+
 [dependencies.chacha20poly1305]
-version = "0.9.0"
+version = "0.10.1"
 optional = true
 
 [dependencies.getrandom]
-version = "0.2.1"
+version = "0.4.2"
 optional = true
 
 [dependencies.hex]
@@ -47,9 +52,17 @@ version = "0.4.2"
 optional = true
 
 [dependencies.indexmap]
-version = "2"
+version = "2.6.0"
 features = ["serde"]
 
 [dependencies.serde]
 version = "1.0.85"
 features = ["derive"]
+
+[dependencies.x25519-dalek]
+version = "2.0.1"
+features = [
+    "getrandom",
+    "static_secrets",
+]
+optional = true

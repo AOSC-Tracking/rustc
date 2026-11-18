@@ -104,12 +104,13 @@ pub enum AnalysisPhase {
     /// * [`TerminatorKind::FalseEdge`]
     /// * [`StatementKind::FakeRead`]
     /// * [`StatementKind::AscribeUserType`]
-    /// * [`StatementKind::Coverage`] with [`CoverageKind::BlockMarker`] or
-    ///   [`CoverageKind::SpanMarker`]
+    /// * [`StatementKind::Coverage`] with [`CoverageKind::is_removed_after_analysis`]
     /// * [`Rvalue::Ref`] with `BorrowKind::Fake`
     /// * [`CastKind::PointerCoercion`] with any of the following:
     ///   * [`PointerCoercion::ArrayToPointer`]
     ///   * [`PointerCoercion::MutToConstPointer`]
+    ///
+    /// [`CoverageKind::is_removed_after_analysis`]: crate::mir::coverage::CoverageKind::is_removed_after_analysis
     ///
     /// Furthermore, `Deref` projections must be the first projection within any place (if they
     /// appear at all)
@@ -306,9 +307,9 @@ pub enum StatementKind<'tcx> {
     /// Assign statements roughly correspond to an assignment in Rust proper (`x = ...`) except
     /// without the possibility of dropping the previous value (that must be done separately, if at
     /// all). The *exact* way this works is undecided. It probably does something like evaluating
-    /// the LHS to a place and the RHS to a value, and then storing the value to the place. Various
-    /// parts of this may do type specific things that are more complicated than simply copying
-    /// bytes. In particular, the assignment will typically erase the contents of padding,
+    /// the LHS to a place, then the RHS to a value, and then storing the value to the place.
+    /// Various parts of this may do type specific things that are more complicated than simply
+    /// copying bytes. In particular, the assignment will typically erase the contents of padding,
     /// erase provenance from non-pointer types, and implicitly "retag" all references and boxes
     /// that it copies, meaning that the resulting value is not an exact duplicate for all intents
     /// and purposes of the original value.
@@ -415,7 +416,7 @@ pub enum StatementKind<'tcx> {
     ///
     /// Coverage statements are used in conjunction with the coverage mappings and other
     /// information stored in the function's
-    /// [`mir::Body::function_coverage_info`](crate::mir::Body::function_coverage_info).
+    /// [`mir::Body::coverage_mir_info`](crate::mir::Body::coverage_mir_info).
     /// (For inlined MIR, take care to look up the *original function's* coverage info.)
     ///
     /// Interpreters and codegen backends that don't support coverage instrumentation
@@ -780,6 +781,9 @@ pub enum TerminatorKind<'tcx> {
     /// operands not aliasing the return place. It is unclear how this is justified in MIR, see
     /// [#71117].
     ///
+    /// The evaluation order is currently "first compute destination place, then `func` operand,
+    /// then the arguments in left-to-right order".
+    ///
     /// [#71117]: https://github.com/rust-lang/rust/issues/71117
     Call {
         /// The function that’s being called.
@@ -1043,6 +1047,7 @@ pub enum AssertKind<O> {
     ResumedAfterDrop(CoroutineKind),
     MisalignedPointerDereference { required: O, found: O },
     NullPointerDereference,
+    NullReferenceConstructed,
     InvalidEnumConstruction(O),
 }
 
@@ -1251,6 +1256,26 @@ pub enum ProjectionElem<V, T> {
     /// A transmute from an unsafe binder to the type that it wraps. This is a projection
     /// of a place, so it doesn't necessarily constitute a move out of the binder.
     UnwrapUnsafeBinder(T),
+
+    /// A symbolic dereference of a `Reborrow` type that does not contain any `&mut T` fields.
+    ///
+    /// If a type is `Reborrow` and contains a `&mut T` field then reborrowing it reborrows the `T`,
+    /// producing a borrow on an indirect place, producing a value that can be returned from the
+    /// function since it does not capture any local place. If no such field exists, then
+    /// reborrowing the type must dereference the type itself to find an indirect place, but
+    /// generally such types will not implement `Deref`. Therefore, in borrow checking we instead
+    /// perform a "phantom dereference" (named so because the type will usually contain some
+    /// `PhantomData<&'a ()>` or equivalent that captures the lifetime) to access an indeterminate
+    /// indirect place.
+    ///
+    /// FIXME(reborrow): currently this variant is not considered an indirect place for whatever
+    /// reason. This variant makes no sense if that cannot be fixed.
+    ///
+    /// FIXME(reborrow): if the Reborrow traits experiment is rejected, this variant can be removed:
+    /// see the [PR].
+    ///
+    /// [PR]: https://github.com/rust-lang/rust/pull/159103
+    PhantomDeref,
 }
 
 /// Alias for projections as they appear in places, where the base is a place
@@ -1492,8 +1517,16 @@ pub enum CastKind {
     /// MIR is well-formed if the input and output types have different sizes,
     /// but running a transmute between differently-sized types is UB.
     Transmute,
+    /// A special transmute used by elaborated `box` deref's to turn the inner pointer into a raw
+    /// pointer. This is almost equivalent to a regular transmute except that if the input would not
+    /// be valid as `Box<T>`, the cast is UB. Backends that do not care about UB detection can treat
+    /// this like a regular transmute.
+    ///
+    /// Well-formedness: The input type must be a pointer type or a newtype around one (e.g.
+    /// `NonNull`). The output type must be a raw pointer.
+    BoxDerefTransmute,
 
-    /// A `Subtype` cast is applied to any `StatementKind::Assign` where
+    /// A `Subtype` cast is applied to any [`StatementKind::Assign`] where
     /// type of lvalue doesn't match the type of rvalue, the primary goal is making subtyping
     /// explicit during optimizations and codegen.
     ///
@@ -1672,12 +1705,14 @@ pub enum BinOp {
     /// The `<=>` operator (three-way comparison, like `Ord::cmp`)
     ///
     /// This is supported only on the integer types and `char`, always returning
-    /// [`rustc_hir::LangItem::OrderingEnum`] (aka [`std::cmp::Ordering`]).
+    /// [`LangItem::OrderingEnum`] (aka [`std::cmp::Ordering`]).
     ///
     /// [`Rvalue::BinaryOp`]`(BinOp::Cmp, A, B)` returns
     /// - `Ordering::Less` (`-1_i8`, as a Scalar) if `A < B`
     /// - `Ordering::Equal` (`0_i8`, as a Scalar) if `A == B`
     /// - `Ordering::Greater` (`+1_i8`, as a Scalar) if `A > B`
+    ///
+    /// [`LangItem::OrderingEnum`]: rustc_attr_ir::lang_items::LangItem
     Cmp,
     /// The `ptr.offset` operator
     Offset,

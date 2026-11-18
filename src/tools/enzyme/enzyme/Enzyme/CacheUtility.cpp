@@ -128,7 +128,7 @@ InsertNewCanonicalIV(Loop *L, Type *Ty, const llvm::Twine &Name) {
   IRBuilder<> B(Header, Header->begin());
   PHINode *CanonicalIV = B.CreatePHI(Ty, 1, Name);
 
-  B.SetInsertPoint(Header->getFirstNonPHIOrDbg());
+  B.SetInsertPoint(getFirstNonPHIOrDbg(Header));
   Instruction *Inc = cast<Instruction>(
       B.CreateAdd(CanonicalIV, ConstantInt::get(Ty, 1), Name + ".next",
                   /*NUW*/ true, /*NSW*/ true));
@@ -255,8 +255,7 @@ void RemoveRedundantIVs(
 
     // We place that at first non phi as it may produce a non-phi instruction
     // and must thus be expanded after all phi's
-    Value *NewIV =
-        Exp.expandCodeFor(S, Tmp->getType(), Header->getFirstNonPHI());
+    Value *NewIV = Exp.expandCodeFor(S, Tmp->getType(), getFirstNonPHI(Header));
 
     // Explicity preserve wrap behavior from original iv. This is necessary
     // until this PR in llvm is merged:
@@ -283,7 +282,7 @@ void RemoveRedundantIVs(
   }
 
   // Replace existing increments with canonical Increment
-  Increment->moveAfter(CanonicalIV->getParent()->getFirstNonPHI());
+  Increment->moveAfter(getFirstNonPHI(CanonicalIV->getParent()));
   SmallVector<Instruction *, 1> toErase;
   for (auto use : CanonicalIV->users()) {
     auto BO = dyn_cast<BinaryOperator>(use);
@@ -320,12 +319,10 @@ void CanonicalizeLatches(const Loop *L, BasicBlock *Header,
                          Instruction *Increment,
                          ArrayRef<BasicBlock *> latches) {
   // Attempt to explicitly rewrite the latch
-  if (latches.size() == 1 && isa<BranchInst>(latches[0]->getTerminator()) &&
-      cast<BranchInst>(latches[0]->getTerminator())->isConditional())
+  if (latches.size() == 1 && isConditionalBranch(latches[0]->getTerminator()))
     for (auto use : CanonicalIV->users()) {
       if (auto cmp = dyn_cast<ICmpInst>(use)) {
-        if (cast<BranchInst>(latches[0]->getTerminator())->getCondition() !=
-            cmp)
+        if (getBranchCondition(latches[0]->getTerminator()) != cmp)
           continue;
         // Force i to be on LHS
         if (cmp->getOperand(0) != CanonicalIV) {
@@ -397,14 +394,12 @@ void CanonicalizeLatches(const Loop *L, BasicBlock *Header,
 
   // Replace previous increment usage with new increment value
   if (Increment) {
-    Increment->moveAfter(CanonicalIV->getParent()->getFirstNonPHI());
+    Increment->moveAfter(getFirstNonPHI(CanonicalIV->getParent()));
 
-    if (latches.size() == 1 && isa<BranchInst>(latches[0]->getTerminator()) &&
-        cast<BranchInst>(latches[0]->getTerminator())->isConditional())
+    if (latches.size() == 1 && isConditionalBranch(latches[0]->getTerminator()))
       for (auto use : Increment->users()) {
         if (auto cmp = dyn_cast<ICmpInst>(use)) {
-          if (cast<BranchInst>(latches[0]->getTerminator())->getCondition() !=
-              cmp)
+          if (getBranchCondition(latches[0]->getTerminator()) != cmp)
             continue;
 
           // Force i+1 to be on LHS
@@ -725,8 +720,22 @@ bool CacheUtility::getContext(BasicBlock *BB, LoopContext &loopContext,
     }
   endOMP:;
 
-    if (Limit->getType() != CanonicalIV->getType())
-      Limit = SE.getZeroExtendExpr(Limit, CanonicalIV->getType());
+    if (Limit->getType() != CanonicalIV->getType()) {
+      const SCEV *Zero = SE.getZero(Limit->getType());
+      const Loop *outermost = L;
+      while (outermost->getParentLoop()) {
+        outermost = outermost->getParentLoop();
+      }
+      BasicBlock *outermostPreheader = outermost->getLoopPreheader();
+      Instruction *context = outermostPreheader
+                                 ? outermostPreheader->getTerminator()
+                                 : loopContexts[L].preheader->getTerminator();
+      if (SE.isKnownPredicateAt(ICmpInst::ICMP_SGE, Limit, Zero, context)) {
+        Limit = SE.getZeroExtendExpr(Limit, CanonicalIV->getType());
+      } else {
+        Limit = SE.getSignExtendExpr(Limit, CanonicalIV->getType());
+      }
+    }
 
 #if LLVM_VERSION_MAJOR >= 22
     SCEVExpander Exp(SE, "enzyme");
@@ -1289,7 +1298,7 @@ CacheUtility::SubLimitType CacheUtility::getSubLimits(bool inForwardPass,
           limits[i] = found->second;
         } else {
           limits[i] = map[allocationPreheaders[i]] =
-              allocationBuilder.CreateNUWAdd(
+              allocationBuilder.CreateNSWAdd(
                   limitMinus1, ConstantInt::get(limitMinus1->getType(), 1));
         }
       } else {
@@ -1301,7 +1310,7 @@ CacheUtility::SubLimitType CacheUtility::getSubLimits(bool inForwardPass,
           llvm::errs() << *limitMinus1 << "\n";
         }
         assert(lim);
-        limits[i] = RB->CreateNUWAdd(lim, ConstantInt::get(lim->getType(), 1));
+        limits[i] = RB->CreateNSWAdd(lim, ConstantInt::get(lim->getType(), 1));
       }
     }
   }
@@ -1486,7 +1495,7 @@ void CacheUtility::storeInstructionInCache(LimitContext ctx,
   if (&*inst->getParent()->rbegin() != inst) {
     auto pn = dyn_cast<PHINode>(inst);
     Instruction *putafter = (pn && pn->getNumIncomingValues() > 0)
-                                ? (inst->getParent()->getFirstNonPHI())
+                                ? (getFirstNonPHI(inst->getParent()))
                                 : getNextNonDebugInstruction(inst);
     assert(putafter);
     v.SetInsertPoint(putafter);

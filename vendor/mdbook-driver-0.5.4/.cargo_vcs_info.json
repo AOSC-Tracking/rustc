@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "69287f26827e160e99d30c838d2dafa6ca9bb015"
+  },
+  "path_in_vcs": "crates/mdbook-driver"
+}

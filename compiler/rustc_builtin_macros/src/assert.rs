@@ -22,7 +22,7 @@ pub(crate) fn expand_assert<'cx>(
     let Assert { cond_expr, custom_message } = match parse_assert(cx, span, tts) {
         Ok(assert) => assert,
         Err(err) => {
-            let guar = err.emit();
+            let guar = err.emit_err();
             return ExpandResult::Ready(DummyResult::any(span, guar));
         }
     };
@@ -39,9 +39,8 @@ pub(crate) fn expand_assert<'cx>(
                 segments: cx
                     .std_path(&[sym::panic, sym::panic_2021])
                     .into_iter()
-                    .map(|ident| PathSegment::from_ident(ident))
+                    .map(PathSegment::from_ident)
                     .collect(),
-                tokens: None,
             }
         } else {
             // Before edition 2021, we call `panic!()` unqualified,

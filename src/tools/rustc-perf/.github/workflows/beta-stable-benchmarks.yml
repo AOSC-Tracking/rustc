@@ -1,0 +1,40 @@
+name: Test stable benchmarks with beta
+on:
+  pull_request:
+  schedule:
+    - cron: "0 12 * * 1" # Every Monday at 12:00 UTC
+
+permissions:     
+  contents: read
+    
+jobs:
+  test-stable:
+    name: Test stable benchmarks
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout the source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Install beta toolchain
+        run: |
+          rustup install beta
+          rustup default beta
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: beta
+
+      - name: Configure environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-`uname -r`
+          echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
+
+      - name: Build
+        run: cargo build -p collector
+
+      - name: Run stable benchmarks
+        run: |
+          cargo run -p collector --bin collector bench_local `rustup +beta which rustc` --category Stable

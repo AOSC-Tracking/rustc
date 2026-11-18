@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use anyhow::Context;
 use thousands::Separable;
 
+use benchlib::benchmark::passes_filter;
 use benchlib::comm::messages::{BenchmarkMessage, BenchmarkResult, BenchmarkStats};
 pub use benchmark::{
     get_runtime_benchmark_groups, prepare_runtime_benchmark_suite, runtime_benchmark_dir,
@@ -14,12 +15,14 @@ pub use benchmark::{
 };
 use database::{ArtifactIdNumber, CollectionId, Connection};
 
+use crate::runtime_group_step_name;
 use crate::utils::git::get_rustc_perf_commit;
 use crate::{command_output, CollectorCtx};
 
 mod benchmark;
 mod profile;
 
+use crate::compile::benchmark::target::Target;
 pub use benchmark::RuntimeCompilationOpts;
 pub use profile::{profile_runtime, RuntimeProfiler};
 
@@ -35,17 +38,49 @@ pub async fn bench_runtime(
     collector: &CollectorCtx,
     filter: RuntimeBenchmarkFilter,
     iterations: u32,
+    target: Target,
 ) -> anyhow::Result<()> {
-    let filtered = suite.filtered_benchmark_count(&filter);
+    let db_target: database::Target = target.into();
+
+    // Compute the total number of benchmarks to run, excluding already-measured ones.
+    let filtered: u64 = suite
+        .groups
+        .iter()
+        .flat_map(|group| collector.get_unmeasured_runtime_benchmarks(group, db_target))
+        .filter(|name| passes_filter(name, &filter.exclude, &filter.include))
+        .count() as u64;
     println!("Executing {filtered} benchmarks\n");
 
     let rustc_perf_version = get_rustc_perf_commit();
     let mut benchmark_index = 0;
     for group in suite.groups {
-        let Some(step_name) = collector.start_runtime_step(conn, &group).await else {
+        let unmeasured = collector.get_unmeasured_runtime_benchmarks(&group, db_target);
+        if unmeasured.is_empty() {
             eprintln!("skipping {} -- already benchmarked", group.name);
             continue;
-        };
+        }
+
+        // Construct a filter that excludes already-measured benchmarks, combined with the
+        // user-provided filter.
+        let mut group_filter =
+            RuntimeBenchmarkFilter::new(filter.exclude.clone(), filter.include.clone());
+        for name in &group.benchmark_names {
+            if !unmeasured.contains(&name.as_str()) {
+                group_filter.exclude.push(name.clone());
+            }
+        }
+
+        // Check if any benchmarks remain after filtering
+        let has_benchmarks = group
+            .benchmark_names
+            .iter()
+            .any(|name| passes_filter(name, &group_filter.exclude, &group_filter.include));
+        if !has_benchmarks {
+            eprintln!("skipping {} -- already benchmarked", group.name);
+            continue;
+        }
+
+        let step_name = runtime_group_step_name(&group.name);
 
         let mut tx = conn.transaction().await;
 
@@ -53,7 +88,8 @@ pub async fn bench_runtime(
         // Extracting this into a separate function would be annoying, as there would be many
         // parameters.
         let result = async {
-            let messages = execute_runtime_benchmark_binary(&group.binary, &filter, iterations)?;
+            let messages =
+                execute_runtime_benchmark_binary(&group.binary, &group_filter, iterations)?;
             for message in messages {
                 let message = message.map_err(|err| {
                     anyhow::anyhow!(
@@ -74,6 +110,7 @@ pub async fn bench_runtime(
                             tx.conn(),
                             collector.artifact_row_id,
                             &rustc_perf_version,
+                            target,
                             result,
                         )
                         .await;
@@ -98,7 +135,6 @@ pub async fn bench_runtime(
                 .await;
         };
 
-        collector.end_runtime_step(tx.conn(), &group).await;
         tx.commit()
             .await
             .expect("Cannot commit runtime benchmark group results");
@@ -126,6 +162,7 @@ async fn record_stats(
     conn: &dyn Connection,
     artifact_id: ArtifactIdNumber,
     rustc_perf_version: &str,
+    target: Target,
     result: BenchmarkResult,
 ) {
     async fn record<'a>(
@@ -133,6 +170,7 @@ async fn record_stats(
         artifact_id: ArtifactIdNumber,
         collection_id: CollectionId,
         result: &'a BenchmarkResult,
+        target: Target,
         value: Option<u64>,
         metric: &'a str,
     ) {
@@ -142,6 +180,7 @@ async fn record_stats(
                 artifact_id,
                 &result.name,
                 metric,
+                target.into(),
                 value as f64,
             )
             .await;
@@ -156,6 +195,7 @@ async fn record_stats(
             artifact_id,
             collection_id,
             &result,
+            target,
             stat.instructions,
             "instructions:u",
         )
@@ -165,6 +205,7 @@ async fn record_stats(
             artifact_id,
             collection_id,
             &result,
+            target,
             stat.cycles,
             "cycles:u",
         )
@@ -174,6 +215,7 @@ async fn record_stats(
             artifact_id,
             collection_id,
             &result,
+            target,
             stat.branch_misses,
             "branch-misses",
         )
@@ -183,6 +225,7 @@ async fn record_stats(
             artifact_id,
             collection_id,
             &result,
+            target,
             stat.cache_misses,
             "cache-misses",
         )
@@ -192,6 +235,7 @@ async fn record_stats(
             artifact_id,
             collection_id,
             &result,
+            target,
             Some(stat.wall_time.as_nanos() as u64),
             "wall-time",
         )

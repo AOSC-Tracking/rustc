@@ -1,6 +1,7 @@
 import {BenchmarkFilter, CompareResponse, StatComparison} from "../types";
 import {calculateComparison, TestCaseComparison} from "../data";
-import {benchmarkNameMatchesFilter} from "../shared";
+import {benchmarkNameMatchesFilter, targetMatchesFilter} from "../shared";
+import {DEFAULT_COMPILE_TARGET_TRIPLE} from "../../../api";
 
 export type CompileBenchmarkFilter = {
   profile: {
@@ -8,6 +9,7 @@ export type CompileBenchmarkFilter = {
     debug: boolean;
     opt: boolean;
     doc: boolean;
+    docJson: boolean;
   };
   scenario: {
     full: boolean;
@@ -19,9 +21,7 @@ export type CompileBenchmarkFilter = {
     llvm: boolean;
     cranelift: boolean;
   };
-  target: {
-    x86_64_unknown_linux_gnu: boolean;
-  };
+  target: Target[];
   category: {
     primary: boolean;
     secondary: boolean;
@@ -46,6 +46,7 @@ export const defaultCompileFilter: CompileBenchmarkFilter = {
     debug: true,
     opt: true,
     doc: true,
+    docJson: true,
   },
   scenario: {
     full: true,
@@ -57,9 +58,7 @@ export const defaultCompileFilter: CompileBenchmarkFilter = {
     llvm: true,
     cranelift: true,
   },
-  target: {
-    x86_64_unknown_linux_gnu: true,
-  },
+  target: [DEFAULT_COMPILE_TARGET_TRIPLE],
   category: {
     primary: true,
     secondary: true,
@@ -78,7 +77,7 @@ export const defaultCompileFilter: CompileBenchmarkFilter = {
 export type Profile = "check" | "debug" | "opt" | "doc";
 export type CodegenBackend = "llvm" | "cranelift";
 export type Category = "primary" | "secondary";
-export type Target = "x86_64-unknown-linux-gnu";
+export type Target = "x86_64-unknown-linux-gnu" | "aarch64-unknown-linux-gnu";
 
 export type CompileBenchmarkMap = Dict<CompileBenchmarkMetadata>;
 
@@ -129,6 +128,8 @@ export function computeCompileComparisonsWithNonRelevant(
       return filter.profile.opt;
     } else if (profile === "doc") {
       return filter.profile.doc;
+    } else if (profile === "doc-json") {
+      return filter.profile.docJson;
     } else {
       return true;
     }
@@ -154,15 +155,6 @@ export function computeCompileComparisonsWithNonRelevant(
       return filter.backend.llvm;
     } else if (backend === "cranelift") {
       return filter.backend.cranelift;
-    } else {
-      // Unknown, but by default we should show things
-      return true;
-    }
-  }
-
-  function targetFilter(target: Target): boolean {
-    if (target === "x86_64-unknown-linux-gnu") {
-      return filter.target.x86_64_unknown_linux_gnu;
     } else {
       // Unknown, but by default we should show things
       return true;
@@ -201,7 +193,7 @@ export function computeCompileComparisonsWithNonRelevant(
       profileFilter(comparison.testCase.profile) &&
       scenarioFilter(comparison.testCase.scenario) &&
       backendFilter(comparison.testCase.backend) &&
-      targetFilter(comparison.testCase.target) &&
+      targetMatchesFilter(comparison.testCase.target, filter.target) &&
       categoryFilter(comparison.testCase.category) &&
       artifactFilter(benchmarkMap[comparison.testCase.benchmark] ?? null) &&
       changeFilter(comparison) &&

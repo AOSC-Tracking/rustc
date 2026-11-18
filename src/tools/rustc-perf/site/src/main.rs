@@ -1,6 +1,7 @@
+use collector::{LocalSelfProfileStorage, S3SelfProfileStorage, SelfProfileStorage};
 use futures::future::FutureExt;
 use parking_lot::RwLock;
-use site::job_queue::{create_queue_process, is_job_queue_enabled};
+use site::job_queue::create_job_queue_process;
 use site::load;
 use std::env;
 use std::sync::Arc;
@@ -13,7 +14,7 @@ static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() {
-    env_logger::init();
+    env_logger::builder().format_timestamp_millis().init();
 
     #[cfg(unix)]
     let _ = jemalloc_ctl::background_thread::write(true);
@@ -35,10 +36,25 @@ async fn main() {
         .ok()
         .and_then(|x| x.parse().ok())
         .unwrap_or(30);
+    let self_profile_storage: Box<dyn SelfProfileStorage + Send + Sync> =
+        match env::var("SELF_PROFILE_STORAGE_S3").ok() {
+            Some(_) => {
+                eprintln!("Loading self-profile data from S3");
+                Box::new(S3SelfProfileStorage::new().await)
+            }
+            None => {
+                eprintln!("Loading self-profile data from local directory");
+                Box::new(LocalSelfProfileStorage::default_path())
+            }
+        };
 
     let fut = tokio::task::spawn_blocking(move || {
         tokio::task::spawn(async move {
-            let res = Arc::new(load::SiteCtxt::from_db_url(&db_url).await.unwrap());
+            let res = Arc::new(
+                load::SiteCtxt::from_db_url(&db_url, self_profile_storage)
+                    .await
+                    .unwrap(),
+            );
             *ctxt_.write() = Some(res.clone());
             let commits = res.index.load().commits().len();
             let artifacts = res.index.load().artifacts().count();
@@ -49,9 +65,6 @@ async fn main() {
             eprintln!(
                 "View the results in a web browser at 'http://localhost:{port}/compare.html'"
             );
-            // Spawn off a task to post the results of any commit results that we
-            // are now aware of.
-            site::github::post_finished(&res).await;
         })
     })
     .fuse();
@@ -59,24 +72,30 @@ async fn main() {
 
     let server = site::server::start(ctxt.clone(), port).fuse();
 
-    if is_job_queue_enabled() {
+    let create_job_queue_handler = |ctxt: Arc<RwLock<Option<Arc<load::SiteCtxt>>>>| {
         task::spawn(async move {
-            create_queue_process(
-                ctxt.clone(),
-                Duration::from_secs(queue_update_interval_seconds),
-            )
-            .await;
-        });
-    }
+            create_job_queue_process(ctxt, Duration::from_secs(queue_update_interval_seconds))
+                .await;
+        })
+        .fuse()
+    };
+
+    let mut job_queue_handler = create_job_queue_handler(ctxt.clone());
 
     futures::pin_mut!(server);
     futures::pin_mut!(fut);
     loop {
         futures::select! {
-            _s = server => {
-                eprintln!("Server completed unexpectedly.");
-                return;
-            }
+            result = server => match result {
+                Ok(()) => {
+                    eprintln!("Server finished unexpectedly.");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("Server failed: {e:?}");
+                    return;
+                }
+            },
             l = fut => {
                 if let Err(e) = l {
                     eprintln!("Loading failed, exiting.");
@@ -84,6 +103,17 @@ async fn main() {
                         std::panic::resume_unwind(panic);
                     }
                 }
+            }
+            // We want to have a panic boundary here; if the job queue handler panics for any
+            // reason (e.g. a transient networking/DB issue), we want to continue running it in the
+            // future.
+            // We thus use tokio::task::spawn, wait for a potential panic, and then restart the
+            // task again.
+            res = job_queue_handler => {
+                // The job queue handler task future has "finished", which means that it had to crash.
+                let error = res.expect_err("Job queue handler finished without an error");
+                log::error!("The job queue handler has panicked\n{error:?}\nIt will be now restarted");
+                job_queue_handler = create_job_queue_handler(ctxt.clone());
             }
         }
     }

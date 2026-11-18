@@ -1,18 +1,19 @@
 name: CI
 on:
-  push:
-    branches:
-      - master
-  pull_request: { }
+  merge_group:
+  pull_request:
   schedule:
     - cron: "0 12 * * 1" # Every Monday at 12:00 UTC
+
+permissions:
+  contents: read
 
 env:
   AWS_ACCESS_KEY_ID: AKIA46X5W6CZBLO3VBND
 
 jobs:
-  test_and_deploy:
-    name: Test and deploy
+  test-linux:
+    name: Test on Linux
     runs-on: ubuntu-22.04
     env:
       TEST_DB_URL: postgres://postgres:testpass@localhost:5432/postgres
@@ -27,9 +28,10 @@ jobs:
           - 5432:5432
     steps:
       - name: Checkout the source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Install toolchain
         run: |
@@ -37,14 +39,17 @@ jobs:
           rustup default $RUST_TOOLCHAIN_VERSION
           rustup component add --toolchain $RUST_TOOLCHAIN_VERSION rustfmt clippy
         env:
-          RUST_TOOLCHAIN_VERSION: 1.88.0
+          RUST_TOOLCHAIN_VERSION: 1.91.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: linux
 
       - name: Run unit tests
-        run: cargo test --all
+        run: cargo test --all --locked
+
+      - name: Build with S3 feature
+        run: cargo build --features s3-sdk --locked
 
       - name: Lint check
         run: cargo clippy --all -- -D warnings
@@ -52,40 +57,17 @@ jobs:
       - name: Formatting check
         run: cargo fmt --all -- --check
 
-      - uses: docker/setup-buildx-action@v2
-      - name: Build Docker image
-        uses: docker/build-push-action@v4
-        with:
-          context: .
-          # Export the image to Docker to make it available in the next step
-          load: true
-          tags: rustc-perf
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
       - name: Check licenses
         run: |
           pip install reuse==4.0.3
           reuse lint
 
-      - name: Deploy to production
-        uses: rust-lang/simpleinfra/github-actions/upload-docker-image@master
-        with:
-          image: rustc-perf
-          repository: rust-rustc-perf
-          region: us-west-1
-          redeploy_ecs_cluster: rust-ecs-prod
-          redeploy_ecs_service: rustc-perf
-          aws_access_key_id: "${{ env.AWS_ACCESS_KEY_ID }}"
-          aws_secret_access_key: "${{ secrets.AWS_SECRET_ACCESS_KEY }}"
-        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/deploy'
-
-  test_on_windows:
+  test-windows:
     name: Test on Windows
     runs-on: windows-latest
     steps:
       - name: Checkout the source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 1
 
@@ -98,7 +80,7 @@ jobs:
           RUST_TOOLCHAIN_VERSION: beta
         shell: cmd
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: windows
 
@@ -110,7 +92,7 @@ jobs:
       - name: Run unit tests
         run: cargo test --all
 
-  test_benchmarks:
+  test-benchmarks-linux:
     strategy:
       matrix:
         # We split `bench_local` testing into four jobs that run in parallel,
@@ -120,23 +102,23 @@ jobs:
         #   few of the most expensive ones). In the other half we run
         #   everything but the benchmarks listed here.
         #
-        # - Dimension 2: In one half we run the Check, Debug, and Doc profiles.
-        #   In the other half we run the Opt profiles.
+        # - Dimension 2: In one half we run the Check/Debug/Doc profiles.
+        #   In the other half we run the Opt/DocJson profiles.
         #
         # We want the four parts to have similar runtimes.
-        BENCH_INCLUDE_EXCLUDE_OPTS: [
-          "--include cargo-0.87.1,stm32f4-0.15.1",
-          "--exclude cargo-0.87.1,stm32f4-0.15.1",
-        ]
         PROFILES: [
           "Check,Debug,Doc",
-          "Opt",
+          "Opt,DocJson",
         ]
-    name: Test benchmarks
+        BENCH_INCLUDE_EXCLUDE_OPTS: [
+          "--include cargo-0.87.1,stm32f4-0.15.1,diesel-2.2.10,eza-0.21.2",
+          "--exclude cargo-0.87.1,stm32f4-0.15.1,diesel-2.2.10,eza-0.21.2",
+        ]
+    name: Test benchmarks on Linux
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout the source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 1
 
@@ -157,7 +139,7 @@ jobs:
       - name: Install servo dependencies
         run: sudo apt-get install -y llvm-dev clang libx11-dev python2.7 autoconf2.13 libjemalloc-dev
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Build collector
         run: cargo build -p collector
@@ -170,12 +152,40 @@ jobs:
           PROFILES: ${{ matrix.PROFILES }}
           SHELL: "/bin/bash"
 
-  test_backends:
+  # Just a smoke test to ensure that we can fully run a single benchmark
+  test-benchmarks-windows:
+    name: Test benchmarks on Windows
+    runs-on: windows-latest
+    steps:
+      - name: Checkout the source code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install latest beta toolchain
+        run: |
+          rustup install $RUST_TOOLCHAIN_VERSION
+          rustup default $RUST_TOOLCHAIN_VERSION
+          rustup component add --toolchain $RUST_TOOLCHAIN_VERSION rustfmt clippy
+        shell: bash
+        env:
+          RUST_TOOLCHAIN_VERSION: beta
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build collector
+        run: cargo build -p collector
+
+      - name: Check eprintln
+        run: cargo run --bin collector profile_local eprintln --exact-match helloworld --profiles All `rustup which rustc`
+        shell: bash
+
+  test-backends:
     name: Test codegen backend benchmarks
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout the source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 1
 
@@ -193,7 +203,7 @@ jobs:
           sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-`uname -r`
           echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Build collector
         run: cargo build -p collector
@@ -206,12 +216,12 @@ jobs:
           BACKENDS: Cranelift
           SHELL: "/bin/bash"
 
-  test_runtime_benchmarks:
+  test-runtime-benchmarks:
     name: Test runtime benchmarks
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout the source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 1
 
@@ -229,7 +239,7 @@ jobs:
           sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-`uname -r`
           echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Build collector
         run: cargo build -p collector
@@ -239,12 +249,12 @@ jobs:
         env:
           SHELL: "/bin/bash"
 
-  test_profiling:
+  test-profiling:
     name: Test profiling
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout the source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 1
 
@@ -256,21 +266,10 @@ jobs:
         env:
           RUST_TOOLCHAIN_VERSION: beta
 
-      # We build a specific version of Valgrind because the one from the Ubuntu 22.04 repositories
-      # has problems with Rust debuginfo.
       - name: Install Valgrind
-        run: |
-          git clone https://sourceware.org/git/valgrind.git
-          cd valgrind
-          # Version from May 2022
-          git checkout 74e180e3c4d9e6bb4b2a9cd22eca7703412c5d42
-          ./autogen.sh
-          ./configure --prefix=${PWD}/build
-          make -j2
-          make install
-          echo "${PWD}/build/bin" >> $GITHUB_PATH
+        run: sudo apt install valgrind
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Install profilers
         run: cargo install --version 0.4.12 cargo-llvm-lines
@@ -315,7 +314,7 @@ jobs:
 
     steps:
       - name: Check out repository code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Install latest toolchain
         run: |
@@ -325,7 +324,7 @@ jobs:
         env:
           RUST_TOOLCHAIN_VERSION: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Build site
         run: cargo build --bin site
@@ -368,7 +367,7 @@ jobs:
 
     steps:
       - name: Check out repository code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Install latest stable toolchain
         run: |
@@ -387,7 +386,7 @@ jobs:
           sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-`uname -r`
           echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Build collector
         run: cargo build -p collector
@@ -405,7 +404,7 @@ jobs:
         run: cargo build --bin site
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
 
       - name: Install Python dependencies
         run: python3 -m pip install msgpack requests
@@ -415,3 +414,46 @@ jobs:
         run: |
           DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres cargo run --bin site &
           python3 ci/check-site.py version1 version2
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: docker/setup-buildx-action@885d1462b80bc1c1c7f0b00334ad271f09369c55 # v2.10.0
+      - name: Build Docker image
+        uses: docker/build-push-action@0a97817b6ade9f46837855d676c4cca3a2471fc9 # v4.2.1
+        with:
+          context: .
+          tags: rustc-perf
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Summary job for the merge queue.
+  # ALL THE PREVIOUS JOBS NEED TO BE ADDED TO THE `needs` SECTION OF THIS JOB!
+  conclusion:
+    needs:
+      - test-linux
+      - test-windows
+      - test-benchmarks-linux
+      - test-benchmarks-windows
+      - test-backends
+      - test-runtime-benchmarks
+      - test-profiling
+      - database-check
+      - site-endpoint
+      - docker
+    # We need to ensure this job does *not* get skipped if its dependencies fail,
+    # because a skipped job is considered a success by GitHub. So we have to
+    # overwrite `if:`. We use `!cancelled()` to ensure the job does still not get run
+    # when the workflow is canceled manually.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      # Manually check the status of all dependencies. `if: failure()` does not work.
+      - name: Conclusion
+        run: |
+          # Print the dependent jobs to see them in the CI log
+          jq -C <<< '${{ toJson(needs) }}'
+          # Check if all jobs that we depend on (in the needs array) were successful.
+          jq --exit-status 'all(.result == "success")' <<< '${{ toJson(needs) }}'

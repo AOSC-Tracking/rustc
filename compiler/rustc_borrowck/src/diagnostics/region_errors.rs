@@ -1,23 +1,23 @@
 //! Error reporting machinery for lifetime errors.
 
-use rustc_data_structures::fx::FxIndexSet;
+use rustc_data_structures::fx::{FxHashMap, FxIndexSet};
 use rustc_errors::{Applicability, Diag, ErrorGuaranteed, MultiSpan, msg};
 use rustc_hir as hir;
 use rustc_hir::GenericBound::Trait;
 use rustc_hir::QPath::Resolved;
 use rustc_hir::WherePredicateKind::BoundPredicate;
+use rustc_hir::def::DefKind;
 use rustc_hir::def::Res::Def;
 use rustc_hir::def_id::DefId;
-use rustc_hir::intravisit::VisitorExt;
+use rustc_hir::intravisit::Visitor;
 use rustc_hir::{PolyTraitRef, TyKind, WhereBoundPredicate};
 use rustc_infer::infer::{NllRegionVariableOrigin, SubregionOrigin};
-use rustc_middle::bug;
 use rustc_middle::hir::place::PlaceBase;
 use rustc_middle::mir::{AnnotationSource, ConstraintCategory, ReturnConstraint};
 use rustc_middle::ty::{
     self, GenericArgs, Region, RegionVid, Ty, TyCtxt, TypeFoldable, TypeVisitor, fold_regions,
 };
-use rustc_span::{Ident, Span, kw};
+use rustc_span::{Ident, Span, bug, kw};
 use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
 use rustc_trait_selection::error_reporting::infer::nice_region_error::{
     self, HirTraitObjectVisitor, NiceRegionError, TraitObjectVisitor, find_anon_type,
@@ -28,9 +28,9 @@ use rustc_trait_selection::traits::{Obligation, ObligationCtxt};
 use tracing::{debug, instrument, trace};
 
 use super::{LIMITATION_NOTE, OutlivesSuggestionBuilder, RegionName, RegionNameSource};
-use crate::consumers::RegionInferenceContext;
+use crate::consumers::OutlivesConstraint;
 use crate::nll::ConstraintDescription;
-use crate::region_infer::{BlameConstraint, TypeTest};
+use crate::region_infer::{RegionInferenceContext, TypeTest};
 use crate::session_diagnostics::{
     FnMutError, FnMutReturnTypeErr, GenericDoesNotLiveLongEnough, LifetimeOutliveErr,
     LifetimeReturnCategoryErr, RequireStaticErr, VarHereDenote,
@@ -189,7 +189,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     }
 }
 
-impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
+impl<'diag, 'tcx> MirBorrowckCtxt<'_, 'diag, 'tcx> {
     // For generic associated types (GATs) which implied 'static requirement
     // from higher-ranked trait bounds (HRTB). Try to locate span of the trait
     // and the span which bounded to the trait for adding 'static lifetime suggestion
@@ -392,6 +392,165 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
         outlives_suggestion.add_suggestion(self);
     }
 
+    /// Point at `'static` obligations from the item being called.
+    ///
+    /// ```text
+    /// error[E0521]: borrowed data escapes outside of function
+    ///   --> $DIR/static-impl-obligation.rs:163:9
+    ///    |
+    /// LL |     fn bar<'a>(x: &'a &'a u32) {
+    ///    |            --  - `x` is only valid in the function body
+    ///    |            |
+    ///    |            lifetime `'a` defined here
+    /// LL |         let y: &dyn Foo = x;
+    /// LL |         y.hello();
+    ///    |         ^^^^^^^^^
+    ///    |         |
+    ///    |         `x` escapes the function body here
+    ///    |         argument requires that `'a` must outlive `'static`
+    ///    |
+    /// note: `'static` lifetime requirement from `<(dyn o::Foo + 'static)>::hello` introduced here
+    ///   --> $DIR/static-impl-obligation.rs:158:20
+    ///    |
+    /// LL |     impl dyn Foo + 'static where Self: 'static {
+    ///    |                    ^^^^^^^             ^^^^^^^ lifetime requirement introduced here
+    ///    |                    |
+    ///    |                    lifetime requirement introduced here
+    /// LL |         fn hello(&'static self) where Self: 'static {}
+    ///    |                  ^^^^^^^^^^^^^              ^^^^^^^ lifetime requirement introduced here
+    ///    |                  |
+    ///    |                  lifetime requirement introduced here
+    /// ```
+    fn explain_impl_static_obligation(
+        &self,
+        diag: &mut Diag<'_>,
+        ty: Ty<'tcx>,
+        outlived_fr: RegionVid,
+    ) {
+        let tcx = self.infcx.tcx;
+        if self.regioncx.to_error_region(outlived_fr) != Some(tcx.lifetimes.re_static) {
+            return;
+        }
+        let ty::FnDef(def_id, args) = ty.kind() else {
+            return;
+        };
+        let typing_env = self.infcx.typing_env(self.infcx.param_env);
+        let Ok(Some(instance)) = ty::Instance::try_resolve(
+            tcx,
+            typing_env,
+            *def_id,
+            self.infcx.deeply_resolve_ignoring_regions(args.no_bound_vars().unwrap()),
+        ) else {
+            return;
+        };
+        let def_id = instance.def_id();
+        let mut bounds =
+            tcx.clauses_of(def_id)
+                .instantiate(tcx, instance.args)
+                .into_iter()
+                .map(|(c, sp)| (c.skip_norm_wip().as_predicate(), sp))
+                .filter(|(pred, _)| match pred.kind().skip_binder() {
+                    ty::PredicateKind::Clause(ty::ClauseKind::TypeOutlives(
+                        ty::OutlivesClause(_, lt),
+                    ))
+                    | ty::PredicateKind::Clause(ty::ClauseKind::RegionOutlives(
+                        ty::OutlivesClause(_, lt),
+                    )) if lt.is_static() => true,
+                    _ => false,
+                })
+                .map(|(_, sp)| sp)
+                .collect::<Vec<Span>>();
+
+        let mut labels = FxHashMap::default();
+
+        let parent = tcx.parent(def_id);
+        if let Some(rcvr) =
+            tcx.fn_sig(def_id).instantiate_identity().skip_norm_wip().inputs().skip_binder().get(0)
+        {
+            // Look at the receiver for `&'static self`, which introduces a `'static` obligation.
+            // ```
+            // impl Foo {
+            //     fn foo(&'static self) {}
+            //            ^^^^^^^^^^^^^
+            // ```
+            if let ty::Ref(region, _, _) = rcvr.kind()
+                && *region == tcx.lifetimes.re_static
+                && let Some(assoc) = tcx.opt_associated_item(def_id)
+                && assoc.is_method()
+            {
+                let def_span = tcx.def_span(def_id);
+                // We have a `&'static self` receiver.
+                if let Some(def_id) = def_id.as_local()
+                    && let owner = tcx.expect_hir_owner_node(def_id)
+                    && let Some(decl) = owner.fn_decl()
+                    && let Some(ty) = decl.inputs.get(0)
+                {
+                    // Point at the `&'static self` receiver.
+                    bounds.push(ty.span);
+                } else if !bounds.iter().any(|sp| sp.overlaps(def_span)) {
+                    // The method is not defined on the local crate, point at the signature instead of
+                    // just the receiver as an approximation. We don't add it if there are already
+                    // other spans with overlap with the def `Span`, as the other will be more specific.
+                    bounds.push(def_span)
+                }
+            }
+
+            if let DefKind::Impl { .. } = tcx.def_kind(parent)
+                && let ty = tcx.type_of(parent).instantiate_identity().skip_norm_wip()
+                && let ty::Dynamic(_, region) = ty.kind()
+                && *region == tcx.lifetimes.re_static
+            {
+                // We have a call into a method of either `impl dyn Trait {}` or
+                // `impl dyn Trait + 'static {}`.
+                if let Some(def_id) = parent.as_local()
+                    && let hir::OwnerNode::Item(item) = tcx.expect_hir_owner_node(def_id)
+                    && let hir::ItemKind::Impl(impl_) = item.kind
+                    && let hir::TyKind::TraitObject(_, tagged_ref) = impl_.self_ty.kind
+                {
+                    if tagged_ref.is_static() {
+                        // impl dyn Trait + 'static {
+                        //                  ^^^^^^^ lifetime requirement introduced here
+                        bounds.push(tagged_ref.pointer().ident.span);
+                    } else if tagged_ref.is_implicit() {
+                        // impl dyn Trait {
+                        //      ^^^^^^^^^ `dyn Trait` introduces an...
+                        bounds.push(impl_.self_ty.span);
+                        labels.insert(
+                            impl_.self_ty.span,
+                            "`dyn Trait` introduces an implicit `'static` lifetime requirement",
+                        );
+                    }
+                } else {
+                    // Non-local `impl`, we don't have a way to differentiate between `+ 'static`
+                    // and bare `dyn Trait`. We point at the whole def `Span` for now.
+                    let def_span = tcx.def_span(parent);
+                    if !bounds.iter().any(|sp| sp.overlaps(def_span)) {
+                        bounds.push(def_span);
+                    }
+                }
+            }
+        }
+
+        if !bounds.is_empty() {
+            let mut multispan: MultiSpan = bounds.clone().into();
+            for span in bounds {
+                let label = labels.get(&span).unwrap_or(&"lifetime requirement introduced here");
+                multispan.push_span_label(span, *label);
+            }
+            multispan.push_span_context(tcx.def_span(def_id).shrink_to_lo());
+            if let DefKind::Impl { .. } | DefKind::Trait = tcx.def_kind(parent) {
+                multispan.push_span_context(tcx.def_span(parent).shrink_to_lo());
+            }
+            diag.span_note(
+                multispan,
+                format!(
+                    "`'static` lifetime requirement from `{}` introduced here",
+                    tcx.def_path_str(def_id)
+                ),
+            );
+        }
+    }
+
     /// Report that `longer_fr: error_vid`, which doesn't hold,
     /// where `longer_fr` is a placeholder.
     fn report_erroneous_rvid_reaches_placeholder(
@@ -414,8 +573,8 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
         };
 
         // Find the code to blame for the fact that `longer_fr` outlives `error_fr`.
-        let cause =
-            self.regioncx.best_blame_constraint(longer_fr, origin_longer, error_vid).0.cause;
+        let best_blame = self.regioncx.best_blame_constraint(longer_fr, origin_longer, error_vid);
+        let cause = best_blame.to_obligation_cause();
 
         // FIXME these methods should have better names, and also probably not be this generic.
         // FIXME note that we *throw away* the error element here! We probably want to
@@ -446,19 +605,18 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
     ) {
         debug!("report_region_error(fr={:?}, outlived_fr={:?})", fr, outlived_fr);
 
-        let (blame_constraint, path) =
-            self.regioncx.best_blame_constraint(fr, fr_origin, outlived_fr);
-        let BlameConstraint { category, cause, variance_info, .. } = blame_constraint;
+        let best_blame = self.regioncx.best_blame_constraint(fr, fr_origin, outlived_fr);
+        let OutlivesConstraint { category, span, variance_info, .. } = *best_blame.constraint();
+        let path = best_blame.path();
 
-        debug!("report_region_error: category={:?} {:?} {:?}", category, cause, variance_info);
+        debug!("report_region_error: category={:?} {:?} {:?}", category, span, variance_info);
 
         // Check if we can use one of the "nice region errors".
         if let (Some(f), Some(o)) =
             (self.regioncx.to_error_region(fr), self.regioncx.to_error_region(outlived_fr))
         {
             let infer_err = self.infcx.err_ctxt();
-            let nice =
-                NiceRegionError::new_from_span(&infer_err, self.mir_def_id(), cause.span, o, f);
+            let nice = NiceRegionError::new_from_span(&infer_err, self.mir_def_id(), span, o, f);
             if let Some(diag) = nice.try_report_from_nll() {
                 self.buffer_error(diag);
                 return;
@@ -475,17 +633,12 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             fr_is_local, outlived_fr_is_local, category
         );
 
-        let errci = ErrorConstraintInfo { fr, outlived_fr, category, span: cause.span };
+        let errci = ErrorConstraintInfo { fr, outlived_fr, category, span };
 
         let mut diag = match (category, fr_is_local, outlived_fr_is_local) {
-            (ConstraintCategory::SolverRegionConstraint(span), _, _) => {
-                let mut d = self.dcx().struct_span_err(
-                    span,
-                    "unsatisfied lifetime constraint from -Zassumptions-on-binders :3",
-                );
-                d.note("meoow :c");
-                d
-            }
+            (ConstraintCategory::SolverRegionConstraint(span), _, _) => self
+                .dcx()
+                .struct_span_err(span, "higher-ranked lifetime bound could not be satisfied"),
             (ConstraintCategory::Return(kind), true, false)
                 if self.regioncx.is_closure_fn_mut(fr) =>
             {
@@ -509,6 +662,10 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                 db
             }
         };
+
+        if let ConstraintCategory::CallArgument(Some(ty)) = category {
+            self.explain_impl_static_obligation(&mut diag, ty, outlived_fr);
+        }
 
         match variance_info {
             ty::VarianceDiagInfo::None => {}
@@ -563,10 +720,10 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             }
         }
 
-        self.add_placeholder_from_predicate_note(&mut diag, &path);
-        self.add_sized_or_copy_bound_info(&mut diag, category, &path);
+        self.add_placeholder_from_predicate_note(&mut diag, path);
+        self.add_sized_or_copy_bound_info(&mut diag, category, path);
 
-        for constraint in &path {
+        for constraint in path {
             if let ConstraintCategory::Cast { is_raw_ptr_dyn_type_cast: true, .. } =
                 constraint.category
             {
@@ -606,7 +763,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
         &self,
         errci: &ErrorConstraintInfo<'tcx>,
         kind: ReturnConstraint,
-    ) -> Diag<'infcx> {
+    ) -> Diag<'diag> {
         let ErrorConstraintInfo { outlived_fr, span, .. } = errci;
 
         let mut output_ty = self.regioncx.universal_regions().unnormalized_output_ty;
@@ -669,13 +826,13 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
     ///   --> $DIR/lifetime-bound-will-change-warning.rs:44:5
     ///    |
     /// LL | fn test2<'a>(x: &'a Box<Fn()+'a>) {
-    ///    |              - `x` is a reference that is only valid in the function body
+    ///    |              - `x` is only valid in the function body
     /// LL |     // but ref_obj will not, so warn.
     /// LL |     ref_obj(x)
     ///    |     ^^^^^^^^^^ `x` escapes the function body here
     /// ```
     #[instrument(level = "debug", skip(self))]
-    fn report_escaping_data_error(&self, errci: &ErrorConstraintInfo<'tcx>) -> Diag<'infcx> {
+    fn report_escaping_data_error(&self, errci: &ErrorConstraintInfo<'tcx>) -> Diag<'diag> {
         let ErrorConstraintInfo { span, category, .. } = errci;
 
         let fr_name_and_span = self.regioncx.get_var_name_and_span_for_region(
@@ -709,7 +866,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
         }
 
         let mut diag =
-            borrowck_errors::borrowed_data_escapes_closure(self.infcx.tcx, *span, escapes_from);
+            borrowck_errors::borrowed_data_escapes_closure(self.dcx(), *span, escapes_from);
 
         if let Some((Some(outlived_fr_name), outlived_fr_span)) = outlived_fr_name_and_span {
             diag.span_label(
@@ -721,9 +878,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
         if let Some((Some(fr_name), fr_span)) = fr_name_and_span {
             diag.span_label(
                 fr_span,
-                format!(
-                    "`{fr_name}` is a reference that is only valid in the {escapes_from} body",
-                ),
+                format!("`{fr_name}` is only valid in the {escapes_from} body"),
             );
 
             diag.span_label(*span, format!("`{fr_name}` escapes the {escapes_from} body here"));
@@ -786,7 +941,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
     ///    |     ^^^^^^^^^^^^^^ function was supposed to return data with lifetime `'a` but it
     ///    |                    is returning data with lifetime `'b`
     /// ```
-    fn report_general_error(&self, errci: &ErrorConstraintInfo<'tcx>) -> Diag<'infcx> {
+    fn report_general_error(&self, errci: &ErrorConstraintInfo<'tcx>) -> Diag<'diag> {
         let ErrorConstraintInfo { fr, outlived_fr, span, category, .. } = errci;
 
         let mir_def_name = self.infcx.tcx.def_descr(self.mir_def_id().to_def_id());
@@ -960,7 +1115,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             tcx,
             self.infcx.typing_env(self.infcx.param_env),
             fn_did,
-            self.infcx.resolve_vars_if_possible(args),
+            self.infcx.deeply_resolve_ignoring_regions(args.no_bound_vars().unwrap()),
         ) else {
             return;
         };
@@ -1167,21 +1322,21 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             }
         });
 
-        let preds = tcx.predicates_of(method_def_id).instantiate(tcx, args);
+        let clauses = tcx.clauses_of(method_def_id).instantiate(tcx, args);
 
         let ocx = ObligationCtxt::new(&self.infcx);
-        ocx.register_obligations(preds.iter().map(|(pred, span)| {
-            trace!(?pred);
+        ocx.register_obligations(clauses.iter().map(|(clause, span)| {
+            trace!(?clause);
             Obligation::misc(
                 tcx,
                 span,
                 self.mir_def_id(),
                 self.infcx.param_env,
-                pred.skip_norm_wip(),
+                clause.skip_norm_wip(),
             )
         }));
 
-        if ocx.evaluate_obligations_error_on_ambiguity().is_empty() && count > 0 {
+        if ocx.evaluate_obligations_error_on_ambiguity().no_errors() && count > 0 {
             diag.span_suggestion_verbose(
                 tcx.hir_body(*body).value.peel_blocks().span.shrink_to_lo(),
                 msg!("dereference the return value"),

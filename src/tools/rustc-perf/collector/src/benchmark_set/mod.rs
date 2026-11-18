@@ -31,25 +31,118 @@ pub enum BenchmarkSetMember {
     CompileBenchmark(BenchmarkName),
 }
 
-/// Return the number of benchmark sets for the given target.
-pub fn benchmark_set_count(target: Target) -> usize {
-    match target {
-        Target::X86_64UnknownLinuxGnu => 1,
+#[derive(Debug)]
+pub struct BenchmarkSet {
+    members: Vec<BenchmarkSetMember>,
+}
+
+impl BenchmarkSet {
+    pub fn members(&self) -> &[BenchmarkSetMember] {
+        &self.members
     }
 }
 
-/// Expand all the benchmarks that should be performed by a single collector.
-pub fn expand_benchmark_set(id: BenchmarkSetId) -> Vec<BenchmarkSetMember> {
+pub const BENCHMARK_SET_RUNTIME_BENCHMARKS: u32 = 0;
+pub const BENCHMARK_SET_RUSTC: u32 = 0;
+
+/// Return all benchmark sets for the given target.
+pub fn get_benchmark_sets_for_target(target: Target) -> Vec<BenchmarkSet> {
     use compile_benchmarks::*;
 
-    match (id.target, id.index) {
-        (Target::X86_64UnknownLinuxGnu, 0) => {
-            vec![
+    fn compile(name: &str) -> BenchmarkSetMember {
+        BenchmarkSetMember::CompileBenchmark(BenchmarkName::from(name))
+    }
+
+    let stable = vec![
+        compile(CARGO),
+        compile(ENCODING),
+        compile(FUTURES),
+        compile(HTML5EVER),
+        compile(INFLATE),
+        compile(PISTON_IMAGE),
+        compile(REGEX),
+        compile(SYN),
+        compile(TOKIO_WEBPUSH_SIMPLE),
+    ];
+    let all_nonstable = || {
+        vec![
+            compile(AWAIT_CALL_TREE),
+            compile(CARGO_0_87_1),
+            compile(BITMAPS_3_2_1),
+            compile(BITMAPS_3_2_1_NEW_SOLVER),
+            compile(CLAP_DERIVE_4_5_32),
+            compile(CLAP_DERIVE_4_5_32_NLL),
+            compile(COERCIONS),
+            compile(CRANELIFT_CODEGEN_0_119_0),
+            compile(CTFE_STRESS_5),
+            compile(DEEP_VECTOR),
+            compile(DEEPLY_NESTED_MULTI),
+            compile(DERIVE),
+            compile(DIESEL_2_2_10),
+            compile(EXTERNS),
+            compile(EZA_0_21_2),
+            // We split here on x86_64 for the two machines
+            compile(HELLOWORLD),
+            compile(HELLOWORLD_TINY),
+            compile(HTML5EVER_0_31_0),
+            compile(HTML5EVER_0_31_0_NEW_SOLVER),
+            compile(HYPER_1_6_0),
+            compile(IMAGE_0_25_6),
+            compile(INCLUDE_BLOB),
+            compile(ISSUE_46449),
+            compile(ISSUE_58319),
+            compile(ISSUE_88862),
+            compile(LARGE_WORKSPACE),
+            compile(LIBC_0_2_172),
+            compile(MANY_ASSOC_ITEMS),
+            compile(MATCH_STRESS),
+            compile(NALGEBRA_0_33_0),
+            compile(NALGEBRA_0_33_0_NEW_SOLVER),
+            compile(PROJECTION_CACHING),
+            compile(REGEX_AUTOMATA_0_4_8),
+            compile(REGRESSION_31157),
+            compile(RIPGREP_14_1_1),
+            compile(RIPGREP_14_1_1_NLL),
+            compile(RIPGREP_14_1_1_TINY),
+            compile(SERDE_1_0_219),
+            compile(SERDE_1_0_219_NEW_SOLVER),
+            compile(SERDE_1_0_219_NLL),
+            compile(SERDE_1_0_219_THREADS4),
+            compile(SERDE_DERIVE_1_0_219),
+            compile(STM32F4_0_15_1),
+            compile(SYN_2_0_101),
+            compile(SYN_2_0_101_NEW_SOLVER),
+            compile(TOKEN_STREAM_STRESS),
+            compile(TT_MUNCHER),
+            compile(TUPLE_STRESS),
+            compile(TYPENUM_1_18_0),
+            compile(TYPENUM_1_18_0_NEW_SOLVER),
+            compile(UCD),
+            compile(UNICODE_NORMALIZATION_0_1_24),
+            compile(UNIFY_LINEARLY),
+            compile(UNUSED_WARNINGS),
+            compile(WF_PROJECTION_STRESS_65510),
+            compile(WG_GRAMMAR),
+            compile(WG_GRAMMAR_NEW_SOLVER),
+            compile(DIESEL_2_2_10_NEW_SOLVER),
+            compile(DEEPLY_NESTED_MULTI_NEW_SOLVER),
+        ]
+    };
+
+    match target {
+        Target::X86_64UnknownLinuxGnu => {
+            // Set 0 automatically runs runtime benchmarks and the rustc benchmark, so it should
+            // receive less compile-time benchmarks to balance.
+            // Set 0 also runs all stable benchmarks, but those are separate and we don't
+            // really care about benchmarking "performance" for them, so we don't bother splitting
+            // them up.
+            let set_0 = vec![
                 compile(AWAIT_CALL_TREE),
+                compile(CARGO_0_87_1),
                 compile(BITMAPS_3_2_1),
                 compile(BITMAPS_3_2_1_NEW_SOLVER),
-                compile(CARGO_0_87_1),
                 compile(CLAP_DERIVE_4_5_32),
+                compile(CLAP_DERIVE_4_5_32_NLL),
                 compile(COERCIONS),
                 compile(CRANELIFT_CODEGEN_0_119_0),
                 compile(CTFE_STRESS_5),
@@ -59,6 +152,9 @@ pub fn expand_benchmark_set(id: BenchmarkSetId) -> Vec<BenchmarkSetMember> {
                 compile(DIESEL_2_2_10),
                 compile(EXTERNS),
                 compile(EZA_0_21_2),
+                compile(SERDE_1_0_219_NLL),
+            ];
+            let set_1 = vec![
                 compile(HELLOWORLD),
                 compile(HELLOWORLD_TINY),
                 compile(HTML5EVER_0_31_0),
@@ -79,6 +175,7 @@ pub fn expand_benchmark_set(id: BenchmarkSetId) -> Vec<BenchmarkSetMember> {
                 compile(REGEX_AUTOMATA_0_4_8),
                 compile(REGRESSION_31157),
                 compile(RIPGREP_14_1_1),
+                compile(RIPGREP_14_1_1_NLL),
                 compile(RIPGREP_14_1_1_TINY),
                 compile(SERDE_1_0_219),
                 compile(SERDE_1_0_219_NEW_SOLVER),
@@ -91,30 +188,46 @@ pub fn expand_benchmark_set(id: BenchmarkSetId) -> Vec<BenchmarkSetMember> {
                 compile(TT_MUNCHER),
                 compile(TUPLE_STRESS),
                 compile(TYPENUM_1_18_0),
+                compile(TYPENUM_1_18_0_NEW_SOLVER),
                 compile(UCD),
                 compile(UNICODE_NORMALIZATION_0_1_24),
                 compile(UNIFY_LINEARLY),
                 compile(UNUSED_WARNINGS),
                 compile(WF_PROJECTION_STRESS_65510),
                 compile(WG_GRAMMAR),
+                compile(WG_GRAMMAR_NEW_SOLVER),
+                compile(DIESEL_2_2_10_NEW_SOLVER),
+                compile(DEEPLY_NESTED_MULTI_NEW_SOLVER),
+            ];
+            vec![
+                BenchmarkSet {
+                    members: stable.into_iter().chain(set_0).collect(),
+                },
+                BenchmarkSet { members: set_1 },
             ]
         }
-        (Target::X86_64UnknownLinuxGnu, 1..) => {
-            panic!("Unknown benchmark set id {id:?}");
+        Target::AArch64UnknownLinuxGnu => {
+            vec![BenchmarkSet {
+                members: stable.into_iter().chain(all_nonstable()).collect(),
+            }]
+        }
+        Target::Custom(_) => {
+            vec![BenchmarkSet {
+                members: stable.into_iter().chain(all_nonstable()).collect(),
+            }]
         }
     }
 }
 
-/// Helper function for creating compile-time benchmark member sets.
-fn compile(name: &str) -> BenchmarkSetMember {
-    BenchmarkSetMember::CompileBenchmark(BenchmarkName::from(name))
+/// Expand all the benchmarks that should be performed by a single collector.
+pub fn get_benchmark_set(id: BenchmarkSetId) -> BenchmarkSet {
+    let mut sets = get_benchmark_sets_for_target(id.target);
+    sets.remove(id.index as usize)
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::benchmark_set::{
-        benchmark_set_count, expand_benchmark_set, BenchmarkSetId, BenchmarkSetMember,
-    };
+    use crate::benchmark_set::{get_benchmark_sets_for_target, BenchmarkSet, BenchmarkSetMember};
     use crate::compile::benchmark::target::Target;
     use crate::compile::benchmark::{
         get_compile_benchmarks, BenchmarkName, CompileBenchmarkFilter,
@@ -122,25 +235,12 @@ mod tests {
     use std::collections::HashSet;
     use std::path::Path;
 
-    /// Sanity check for making sure that the expanded benchmark sets are non-overlapping and
-    /// complete, i.e. they don't miss any benchmarks.
-    #[test]
-    fn check_benchmark_set_x64() {
-        let target = Target::X86_64UnknownLinuxGnu;
-        let sets = (0..benchmark_set_count(target))
-            .map(|index| {
-                expand_benchmark_set(BenchmarkSetId {
-                    target,
-                    index: index as u32,
-                })
-            })
-            .collect::<Vec<Vec<BenchmarkSetMember>>>();
-
+    fn check_benchmark_sets(sets: &Vec<BenchmarkSet>) {
         // Assert set is unique
-        for set in &sets {
-            let hashset = set.iter().collect::<HashSet<_>>();
+        for set in sets {
+            let hashset = set.members().iter().collect::<HashSet<_>>();
             assert_eq!(
-                set.len(),
+                set.members().len(),
                 hashset.len(),
                 "Benchmark set {set:?} contains duplicates"
             );
@@ -151,8 +251,8 @@ mod tests {
             for j in i + 1..sets.len() {
                 let set_a = &sets[i];
                 let set_b = &sets[j];
-                let hashset_a = set_a.iter().collect::<HashSet<_>>();
-                let hashset_b = set_b.iter().collect::<HashSet<_>>();
+                let hashset_a = set_a.members().iter().collect::<HashSet<_>>();
+                let hashset_b = set_b.members().iter().collect::<HashSet<_>>();
                 assert!(
                     hashset_a.is_disjoint(&hashset_b),
                     "Benchmark sets {set_a:?} and {set_b:?} overlap"
@@ -161,14 +261,16 @@ mod tests {
         }
 
         // Check that the union of all sets contains all the required benchmarks
-        let all_members = sets.iter().flatten().collect::<HashSet<_>>();
+        let all_members = sets
+            .iter()
+            .flat_map(|s| s.members())
+            .collect::<HashSet<_>>();
 
         const BENCHMARK_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/compile-benchmarks");
         let all_compile_benchmarks =
             get_compile_benchmarks(Path::new(BENCHMARK_DIR), CompileBenchmarkFilter::All)
                 .unwrap()
                 .into_iter()
-                .filter(|b| !b.category().is_stable())
                 .map(|b| b.name)
                 .collect::<Vec<BenchmarkName>>();
         for benchmark in &all_compile_benchmarks {
@@ -181,9 +283,27 @@ mod tests {
             let BenchmarkSetMember::CompileBenchmark(name) = benchmark;
             assert!(
                 all_compile_benchmarks.contains(name),
-                "Compile-time benchmark {name} does not exist on disk or is a stable benchmark"
+                "Compile-time benchmark {name} does not exist on disk"
             );
         }
         assert_eq!(all_members.len(), all_compile_benchmarks.len());
+    }
+
+    /// Sanity check for making sure that the expanded benchmark sets are non-overlapping and
+    /// complete, i.e. they don't miss any benchmarks.
+    #[test]
+    fn check_benchmark_set_x64() {
+        let sets = get_benchmark_sets_for_target(Target::X86_64UnknownLinuxGnu);
+
+        check_benchmark_sets(&sets);
+    }
+
+    #[test]
+    fn check_benchmark_set_aarch64() {
+        let sets = get_benchmark_sets_for_target(Target::AArch64UnknownLinuxGnu);
+
+        assert_eq!(sets.len(), 1);
+
+        check_benchmark_sets(&sets);
     }
 }

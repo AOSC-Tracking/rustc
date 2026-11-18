@@ -1,75 +1,73 @@
 use crate::api::{github, ServerResult};
 use crate::github::{
-    client, enqueue_shas, parse_homu_comment, rollup_pr_number, unroll_rollup,
-    COMMENT_MARK_TEMPORARY, RUST_REPO_GITHUB_API_URL,
+    client, enqueue_sha, parse_homu_comment, COMMENT_MARK_TEMPORARY, RUST_REPO_GITHUB_API_URL,
 };
-use crate::job_queue::should_use_job_queue;
 use crate::load::SiteCtxt;
+use std::fmt::Write;
 
-use database::BenchmarkRequest;
+use crate::github::client::Client;
+use database::{
+    parse_backends, parse_profiles, parse_targets, BenchmarkRequest, BenchmarkRequestInsertResult,
+    CodegenBackend, Profile, Target,
+};
+use futures::stream::{FuturesUnordered, StreamExt};
 use hashbrown::HashMap;
 use std::sync::Arc;
 
-pub async fn handle_github(
+pub async fn handle_github_webhook(
     request: github::Request,
     ctxt: Arc<SiteCtxt>,
 ) -> ServerResult<github::Response> {
     log::info!("handle_github({:?})", request);
     match request {
-        github::Request::Issue { issue, comment } => handle_issue(ctxt, issue, comment).await,
-        github::Request::Push(p) => handle_push(ctxt, p).await,
+        github::Request::Issue {
+            action,
+            issue,
+            comment,
+        } => {
+            // Ignore edits and other comment actions
+            if action != "created" {
+                return Ok(github::Response);
+            }
+            handle_issue(ctxt, issue, comment).await
+        }
     }
 }
 
-async fn handle_push(ctxt: Arc<SiteCtxt>, push: github::Push) -> ServerResult<github::Response> {
-    let gh_client = client::Client::from_ctxt(&ctxt, RUST_REPO_GITHUB_API_URL.to_owned());
-    if push.r#ref != format!("refs/heads/{}", push.repository.default_branch)
-        || push.sender.login != "bors"
-    {
-        return Ok(github::Response);
-    }
-    let rollup_pr_number = match rollup_pr_number(&gh_client, &push.head_commit.message).await? {
-        Some(pr) => pr,
-        None => return Ok(github::Response),
-    };
-
-    let previous_master = push.before;
-    let commits = push.commits;
-
-    // GitHub webhooks have a timeout of 10 seconds, so we process this
-    // in the background.
-    tokio::spawn(async move {
-        let rollup_merges = commits
-            .iter()
-            .rev()
-            .filter(|c| c.message.starts_with("Rollup merge of #"));
-        let result =
-            unroll_rollup(gh_client, rollup_merges, &previous_master, rollup_pr_number).await;
-        log::info!("Processing of rollup merge finished: {:#?}", result);
-    });
-    Ok(github::Response)
-}
+const RUST_TIMER_PREFIX: &str = "@rust-timer";
 
 async fn handle_issue(
     ctxt: Arc<SiteCtxt>,
     issue: github::Issue,
     comment: github::Comment,
 ) -> ServerResult<github::Response> {
+    // Do not react to our own comments, to avoid funny loops :)
+    if comment.user.login == "rust-timer" {
+        return Ok(github::Response);
+    }
+
     let gh_client = client::Client::from_ctxt(&ctxt, RUST_REPO_GITHUB_API_URL.to_owned());
     if comment.body.contains(" homu: ") {
         if let Some(sha) = parse_homu_comment(&comment.body).await {
-            enqueue_shas(
-                &ctxt,
-                &gh_client,
-                issue.number,
-                std::iter::once(sha.as_str()),
-            )
-            .await?;
+            match enqueue_sha(&ctxt, &gh_client, issue.number, &sha).await {
+                Ok(Some(mut msg)) => {
+                    msg.push_str(&format!("\n{COMMENT_MARK_TEMPORARY}"));
+                    gh_client.post_comment(issue.number, msg).await;
+                }
+                Ok(None) => {
+                    // A try build without @rust-timer queue finished
+                }
+                Err(err) => {
+                    gh_client.post_comment(issue.number, err).await;
+                }
+            }
             return Ok(github::Response);
         }
     }
 
-    if comment.body.contains("@rust-timer ") {
+    // Do not react to @rust-timer commands sent by the bors GitHub App
+    // https://api.github.com/users/rust-bors[bot]
+    if comment.body.contains(RUST_TIMER_PREFIX) && comment.user.id != 122020455 {
         return handle_rust_timer(ctxt, &gh_client, comment, issue).await;
     }
 
@@ -83,11 +81,99 @@ async fn record_try_benchmark_request_without_artifacts(
     conn: &dyn database::pool::Connection,
     pr: u32,
     backends: &str,
-) {
-    let try_request = BenchmarkRequest::create_try_without_artifacts(pr, backends, "");
+    profiles: &str,
+    targets: &str,
+) -> String {
+    let try_request =
+        BenchmarkRequest::create_try_without_artifacts(pr, backends, profiles, targets);
     log::info!("Inserting try benchmark request {try_request:?}");
-    if let Err(e) = conn.insert_benchmark_request(&try_request).await {
-        log::error!("Failed to insert try benchmark request: {}", e);
+
+    match conn.insert_benchmark_request(&try_request).await {
+        Ok(BenchmarkRequestInsertResult::NothingInserted) => {
+            log::info!(
+                "Failed to insert try benchmark request, a request for PR`#{pr}` already exists"
+            );
+            format!(
+                "This pull request is already queued and waiting for a try build to finish.
+
+{COMMENT_MARK_TEMPORARY}"
+            )
+        }
+        Ok(BenchmarkRequestInsertResult::Inserted) => {
+            format!(
+                "Awaiting bors try build completion.
+
+@rustbot label: +S-waiting-on-perf
+
+{COMMENT_MARK_TEMPORARY}"
+            )
+        }
+        Err(e) => {
+            log::error!("Failed to insert try benchmark request: {e}");
+            "Something went wrong! This is most likely an internal failure, please let us know on [Zulip](https://rust-lang.zulipchat.com/#narrow/channel/242791-t-infra)".to_string()
+        }
+    }
+}
+
+async fn validate_build_command<'a>(cmd: &BuildCommand<'a>) -> Result<(), String> {
+    const BASE_URL: &str = "https://ci-artifacts.rust-lang.org/rustc-builds";
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(3000))
+        .build()
+        .map_err(|e| format!("Failed to build request client {e}"))?;
+    let mut futures = FuturesUnordered::new();
+
+    let sha = cmd.sha;
+    // Though presently very unlikely, there could be `N` targets
+    let targets = cmd
+        .params
+        .targets
+        .map(|targets| {
+            targets
+                .split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| {
+            Target::default_targets()
+                .into_iter()
+                .map(|t| t.to_string())
+                .collect()
+        });
+
+    for target in targets {
+        let url = format!("{BASE_URL}/{sha}/rustc-nightly-{target}.tar.xz");
+        let client = client.clone();
+
+        futures.push(async move {
+            let status = client.head(&url).send().await.map(|r| r.status());
+            (sha, url, status)
+        });
+    }
+
+    let mut errors = String::new();
+    while let Some((sha, url, status)) = futures.next().await {
+        match status {
+            Ok(reqwest::StatusCode::NOT_FOUND) => {
+                errors += format!(
+                    "Missing artifact for sha `{sha}` ({url}); not built yet, try again later.\n"
+                )
+                .as_str();
+            }
+            Ok(_) => {}
+            Err(e) => {
+                errors += format!("Failed to check sha `{sha}` ({url}): {e}. Try again later.\n")
+                    .as_str();
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
     }
 }
 
@@ -112,148 +198,251 @@ async fn handle_rust_timer(
         return Ok(github::Response);
     }
 
-    if let Some(queue) = parse_queue_command(&comment.body) {
-        let msg = match queue {
-            Ok(cmd) => {
-                let conn = ctxt.conn().await;
-
-                if should_use_job_queue(issue.number) {
-                    record_try_benchmark_request_without_artifacts(
-                        &*conn,
-                        issue.number,
-                        cmd.params.backends.unwrap_or(""),
-                    )
-                    .await;
-                } else {
-                    conn.queue_pr(
-                        issue.number,
-                        cmd.params.include,
-                        cmd.params.exclude,
-                        cmd.params.runs,
-                        cmd.params.backends,
-                    )
-                    .await;
+    match parse_command(&comment.body) {
+        Ok(RustTimerCommand::Queue(cmd)) => {
+            let conn = ctxt.conn().await;
+            let comment = record_try_benchmark_request_without_artifacts(
+                &*conn,
+                issue.number,
+                cmd.params.backends.unwrap_or(""),
+                cmd.params.profiles.unwrap_or(""),
+                cmd.params.targets.unwrap_or(""),
+            )
+            .await;
+            main_client.post_comment(issue.number, comment).await;
+        }
+        Ok(RustTimerCommand::Build(cmd)) => {
+            match enqueue_sha_build(&ctxt, main_client, issue.number, &cmd).await {
+                Ok(mut msg) => {
+                    msg.push_str(&format!("\n{COMMENT_MARK_TEMPORARY}"));
+                    main_client.post_comment(issue.number, msg).await;
                 }
-                format!(
-                    "Awaiting bors try build completion.
-
-@rustbot label: +S-waiting-on-perf
-
-{COMMENT_MARK_TEMPORARY}"
-                )
-            }
-            Err(error) => {
-                format!("Error occurred while parsing comment: {error}")
-            }
-        };
-        main_client.post_comment(issue.number, msg).await;
-        return Ok(github::Response);
-    }
-
-    let mut valid_build_cmds = vec![];
-    let mut errors = String::new();
-    for cmd in parse_build_commands(&comment.body) {
-        match cmd {
-            Ok(cmd) => valid_build_cmds.push(cmd),
-            Err(error) => errors.push_str(&format!("Cannot parse build command: {error}\n")),
+                Err(error) => {
+                    log::error!("Failed to enqueue SHA on {}: {error:?}", issue.number);
+                    main_client.post_comment(issue.number, error).await;
+                }
+            };
         }
-    }
-    if !errors.is_empty() {
-        main_client.post_comment(issue.number, errors).await;
-        return Ok(github::Response);
-    }
+        Ok(RustTimerCommand::Triage(cmd)) => {
+            let mut result = String::new();
+            for sha in cmd.shas {
+                // Get unrolled commit
+                let commit = match main_client.get_commit(sha).await {
+                    Ok(commit) => commit,
+                    Err(err) => {
+                        writeln!(&mut result, "### {sha}").unwrap();
+                        writeln!(&mut result, "Failed to get commit: {err}").unwrap();
+                        continue;
+                    }
+                };
 
-    {
-        let conn = ctxt.conn().await;
-        for command in &valid_build_cmds {
-            if should_use_job_queue(issue.number) {
-                record_try_benchmark_request_without_artifacts(
-                    &*conn,
-                    issue.number,
-                    command.params.backends.unwrap_or(""),
+                // Find PR number from commit message
+                let pr_number = match find_pr_number_for_unrolled_build(&commit.commit.message) {
+                    Ok(r) => r,
+                    Err(err) => {
+                        writeln!(&mut result, "### {sha}").unwrap();
+                        writeln!(&mut result, "{err}").unwrap();
+                        continue;
+                    }
+                };
+
+                // Write header
+                let pr_title = &commit
+                    .commit
+                    .message
+                    .lines()
+                    .nth(3)
+                    .unwrap_or("<FAILED TO GET PR TITLE>");
+                writeln!(&mut result, "### #{pr_number} {sha} {pr_title}",).unwrap();
+
+                // Enqueue the sha build and write result
+                let (Ok(msg) | Err(msg)) = enqueue_sha_build(
+                    &ctxt,
+                    main_client,
+                    pr_number,
+                    &BuildCommand {
+                        sha,
+                        params: Default::default(),
+                    },
                 )
                 .await;
-            } else {
-                conn.queue_pr(
-                    issue.number,
-                    command.params.include,
-                    command.params.exclude,
-                    command.params.runs,
-                    command.params.backends,
-                )
-                .await;
+                writeln!(&mut result, "{msg}\n").unwrap();
             }
+            main_client.post_comment(issue.number, result).await;
+        }
+        Err(e) => {
+            main_client.post_comment(issue.number, e).await;
         }
     }
-
-    enqueue_shas(
-        &ctxt,
-        main_client,
-        issue.number,
-        valid_build_cmds.iter().map(|c| c.sha),
-    )
-    .await?;
 
     Ok(github::Response)
 }
 
-/// Parses the first occurrence of a `@rust-timer queue <shared-args>` command
-/// in the input string.
-fn parse_queue_command(body: &str) -> Option<Result<QueueCommand<'_>, String>> {
-    let args = get_command_lines(body, "queue").next()?;
-    let args = match parse_command_arguments(args) {
-        Ok(args) => args,
-        Err(error) => return Some(Err(error)),
+fn find_pr_number_for_unrolled_build(commit_message: &str) -> Result<u32, String> {
+    // Find PR number for this unrolled build sha
+    const COMMIT_NAME_START: &str = "Unrolled build for #";
+    let first_line = commit_message.lines().next().unwrap_or("");
+    let Some(pr_number) = first_line.strip_prefix(COMMIT_NAME_START) else {
+        return Err(format!(
+            "Unexpected commit name `{first_line}`, did not find expected prefix. Is the commit an unrolled build?"
+        ));
     };
-    let params = match parse_benchmark_parameters(args) {
-        Ok(params) => params,
-        Err(error) => return Some(Err(error)),
+    let Ok(pr_number) = pr_number.parse::<u32>() else {
+        return Err(format!(
+            "Unexpected commit name, pr number `{pr_number}` was not parsable as u32. Is the commit an unrolled build?"
+        ));
     };
 
-    Some(Ok(QueueCommand { params }))
+    Ok(pr_number)
 }
 
-/// Parses all occurrences of a `@rust-timer build <shared-args>` command in the input string.
-fn parse_build_commands(body: &str) -> impl Iterator<Item = Result<BuildCommand<'_>, String>> {
-    get_command_lines(body, "build").map(|line| {
-        let mut iter = line.splitn(2, ' ');
-        let Some(sha) = iter.next().filter(|s| !s.is_empty() && !s.contains('=')) else {
-            return Err("Missing SHA in build command".to_string());
-        };
+async fn enqueue_sha_build(
+    ctxt: &Arc<SiteCtxt>,
+    main_client: &Client,
+    issue_number: u32,
+    cmd: &BuildCommand<'_>,
+) -> Result<String, String> {
+    // requested artifacts do not exist errors
+    validate_build_command(cmd).await?;
 
-        let sha = sha.trim_start_matches("https://github.com/rust-lang/rust/commit/");
-        let args = iter.next().unwrap_or("");
-        let args = parse_command_arguments(args)?;
-        let params = parse_benchmark_parameters(args)?;
-        Ok(BuildCommand { sha, params })
+    {
+        let conn = ctxt.conn().await;
+        record_try_benchmark_request_without_artifacts(
+            &*conn,
+            issue_number,
+            cmd.params.backends.unwrap_or(""),
+            cmd.params.profiles.unwrap_or(""),
+            cmd.params.targets.unwrap_or(""),
+        )
+        .await;
+    }
+
+    match enqueue_sha(ctxt, main_client, issue_number, cmd.sha).await {
+        Ok(Some(msg)) => Ok(msg),
+        Ok(None) => Err(
+            "Commit was not enqueued, since no previous benchmark request was found".to_string(),
+        ),
+        Err(err) => Err(err),
+    }
+}
+
+fn parse_command(body: &str) -> Result<RustTimerCommand<'_>, String> {
+    let mut cmds = body.lines().filter_map(move |line| {
+        line.find(RUST_TIMER_PREFIX)
+            .map(|index| line[index + RUST_TIMER_PREFIX.len()..].trim())
+    });
+    let Some(cmd) = cmds.next() else {
+        return Err(
+            "Cannot find @rust-timer command even though `@rust-timer` is tagged".to_string(),
+        );
+    };
+    if cmds.next().is_some() {
+        return Err("Rust-timer does not support multiple concurrent perf runs on the same PR. Please submit one perf run at a time, and wait until it is finished before submitting the next".to_string());
+    }
+    let (cmd, args) = cmd.split_once(" ").unwrap_or((cmd, ""));
+    let args = args.trim();
+
+    Ok(match cmd {
+        "queue" => RustTimerCommand::Queue(parse_queue_command_args(args)?),
+        "build" => RustTimerCommand::Build(parse_build_command_args(args)?),
+        "triage" => RustTimerCommand::Triage(parse_triage_command_args(args)?),
+        _ => return Err(format!("Unknown rust-timer command: {cmd}")),
     })
 }
 
-fn get_command_lines<'a>(body: &'a str, command: &'a str) -> impl Iterator<Item = &'a str> {
-    let prefix = "@rust-timer";
-    body.lines()
-        .filter_map(move |line| {
-            line.find(prefix)
-                .map(|index| line[index + prefix.len()..].trim())
-        })
-        .filter_map(move |line| line.strip_prefix(command))
-        .map(|l| l.trim_start())
+/// Parses the arguments of `<params>`
+fn parse_queue_command_args(args: &str) -> Result<QueueCommand<'_>, String> {
+    let args = parse_command_arguments(args)?;
+    let params = parse_benchmark_parameters(args)?;
+    Ok(QueueCommand { params })
+}
+
+/// Parses the arguments of `<sha> <params>`
+fn parse_build_command_args(args: &str) -> Result<BuildCommand<'_>, String> {
+    let mut iter = args.splitn(2, ' ');
+    let Some(sha) = iter.next().filter(|s| !s.is_empty() && !s.contains('=')) else {
+        return Err("Missing SHA in build command".to_string());
+    };
+
+    let sha = parse_sha(sha)?;
+    let args = iter.next().unwrap_or("");
+    let args = parse_command_arguments(args)?;
+    let params = parse_benchmark_parameters(args)?;
+    Ok(BuildCommand { sha, params })
+}
+
+/// Parses the arguments of `@rust-timer triage <sha>+`
+fn parse_triage_command_args(args: &str) -> Result<TriageCommand<'_>, String> {
+    let shas = args
+        .split_whitespace()
+        .map(parse_sha)
+        .collect::<Result<Vec<_>, _>>()?;
+    if shas.is_empty() {
+        return Err(
+            "The triage comment requires a space-separated list of SHAs as an argument."
+                .to_string(),
+        );
+    }
+    Ok(TriageCommand { shas })
+}
+
+fn parse_sha(sha: &str) -> Result<&str, String> {
+    let sha = sha.trim_start_matches("https://github.com/rust-lang/rust/commit/");
+    if !sha.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(format!("Sha `{sha}` is not alphanumeric"));
+    }
+    Ok(sha)
 }
 
 fn parse_benchmark_parameters<'a>(
     mut args: HashMap<&'a str, &'a str>,
 ) -> Result<BenchmarkParameters<'a>, String> {
-    let mut params = BenchmarkParameters {
-        include: args.remove("include").filter(|s| !s.is_empty()),
-        exclude: args.remove("exclude").filter(|s| !s.is_empty()),
-        runs: None,
+    let params = BenchmarkParameters {
         backends: args.remove("backends").filter(|s| !s.is_empty()),
+        profiles: args.remove("profiles").filter(|s| !s.is_empty()),
+        targets: args.remove("targets").filter(|s| !s.is_empty()),
     };
-    if let Some(runs) = args.remove("runs").filter(|s| !s.is_empty()) {
-        let Ok(runs) = runs.parse::<u32>() else {
-            return Err(format!("Cannot parse runs {runs} as a number"));
-        };
-        params.runs = Some(runs as i32);
+
+    if let Some(backends) = &params.backends {
+        // Make sure that the backends are correct
+        parse_backends(backends).map_err(|e| {
+            format!(
+                "Cannot parse backends: {e}. Valid values are: {}",
+                CodegenBackend::all_values()
+                    .iter()
+                    .map(|b| b.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+    }
+
+    if let Some(profiles) = &params.profiles {
+        // Make sure that the profiles are correct
+        parse_profiles(profiles).map_err(|e| {
+            format!(
+                "Cannot parse profiles: {e}. Valid values are: {}",
+                Profile::all_values()
+                    .iter()
+                    .map(|b| b.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+    }
+
+    if let Some(targets) = &params.targets {
+        // Make sure that the targets are correct
+        parse_targets(targets).map_err(|e| {
+            format!(
+                "Cannot parse targets: {e}. Valid values are: {}",
+                Target::primary_targets()
+                    .iter()
+                    .map(|b| b.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
     }
 
     if !args.is_empty() {
@@ -288,6 +477,19 @@ fn parse_command_arguments(args: &str) -> Result<HashMap<&str, &str>, String> {
 }
 
 #[derive(Debug)]
+enum RustTimerCommand<'a> {
+    /// This command is usually invoked as `@bors try @rust-timer queue`, which starts a bors "try build".
+    /// `@rust-timer` will wait for the try build to finish, and if it succeeds will then queue a perf run.
+    Queue(QueueCommand<'a>),
+    /// `@rust-timer build $commit` will queue a perf run for the given `$commit`.
+    Build(BuildCommand<'a>),
+    /// This command is meant to be executed on a rollup,
+    /// to help identify the culprit of performance regressions/improvements of that rollup.
+    /// It takes a space-separated list of `$commits` SHAs, and queues a perf run for each commit.
+    Triage(TriageCommand<'a>),
+}
+
+#[derive(Debug)]
 struct QueueCommand<'a> {
     params: BenchmarkParameters<'a>,
 }
@@ -299,11 +501,15 @@ struct BuildCommand<'a> {
 }
 
 #[derive(Debug)]
+struct TriageCommand<'a> {
+    shas: Vec<&'a str>,
+}
+
+#[derive(Debug, Default)]
 struct BenchmarkParameters<'a> {
-    include: Option<&'a str>,
-    exclude: Option<&'a str>,
-    runs: Option<i32>,
     backends: Option<&'a str>,
+    profiles: Option<&'a str>,
+    targets: Option<&'a str>,
 }
 
 pub async fn get_authorized_users() -> Result<Vec<u64>, String> {
@@ -327,193 +533,199 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_command_missing() {
-        assert!(get_build_commands("").is_empty());
+    fn command_missing() {
+        insta::assert_compact_debug_snapshot!(parse_command(""),
+            @r#"Err("Cannot find @rust-timer command even though `@rust-timer` is tagged")"#);
     }
 
     #[test]
-    fn build_unknown_command() {
-        assert!(get_build_commands("@rust-timer foo").is_empty());
+    fn unknown_command() {
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer foo"),
+            @r#"Err("Unknown rust-timer command: foo")"#);
     }
 
     #[test]
     fn build_command_missing_sha() {
-        insta::assert_compact_debug_snapshot!(get_build_commands("@rust-timer build"),
-            @r###"[Err("Missing SHA in build command")]"###);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer build"),
+            @r#"Err("Missing SHA in build command")"#);
     }
 
     #[test]
     fn build_command() {
-        insta::assert_compact_debug_snapshot!(get_build_commands("@rust-timer build 5832462aa1d9373b24ace96ad2c50b7a18af9952"),
-            @r#"[Ok(BuildCommand { sha: "5832462aa1d9373b24ace96ad2c50b7a18af9952", params: BenchmarkParameters { include: None, exclude: None, runs: None, backends: None } })]"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer build 5832462aa1d9373b24ace96ad2c50b7a18af9952"),
+            @r#"Ok(Build(BuildCommand { sha: "5832462aa1d9373b24ace96ad2c50b7a18af9952", params: BenchmarkParameters { backends: None, profiles: None, targets: None } }))"#);
+    }
+
+    #[test]
+    fn build_command_invalid_sha() {
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer build 5832462aa1d9373b24ace96ad2c50b7a18af9952/5"),
+            @r#"Err("Sha `5832462aa1d9373b24ace96ad2c50b7a18af9952/5` is not alphanumeric")"#);
     }
 
     #[test]
     fn build_command_multiple() {
-        insta::assert_compact_debug_snapshot!(get_build_commands(r#"
+        insta::assert_compact_debug_snapshot!(parse_command(r#"
 @rust-timer build 5832462aa1d9373b24ace96ad2c50b7a18af9952
 @rust-timer build 23936af287657fa4148aeab40cc2a780810fae52
 "#),
-            @r#"[Ok(BuildCommand { sha: "5832462aa1d9373b24ace96ad2c50b7a18af9952", params: BenchmarkParameters { include: None, exclude: None, runs: None, backends: None } }), Ok(BuildCommand { sha: "23936af287657fa4148aeab40cc2a780810fae52", params: BenchmarkParameters { include: None, exclude: None, runs: None, backends: None } })]"#);
+            @r#"Err("Rust-timer does not support multiple concurrent perf runs on the same PR. Please submit one perf run at a time, and wait until it is finished before submitting the next")"#);
     }
 
     #[test]
     fn build_command_unknown_arg() {
-        insta::assert_compact_debug_snapshot!(get_build_commands("@rust-timer build foo=bar"),
-            @r###"[Err("Missing SHA in build command")]"###);
-    }
-
-    #[test]
-    fn build_command_complex() {
-        insta::assert_compact_debug_snapshot!(get_build_commands("  @rust-timer  build    sha123456  exclude=baz    include=foo,bar runs=4"),
-            @r#"[Ok(BuildCommand { sha: "sha123456", params: BenchmarkParameters { include: Some("foo,bar"), exclude: Some("baz"), runs: Some(4), backends: None } })]"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer build foo=bar"),
+            @r#"Err("Missing SHA in build command")"#);
     }
 
     #[test]
     fn build_command_link() {
-        insta::assert_compact_debug_snapshot!(get_build_commands(r#"
+        insta::assert_compact_debug_snapshot!(parse_command(r#"
 @rust-timer build https://github.com/rust-lang/rust/commit/323f521bc6d8f2b966ba7838a3f3ee364e760b7e"#),
-            @r#"[Ok(BuildCommand { sha: "323f521bc6d8f2b966ba7838a3f3ee364e760b7e", params: BenchmarkParameters { include: None, exclude: None, runs: None, backends: None } })]"#);
-    }
-
-    #[test]
-    fn queue_command_missing() {
-        assert!(parse_queue_command("").is_none());
-    }
-
-    #[test]
-    fn queue_unknown_command() {
-        assert!(parse_queue_command("@rust-timer foo").is_none());
+            @r#"Ok(Build(BuildCommand { sha: "323f521bc6d8f2b966ba7838a3f3ee364e760b7e", params: BenchmarkParameters { backends: None, profiles: None, targets: None } }))"#);
     }
 
     #[test]
     fn queue_command() {
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue"),
-            @"Some(Ok(QueueCommand { params: BenchmarkParameters { include: None, exclude: None, runs: None, backends: None } }))");
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue"),
+            @"Ok(Queue(QueueCommand { params: BenchmarkParameters { backends: None, profiles: None, targets: None } }))");
     }
 
     #[test]
     fn queue_command_unknown_arg() {
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue foo=bar"),
-            @r###"Some(Err("Unknown command argument(s) `foo`"))"###);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue foo=bar"),
+            @r###"Err("Unknown command argument(s) `foo`")"###);
     }
 
     #[test]
     fn queue_command_duplicate_arg() {
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue include=a exclude=c include=b"),
-            @r###"Some(Err("Duplicate command argument `include`"))"###);
-    }
-
-    #[test]
-    fn queue_command_include() {
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue include=abcd,feih"),
-            @r#"Some(Ok(QueueCommand { params: BenchmarkParameters { include: Some("abcd,feih"), exclude: None, runs: None, backends: None } }))"#);
-    }
-
-    #[test]
-    fn queue_command_exclude() {
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue exclude=foo134,barzbaz41baf"),
-            @r#"Some(Ok(QueueCommand { params: BenchmarkParameters { include: None, exclude: Some("foo134,barzbaz41baf"), runs: None, backends: None } }))"#);
-    }
-
-    #[test]
-    fn queue_command_runs() {
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue runs=5"),
-            @"Some(Ok(QueueCommand { params: BenchmarkParameters { include: None, exclude: None, runs: Some(5), backends: None } }))");
-    }
-
-    #[test]
-    fn queue_command_runs_nan() {
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue runs=xxx"),
-            @r###"Some(Err("Cannot parse runs xxx as a number"))"###);
-    }
-
-    #[test]
-    fn queue_command_combination() {
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue include=acda,13asd exclude=c13,DA runs=5"),
-            @r#"Some(Ok(QueueCommand { params: BenchmarkParameters { include: Some("acda,13asd"), exclude: Some("c13,DA"), runs: Some(5), backends: None } }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue backends=a targets=c backends=b"),
+            @r#"Err("Duplicate command argument `backends`")"#);
     }
 
     #[test]
     fn queue_command_argument_spaces() {
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue include  =  abcd,das"),
-            @r###"Some(Err("Invalid command argument `include` (there may be no spaces around the `=` character)"))"###);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue backends  =  llvm"),
+            @r#"Err("Invalid command argument `backends` (there may be no spaces around the `=` character)")"#);
     }
 
     #[test]
     fn queue_command_spaces() {
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer     queue     include=abcd,das   "),
-            @r#"Some(Ok(QueueCommand { params: BenchmarkParameters { include: Some("abcd,das"), exclude: None, runs: None, backends: None } }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer     queue     backends=llvm   "),
+            @r#"Ok(Queue(QueueCommand { params: BenchmarkParameters { backends: Some("llvm"), profiles: None, targets: None } }))"#);
     }
 
     #[test]
     fn queue_command_with_bors() {
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@bors try @rust-timer queue include=foo,bar"),
-            @r#"Some(Ok(QueueCommand { params: BenchmarkParameters { include: Some("foo,bar"), exclude: None, runs: None, backends: None } }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@bors try @rust-timer queue backends=llvm"),
+            @r#"Ok(Queue(QueueCommand { params: BenchmarkParameters { backends: Some("llvm"), profiles: None, targets: None } }))"#);
     }
 
     #[test]
     fn queue_command_parameter_order() {
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue runs=3 exclude=c,a include=b"),
-            @r#"Some(Ok(QueueCommand { params: BenchmarkParameters { include: Some("b"), exclude: Some("c,a"), runs: Some(3), backends: None } }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue profiles=Doc backends=llvm"),
+            @r#"Ok(Queue(QueueCommand { params: BenchmarkParameters { backends: Some("llvm"), profiles: Some("Doc"), targets: None } }))"#);
     }
 
     #[test]
     fn queue_command_multiline() {
-        insta::assert_compact_debug_snapshot!(parse_queue_command(r#"Ok, this looks good now.
+        insta::assert_compact_debug_snapshot!(parse_command(r#"Ok, this looks good now.
 Let's do a perf run quickly and then we can merge it.
 
-@bors try @rust-timer queue include=foo,bar
+@bors try @rust-timer queue
 
 Otherwise LGTM."#),
-            @r#"Some(Ok(QueueCommand { params: BenchmarkParameters { include: Some("foo,bar"), exclude: None, runs: None, backends: None } }))"#);
-    }
-
-    fn get_build_commands(body: &str) -> Vec<Result<BuildCommand<'_>, String>> {
-        parse_build_commands(body).collect()
+            @"Ok(Queue(QueueCommand { params: BenchmarkParameters { backends: None, profiles: None, targets: None } }))");
     }
 
     #[test]
     fn build_command_with_backends() {
-        insta::assert_compact_debug_snapshot!(get_build_commands(r#"@rust-timer build 5832462aa1d9373b24ace96ad2c50b7a18af995G"#),
-            @r#"[Ok(BuildCommand { sha: "5832462aa1d9373b24ace96ad2c50b7a18af995G", params: BenchmarkParameters { include: None, exclude: None, runs: None, backends: None } })]"#);
-        insta::assert_compact_debug_snapshot!(get_build_commands(r#"@rust-timer build 5832462aa1d9373b24ace96ad2c50b7a18af995A backends=Llvm"#),
-            @r#"[Ok(BuildCommand { sha: "5832462aa1d9373b24ace96ad2c50b7a18af995A", params: BenchmarkParameters { include: None, exclude: None, runs: None, backends: Some("Llvm") } })]"#);
-        insta::assert_compact_debug_snapshot!(get_build_commands(r#"@rust-timer build 23936af287657fa4148aeab40cc2a780810fae5B backends=Cranelift"#),
-            @r#"[Ok(BuildCommand { sha: "23936af287657fa4148aeab40cc2a780810fae5B", params: BenchmarkParameters { include: None, exclude: None, runs: None, backends: Some("Cranelift") } })]"#);
-        insta::assert_compact_debug_snapshot!(get_build_commands(r#"@rust-timer build 23936af287657fa4148aeab40cc2a780810fae5C backends=Cranelift,Llvm"#),
-            @r#"[Ok(BuildCommand { sha: "23936af287657fa4148aeab40cc2a780810fae5C", params: BenchmarkParameters { include: None, exclude: None, runs: None, backends: Some("Cranelift,Llvm") } })]"#);
-        insta::assert_compact_debug_snapshot!(get_build_commands(r#"@rust-timer build 5832462aa1d9373b24ace96ad2c50b7a18af995D include=hello backends=Llvm"#),
-            @r#"[Ok(BuildCommand { sha: "5832462aa1d9373b24ace96ad2c50b7a18af995D", params: BenchmarkParameters { include: Some("hello"), exclude: None, runs: None, backends: Some("Llvm") } })]"#);
-        insta::assert_compact_debug_snapshot!(get_build_commands(r#"@rust-timer build 5832462aa1d9373b24ace96ad2c50b7a18af995E runs=10 backends=Llvm"#),
-            @r#"[Ok(BuildCommand { sha: "5832462aa1d9373b24ace96ad2c50b7a18af995E", params: BenchmarkParameters { include: None, exclude: None, runs: Some(10), backends: Some("Llvm") } })]"#);
+        insta::assert_compact_debug_snapshot!(parse_command(r#"@rust-timer build 5832462aa1d9373b24ace96ad2c50b7a18af995G"#),
+            @r#"Ok(Build(BuildCommand { sha: "5832462aa1d9373b24ace96ad2c50b7a18af995G", params: BenchmarkParameters { backends: None, profiles: None, targets: None } }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command(r#"@rust-timer build 5832462aa1d9373b24ace96ad2c50b7a18af995A backends=Llvm"#),
+            @r#"Ok(Build(BuildCommand { sha: "5832462aa1d9373b24ace96ad2c50b7a18af995A", params: BenchmarkParameters { backends: Some("Llvm"), profiles: None, targets: None } }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command(r#"@rust-timer build 23936af287657fa4148aeab40cc2a780810fae5B backends=Cranelift"#),
+            @r#"Ok(Build(BuildCommand { sha: "23936af287657fa4148aeab40cc2a780810fae5B", params: BenchmarkParameters { backends: Some("Cranelift"), profiles: None, targets: None } }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command(r#"@rust-timer build 23936af287657fa4148aeab40cc2a780810fae5C backends=Cranelift,Llvm"#),
+            @r#"Ok(Build(BuildCommand { sha: "23936af287657fa4148aeab40cc2a780810fae5C", params: BenchmarkParameters { backends: Some("Cranelift,Llvm"), profiles: None, targets: None } }))"#);
     }
 
     #[test]
     fn queue_command_with_backends() {
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue backends=Llvm"),
-            @r#"Some(Ok(QueueCommand { params: BenchmarkParameters { include: None, exclude: None, runs: None, backends: Some("Llvm") } }))"#);
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue backends=Cranelift"),
-            @r#"Some(Ok(QueueCommand { params: BenchmarkParameters { include: None, exclude: None, runs: None, backends: Some("Cranelift") } }))"#);
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue backends=Cranelift,Llvm"),
-            @r#"Some(Ok(QueueCommand { params: BenchmarkParameters { include: None, exclude: None, runs: None, backends: Some("Cranelift,Llvm") } }))"#);
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue"),
-            @"Some(Ok(QueueCommand { params: BenchmarkParameters { include: None, exclude: None, runs: None, backends: None } }))");
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue include=hello backends=Llvm"),
-            @r#"Some(Ok(QueueCommand { params: BenchmarkParameters { include: Some("hello"), exclude: None, runs: None, backends: Some("Llvm") } }))"#);
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue include=hello exclude=ripgrep runs=3 backends=Llvm"),
-            @r#"Some(Ok(QueueCommand { params: BenchmarkParameters { include: Some("hello"), exclude: Some("ripgrep"), runs: Some(3), backends: Some("Llvm") } }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue backends=Llvm"),
+            @r#"Ok(Queue(QueueCommand { params: BenchmarkParameters { backends: Some("Llvm"), profiles: None, targets: None } }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue backends=Cranelift"),
+            @r#"Ok(Queue(QueueCommand { params: BenchmarkParameters { backends: Some("Cranelift"), profiles: None, targets: None } }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue backends=Cranelift,Llvm"),
+            @r#"Ok(Queue(QueueCommand { params: BenchmarkParameters { backends: Some("Cranelift,Llvm"), profiles: None, targets: None } }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue"),
+            @"Ok(Queue(QueueCommand { params: BenchmarkParameters { backends: None, profiles: None, targets: None } }))");
+    }
+
+    #[test]
+    fn queue_command_with_profiles() {
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue profiles=Doc"),
+            @r#"Ok(Queue(QueueCommand { params: BenchmarkParameters { backends: None, profiles: Some("Doc"), targets: None } }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue profiles=Check,Clippy"),
+            @r#"Ok(Queue(QueueCommand { params: BenchmarkParameters { backends: None, profiles: Some("Check,Clippy"), targets: None } }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue profiles=Doc,Clippy,Opt backends=Cranelift,Llvm"),
+            @r#"Ok(Queue(QueueCommand { params: BenchmarkParameters { backends: Some("Cranelift,Llvm"), profiles: Some("Doc,Clippy,Opt"), targets: None } }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue profiles=Foo"),
+            @r#"Err("Cannot parse profiles: Invalid profile: Foo. Valid values are: check, debug, opt, doc, doc-json, clippy")"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue profiles=check"),
+            @r#"Ok(Queue(QueueCommand { params: BenchmarkParameters { backends: None, profiles: Some("check"), targets: None } }))"#);
+    }
+
+    #[test]
+    fn queue_command_with_targets() {
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue targets=x86_64-unknown-linux-gnu"),
+            @r#"Ok(Queue(QueueCommand { params: BenchmarkParameters { backends: None, profiles: None, targets: Some("x86_64-unknown-linux-gnu") } }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue targets=x86_64-unknown-linux-gnu,67-unknown-none"),
+            @r#"Err("Cannot parse targets: Only primary targets can be specified. Valid values are: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu")"#);
     }
 
     #[test]
     fn no_empty_arguments_thank_you() {
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue include="),
-            @"Some(Ok(QueueCommand { params: BenchmarkParameters { include: None, exclude: None, runs: None, backends: None } }))");
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue exclude="),
-            @"Some(Ok(QueueCommand { params: BenchmarkParameters { include: None, exclude: None, runs: None, backends: None } }))");
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue runs="),
-            @"Some(Ok(QueueCommand { params: BenchmarkParameters { include: None, exclude: None, runs: None, backends: None } }))");
-        insta::assert_compact_debug_snapshot!(parse_queue_command("@rust-timer queue backends="),
-            @"Some(Ok(QueueCommand { params: BenchmarkParameters { include: None, exclude: None, runs: None, backends: None } }))");
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue backends="),
+            @"Ok(Queue(QueueCommand { params: BenchmarkParameters { backends: None, profiles: None, targets: None } }))");
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue targets="),
+            @"Ok(Queue(QueueCommand { params: BenchmarkParameters { backends: None, profiles: None, targets: None } }))");
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer queue profiles="),
+            @"Ok(Queue(QueueCommand { params: BenchmarkParameters { backends: None, profiles: None, targets: None } }))");
+    }
+
+    #[test]
+    fn triage_command() {
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer triage"),
+            @r#"Err("The triage comment requires a space-separated list of SHAs as an argument.")"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer triage    "),
+            @r#"Err("The triage comment requires a space-separated list of SHAs as an argument.")"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer triage abcd"),
+            @r#"Ok(Triage(TriageCommand { shas: ["abcd"] }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer triage abcd efgh"),
+            @r#"Ok(Triage(TriageCommand { shas: ["abcd", "efgh"] }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer triage abcd efgh ijkl"),
+            @r#"Ok(Triage(TriageCommand { shas: ["abcd", "efgh", "ijkl"] }))"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer triage abcd targets=Foo"),
+            @r#"Err("Sha `targets=Foo` is not alphanumeric")"#);
+        insta::assert_compact_debug_snapshot!(parse_command("@rust-timer triage abcd  efgh"),
+            @r#"Ok(Triage(TriageCommand { shas: ["abcd", "efgh"] }))"#);
+    }
+
+    #[test]
+    fn pr_number_from_unrolled_build() {
+        const EXAMPLE: &str = "Unrolled build for #157428
+Rollup merge of #157428 - nia-e:allocator-refactor, r=clarfonthey
+
+allocator: refactor for stabilisation
+
+Adds my current proposal per the doc in #156882 and follow-up Zulip conversations (notably for [dyn-compat](https://rust-lang.zulipchat.com/#narrow/channel/197181-t-libs.2Fwg-allocators/topic/Allocator.20dyn-safety/near/599555822)) unstably.
+
+r? libs";
+        insta::assert_compact_debug_snapshot!(find_pr_number_for_unrolled_build(EXAMPLE),
+            @"Ok(157428)");
+        insta::assert_compact_debug_snapshot!(find_pr_number_for_unrolled_build("Not a correct title"),
+            @r#"Err("Unexpected commit name `Not a correct title`, did not find expected prefix. Is the commit an unrolled build?")"#);
+        insta::assert_compact_debug_snapshot!(find_pr_number_for_unrolled_build("Unrolled build for #123almost"),
+            @r#"Err("Unexpected commit name, pr number `123almost` was not parsable as u32. Is the commit an unrolled build?")"#);
     }
 }

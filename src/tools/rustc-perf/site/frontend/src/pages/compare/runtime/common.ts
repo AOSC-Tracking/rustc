@@ -1,21 +1,28 @@
 import {BenchmarkFilter, StatComparison} from "../types";
 import {calculateComparison, TestCaseComparison} from "../data";
-import {benchmarkNameMatchesFilter} from "../shared";
+import {benchmarkNameMatchesFilter, targetMatchesFilter} from "../shared";
+import {Target} from "../compile/common";
+import {DEFAULT_COMPILE_TARGET_TRIPLE} from "../../../api";
 
 export interface RuntimeTestCase {
   benchmark: string;
+  target: Target;
 }
 
-export type RuntimeBenchmarkFilter = BenchmarkFilter;
+export type RuntimeBenchmarkFilter = {
+  target: Target[];
+} & BenchmarkFilter;
 
 export const defaultRuntimeFilter: RuntimeBenchmarkFilter = {
   name: null,
   nonRelevant: false,
   showRawData: false,
+  target: [DEFAULT_COMPILE_TARGET_TRIPLE],
 };
 
 export interface RuntimeBenchmarkComparison {
   benchmark: string;
+  target: Target;
   comparison: StatComparison;
 }
 
@@ -26,9 +33,9 @@ export function computeRuntimeComparisonsWithNonRelevant(
   function shouldShowTestCase(
     comparison: TestCaseComparison<RuntimeTestCase>
   ): boolean {
-    return benchmarkNameMatchesFilter(
-      comparison.testCase.benchmark,
-      filter.name
+    return (
+      benchmarkNameMatchesFilter(comparison.testCase.benchmark, filter.name) &&
+      targetMatchesFilter(comparison.testCase.target, filter.target)
     );
   }
 
@@ -37,6 +44,7 @@ export function computeRuntimeComparisonsWithNonRelevant(
       (c: RuntimeBenchmarkComparison): TestCaseComparison<RuntimeTestCase> => {
         let testCase = {
           benchmark: c.benchmark,
+          target: c.target,
         };
         return calculateComparison(c.comparison, testCase);
       }

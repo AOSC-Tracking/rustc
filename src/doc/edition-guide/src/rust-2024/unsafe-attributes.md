@@ -36,6 +36,7 @@ Because the set of symbols across all linked libraries is a global namespace, th
 For example, in previous editions the following crashes on most Unix-like platforms despite containing only safe code:
 
 ```rust,no_run,edition2021
+# #![allow(invalid_runtime_symbol_definitions)]
 fn main() {
     println!("Hello, world!");
 }

@@ -758,7 +758,8 @@ fn cargo_metadata_public_private_dependencies_enabled() {
     Package::new("foobar", "0.0.2").publish();
     Package::new("baz", "0.0.3").publish();
 
-    p.cargo("metadata -q --format-version 1 -Zpublic-dependency")
+    p.cargo("metadata -q --format-version 1")
+        .arg("-Zpublic-dependency")
         .masquerade_as_nightly_cargo(&["public-dependency"])
         .with_stdout_data(
             str![[r#"
@@ -1215,7 +1216,6 @@ fn workspace_metadata() {
 #[cargo_test]
 fn workspace_metadata_with_dependencies_no_deps() {
     let p = project()
-        // NOTE that 'artifact' isn't mentioned in the workspace here, yet it shows up as member.
         .file(
             "Cargo.toml",
             r#"
@@ -1234,18 +1234,14 @@ fn workspace_metadata_with_dependencies_no_deps() {
 
                 [dependencies]
                 baz = { path = "../baz/" }
-                artifact = { path = "../artifact/", artifact = "bin" }
            "#,
         )
         .file("bar/src/lib.rs", "")
         .file("baz/Cargo.toml", &basic_lib_manifest("baz"))
         .file("baz/src/lib.rs", "")
-        .file("artifact/Cargo.toml", &basic_bin_manifest("artifact"))
-        .file("artifact/src/main.rs", "fn main() {}")
         .build();
 
-    p.cargo("metadata --no-deps -Z bindeps")
-        .masquerade_as_nightly_cargo(&["bindeps"])
+    p.cargo("metadata --no-deps")
         .with_stdout_data(
             str![[r#"
 {
@@ -1258,26 +1254,6 @@ fn workspace_metadata_with_dependencies_no_deps() {
       "categories": [],
       "default_run": null,
       "dependencies": [
-        {
-          "artifact": {
-            "kinds": [
-              "bin"
-            ],
-            "lib": false,
-            "target": null
-          },
-          "features": [],
-          "kind": null,
-          "name": "artifact",
-          "optional": false,
-          "path": "[ROOT]/foo/artifact",
-          "registry": null,
-          "rename": null,
-          "req": "*",
-          "source": null,
-          "target": null,
-          "uses_default_features": true
-        },
         {
           "features": [],
           "kind": null,
@@ -1340,49 +1316,6 @@ fn workspace_metadata_with_dependencies_no_deps() {
       "edition": "2015",
       "features": {},
       "homepage": null,
-      "id": "path+[ROOTURL]/foo/artifact#0.5.0",
-      "keywords": [],
-      "license": null,
-      "license_file": null,
-      "links": null,
-      "manifest_path": "[ROOT]/foo/artifact/Cargo.toml",
-      "metadata": null,
-      "name": "artifact",
-      "publish": null,
-      "readme": null,
-      "repository": null,
-      "rust_version": null,
-      "source": null,
-      "targets": [
-        {
-          "crate_types": [
-            "bin"
-          ],
-          "doc": true,
-          "doctest": false,
-          "edition": "2015",
-          "kind": [
-            "bin"
-          ],
-          "name": "artifact",
-          "src_path": "[ROOT]/foo/artifact/src/main.rs",
-          "test": true
-        }
-      ],
-      "version": "0.5.0"
-    },
-    {
-      "authors": [
-        "wycats@example.com"
-      ],
-      "categories": [],
-      "default_run": null,
-      "dependencies": [],
-      "description": null,
-      "documentation": null,
-      "edition": "2015",
-      "features": {},
-      "homepage": null,
       "id": "path+[ROOTURL]/foo/baz#0.5.0",
       "keywords": [],
       "license": null,
@@ -1421,12 +1354,10 @@ fn workspace_metadata_with_dependencies_no_deps() {
   "version": 1,
   "workspace_default_members": [
     "path+[ROOTURL]/foo/bar#0.5.0",
-    "path+[ROOTURL]/foo/artifact#0.5.0",
     "path+[ROOTURL]/foo/baz#0.5.0"
   ],
   "workspace_members": [
     "path+[ROOTURL]/foo/bar#0.5.0",
-    "path+[ROOTURL]/foo/artifact#0.5.0",
     "path+[ROOTURL]/foo/baz#0.5.0"
   ],
   "workspace_root": "[ROOT]/foo"
@@ -1523,7 +1454,8 @@ fn workspace_metadata_with_dependencies_and_resolve() {
         .file("non-artifact/src/lib.rs", "")
         .build();
 
-    p.cargo("metadata -Z bindeps")
+    p.cargo("metadata")
+        .arg("-Zbindeps")
         .masquerade_as_nightly_cargo(&["bindeps"])
         .with_stdout_data(
             str![[r#"
@@ -2187,12 +2119,13 @@ fn cargo_metadata_with_invalid_artifact_deps() {
         .file("artifact/src/main.rs", "fn main() {}")
         .build();
 
-    p.cargo("metadata -Z bindeps")
+    p.cargo("metadata")
+        .arg("-Zbindeps")
         .masquerade_as_nightly_cargo(&["bindeps"])
         .with_status(101)
         .with_stderr_data(str![[r#"
 [WARNING] please specify `--format-version` flag explicitly to avoid compatibility problems
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [ERROR] dependency `artifact` in package `foo` requires a `bin:notfound` artifact to be present.
 
 "#]])
@@ -2223,7 +2156,7 @@ fn cargo_metadata_with_invalid_duplicate_renamed_deps() {
         .with_status(101)
         .with_stderr_data(str![[r#"
 [WARNING] please specify `--format-version` flag explicitly to avoid compatibility problems
-[LOCKING] 1 package to latest compatible version
+[LOCKING] 1 package to highest compatible version
 [ERROR] the crate `foo v0.5.0 ([ROOT]/foo)` depends on crate `bar v0.5.0 ([ROOT]/foo/bar)` multiple times with different names
 
 "#]])
@@ -3582,7 +3515,7 @@ fn filter_platform() {
             str![[r#"
 [WARNING] please specify `--format-version` flag explicitly to avoid compatibility problems
 [UPDATING] `dummy-registry` index
-[LOCKING] 4 packages to latest compatible versions
+[LOCKING] 4 packages to highest compatible versions
 [DOWNLOADING] crates ...
 [DOWNLOADED] normal-dep v0.0.1 (registry `dummy-registry`)
 [DOWNLOADED] host-dep v0.0.1 (registry `dummy-registry`)
@@ -4386,7 +4319,6 @@ fn cargo_metadata_non_utf8() {
         .run();
 }
 
-// TODO: Consider using this test instead of the version without the 'artifact' suffix or merge them because they should be pretty much the same.
 #[cargo_test]
 fn workspace_metadata_with_dependencies_no_deps_artifact() {
     let p = project()
@@ -4420,7 +4352,8 @@ fn workspace_metadata_with_dependencies_no_deps_artifact() {
         .file("artifact/src/main.rs", "fn main() {}")
         .build();
 
-    p.cargo("metadata --no-deps -Z bindeps")
+    p.cargo("metadata --no-deps")
+        .arg("-Zbindeps")
         .masquerade_as_nightly_cargo(&["bindeps"])
         .with_stdout_data(
             str![[r#"

@@ -5,9 +5,11 @@ import {ref, toRaw, watch} from "vue";
 import {deepCopy} from "../../../utils/copy";
 import {PREF_FILTERS_OPENED} from "../prefs";
 import {createPersistedRef} from "../../../storage";
-import {CompileBenchmarkFilter} from "./common";
+import {CompileBenchmarkFilter, Target} from "./common";
+import {BenchmarkInfo} from "../../../api";
 
 const props = defineProps<{
+  info: BenchmarkInfo;
   // When reset, set filter to this value
   defaultFilter: CompileBenchmarkFilter;
   // Initialize the filter with this value
@@ -22,6 +24,18 @@ const emit = defineEmits<{
 function reset() {
   // We must not change the default filter
   filter.value = deepCopy(props.defaultFilter);
+}
+
+function hasTarget(target: Target): boolean {
+  return filter.value.target.includes(target);
+}
+
+function toggleTarget(target: Target) {
+  if (hasTarget(target)) {
+    filter.value.target = filter.value.target.filter((t) => t !== target);
+  } else {
+    filter.value.target = [...filter.value.target, target];
+  }
 }
 
 let filter = ref(deepCopy(props.initialFilter));
@@ -103,6 +117,20 @@ const opened = createPersistedRef(PREF_FILTERS_OPENED);
                 <Tooltip
                   >Documentation build that produces HTML documentation site
                   produced by `rustdoc`.
+                </Tooltip>
+              </li>
+              <li>
+                <label>
+                  <input
+                    type="checkbox"
+                    id="profile-doc-json"
+                    v-model="filter.profile.docJson"
+                  />
+                  <span class="label">doc-json</span>
+                </label>
+                <Tooltip
+                  >Documentation build that produces JSON data produced by
+                  `rustdoc`.
                 </Tooltip>
               </li>
             </ul>
@@ -215,15 +243,15 @@ const opened = createPersistedRef(PREF_FILTERS_OPENED);
               </div>
             </div>
             <ul class="states-list">
-              <li>
+              <li v-for="target in info.compile_targets" :key="target">
                 <label>
                   <input
                     type="checkbox"
-                    v-model="filter.target.x86_64_unknown_linux_gnu"
+                    :checked="hasTarget(target)"
+                    @change="toggleTarget(target)"
                   />
-                  <span class="label">x86_64-unknown-linux-gnu</span>
+                  <span class="label">{{ target }}</span>
                 </label>
-                <Tooltip>The default Linux x64 target.</Tooltip>
               </li>
             </ul>
           </div>

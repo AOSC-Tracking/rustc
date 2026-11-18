@@ -1,4 +1,4 @@
-# Const Generics
+# Const generics
 
 ## Kinds of const arguments
 
@@ -15,9 +15,9 @@ Inference Variables are quite boring and treated equivalently to type inference 
 Const Parameters are also similarly boring and equivalent to uses of type parameters almost everywhere.
 However, there are some interesting subtleties with how they are handled during parsing, name resolution, and AST lowering: [ambig-unambig-ty-and-consts].
 
-## Anon Consts
+## Anon consts
 
-Anon Consts (short for anonymous const items) are how arbitrary expression are represented in const generics, for example an array length of `1 + 1` or `foo()` or even just `0`.
+Anon consts (short for anonymous const items) are how arbitrary expression are represented in const generics, for example an array length of `1 + 1` or `foo()` or even just `0`.
 These are unique to const generics and have no real type equivalent.
 
 ### Desugaring
@@ -81,11 +81,11 @@ type Alias = [u8; ANON];
 When we go through HIR ty lowering for the array type in `Alias`, we will lower the array length too, and feed `type_of(ANON) -> usize`.
 This will effectively set the type of the `ANON` const item during some later part of the compiler rather than when constructing the HIR.
 
-After all of this desugaring has taken place the final representation in the type system (ie as a `ty::Const`) is a `ConstKind::Unevaluated` with the `DefId` of the `AnonConst`. This is equivalent to how we would representa a usage of an actual const item if we were to represent them without going through an anon const (e.g. when `min_generic_const_args` is enabled).
+After all of this desugaring has taken place the final representation in the type system (ie as a `ty::Const`) is a `ConstKind::Unevaluated` with the `DefId` of the `AnonConst`. This is equivalent to how we would representa a usage of an actual const item if we were to represent them without going through an anon const (e.g. when `gca_min_const_items` is enabled).
 
 This allows the representation for const "aliases" to be the same as the representation of `TyKind::Alias`. Having a proper HIR body also allows for a *lot* of code re-use, e.g. we can reuse HIR typechecking and all of the lowering steps to MIR where we can then reuse const eval.
 
-### Enforcing lack of Generic Parameters
+### Enforcing lack of generic parameters
 
 There are three ways that we enforce anon consts can't use generic parameters:
 1. Name Resolution will not resolve paths to generic parameters when inside of an anon const
@@ -134,12 +134,14 @@ fn foo<T: Sized>() {
 }
 ```
 
-However, to avoid most of the problems involved in allowing generic parameters in anon const const arguments we require that the constant be evaluated before monomorphization (e.g. during type checking). In some sense we only allow generic parameters here when they are semantically unused.
+However, to avoid most of the problems involved in allowing generic parameters in anon const const arguments,
+we require that the constant be evaluated before monomorphization (e.g. during type checking).
+In some sense we only allow generic parameters here when they are semantically unused.
 
 In the previous example the anon const can be evaluated for any type parameter `T` because raw pointers to sized types always have the same size (e.g. `8` on 64bit platforms).
 
 When detecting that we evaluated an anon const that syntactically contained generic parameters, but did not actually depend on them for evaluation to succeed, we emit the [`const_evaluatable_unchecked` FCW][cec_fcw].
-This is intended to become a hard error once we stabilize more ways of using generic parameters in const arguments, for example `min_generic_const_args` or (the now dead) `generic_const_exprs`.
+This is intended to become a hard error once we stabilize more ways of using generic parameters in const arguments, for example `gca_min_const_items` or (the now dead) `generic_const_exprs`.
 
 The implementation for this FCW can be found here: [`const_eval_resolve_for_typeck`]
 
@@ -180,9 +182,9 @@ It is currently unclear what the right way to make `generic_const_parameter_type
 
 `generic_const_exprs` would have allowed for anon consts with types referencing generic parameters, but that design wound up unworkable.
 
-`min_generic_const_args` will allow for some expressions (for example array construction) to be representable without an anon const and therefore without running into these issues, though whether this is *enough* has yet to be determined.
+`gca_min_const_items` will allow for some expressions (for example array construction) to be representable without an anon const and therefore without running into these issues, though whether this is *enough* has yet to be determined.
 
-## Checking types of Const Arguments
+## Checking types of const arguments
 
 In order for a const argument to be well formed it must have the same type as the const parameter it is an argument to.
 For example, a const argument of type `bool` for an array length is not well formed, as an array's length parameter has type `usize`.

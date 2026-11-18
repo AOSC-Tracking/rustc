@@ -11,10 +11,11 @@
 //!
 //! The database is kept in git. It usually shouldn't need to be re-generated
 //! unless there is a change in the schema or the benchmark.
+#![allow(clippy::disallowed_types)]
 
 use cargo::GlobalContext;
-use cargo::core::global_cache_tracker::{self, DeferredGlobalLastUse, GlobalCacheTracker};
 use cargo::util::cache_lock::CacheLockMode;
+use cargo::workspace::global_cache_tracker::{self, DeferredGlobalLastUse, GlobalCacheTracker};
 use rand::prelude::*;
 use std::collections::HashMap;
 use std::fs;

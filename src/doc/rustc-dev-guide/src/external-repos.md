@@ -34,17 +34,20 @@ to these tools should be filed against the tools directly in their respective up
 The exception is that when rustc changes are required to
 implement a new tool feature or test, that should happen in one collective rustc PR.
 
+Similarly, if your rustc changes break the build of some subtree dependency,
+you should include fixes for those in the rustc PR as well.
+
 `subtree` dependencies are currently managed by two distinct approaches:
 
 * Using `git subtree`
     * `clippy` ([sync guide](https://doc.rust-lang.org/nightly/clippy/development/infrastructure/sync.html#performing-the-sync-from-rust-langrust-to-clippy))
     * `portable-simd` ([sync script](https://github.com/rust-lang/portable-simd/blob/master/subtree-sync.sh))
     * `rustfmt`
-    * `rustc_codegen_cranelift` ([sync script](https://github.com/rust-lang/rustc_codegen_cranelift/blob/113af154d459e41b3dc2c5d7d878e3d3a8f33c69/scripts/rustup.sh#L7))
     * `rustc_codegen_gcc` ([sync guide](https://github.com/rust-lang/rustc_codegen_gcc/blob/master/doc/subtree.md))
 * Using the [josh](#synchronizing-a-josh-subtree) tool
     * `miri`
     * `rust-analyzer`
+    * `rustc_codegen_cranelift`
     * `rustc-dev-guide`
     * `compiler-builtins`
     * `stdarch`

@@ -46,7 +46,8 @@ fn simple() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("build --features a/feata --unit-graph -Zunstable-options")
+    p.cargo("build --features a/feata --unit-graph")
+        .arg("-Zunstable-options")
         .masquerade_as_nightly_cargo(&["unit-graph"])
         .with_stdout_data(
             str![[r#"
@@ -84,7 +85,8 @@ fn simple() {
         "panic": "unwind",
         "rpath": false,
         "split_debuginfo": "{...}",
-        "strip": "{...}"
+        "strip": "{...}",
+        "trim_paths": "none"
       },
       "target": {
         "crate_types": [
@@ -130,7 +132,8 @@ fn simple() {
         "panic": "unwind",
         "rpath": false,
         "split_debuginfo": "{...}",
-        "strip": "{...}"
+        "strip": "{...}",
+        "trim_paths": "none"
       },
       "target": {
         "crate_types": [
@@ -168,7 +171,8 @@ fn simple() {
         "panic": "unwind",
         "rpath": false,
         "split_debuginfo": "{...}",
-        "strip": "{...}"
+        "strip": "{...}",
+        "trim_paths": "none"
       },
       "target": {
         "crate_types": [
@@ -212,7 +216,8 @@ fn simple() {
         "panic": "unwind",
         "rpath": false,
         "split_debuginfo": "{...}",
-        "strip": "{...}"
+        "strip": "{...}",
+        "trim_paths": "none"
       },
       "target": {
         "crate_types": [

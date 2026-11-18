@@ -2,19 +2,21 @@ use std::iter;
 
 use rustc_abi::{BackendRepr, TagEncoding, Variants, WrappingRange};
 use rustc_ast as ast;
+use rustc_attr_ir::find_attr;
+use rustc_attr_ir::lang_items::LangItem;
 use rustc_hir as hir;
-use rustc_hir::{Expr, ExprKind, HirId, LangItem, find_attr};
-use rustc_middle::bug;
+use rustc_hir::{Expr, ExprKind, HirId};
+use rustc_lint_defs::{declare_lint, declare_lint_pass, impl_lint_pass};
+use rustc_middle::ty::consts::ConstExt;
 use rustc_middle::ty::layout::{LayoutOf, SizeSkeleton};
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt, Unnormalized};
-use rustc_session::{declare_lint, declare_lint_pass, impl_lint_pass};
-use rustc_span::{DUMMY_SP, Span, Symbol, sym};
+use rustc_span::{DUMMY_SP, Span, Symbol, bug, sym};
 use tracing::debug;
 
 mod improper_ctypes; // these files do the implementation for ImproperCTypesDefinitions,ImproperCTypesDeclarations
 pub(crate) use improper_ctypes::ImproperCTypesLint;
 
-use crate::lints::{
+use crate::diagnostics::{
     AmbiguousWidePointerComparisons, AmbiguousWidePointerComparisonsAddrMetadataSuggestion,
     AmbiguousWidePointerComparisonsAddrSuggestion, AmbiguousWidePointerComparisonsCastSuggestion,
     AmbiguousWidePointerComparisonsExpectSuggestion, AtomicOrderingFence, AtomicOrderingLoad,
@@ -23,6 +25,7 @@ use crate::lints::{
     UnpredictableFunctionPointerComparisonsSuggestion, UnusedComparisons,
     VariantSizeDifferencesDiag,
 };
+use crate::utils::std_or_core;
 use crate::{LateContext, LateLintPass, LintContext};
 
 mod literal;
@@ -194,10 +197,15 @@ declare_lint! {
 
 #[derive(Copy, Clone, Default)]
 pub(crate) struct TypeLimits {
-    /// Id of the last visited negated expression
-    negated_expr_id: Option<hir::HirId>,
-    /// Span of the last visited negated expression
-    negated_expr_span: Option<Span>,
+    last_visited_negation: Option<NegationInfo>,
+}
+
+#[derive(Copy, Clone)]
+struct NegationInfo {
+    /// A negation expression (a `rustc_hir::ExprKind::Unary`)
+    negation_span: Span,
+    /// The operand of the negation expression.
+    negated_id: hir::HirId,
 }
 
 impl_lint_pass!(TypeLimits => [
@@ -210,7 +218,7 @@ impl_lint_pass!(TypeLimits => [
 
 impl TypeLimits {
     pub(crate) fn new() -> TypeLimits {
-        TypeLimits { negated_expr_id: None, negated_expr_span: None }
+        TypeLimits { last_visited_negation: None }
     }
 }
 
@@ -312,7 +320,7 @@ fn lint_wide_pointer<'tcx>(
         let mut modifiers = String::new();
         ty = match ty.kind() {
             ty::RawPtr(ty, _) => *ty,
-            ty::Adt(def, args) if cx.tcx.is_diagnostic_item(sym::NonNull, def.did()) => {
+            ty::Adt(def, args) if cx.tcx.is_lang_item(def.did(), LangItem::NonNull) => {
                 modifiers.push_str(".as_ptr()");
                 args.type_at(0)
             }
@@ -341,13 +349,21 @@ fn lint_wide_pointer<'tcx>(
         return;
     };
 
+    let Some(krate) = std_or_core(cx) else {
+        return cx.emit_span_lint(
+            AMBIGUOUS_WIDE_POINTER_COMPARISONS,
+            e.span,
+            AmbiguousWidePointerComparisons::Warn,
+        );
+    };
+
     let (Some(l_span), Some(r_span)) =
         (l.span.find_ancestor_inside(e.span), r.span.find_ancestor_inside(e.span))
     else {
         return cx.emit_span_lint(
             AMBIGUOUS_WIDE_POINTER_COMPARISONS,
             e.span,
-            AmbiguousWidePointerComparisons::Spanless,
+            AmbiguousWidePointerComparisons::Spanless { krate },
         );
     };
 
@@ -373,6 +389,7 @@ fn lint_wide_pointer<'tcx>(
             AmbiguousWidePointerComparisons::SpanfulEq {
                 addr_metadata_suggestion: (!is_dyn_comparison).then(|| {
                     AmbiguousWidePointerComparisonsAddrMetadataSuggestion {
+                        krate,
                         ne,
                         deref_left,
                         deref_right,
@@ -384,6 +401,7 @@ fn lint_wide_pointer<'tcx>(
                     }
                 }),
                 addr_suggestion: AmbiguousWidePointerComparisonsAddrSuggestion {
+                    krate,
                     ne,
                     deref_left,
                     deref_right,
@@ -505,6 +523,14 @@ fn lint_fn_pointer<'tcx>(
     let middle = l_span.shrink_to_hi().until(r_span.shrink_to_lo());
     let right = r_span.shrink_to_hi().until(e.span.shrink_to_hi());
 
+    let Some(krate) = std_or_core(cx) else {
+        return cx.emit_span_lint(
+            UNPREDICTABLE_FUNCTION_POINTER_COMPARISONS,
+            e.span,
+            UnpredictableFunctionPointerComparisons::Warn,
+        );
+    };
+
     let sugg =
         // We only check for a right cast as `FnDef` == `FnPtr` is not possible,
         // only `FnPtr == FnDef` is possible.
@@ -512,6 +538,7 @@ fn lint_fn_pointer<'tcx>(
             let fn_sig = r_ty.fn_sig(cx.tcx);
 
             UnpredictableFunctionPointerComparisonsSuggestion::FnAddrEqWithCast {
+                krate,
                 ne,
                 fn_sig,
                 deref_left,
@@ -522,6 +549,7 @@ fn lint_fn_pointer<'tcx>(
             }
         } else {
             UnpredictableFunctionPointerComparisonsSuggestion::FnAddrEq {
+                krate,
                 ne,
                 deref_left,
                 deref_right,
@@ -539,22 +567,32 @@ fn lint_fn_pointer<'tcx>(
 }
 
 impl<'tcx> LateLintPass<'tcx> for TypeLimits {
-    fn check_lit(&mut self, cx: &LateContext<'tcx>, hir_id: HirId, lit: hir::Lit, negated: bool) {
-        if negated {
-            self.negated_expr_id = Some(hir_id);
-            self.negated_expr_span = Some(lit.span);
-        }
-        lint_literal(cx, self, hir_id, lit.span, &lit, negated);
+    fn check_lit(
+        &mut self,
+        cx: &LateContext<'tcx>,
+        hir_id: HirId,
+        lit: hir::Lit,
+        is_negated_pat: bool,
+    ) {
+        let surrounding_negation = if is_negated_pat {
+            // In this case, lit.span refers to a `rustc_hir::hir::PatExprKind::Lit`,
+            // which includes the minus sign in front.
+            Some(lit.span)
+        } else if let Some(negation_info) = self.last_visited_negation
+            && negation_info.negated_id == hir_id
+        {
+            Some(negation_info.negation_span)
+        } else {
+            None
+        };
+        lint_literal(cx, hir_id, lit.span, &lit, surrounding_negation);
     }
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, e: &'tcx hir::Expr<'tcx>) {
         match e.kind {
             hir::ExprKind::Unary(hir::UnOp::Neg, expr) => {
-                // Propagate negation, if the negation itself isn't negated
-                if self.negated_expr_id != Some(e.hir_id) {
-                    self.negated_expr_id = Some(expr.hir_id);
-                    self.negated_expr_span = Some(e.span);
-                }
+                self.last_visited_negation =
+                    Some(NegationInfo { negation_span: e.span, negated_id: expr.hir_id });
             }
             hir::ExprKind::Binary(binop, ref l, ref r) => {
                 if is_comparison(binop.node) {

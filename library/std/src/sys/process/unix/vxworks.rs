@@ -171,12 +171,9 @@ impl Process {
         }
     }
 
-    pub fn send_process_group_signal(&self, signal: i32) -> io::Result<()> {
-        // See note in `send_signal` regarding recycled PIDs.
-        if self.status.is_some() {
-            return Ok(());
-        }
-        cvt(unsafe { libc::killpg(self.pid, signal) }).map(drop)
+    pub fn send_process_group_signal(&self, _signal: i32) -> io::Result<()> {
+        // VxWorks doesn't have process groups
+        unimplemented!()
     }
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
@@ -221,7 +218,7 @@ impl ExitStatus {
     pub fn exit_ok(&self) -> Result<(), ExitStatusError> {
         // This assumes that WIFEXITED(status) && WEXITSTATUS==0 corresponds to status==0. This is
         // true on all actual versions of Unix, is widely assumed, and is specified in SuS
-        // https://pubs.opengroup.org/onlinepubs/9699919799/functions/wait.html. If it is not
+        // https://pubs.opengroup.org/onlinepubs/9799919799/functions/wait.html. If it is not
         // true for a platform pretending to be Unix, the tests (our doctests, and also
         // unix/tests.rs) will spot it. `ExitStatusError::code` assumes this too.
         match NonZero::try_from(self.0) {

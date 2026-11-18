@@ -2,9 +2,10 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
 
-use cargo::core::dependency::DepKind;
-use cargo::core::{Dependency, FeatureMap, FeatureValue, PackageId, Summary};
+use cargo::util::VersionReqMatchMode;
 use cargo::util::interning::{INTERNED_DEFAULT, InternedString};
+use cargo::workspace::dependency::DepKind;
+use cargo::workspace::{Dependency, FeatureMap, FeatureValue, PackageId, Summary};
 use cargo_platform::Platform;
 use varisat::ExtendFormula;
 
@@ -281,7 +282,7 @@ fn process_compatible_dep_summaries(
             .get(&dep.package_name())
             .into_iter()
             .flatten()
-            .filter(|s| dep.matches(s))
+            .filter(|s| dep.matches(s, VersionReqMatchMode::Default))
             .filter(|s| dep.features().iter().all(|f| s.features().contains_key(f)))
             .map(|s| s.package_id())
             .collect::<Vec<_>>();

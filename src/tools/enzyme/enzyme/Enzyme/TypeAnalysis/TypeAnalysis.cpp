@@ -39,6 +39,8 @@
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Value.h"
 
+#include "llvm/ProfileData/InstrProf.h"
+
 #include "llvm/IR/InstIterator.h"
 
 #include "llvm/Support/CommandLine.h"
@@ -128,7 +130,11 @@ const llvm::StringMap<llvm::Intrinsic::ID> LIBM_FUNCTIONS = {
     {"atanh", Intrinsic::not_intrinsic},
     {"exp", Intrinsic::exp},
     {"exp2", Intrinsic::exp2},
+#if LLVM_VERSION_MAJOR >= 18
+    {"exp10", Intrinsic::exp10},
+#else
     {"exp10", Intrinsic::not_intrinsic},
+#endif
     {"log", Intrinsic::log},
     {"log10", Intrinsic::log10},
     {"expm1", Intrinsic::not_intrinsic},
@@ -825,8 +831,6 @@ void getConstantAnalysis(Constant *Val, TypeAnalyzer &TA,
       Result |= mid.ShiftIndices(DL, /*init offset*/ 0,
                                  /*maxSize*/ ObjSize,
                                  /*addOffset*/ Off);
-
-      Result |= mid;
     }
     Result.CanonicalizeInPlace(
         (TA.fntypeinfo.Function->getParent()->getDataLayout().getTypeSizeInBits(
@@ -874,6 +878,10 @@ void getConstantAnalysis(Constant *Val, TypeAnalyzer &TA,
   }
 
   if (auto GV = dyn_cast<GlobalVariable>(Val)) {
+    if (auto MD = GV->getMetadata("enzyme_type")) {
+      analysis[Val] |= TypeTree::fromMD(MD);
+      return;
+    }
 
     if (GV->getName() == "__cxa_thread_atexit_impl") {
       analysis[Val] = TypeTree(BaseType::Pointer).Only(-1, nullptr);
@@ -889,15 +897,37 @@ void getConstantAnalysis(Constant *Val, TypeAnalyzer &TA,
       return;
     }
 
+    if (startsWith(GV->getName(), getInstrProfCountersVarPrefix())) {
+      TypeTree T;
+      T.insert({-1}, BaseType::Pointer);
+      T.insert({-1, -1}, BaseType::Integer);
+      analysis[Val] = T;
+      return;
+    }
+    // A fixed constant global is a pointer to its initializer
+    if (GV->isConstant() && GV->hasInitializer()) {
+      // Record that this global is a pointer before analyzing its initializer.
+      // An initializer which refers back to its own global (such as a relative
+      // pointer jump table) would otherwise recurse forever, as the type of a
+      // global is only recorded once its initializer has been fully analyzed.
+      // Seeding with the fact that a global is a pointer is always correct, so
+      // any type deduced from it remains sound, and the seed is refined into
+      // the full type below once the initializer has been analyzed.
+      TypeTree seed;
+      seed.insert({-1}, ConcreteType(BaseType::Pointer));
+      GV->setMetadata("enzyme_type", seed.toMD(GV->getContext()));
+
+      getConstantAnalysis(GV->getInitializer(), TA, analysis);
+      TypeTree constTT = analysis[GV->getInitializer()].Only(-1, nullptr);
+      constTT.insert({-1}, ConcreteType(BaseType::Pointer));
+      GV->setMetadata("enzyme_type", constTT.toMD(GV->getContext()));
+      analysis[Val] |= constTT;
+      return;
+    }
+
     TypeTree &Result = analysis[Val];
     Result.insert({-1}, ConcreteType(BaseType::Pointer));
 
-    // A fixed constant global is a pointer to its initializer
-    if (GV->isConstant() && GV->hasInitializer()) {
-      getConstantAnalysis(GV->getInitializer(), TA, analysis);
-      Result |= analysis[GV->getInitializer()].Only(-1, nullptr);
-      return;
-    }
     if (!isa<StructType>(GV->getValueType()) ||
         !cast<StructType>(GV->getValueType())->isOpaque()) {
       auto globalSize = (DL.getTypeSizeInBits(GV->getValueType()) + 7) / 8;
@@ -1206,6 +1236,24 @@ void TypeAnalyzer::updateAnalysis(Value *Val, TypeTree Data, Value *Origin) {
   auto &DL = fntypeinfo.Function->getParent()->getDataLayout();
   auto RegSize = (DL.getTypeSizeInBits(Val->getType()) + 7) / 8;
   Data.CanonicalizeInPlace(RegSize, DL);
+
+  if (auto GV = dyn_cast<GlobalVariable>(Val)) {
+    if (!isa<StructType>(GV->getValueType()) ||
+        !cast<StructType>(GV->getValueType())->isOpaque()) {
+      auto allocSize = (DL.getTypeSizeInBits(GV->getValueType()) + 7) / 8;
+      if (EnzymePrintType) {
+        llvm::errs() << " pre global update input " << Data.str()
+                     << " for global of size " << allocSize << "\n";
+      }
+      Data = Data.Lookup(allocSize, DL)
+                 .Only(-1, dyn_cast_or_null<Instruction>(Origin));
+      if (EnzymePrintType) {
+        llvm::errs() << " post global update input " << Data.str()
+                     << " for global of size " << allocSize << "\n";
+      }
+    }
+  }
+
   bool Changed =
       analysis[Val].checkedOrIn(Data, /*PointerIntSame*/ false, LegalOr);
 
@@ -1250,9 +1298,10 @@ void TypeAnalyzer::updateAnalysis(Value *Val, TypeTree Data, Value *Origin) {
       EmitFailure("IllegalUpdateAnalysis", I->getDebugLoc(), I, ss.str());
       exit(1);
     } else {
-      llvm::errs() << ss.str() << "\n";
+      EmitFailure("IllegalUpdateAnalysis", DiagnosticLocation(),
+                  fntypeinfo.Function, ss.str());
+      exit(1);
     }
-    report_fatal_error("Performed illegal updateAnalysis");
   }
 
   if (Changed) {
@@ -3409,21 +3458,33 @@ void TypeAnalyzer::visitBinaryOperation(const DataLayout &dl, llvm::Type *T,
       }
       if (Opcode == BinaryOperator::And) {
         for (int i = 0; i < 2; ++i) {
-          if (Args[i])
-            for (auto andval :
-                 fntypeinfo.knownIntegralValues(Args[i], DT, intseen, SE)) {
-              if (andval <= 16 && andval >= 0) {
-                Result = TypeTree(BaseType::Integer);
-              } else if (andval < 0 && andval >= -64) {
-                // If a small negative number, this just masks off the lower
-                // bits in this case we can say that this is the same as the
-                // other operand
+          bool isNegMask = false;
+          if (Args[i]) {
+            if (auto CI = dyn_cast<ConstantInt>(Args[i])) {
+              int64_t andval = CI->getSExtValue();
+              if (andval < 0 && andval >= -64) {
                 Result = (i == 0 ? AnalysisRHS : AnalysisLHS);
+                isNegMask = true;
               }
             }
+            if (!isNegMask) {
+              for (auto andval :
+                   fntypeinfo.knownIntegralValues(Args[i], DT, intseen, SE)) {
+                if (andval <= 16 && andval >= 0) {
+                  Result = TypeTree(BaseType::Integer);
+                } else if (andval < 0 && andval >= -64) {
+                  // If a small negative number, this just masks off the lower
+                  // bits in this case we can say that this is the same as the
+                  // other operand
+                  Result = (i == 0 ? AnalysisRHS : AnalysisLHS);
+                  isNegMask = true;
+                }
+              }
+            }
+          }
           // If we and a constant against an integer, the result remains an
           // integer
-          if (Args[i] && isa<ConstantInt>(Args[i]) &&
+          if (!isNegMask && Args[i] && isa<ConstantInt>(Args[i]) &&
               (i == 0 ? AnalysisRHS : AnalysisLHS).Inner0() ==
                   BaseType::Integer) {
             Result = TypeTree(BaseType::Integer);
@@ -4087,6 +4148,9 @@ void TypeAnalyzer::visitIntrinsicInst(llvm::IntrinsicInst &I) {
   case Intrinsic::exp2:
   case Intrinsic::sin:
   case Intrinsic::cos:
+#if LLVM_VERSION_MAJOR >= 18
+  case Intrinsic::exp10:
+#endif
 #if LLVM_VERSION_MAJOR >= 19
   case Intrinsic::sinh:
   case Intrinsic::cosh:
@@ -5523,8 +5587,17 @@ void TypeAnalyzer::visitCallBase(CallBase &call) {
       return;
     }
     if (isDeallocationFunction(funcName, TLI)) {
+      bool cudaFree = isCudaDeallocationFunction(funcName);
       size_t Idx = 0;
       for (auto &Arg : ci->args()) {
+        // The allocation freed by the CUDA driver API is a CUdeviceptr, an
+        // integer at the LLVM level, but still a pointer.
+        if (Idx == 0 && cudaFree) {
+          updateAnalysis(call.getOperand(Idx),
+                         TypeTree(BaseType::Pointer).Only(-1, &call), &call);
+          Idx++;
+          continue;
+        }
         if (Arg.getType()->isIntegerTy()) {
           updateAnalysis(call.getOperand(Idx),
                          TypeTree(BaseType::Integer).Only(-1, &call), &call);

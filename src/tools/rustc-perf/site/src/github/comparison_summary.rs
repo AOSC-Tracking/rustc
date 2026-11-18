@@ -4,68 +4,11 @@ use crate::comparison::{
 };
 use crate::load::SiteCtxt;
 
-use database::{metric::Metric, ArtifactId, QueuedCommit};
+use database::{metric::Metric, QueuedCommit};
 
-use crate::github::{COMMENT_MARK_ROLLUP, COMMENT_MARK_TEMPORARY, RUST_REPO_GITHUB_API_URL};
+use crate::github::{COMMENT_MARK_TEMPORARY, RUST_REPO_GITHUB_API_URL};
 use humansize::BINARY;
-use std::collections::HashSet;
 use std::fmt::Write;
-
-/// Post messages to GitHub for all queued commits that have
-/// not yet been marked as completed.
-pub async fn post_finished(ctxt: &SiteCtxt) {
-    // If the github token is not configured, do not run this -- we don't want
-    // to mark things as complete without posting the comment.
-    if ctxt.config.keys.github_api_token.is_none() {
-        return;
-    }
-    let conn = ctxt.conn().await;
-    let index = ctxt.index.load();
-    let mut known_commits = index
-        .commits()
-        .into_iter()
-        .map(|c| c.sha)
-        .collect::<HashSet<_>>();
-    let (master_commits, queued_pr_commits, in_progress_artifacts) = futures::join!(
-        collector::master_commits(),
-        conn.queued_commits(),
-        conn.in_progress_artifacts()
-    );
-    let master_commits = match master_commits {
-        Ok(mcs) => mcs.into_iter().map(|c| c.sha).collect::<HashSet<_>>(),
-        Err(e) => {
-            log::error!("posting finished did not load master commits: {:?}", e);
-            // If we can't fetch master commits, return.
-            // We'll eventually try again later
-            return;
-        }
-    };
-
-    for aid in in_progress_artifacts {
-        match aid {
-            ArtifactId::Commit(c) => {
-                known_commits.remove(&c.sha);
-            }
-            ArtifactId::Tag(_) => {
-                // do nothing, for now, though eventually we'll want an artifact queue
-            }
-        }
-    }
-    for queued_commit in queued_pr_commits
-        .into_iter()
-        .filter(|c| known_commits.contains(&c.sha))
-    {
-        if let Some(completed) = conn.mark_complete(&queued_commit.sha).await {
-            assert_eq!(completed, queued_commit);
-
-            let is_master_commit = master_commits.contains(&queued_commit.sha);
-            if let Err(error) = post_comparison_comment(ctxt, queued_commit, is_master_commit).await
-            {
-                log::error!("Cannot post comparison comment: {error:?}");
-            }
-        }
-    }
-}
 
 /// Posts a comment to GitHub summarizing the comparison of the queued commit with its parent
 ///
@@ -77,9 +20,6 @@ pub async fn post_comparison_comment(
 ) -> anyhow::Result<()> {
     let client = super::client::Client::from_ctxt(ctxt, RUST_REPO_GITHUB_API_URL.to_owned());
     let pr = commit.pr;
-
-    // Was this perf. run triggered from a PR that was already merged and is a rollup?
-    let mut is_rollup = false;
 
     // Scan comments to hide outdated ones and gather context
     let graph_client = super::client::GraphQLClient::from_ctxt(ctxt);
@@ -93,24 +33,17 @@ pub async fn post_comparison_comment(
             log::debug!("Hiding comment {}", comment.id);
             graph_client.hide_comment(&comment.id, "OUTDATED").await?;
         }
-
-        if comment.viewer_did_author && comment.body.contains(COMMENT_MARK_ROLLUP) {
-            is_rollup = true;
-        }
     }
 
     let source = if is_master_commit {
         PerfRunSource::MasterCommit
-    } else if is_rollup {
-        PerfRunSource::TryBuildRollup
     } else {
         PerfRunSource::TryBuild
     };
 
-    let body = match summarize_run(ctxt, commit, source).await {
-        Ok(message) => message,
-        Err(error) => error,
-    };
+    let body = summarize_run(ctxt, commit, source)
+        .await
+        .unwrap_or_else(|error| error);
 
     client.post_comment(pr, body).await;
 
@@ -140,7 +73,12 @@ async fn calculate_metric_comparison(
     .await
     {
         Ok(Some(c)) => Ok(c),
-        _ => Err("ERROR categorizing benchmark run!".to_owned()),
+        Ok(None) => {
+            Err("Error occured while categorizing benchmark run (missing comparison).".to_string())
+        }
+        Err(error) => Err(format!(
+            "Error occured while categorizing benchmark run:\n\n```{error}```"
+        )),
     }
 }
 
@@ -150,8 +88,6 @@ enum PerfRunSource {
     MasterCommit,
     // Manual try build on a PR
     TryBuild,
-    // Manual try build on a merged rollup PR
-    TryBuildRollup,
 }
 
 // Should the metric be shown by default in the summary?
@@ -204,8 +140,9 @@ async fn summarize_run(
         Direction::Mixed => "❌✅ regressions and improvements",
         Direction::None => "no relevant changes",
     };
-    let is_regression = deserves_attention_icount(&inst_primary, &inst_secondary)
-        && matches!(direction, Direction::Regression | Direction::Mixed);
+    let deserves_attention = deserves_attention_icount(&inst_primary, &inst_secondary);
+    let is_regression =
+        deserves_attention && matches!(direction, Direction::Regression | Direction::Mixed);
 
     writeln!(
         &mut message,
@@ -214,7 +151,7 @@ async fn summarize_run(
         if has_broken_benchmarks {
             " - BENCHMARK(S) FAILED"
         } else if is_regression {
-            " - please read the text below"
+            " - please read:"
         } else {
             " - no action needed"
         },
@@ -222,8 +159,7 @@ async fn summarize_run(
     .unwrap();
 
     let next_steps = match source {
-        PerfRunSource::TryBuild => try_run_body(is_regression),
-        PerfRunSource::TryBuildRollup => "".to_string(),
+        PerfRunSource::TryBuild => try_run_body(is_regression, deserves_attention),
         PerfRunSource::MasterCommit => master_run_body(is_regression),
     };
     writeln!(&mut message, "{next_steps}\n").unwrap();
@@ -319,8 +255,7 @@ fn write_metric_summary(
     message: &mut String,
 ) {
     if !primary.is_relevant() && !secondary.is_relevant() {
-        message
-            .push_str("This benchmark run did not return any relevant results for this metric.\n");
+        message.push_str("This perf run didn't have relevant results for this metric.\n");
     } else {
         match visibility {
             DefaultMetricVisibility::Shown => {
@@ -389,26 +324,45 @@ cc @rust-lang/wg-compiler-performance
     .to_string()
 }
 
-fn try_run_body(is_regression: bool) -> String {
+fn try_run_body(is_regression: bool, deserves_attention: bool) -> String {
     let next_steps = if is_regression {
-        "\n\n**Next Steps**: If you can justify the regressions found in \
-            this try perf run, please do so in sufficient writing \
+        "\n\n**Next, please**: If you can, justify the regressions found in \
+            this try perf run in writing \
             along with `@rustbot label: +perf-regression-triaged`. If not, \
-            please fix the regressions and do another perf run. If its results \
-            are neutral or positive, the label will be automatically removed."
+            fix the regressions and do another perf run. \
+            Neutral or positive results will clear the label automatically."
     } else {
         ""
+    };
+
+    // We mark PRs as rollup=never if perf deserves attention, so we don't need to debug the perf in the rollup
+    // We don't remove `rollup=never` if perf does not deserve attention, as sometimes there are multiple perf. runs on the same PR,
+    // and it's not always the case that the latest version that gets approved is the one for which we ran perf.
+    let rollup_never = if deserves_attention {
+        // We set the PR note to "rustc-perf", which will be interpreted by bors to mark the PR
+        // as having significant performance results.
+        "@bors rollup=never rustc-perf"
+    } else {
+        ""
+    };
+
+    // If perf does not deserve attention, don't say that the PR was automatically marked as not fit for rolling up
+    // But point out that it can be manually marked as such
+    let rollup_comment = if deserves_attention {
+        "It's automatically marked not fit for rolling up. \
+Overriding is possible but disadvised: \
+it risks changing compiler perf."
+    } else {
+        "Consider adding rollup=never if this change is not fit for rolling up."
     };
 
     let sign = if is_regression { "+" } else { "-" };
     format!(
         "
-Benchmarking this pull request means it may be perf-sensitive – \
-we'll automatically label it not fit for rolling up. \
-You can override this, but we strongly advise not to, \
-due to possible changes in compiler perf.{next_steps}
+Benchmarking means the PR may be perf-sensitive. \
+{rollup_comment}{next_steps}
 
-@bors rollup=never
+{rollup_never}
 @rustbot label: -S-waiting-on-perf {sign}perf-regression",
     )
 }

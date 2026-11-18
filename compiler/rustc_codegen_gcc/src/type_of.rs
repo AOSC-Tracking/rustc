@@ -9,15 +9,15 @@ use rustc_abi::{
 use rustc_codegen_ssa::traits::{
     BaseTypeCodegenMethods, DerivedTypeCodegenMethods, LayoutTypeCodegenMethods,
 };
-use rustc_middle::bug;
 use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::{self, CoroutineArgsExt, Ty, TypeVisitableExt};
+use rustc_span::bug;
 use rustc_target::callconv::{CastTarget, FnAbi};
 
 use crate::abi::{FnAbiGcc, FnAbiGccExt, GccType};
 use crate::context::CodegenCx;
-use crate::type_::struct_fields;
+use crate::type_::{struct_attributes, struct_fields};
 
 impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
     fn type_from_unsigned_integer(&self, i: Integer) -> Type<'gcc> {
@@ -73,15 +73,15 @@ fn uncached_gcc_type<'gcc, 'tcx>(
                 else {
                     element
                 };
-            return cx.context.new_vector_type(element, count);
+            return cx.context.new_vector_type(element, count.as_u64());
         }
-        BackendRepr::ScalarPair(..) => {
+        BackendRepr::ScalarPair { .. } => {
             return cx.type_struct(
                 &[
                     layout.scalar_pair_element_gcc_type(cx, 0),
                     layout.scalar_pair_element_gcc_type(cx, 1),
                 ],
-                false,
+                &struct_attributes(false, Some(layout.align.abi)),
             );
         }
         BackendRepr::Memory { .. } => {}
@@ -129,11 +129,12 @@ fn uncached_gcc_type<'gcc, 'tcx>(
         FieldsShape::Primitive | FieldsShape::Union(_) => {
             let fill = cx.type_padding_filler(layout.size, layout.align.abi);
             let packed = false;
+            let attributes = struct_attributes(packed, Some(layout.align.abi));
             match name {
-                None => cx.type_struct(&[fill], packed),
+                None => cx.type_struct(&[fill], &attributes),
                 Some(ref name) => {
                     let gcc_type = cx.type_named_struct(name);
-                    cx.set_struct_body(gcc_type, &[fill], packed);
+                    cx.set_struct_body(gcc_type, &[fill], &attributes);
                     gcc_type.as_type()
                 }
             }
@@ -142,7 +143,7 @@ fn uncached_gcc_type<'gcc, 'tcx>(
         FieldsShape::Arbitrary { .. } => match name {
             None => {
                 let (gcc_fields, packed) = struct_fields(cx, layout);
-                cx.type_struct(&gcc_fields, packed)
+                cx.type_struct(&gcc_fields, &struct_attributes(packed, Some(layout.align.abi)))
             }
             Some(ref name) => {
                 let gcc_type = cx.type_named_struct(name);
@@ -154,8 +155,6 @@ fn uncached_gcc_type<'gcc, 'tcx>(
 }
 
 pub trait LayoutGccExt<'tcx> {
-    fn is_gcc_immediate(&self) -> bool;
-    fn is_gcc_scalar_pair(&self) -> bool;
     fn gcc_type<'gcc>(&self, cx: &CodegenCx<'gcc, 'tcx>) -> Type<'gcc>;
     fn immediate_gcc_type<'gcc>(&self, cx: &CodegenCx<'gcc, 'tcx>) -> Type<'gcc>;
     fn scalar_gcc_type_at<'gcc>(
@@ -177,25 +176,6 @@ pub trait LayoutGccExt<'tcx> {
 }
 
 impl<'tcx> LayoutGccExt<'tcx> for TyAndLayout<'tcx> {
-    fn is_gcc_immediate(&self) -> bool {
-        match self.backend_repr {
-            BackendRepr::Scalar(_) | BackendRepr::SimdVector { .. } => true,
-            // FIXME(rustc_scalable_vector): Not yet implemented in rustc_codegen_gcc.
-            BackendRepr::SimdScalableVector { .. } => todo!(),
-            BackendRepr::ScalarPair(..) | BackendRepr::Memory { .. } => false,
-        }
-    }
-
-    fn is_gcc_scalar_pair(&self) -> bool {
-        match self.backend_repr {
-            BackendRepr::ScalarPair(..) => true,
-            BackendRepr::Scalar(_)
-            | BackendRepr::SimdVector { .. }
-            | BackendRepr::SimdScalableVector { .. }
-            | BackendRepr::Memory { .. } => false,
-        }
-    }
-
     /// Gets the GCC type corresponding to a Rust type, i.e., `rustc_middle::ty::Ty`.
     /// The pointee type of the pointer in `PlaceRef` is always this type.
     /// For sized types, it is also the right LLVM type for an `alloca`
@@ -261,7 +241,11 @@ impl<'tcx> LayoutGccExt<'tcx> for TyAndLayout<'tcx> {
 
         if let Some((deferred_ty, layout)) = defer {
             let (fields, packed) = struct_fields(cx, layout);
-            cx.set_struct_body(deferred_ty, &fields, packed);
+            cx.set_struct_body(
+                deferred_ty,
+                &fields,
+                &struct_attributes(packed, Some(layout.align.abi)),
+            );
         }
 
         ty
@@ -308,8 +292,8 @@ impl<'tcx> LayoutGccExt<'tcx> for TyAndLayout<'tcx> {
         // This must produce the same result for `repr(transparent)` wrappers as for the inner type!
         // In other words, this should generally not look at the type at all, but only at the
         // layout.
-        let (a, b) = match self.backend_repr {
-            BackendRepr::ScalarPair(ref a, ref b) => (a, b),
+        let (a, b, b_offset) = match self.backend_repr {
+            BackendRepr::ScalarPair { ref a, ref b, b_offset } => (a, b, b_offset),
             _ => bug!("TyAndLayout::scalar_pair_element_llty({:?}): not applicable", self),
         };
         let scalar = [a, b][index];
@@ -325,8 +309,7 @@ impl<'tcx> LayoutGccExt<'tcx> for TyAndLayout<'tcx> {
             return cx.type_i1();
         }
 
-        let offset =
-            if index == 0 { Size::ZERO } else { a.size(cx).align_to(b.default_align(cx).abi) };
+        let offset = if index == 0 { Size::ZERO } else { b_offset };
         self.scalar_gcc_type_at(cx, scalar, offset)
     }
 
@@ -351,14 +334,6 @@ impl<'gcc, 'tcx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'gcc, 'tcx> {
         layout.immediate_gcc_type(self)
     }
 
-    fn is_backend_immediate(&self, layout: TyAndLayout<'tcx>) -> bool {
-        layout.is_gcc_immediate()
-    }
-
-    fn is_backend_scalar_pair(&self, layout: TyAndLayout<'tcx>) -> bool {
-        layout.is_gcc_scalar_pair()
-    }
-
     fn scalar_pair_element_backend_type(
         &self,
         layout: TyAndLayout<'tcx>,
@@ -376,8 +351,8 @@ impl<'gcc, 'tcx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'gcc, 'tcx> {
         fn_abi.ptr_to_gcc_type(self)
     }
 
-    fn reg_backend_type(&self, _ty: &Reg) -> Type<'gcc> {
-        unimplemented!();
+    fn reg_backend_type(&self, ty: &Reg) -> Type<'gcc> {
+        ty.gcc_type(self)
     }
 
     fn fn_decl_backend_type(&self, fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> Type<'gcc> {

@@ -81,6 +81,17 @@ export function getBoolOrDefault(
   return defaultValue;
 }
 
+export function getStringArrayOrDefault(
+  params: Dict<string>,
+  name: string,
+  defaultValue: string[]
+): string[] {
+  if (params.hasOwnProperty(name)) {
+    return params[name].split(",");
+  }
+  return defaultValue;
+}
+
 export function benchmarkNameMatchesFilter(
   benchmarkName: string,
   filterName: string | null
@@ -96,10 +107,66 @@ export function benchmarkNameMatchesFilter(
   }
 }
 
+export function targetMatchesFilter(
+  target: Target,
+  target_set: Target[]
+): boolean {
+  return target_set.includes(target);
+}
+
+// Store the bool value into URL parameters, or reset it if it has the default
+// value.
+export function storeOrResetBool<T extends boolean | string>(
+  urlParams: Dict<string>,
+  name: string,
+  value: T,
+  defaultValue: T
+) {
+  if (value === defaultValue) {
+    if (urlParams.hasOwnProperty(name)) {
+      delete urlParams[name];
+    }
+  } else {
+    urlParams[name] = value.toString();
+  }
+}
+
+export function storeOrResetStringArray(
+  urlParams: Dict<string>,
+  name: string,
+  value: string[],
+  defaultValue: string[]
+) {
+  if (isSameStringArray(value, defaultValue)) {
+    if (urlParams.hasOwnProperty(name)) {
+      delete urlParams[name];
+    }
+  } else {
+    urlParams[name] = value.sort().join(",");
+  }
+}
+
+export function loadTargetsFromUrl(
+  urlParams: Dict<string>,
+  defaultTargets: Target[]
+): Target[] {
+  return getStringArrayOrDefault(
+    urlParams,
+    "target",
+    defaultTargets
+  ) as Target[];
+}
+
+// I hate JavaScript...
+export function isSameStringArray(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.sort().join(",") === b.sort().join(",");
+}
+
 const TARGET_SHORTCUTS: {[target in Target]: string} = {
   "x86_64-unknown-linux-gnu": "x64",
+  "aarch64-unknown-linux-gnu": "AArch64",
 };
 
 export function formatTarget(target: Target): string {
-  return TARGET_SHORTCUTS[target] ?? target;
+  return TARGET_SHORTCUTS[target] ?? target?.split("-")[0];
 }

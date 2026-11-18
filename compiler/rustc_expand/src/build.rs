@@ -2,8 +2,8 @@ use rustc_ast::token::Delimiter;
 use rustc_ast::tokenstream::TokenStream;
 use rustc_ast::util::literal;
 use rustc_ast::{
-    self as ast, AnonConst, AttrItem, AttrVec, BlockCheckMode, Expr, LocalKind, MatchKind,
-    MgcaDisambiguation, PatKind, UnOp, attr, token, tokenstream,
+    self as ast, AnonConst, AttrItem, AttrVec, BlockCheckMode, Expr, LocalKind, MatchKind, PatKind,
+    UnOp, attr, token, tokenstream,
 };
 use rustc_span::{DUMMY_SP, Ident, Span, Spanned, Symbol, kw, sym};
 use thin_vec::{ThinVec, thin_vec};
@@ -48,7 +48,7 @@ impl<'a> ExtCtxt<'a> {
             id: ast::DUMMY_NODE_ID,
             args,
         });
-        ast::Path { span, segments, tokens: None }
+        ast::Path { span, segments }
     }
 
     pub fn macro_call(
@@ -73,7 +73,7 @@ impl<'a> ExtCtxt<'a> {
     }
 
     pub fn ty(&self, span: Span, kind: ast::TyKind) -> Box<ast::Ty> {
-        Box::new(ast::Ty { id: ast::DUMMY_NODE_ID, span, kind, tokens: None })
+        Box::new(ast::Ty { id: ast::DUMMY_NODE_ID, span, kind })
     }
 
     pub fn ty_infer(&self, span: Span) -> Box<ast::Ty> {
@@ -100,7 +100,6 @@ impl<'a> ExtCtxt<'a> {
                 attrs: AttrVec::new(),
                 tokens: None,
             }),
-            mgca_disambiguation: MgcaDisambiguation::Direct,
         }
     }
 
@@ -124,6 +123,17 @@ impl<'a> ExtCtxt<'a> {
 
     pub fn ty_ptr(&self, span: Span, ty: Box<ast::Ty>, mutbl: ast::Mutability) -> Box<ast::Ty> {
         self.ty(span, ast::TyKind::Ptr(self.ty_mt(ty, mutbl)))
+    }
+
+    pub fn ty_unit(&self, span: Span) -> Box<ast::Ty> {
+        self.ty(span, ast::TyKind::Tup(ThinVec::new()))
+    }
+
+    pub fn ty_self(&self, span: Span) -> Box<ast::Ty> {
+        self.ty_path(self.path_ident(span, Ident::new(kw::SelfUpper, span)))
+    }
+    pub fn ty_self_ref(&self, span: Span) -> Box<ast::Ty> {
+        self.ty_ref(span, self.ty_self(span), None, ast::Mutability::Not)
     }
 
     pub fn typaram(
@@ -288,13 +298,7 @@ impl<'a> ExtCtxt<'a> {
         )
     }
     pub fn block(&self, span: Span, stmts: ThinVec<ast::Stmt>) -> Box<ast::Block> {
-        Box::new(ast::Block {
-            stmts,
-            id: ast::DUMMY_NODE_ID,
-            rules: BlockCheckMode::Default,
-            span,
-            tokens: None,
-        })
+        Box::new(ast::Block { stmts, id: ast::DUMMY_NODE_ID, rules: BlockCheckMode::Default, span })
     }
 
     pub fn expr(&self, span: Span, kind: ast::ExprKind) -> Box<ast::Expr> {
@@ -316,6 +320,9 @@ impl<'a> ExtCtxt<'a> {
     }
     pub fn expr_self(&self, span: Span) -> Box<ast::Expr> {
         self.expr_ident(span, Ident::new(kw::SelfLower, span))
+    }
+    pub fn expr_ident_sym(&self, span: Span, sym: Symbol) -> Box<ast::Expr> {
+        self.expr_ident(span, Ident::new(sym, span))
     }
 
     pub fn expr_macro_call(&self, span: Span, call: Box<ast::MacCall>) -> Box<ast::Expr> {
@@ -533,7 +540,7 @@ impl<'a> ExtCtxt<'a> {
     }
 
     pub fn pat(&self, span: Span, kind: PatKind) -> ast::Pat {
-        ast::Pat { id: ast::DUMMY_NODE_ID, kind, span, tokens: None }
+        ast::Pat { id: ast::DUMMY_NODE_ID, kind, span }
     }
     pub fn pat_wild(&self, span: Span) -> ast::Pat {
         self.pat(span, PatKind::Wild)
@@ -635,7 +642,7 @@ impl<'a> ExtCtxt<'a> {
                 binder: ast::ClosureBinder::NotPresent,
                 capture_clause: ast::CaptureBy::Ref,
                 constness: ast::Const::No,
-                coroutine_kind: None,
+                coroutine_marker: None,
                 movability: ast::Movability::Movable,
                 fn_decl,
                 body,
@@ -689,7 +696,6 @@ impl<'a> ExtCtxt<'a> {
             vis: ast::Visibility {
                 span: span.shrink_to_lo(),
                 kind: ast::VisibilityKind::Inherited,
-                tokens: None,
             },
             span,
             tokens: None,
@@ -715,7 +721,7 @@ impl<'a> ExtCtxt<'a> {
                     mutability,
                     expr: Some(expr),
                     define_opaque: None,
-                    eii_impls: Default::default(),
+                    eii_impl: None,
                 }
                 .into(),
             ),
@@ -727,7 +733,7 @@ impl<'a> ExtCtxt<'a> {
         span: Span,
         ident: Ident,
         ty: Box<ast::Ty>,
-        rhs_kind: ast::ConstItemRhsKind,
+        body: Option<Box<Expr>>,
     ) -> Box<ast::Item> {
         let defaultness = ast::Defaultness::Implicit;
         self.item(
@@ -740,7 +746,7 @@ impl<'a> ExtCtxt<'a> {
                     // FIXME(generic_const_items): Pass the generics as a parameter.
                     generics: ast::Generics::default(),
                     ty,
-                    rhs_kind,
+                    body,
                     define_opaque: None,
                 }
                 .into(),
@@ -751,7 +757,7 @@ impl<'a> ExtCtxt<'a> {
     // Builds `#[name]`.
     pub fn attr_word(&self, name: Symbol, span: Span) -> ast::Attribute {
         let g = &self.sess.psess.attr_id_generator;
-        attr::mk_attr_word(g, ast::AttrStyle::Outer, ast::Safety::Default, name, span)
+        attr::mk_attr_word(g, ast::AttrStyle::Outer, name, span)
     }
 
     // Builds `#[name = val]`.
@@ -759,32 +765,30 @@ impl<'a> ExtCtxt<'a> {
     // Note: `span` is used for both the identifier and the value.
     pub fn attr_name_value_str(&self, name: Symbol, val: Symbol, span: Span) -> ast::Attribute {
         let g = &self.sess.psess.attr_id_generator;
-        attr::mk_attr_name_value_str(
-            g,
-            ast::AttrStyle::Outer,
-            ast::Safety::Default,
-            name,
-            val,
-            span,
-        )
+        attr::mk_attr_name_value_str(g, ast::AttrStyle::Outer, name, val, span)
     }
 
     // Builds `#[outer(inner)]`.
     pub fn attr_nested_word(&self, outer: Symbol, inner: Symbol, span: Span) -> ast::Attribute {
         let g = &self.sess.psess.attr_id_generator;
-        attr::mk_attr_nested_word(
-            g,
-            ast::AttrStyle::Outer,
-            ast::Safety::Default,
-            outer,
-            inner,
-            span,
-        )
+        attr::mk_attr_nested_word(g, ast::AttrStyle::Outer, outer, inner, span)
     }
 
     // Builds an attribute fully manually.
     pub fn attr_nested(&self, inner: AttrItem, span: Span) -> ast::Attribute {
         let g = &self.sess.psess.attr_id_generator;
         attr::mk_attr_from_item(g, inner, None, ast::AttrStyle::Outer, span)
+    }
+
+    pub fn empty_generics(&self, span: Span) -> ast::Generics {
+        ast::Generics {
+            params: ThinVec::new(),
+            where_clause: ast::WhereClause {
+                has_where_token: false,
+                predicates: ThinVec::new(),
+                span,
+            },
+            span,
+        }
     }
 }

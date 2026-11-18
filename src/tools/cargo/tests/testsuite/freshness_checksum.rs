@@ -1,30 +1,57 @@
 //! Tests for checksum-based fingerprinting (rebuild detection).
+//!
+//! This must be kept in-sync with `freshness_mtime.rs`
 
 use std::fs::{self, OpenOptions};
+use std::io;
 use std::io::prelude::*;
 use std::net::TcpListener;
-use std::process::Stdio;
+use std::path::{Path, PathBuf};
 use std::thread;
+use std::time::SystemTime;
 
 use crate::prelude::*;
 use cargo_test_support::assert_deps_contains;
+use cargo_test_support::paths;
 use cargo_test_support::registry::Package;
 use cargo_test_support::{
-    basic_lib_manifest, basic_manifest, project, rustc_host, rustc_host_env, str,
+    basic_lib_manifest, basic_manifest, is_coarse_mtime, project, rustc_host, sleep_ms, str,
 };
-
-use super::death;
+use filetime::FileTime;
 
 #[cargo_test]
 fn non_nightly_fails() {
     let p = project().file("src/main.rs", "fn main() {}").build();
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .with_stderr_data(str![[r#"
 [ERROR] the `-Z` flag is only accepted on the nightly channel of Cargo, but this is the `stable` channel
 See https://doc.rust-lang.org/book/appendix-07-nightly-rust.html for more information about Rust release channels.
 
 "#]])
         .with_status(101)
+        .run();
+}
+
+#[cargo_test]
+fn warn_on_missing_feature() {
+    let p = project().file("src/main.rs", "fn main() {}").build();
+    p.cargo("check")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .with_stderr_data(str![[r#"
+[WARNING] ignoring `build.fingerprint = "content"` without `-Zchecksum-freshness`
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    p.cargo("check")
+        .env("CARGO_BUILD_FINGERPRINT", "mtime")
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -35,7 +62,9 @@ fn checksum_actually_uses_checksum() {
         .file("src/a.rs", "")
         .build();
 
-    p.cargo("check -Zchecksum-freshness")
+    p.cargo("check")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
 [CHECKING] foo v0.0.1 ([ROOT]/foo)
@@ -45,48 +74,11 @@ fn checksum_actually_uses_checksum() {
         .run();
     p.root().move_into_the_future();
 
-    p.cargo("check -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn checksum_build_compatible_with_mtime_build() {
-    let p = project()
-        .file("src/main.rs", "mod a; fn main() {}")
-        .file("src/a.rs", "")
-        .build();
-
-    p.cargo("check -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[CHECKING] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
     p.cargo("check")
-        .with_stderr_data(str![[r#"
-[CHECKING] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.cargo("check -Zchecksum-freshness")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
-[CHECKING] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.cargo("check")
-        .with_stderr_data(str![[r#"
-[CHECKING] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
@@ -100,7 +92,9 @@ fn same_size_different_content() {
         .file("src/a.rs", "")
         .build();
 
-    p.cargo("check -Zchecksum-freshness")
+    p.cargo("check")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
 [CHECKING] foo v0.0.1 ([ROOT]/foo)
@@ -110,7 +104,9 @@ fn same_size_different_content() {
         .run();
     p.change_file("src/main.rs", "mod a;fn main() { }");
 
-    p.cargo("check -v -Zchecksum-freshness")
+    p.cargo("check -v")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
 [DIRTY] foo v0.0.1 ([ROOT]/foo): the file `src/main.rs` has changed (checksum didn't match, blake3=26aa07e1adab787246f9d333be65d2eb78dd5fd0fee834ba7a769098b4b651bc != blake3=fc1a42e376d9c148227c13de41b77143f6b5b8132d2b204b63cdbc9326848894)
@@ -121,7 +117,9 @@ fn same_size_different_content() {
 "#]])
         .run();
 
-    p.cargo("check -Zchecksum-freshness")
+    p.cargo("check")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -168,8 +166,11 @@ fn binary_depinfo_correctly_encoded() {
         .build();
 
     let host = rustc_host();
-    p.cargo("build -Zbinary-dep-depinfo -Zchecksum-freshness --target")
+    p.cargo("build --target")
         .arg(&host)
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zbinary-dep-depinfo")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["binary-dep-depinfo", "checksum-freshness"])
         .with_stderr_data(str![[r#"
 ...
@@ -181,17 +182,23 @@ fn binary_depinfo_correctly_encoded() {
 
     assert_deps_contains(
         &p,
-        &format!("target/{}/debug/.fingerprint/foo-*/dep-bin-foo", host),
+        &format!("target/{}/debug/build/foo/*/fingerprint/dep-bin-foo", host),
         &[
             (0, "src/main.rs"),
-            (1, &format!("{}/debug/deps/libbar-*.rlib", host)),
-            (1, &format!("{}/debug/deps/libregdep-*.rlib", host)),
+            (1, &format!("{}/debug/build/bar/*/out/libbar-*.rlib", host)),
+            (
+                1,
+                &format!("{}/debug/build/regdep/*/out/libregdep-*.rlib", host),
+            ),
         ],
     );
 
     // Make sure it stays fresh.
-    p.cargo("build -Zbinary-dep-depinfo -Zchecksum-freshness --target")
+    p.cargo("build --target")
         .arg(&host)
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zbinary-dep-depinfo")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["binary-dep-depinfo", "checksum-freshness"])
         .with_stderr_data(str![[r#"
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -207,7 +214,9 @@ fn modifying_and_moving() {
         .file("src/a.rs", "")
         .build();
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
@@ -216,7 +225,9 @@ fn modifying_and_moving() {
 "#]])
         .run();
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
@@ -227,7 +238,9 @@ fn modifying_and_moving() {
     p.root().join("target").move_into_the_past();
 
     p.change_file("src/a.rs", "#[allow(unused)]fn main() {}");
-    p.cargo("build -Zchecksum-freshness -v")
+    p.cargo("build -v")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
 [DIRTY] foo v0.0.1 ([ROOT]/foo): file size changed (0 != 28) for `src/a.rs`
@@ -239,7 +252,9 @@ fn modifying_and_moving() {
         .run();
 
     fs::rename(&p.root().join("src/a.rs"), &p.root().join("src/b.rs")).unwrap();
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_status(101)
         .with_stderr_data(str![[r#"
@@ -249,6 +264,49 @@ error[E0583]: file not found for module `a`
 [ERROR] could not compile `foo` (bin "foo") due to 1 previous error
 
 "#]])
+        .run();
+}
+
+#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
+fn modify_only_some_files() {
+    let p = project()
+        .file("src/lib.rs", "mod a;")
+        .file("src/a.rs", "")
+        .file("src/main.rs", "mod b; fn main() {}")
+        .file("src/b.rs", "")
+        .file("tests/test.rs", "")
+        .build();
+
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
+        .masquerade_as_nightly_cargo(&["checksum-freshness"])
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    p.cargo("test")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
+        .masquerade_as_nightly_cargo(&["checksum-freshness"])
+        .run();
+
+    assert!(p.bin("foo").is_file());
+
+    let lib = p.root().join("src/lib.rs");
+    p.change_file("src/lib.rs", "invalid rust code");
+    p.change_file("src/b.rs", "#[allow(unused)]fn foo() {}");
+    lib.move_into_the_past();
+
+    // Despite mtime change, lib rebuilds and fails
+    p.cargo("build -v")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
+        .masquerade_as_nightly_cargo(&["checksum-freshness"])
+        .with_status(101)
+        .with_stderr_data("...")
         .run();
 }
 
@@ -288,10 +346,12 @@ fn rebuild_sub_package_then_while_package() {
         .file("b/src/lib.rs", "")
         .build();
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
-[LOCKING] 2 packages to latest compatible versions
+[LOCKING] 2 packages to highest compatible versions
 [COMPILING] b v0.0.1 ([ROOT]/foo/b)
 [COMPILING] a v0.0.1 ([ROOT]/foo/a)
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
@@ -302,7 +362,9 @@ fn rebuild_sub_package_then_while_package() {
 
     p.change_file("b/src/lib.rs", "pub fn b() {}");
 
-    p.cargo("build -Zchecksum-freshness -pb -v")
+    p.cargo("build -pb -v")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
 [DIRTY] b v0.0.1 ([ROOT]/foo/b): file size changed (0 != 13) for `b/src/lib.rs`
@@ -318,7 +380,9 @@ fn rebuild_sub_package_then_while_package() {
         "extern crate a; extern crate b; pub fn toplevel() {}",
     );
 
-    p.cargo("build -Zchecksum-freshness -v")
+    p.cargo("build -v")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
 [FRESH] b v0.0.1 ([ROOT]/foo/b)
@@ -335,671 +399,40 @@ fn rebuild_sub_package_then_while_package() {
 }
 
 #[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn changing_lib_features_caches_targets() {
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-                name = "foo"
-                authors = []
-                version = "0.0.1"
-                edition = "2015"
-
-                [features]
-                foo = []
-            "#,
-        )
-        .file("src/lib.rs", "")
-        .build();
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-
-    p.cargo("build -Zchecksum-freshness --features foo")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-
-    /* Targets should be cached from the first build */
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-
-    p.cargo("build -Zchecksum-freshness --features foo")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn changing_profiles_caches_targets() {
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-                name = "foo"
-                authors = []
-                version = "0.0.1"
-                edition = "2015"
-
-                [profile.dev]
-                panic = "abort"
-            "#,
-        )
-        .file("src/lib.rs", "")
-        .build();
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-
-    p.cargo("test -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[RUNNING] unittests src/lib.rs (target/debug/deps/foo-[HASH][EXE])
-[DOCTEST] foo
-
-"#]])
-        .run();
-
-    /* Targets should be cached from the first build */
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-
-    p.cargo("test -Zchecksum-freshness foo")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[RUNNING] unittests src/lib.rs (target/debug/deps/foo-[HASH][EXE])
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn changing_bin_paths_common_target_features_caches_targets() {
-    // Make sure dep_cache crate is built once per feature
-    let p = project()
-        .no_manifest()
-        .file(
-            ".cargo/config.toml",
-            r#"
-                [build]
-                target-dir = "./target"
-            "#,
-        )
-        .file(
-            "dep_crate/Cargo.toml",
-            r#"
-                [package]
-                name    = "dep_crate"
-                version = "0.0.1"
-                edition = "2015"
-                authors = []
-
-                [features]
-                ftest  = []
-            "#,
-        )
-        .file(
-            "dep_crate/src/lib.rs",
-            r#"
-                #[cfg(feature = "ftest")]
-                pub fn yo() {
-                    println!("ftest on")
-                }
-                #[cfg(not(feature = "ftest"))]
-                pub fn yo() {
-                    println!("ftest off")
-                }
-            "#,
-        )
-        .file(
-            "a/Cargo.toml",
-            r#"
-                [package]
-                name    = "a"
-                version = "0.0.1"
-                edition = "2015"
-                authors = []
-
-                [dependencies]
-                dep_crate = {path = "../dep_crate", features = []}
-            "#,
-        )
-        .file("a/src/lib.rs", "")
-        .file(
-            "a/src/main.rs",
-            r#"
-                extern crate dep_crate;
-                use dep_crate::yo;
-                fn main() {
-                    yo();
-                }
-            "#,
-        )
-        .file(
-            "b/Cargo.toml",
-            r#"
-                [package]
-                name    = "b"
-                version = "0.0.1"
-                edition = "2015"
-                authors = []
-
-                [dependencies]
-                dep_crate = {path = "../dep_crate", features = ["ftest"]}
-            "#,
-        )
-        .file("b/src/lib.rs", "")
-        .file(
-            "b/src/main.rs",
-            r#"
-                extern crate dep_crate;
-                use dep_crate::yo;
-                fn main() {
-                    yo();
-                }
-            "#,
-        )
-        .build();
-
-    /* Build and rebuild a/. Ensure dep_crate only builds once */
-    p.cargo("run -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .cwd("a")
-        .with_stdout_data(str![[r#"
-ftest off
-
-"#]])
-        .with_stderr_data(str![[r#"
-[LOCKING] 1 package to latest compatible version
-[COMPILING] dep_crate v0.0.1 ([ROOT]/foo/dep_crate)
-[COMPILING] a v0.0.1 ([ROOT]/foo/a)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[RUNNING] `[ROOT]/foo/./target/debug/a[EXE]`
-
-"#]])
-        .run();
-    p.cargo("clean -p a").cwd("a").run();
-    p.cargo("run -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .cwd("a")
-        .with_stdout_data(str![[r#"
-ftest off
-
-"#]])
-        .with_stderr_data(str![[r#"
-[COMPILING] a v0.0.1 ([ROOT]/foo/a)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[RUNNING] `[ROOT]/foo/./target/debug/a[EXE]`
-
-"#]])
-        .run();
-
-    /* Build and rebuild b/. Ensure dep_crate only builds once */
-    p.cargo("run -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .cwd("b")
-        .with_stdout_data(str![[r#"
-ftest on
-
-"#]])
-        .with_stderr_data(str![[r#"
-[LOCKING] 1 package to latest compatible version
-[COMPILING] dep_crate v0.0.1 ([ROOT]/foo/dep_crate)
-[COMPILING] b v0.0.1 ([ROOT]/foo/b)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[RUNNING] `[ROOT]/foo/./target/debug/b[EXE]`
-
-"#]])
-        .run();
-    p.cargo("clean -p b").cwd("b").run();
-    p.cargo("run -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .cwd("b")
-        .with_stdout_data(str![[r#"
-ftest on
-
-"#]])
-        .with_stderr_data(str![[r#"
-[COMPILING] b v0.0.1 ([ROOT]/foo/b)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[RUNNING] `[ROOT]/foo/./target/debug/b[EXE]`
-
-"#]])
-        .run();
-
-    /* Build a/ package again. If we cache different feature dep builds correctly,
-     * this should not cause a rebuild of dep_crate */
-    p.cargo("clean -p a").cwd("a").run();
-    p.cargo("run -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .cwd("a")
-        .with_stdout_data(str![[r#"
-ftest off
-
-"#]])
-        .with_stderr_data(str![[r#"
-[COMPILING] a v0.0.1 ([ROOT]/foo/a)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[RUNNING] `[ROOT]/foo/./target/debug/a[EXE]`
-
-"#]])
-        .run();
-
-    /* Build b/ package again. If we cache different feature dep builds correctly,
-     * this should not cause a rebuild */
-    p.cargo("clean -p b").cwd("b").run();
-    p.cargo("run -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .cwd("b")
-        .with_stdout_data(str![[r#"
-ftest on
-
-"#]])
-        .with_stderr_data(str![[r#"
-[COMPILING] b v0.0.1 ([ROOT]/foo/b)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[RUNNING] `[ROOT]/foo/./target/debug/b[EXE]`
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn changing_bin_features_caches_targets() {
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-                name = "foo"
-                authors = []
-                version = "0.0.1"
-                edition = "2015"
-
-                [features]
-                foo = []
-            "#,
-        )
-        .file(
-            "src/main.rs",
-            r#"
-                fn main() {
-                    let msg = if cfg!(feature = "foo") { "feature on" } else { "feature off" };
-                    println!("{}", msg);
-                }
-            "#,
-        )
-        .build();
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.rename_run("foo", "off1")
-        .with_stdout_data(str![[r#"
-feature off
-
-"#]])
-        .run();
-
-    p.cargo("build -Zchecksum-freshness --features foo")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.rename_run("foo", "on1")
-        .with_stdout_data(str![[r#"
-feature on
-
-"#]])
-        .run();
-
-    /* Targets should be cached from the first build */
-
-    let mut e = p.cargo("build -Zchecksum-freshness -v");
-    e.masquerade_as_nightly_cargo(&["checksum-freshness"]);
-
-    // MSVC does not include hash in binary filename, so it gets recompiled.
-    if cfg!(target_env = "msvc") {
-        e.with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the list of features changed
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `rustc --crate-name [..]
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]]);
-    } else {
-        e.with_stderr_data(str![[r#"
-[FRESH] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]]);
-    }
-    e.run();
-    p.rename_run("foo", "off2")
-        .with_stdout_data(str![[r#"
-feature off
-
-"#]])
-        .run();
-
-    let mut e = p.cargo("build -Zchecksum-freshness --features foo -v");
-    e.masquerade_as_nightly_cargo(&["checksum-freshness"]);
-    if cfg!(target_env = "msvc") {
-        e.with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the list of features changed
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `rustc [..]
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]]);
-    } else {
-        e.with_stderr_data(str![[r#"
-[FRESH] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]]);
-    }
-    e.run();
-    p.rename_run("foo", "on2")
-        .with_stdout_data(str![[r#"
-feature on
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
 fn rebuild_tests_if_lib_changes() {
     let p = project()
         .file("src/lib.rs", "pub fn foo() {}")
         .file("tests/foo-test.rs", "extern crate foo;")
         .build();
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .run();
-    p.cargo("test -Zchecksum-freshness")
+    p.cargo("test")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .run();
 
     p.change_file("src/lib.rs", "");
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .run();
-    p.cargo("test -Zchecksum-freshness -v --test foo-test")
+    p.cargo("test -v --test foo-test")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
 [DIRTY] foo v0.0.1 ([ROOT]/foo): the dependency `foo` was rebuilt ([TIME_DIFF_AFTER_LAST_BUILD])
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc --crate-name foo_test [..]`
 [FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[RUNNING] `[ROOT]/foo/target/debug/deps/foo_test-[HASH][EXE]`
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn no_rebuild_transitive_target_deps() {
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-                name = "foo"
-                version = "0.0.1"
-                edition = "2015"
-                authors = []
-
-                [dependencies]
-                a = { path = "a" }
-                [dev-dependencies]
-                b = { path = "b" }
-            "#,
-        )
-        .file("src/lib.rs", "")
-        .file("tests/foo.rs", "")
-        .file(
-            "a/Cargo.toml",
-            r#"
-                [package]
-                name = "a"
-                version = "0.0.1"
-                edition = "2015"
-                authors = []
-
-                [target.foo.dependencies]
-                c = { path = "../c" }
-            "#,
-        )
-        .file("a/src/lib.rs", "")
-        .file(
-            "b/Cargo.toml",
-            r#"
-                [package]
-                name = "b"
-                version = "0.0.1"
-                edition = "2015"
-                authors = []
-
-                [dependencies]
-                c = { path = "../c" }
-            "#,
-        )
-        .file("b/src/lib.rs", "")
-        .file("c/Cargo.toml", &basic_manifest("c", "0.0.1"))
-        .file("c/src/lib.rs", "")
-        .build();
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-    p.cargo("test -Zchecksum-freshness --no-run")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[COMPILING] c v0.0.1 ([ROOT]/foo/c)
-[COMPILING] b v0.0.1 ([ROOT]/foo/b)
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[EXECUTABLE] unittests src/lib.rs (target/debug/deps/foo-[HASH][EXE])
-[EXECUTABLE] tests/foo.rs (target/debug/deps/foo-[HASH][EXE])
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn rerun_if_changed_in_dep() {
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-                name = "foo"
-                version = "0.0.1"
-                edition = "2015"
-                authors = []
-
-                [dependencies]
-                a = { path = "a" }
-            "#,
-        )
-        .file("src/lib.rs", "")
-        .file(
-            "a/Cargo.toml",
-            r#"
-                [package]
-                name = "a"
-                version = "0.0.1"
-                edition = "2015"
-                authors = []
-                build = "build.rs"
-            "#,
-        )
-        .file(
-            "a/build.rs",
-            r#"
-                fn main() {
-                    println!("cargo::rerun-if-changed=build.rs");
-                }
-            "#,
-        )
-        .file("a/src/lib.rs", "")
-        .build();
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn same_build_dir_cached_packages() {
-    let p = project()
-        .no_manifest()
-        .file(
-            "a1/Cargo.toml",
-            r#"
-                [package]
-                name = "a1"
-                version = "0.0.1"
-                edition = "2015"
-                authors = []
-                [dependencies]
-                b = { path = "../b" }
-            "#,
-        )
-        .file("a1/src/lib.rs", "")
-        .file(
-            "a2/Cargo.toml",
-            r#"
-                [package]
-                name = "a2"
-                version = "0.0.1"
-                edition = "2015"
-                authors = []
-                [dependencies]
-                b = { path = "../b" }
-            "#,
-        )
-        .file("a2/src/lib.rs", "")
-        .file(
-            "b/Cargo.toml",
-            r#"
-                [package]
-                name = "b"
-                version = "0.0.1"
-                edition = "2015"
-                authors = []
-                [dependencies]
-                c = { path = "../c" }
-            "#,
-        )
-        .file("b/src/lib.rs", "")
-        .file(
-            "c/Cargo.toml",
-            r#"
-                [package]
-                name = "c"
-                version = "0.0.1"
-                edition = "2015"
-                authors = []
-                [dependencies]
-                d = { path = "../d" }
-            "#,
-        )
-        .file("c/src/lib.rs", "")
-        .file("d/Cargo.toml", &basic_manifest("d", "0.0.1"))
-        .file("d/src/lib.rs", "")
-        .file(
-            ".cargo/config.toml",
-            r#"
-                [build]
-                target-dir = "./target"
-            "#,
-        )
-        .build();
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .cwd("a1")
-        .with_stderr_data(str![[r#"
-[LOCKING] 3 packages to latest compatible versions
-[COMPILING] d v0.0.1 ([ROOT]/foo/d)
-[COMPILING] c v0.0.1 ([ROOT]/foo/c)
-[COMPILING] b v0.0.1 ([ROOT]/foo/b)
-[COMPILING] a1 v0.0.1 ([ROOT]/foo/a1)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .cwd("a2")
-        .with_stderr_data(str![[r#"
-[LOCKING] 3 packages to latest compatible versions
-[COMPILING] a2 v0.0.1 ([ROOT]/foo/a2)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `[ROOT]/foo/target/debug/build/foo/[HASH]/out/foo_test-[HASH][EXE]`
 
 "#]])
         .run();
@@ -1019,6 +452,9 @@ fn no_rebuild_if_build_artifacts_move_backwards_in_time() {
 
                 [dependencies]
                 a = { path = "a" }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -1026,13 +462,17 @@ fn no_rebuild_if_build_artifacts_move_backwards_in_time() {
         .file("a/src/lib.rs", "")
         .build();
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .run();
 
     p.root().move_into_the_past();
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stdout_data(str![])
         .with_stderr_data(str![[r#"
@@ -1043,67 +483,45 @@ fn no_rebuild_if_build_artifacts_move_backwards_in_time() {
 }
 
 #[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn rebuild_if_environment_changes() {
+fn no_rebuild_if_build_artifacts_move_forward_in_time() {
     let p = project()
         .file(
             "Cargo.toml",
             r#"
                 [package]
                 name = "foo"
-                description = "old desc"
                 version = "0.0.1"
                 edition = "2015"
                 authors = []
+
+                [dependencies]
+                a = { path = "a" }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
-        .file(
-            "src/main.rs",
-            r#"
-                fn main() {
-                    println!("{}", env!("CARGO_PKG_DESCRIPTION"));
-                }
-            "#,
-        )
+        .file("src/lib.rs", "")
+        .file("a/Cargo.toml", &basic_manifest("a", "0.0.1"))
+        .file("a/src/lib.rs", "")
         .build();
 
-    p.cargo("run -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stdout_data(str![[r#"
-old desc
-
-"#]])
-        .with_stderr_data(str![[r#"
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[RUNNING] `target/debug/foo[EXE]`
-
-"#]])
         .run();
 
-    p.change_file(
-        "Cargo.toml",
-        r#"
-            [package]
-            name = "foo"
-            description = "new desc"
-            version = "0.0.1"
-            edition = "2015"
-            authors = []
-        "#,
-    );
+    p.root().move_into_the_future();
 
-    p.cargo("run -Zchecksum-freshness -v")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stdout_data(str![[r#"
-new desc
-
-"#]])
+        .env("CARGO_LOG", "")
+        .with_stdout_data(str![])
         .with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the environment variable CARGO_PKG_DESCRIPTION changed
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `rustc [..]
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[RUNNING] `target/debug/foo[EXE]`
 
 "#]])
         .run();
@@ -1125,6 +543,9 @@ fn no_rebuild_when_rename_dir() {
 
                 [dependencies]
                 foo = { path = "foo" }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/_unused.rs", "")
@@ -1139,7 +560,9 @@ fn no_rebuild_when_rename_dir() {
     // `Cargo.toml` path from looking for the package root.
     fs::write(p.root().join("src/lib.rs"), "").unwrap();
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .run();
     let mut new = p.root();
@@ -1147,7 +570,9 @@ fn no_rebuild_when_rename_dir() {
     new.push("bar");
     fs::rename(p.root(), &new).unwrap();
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .cwd(&new)
         .with_stderr_data(str![[r#"
@@ -1158,290 +583,7 @@ fn no_rebuild_when_rename_dir() {
 }
 
 #[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn unused_optional_dep() {
-    Package::new("registry1", "0.1.0").publish();
-    Package::new("registry2", "0.1.0").publish();
-    Package::new("registry3", "0.1.0").publish();
-
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-                name = "p"
-                authors = []
-                version = "0.1.0"
-                edition = "2015"
-
-                [dependencies]
-                bar = { path = "bar" }
-                baz = { path = "baz" }
-                registry1 = "*"
-            "#,
-        )
-        .file("src/lib.rs", "")
-        .file(
-            "bar/Cargo.toml",
-            r#"
-                [package]
-                name = "bar"
-                version = "0.1.1"
-                edition = "2015"
-                authors = []
-
-                [dev-dependencies]
-                registry2 = "*"
-            "#,
-        )
-        .file("bar/src/lib.rs", "")
-        .file(
-            "baz/Cargo.toml",
-            r#"
-                [package]
-                name = "baz"
-                version = "0.1.1"
-                edition = "2015"
-                authors = []
-
-                [dependencies]
-                registry3 = { version = "*", optional = true }
-            "#,
-        )
-        .file("baz/src/lib.rs", "")
-        .build();
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn path_dev_dep_registry_updates() {
-    Package::new("registry1", "0.1.0").publish();
-    Package::new("registry2", "0.1.0").publish();
-
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-                name = "p"
-                authors = []
-                version = "0.1.0"
-                edition = "2015"
-
-                [dependencies]
-                bar = { path = "bar" }
-            "#,
-        )
-        .file("src/lib.rs", "")
-        .file(
-            "bar/Cargo.toml",
-            r#"
-                [package]
-                name = "bar"
-                version = "0.1.1"
-                edition = "2015"
-                authors = []
-
-                [dependencies]
-                registry1 = "*"
-
-                [dev-dependencies]
-                baz = { path = "../baz"}
-            "#,
-        )
-        .file("bar/src/lib.rs", "")
-        .file(
-            "baz/Cargo.toml",
-            r#"
-                [package]
-                name = "baz"
-                version = "0.1.1"
-                edition = "2015"
-                authors = []
-
-                [dependencies]
-                registry2 = "*"
-            "#,
-        )
-        .file("baz/src/lib.rs", "")
-        .build();
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn change_panic_mode() {
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-                [workspace]
-                members = ['bar', 'baz']
-                [profile.dev]
-                panic = 'abort'
-            "#,
-        )
-        .file("src/lib.rs", "")
-        .file("bar/Cargo.toml", &basic_manifest("bar", "0.1.1"))
-        .file("bar/src/lib.rs", "")
-        .file(
-            "baz/Cargo.toml",
-            r#"
-                [package]
-                name = "baz"
-                version = "0.1.1"
-                edition = "2015"
-                authors = []
-
-                [lib]
-                proc-macro = true
-
-                [dependencies]
-                bar = { path = '../bar' }
-            "#,
-        )
-        .file("baz/src/lib.rs", "extern crate bar;")
-        .build();
-
-    p.cargo("build -Zchecksum-freshness -p bar")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-    p.cargo("build -Zchecksum-freshness -p baz")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn dont_rebuild_based_on_plugins() {
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-                name = "bar"
-                version = "0.1.1"
-                edition = "2015"
-
-                [workspace]
-                members = ['baz']
-
-                [dependencies]
-                proc-macro-thing = { path = 'proc-macro-thing' }
-            "#,
-        )
-        .file("src/lib.rs", "")
-        .file(
-            "proc-macro-thing/Cargo.toml",
-            r#"
-                [package]
-                name = "proc-macro-thing"
-                version = "0.1.1"
-                edition = "2015"
-
-                [lib]
-                proc-macro = true
-
-                [dependencies]
-                qux = { path = '../qux' }
-            "#,
-        )
-        .file("proc-macro-thing/src/lib.rs", "")
-        .file(
-            "baz/Cargo.toml",
-            r#"
-                [package]
-                name = "baz"
-                version = "0.1.1"
-                edition = "2015"
-
-                [dependencies]
-                qux = { path = '../qux' }
-            "#,
-        )
-        .file("baz/src/main.rs", "fn main() {}")
-        .file("qux/Cargo.toml", &basic_manifest("qux", "0.1.1"))
-        .file("qux/src/lib.rs", "")
-        .build();
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-    p.cargo("build -Zchecksum-freshness -p baz")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.cargo("build -Zchecksum-freshness -p bar")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn reuse_workspace_lib() {
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-                name = "bar"
-                version = "0.1.1"
-                edition = "2015"
-
-                [workspace]
-
-                [dependencies]
-                baz = { path = 'baz' }
-            "#,
-        )
-        .file("src/lib.rs", "")
-        .file("baz/Cargo.toml", &basic_manifest("baz", "0.1.1"))
-        .file("baz/src/lib.rs", "")
-        .build();
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-    p.cargo("test -Zchecksum-freshness -p baz -v --no-run")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[COMPILING] baz v0.1.1 ([ROOT]/foo/baz)
-[RUNNING] `rustc --crate-name baz [..]
-[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[EXECUTABLE] `[ROOT]/foo/target/debug/deps/baz-[HASH][EXE]`
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn reuse_shared_build_dep() {
+fn update_dependency_mtime_does_not_rebuild() {
     let p = project()
         .file(
             "Cargo.toml",
@@ -1452,132 +594,93 @@ fn reuse_shared_build_dep() {
                 edition = "2015"
 
                 [dependencies]
-                shared = {path = "shared"}
+                bar = { path = "bar" }
 
-                [workspace]
-                members = ["shared", "bar"]
+                [lints.cargo]
+                default = "allow"
             "#,
         )
-        .file("src/main.rs", "fn main() {}")
-        .file("shared/Cargo.toml", &basic_manifest("shared", "0.0.1"))
-        .file("shared/src/lib.rs", "")
-        .file(
-            "bar/Cargo.toml",
-            r#"
-                [package]
-                name = "bar"
-                version = "0.0.1"
-                edition = "2015"
-
-                [build-dependencies]
-                shared = { path = "../shared" }
-            "#,
-        )
+        .file("src/lib.rs", "")
+        .file("bar/Cargo.toml", &basic_manifest("bar", "0.0.1"))
         .file("bar/src/lib.rs", "")
-        .file("bar/build.rs", "fn main() {}")
         .build();
 
-    p.cargo("build -Zchecksum-freshness --workspace")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zmtime-on-use")
+        .arg("-Zchecksum-freshness")
+        .masquerade_as_nightly_cargo(&["mtime-on-use", "checksum-freshness"])
+        .env("RUSTFLAGS", "-C linker=cc")
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to highest compatible version
+[COMPILING] bar v0.0.1 ([ROOT]/foo/bar)
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    // This does not make new files, but it does update the mtime of the dependency.
+    p.cargo("build -p bar")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zmtime-on-use")
+        .arg("-Zchecksum-freshness")
+        .masquerade_as_nightly_cargo(&["mtime-on-use", "checksum-freshness"])
+        .env("RUSTFLAGS", "-C linker=cc")
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
     // This should not recompile!
-    p.cargo("build -Zchecksum-freshness -p foo -v")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FRESH] shared v0.0.1 ([ROOT]/foo/shared)
-[FRESH] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn changing_rustflags_is_cached() {
-    let p = project().file("src/lib.rs", "").build();
-
-    // This isn't ever cached, we always have to recompile
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.cargo("build -Zchecksum-freshness -v")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zmtime-on-use")
+        .arg("-Zchecksum-freshness")
+        .masquerade_as_nightly_cargo(&["mtime-on-use", "checksum-freshness"])
         .env("RUSTFLAGS", "-C linker=cc")
         .with_stderr_data(str![[r#"
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `rustc [..]
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-
-    p.cargo("build -Zchecksum-freshness -v")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FRESH] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.cargo("build -Zchecksum-freshness -v")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env("RUSTFLAGS", "-C linker=cc")
-        .with_stderr_data(str![[r#"
-[FRESH] foo v0.0.1 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
         .run();
 }
 
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn changing_rustc_extra_flags_is_cached() {
-    let p = project().file("src/lib.rs", "").build();
-
-    // This isn't ever cached, we always have to recompile
-    p.cargo("rustc -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.cargo("rustc -Zchecksum-freshness -v -- -C linker=cc")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `rustc [..]
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-
-    p.cargo("rustc -Zchecksum-freshness -v")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FRESH] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.cargo("rustc -Zchecksum-freshness -v -- -C linker=cc")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FRESH] foo v0.0.1 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
+fn fingerprint_cleaner(mut dir: PathBuf, timestamp: filetime::FileTime) {
+    // Cargo is experimenting with letting outside projects develop some
+    // limited forms of GC for target_dir. This is one of the forms.
+    // Specifically, Cargo is updating the mtime of a file in
+    // target/profile/.fingerprint each time it uses the fingerprint.
+    // So a cleaner can remove files associated with a fingerprint
+    // if all the files in the fingerprint's folder are older then a time stamp without
+    // effecting any builds that happened since that time stamp.
+    let mut cleaned = false;
+    dir.push("build");
+    let outdated = |f: io::Result<fs::DirEntry>| {
+        filetime::FileTime::from_last_modification_time(&f.unwrap().metadata().unwrap())
+            <= timestamp
+    };
+    for build_unit in fs::read_dir(&dir).unwrap() {
+        let build_unit = build_unit.unwrap();
+        for hash_dir in fs::read_dir(&build_unit.path()).unwrap() {
+            let hash_dir = hash_dir.unwrap();
+            let fingerprint = hash_dir.path().join("fingerprint");
+            if fs::read_dir(fingerprint).unwrap().all(outdated) {
+                fs::remove_dir_all(hash_dir.path()).unwrap();
+                println!("remove: {:?}", hash_dir.path());
+                // a real cleaner would remove the big files in deps and build as well
+                // but fingerprint is sufficient for our tests
+                cleaned = true;
+            }
+        }
+    }
+    assert!(
+        cleaned,
+        "called fingerprint_cleaner, but there was nothing to remove"
+    );
 }
 
 #[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn reuse_panic_build_dep_test() {
+fn fingerprint_cleaner_does_not_rebuild() {
     let p = project()
         .file(
             "Cargo.toml",
@@ -1587,101 +690,79 @@ fn reuse_panic_build_dep_test() {
                 version = "0.0.1"
                 edition = "2015"
 
-                [build-dependencies]
+                [dependencies]
                 bar = { path = "bar" }
 
-                [dev-dependencies]
-                bar = { path = "bar" }
+                [features]
+                a = []
 
-                [profile.dev]
-                panic = "abort"
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
-        .file("build.rs", "fn main() {}")
         .file("bar/Cargo.toml", &basic_manifest("bar", "0.0.1"))
         .file("bar/src/lib.rs", "")
         .build();
 
-    // Check that `bar` is not built twice. It is only needed once (without `panic`).
-    p.cargo("test -Zchecksum-freshness --lib --no-run -v")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zmtime-on-use")
+        .arg("-Zchecksum-freshness")
+        .masquerade_as_nightly_cargo(&["mtime-on-use", "checksum-freshness"])
+        .run();
+    p.cargo("build --features a")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zmtime-on-use")
+        .arg("-Zchecksum-freshness")
+        .masquerade_as_nightly_cargo(&["mtime-on-use", "checksum-freshness"])
         .with_stderr_data(str![[r#"
-[LOCKING] 1 package to latest compatible version
-[COMPILING] bar v0.0.1 ([ROOT]/foo/bar)
-[RUNNING] `rustc --crate-name bar [..]
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `rustc --crate-name build_script_build [..]
-[RUNNING] `[ROOT]/foo/target/debug/build/foo-[HASH]/build-script-build`
-[RUNNING] `rustc --crate-name foo [..] src/lib.rs [..]--test[..]
-[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[EXECUTABLE] `[ROOT]/foo/target/debug/deps/foo-[HASH][EXE]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])
         .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn reuse_panic_pm() {
-    // foo(panic) -> bar(panic)
-    // somepm(nopanic) -> bar(nopanic)
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-                name = "foo"
-                version = "0.0.1"
-                edition = "2015"
-
-                [dependencies]
-                bar = { path = "bar" }
-                somepm = { path = "somepm" }
-
-                [profile.dev]
-                panic = "abort"
-            "#,
-        )
-        .file("src/lib.rs", "extern crate bar;")
-        .file("bar/Cargo.toml", &basic_manifest("bar", "0.0.1"))
-        .file("bar/src/lib.rs", "")
-        .file(
-            "somepm/Cargo.toml",
-            r#"
-                [package]
-                name = "somepm"
-                version = "0.0.1"
-                edition = "2015"
-
-                [lib]
-                proc-macro = true
-
-                [dependencies]
-                bar = { path = "../bar" }
-            "#,
-        )
-        .file("somepm/src/lib.rs", "extern crate bar;")
-        .build();
-
-    // bar is built once without panic (for proc-macro) and once with (for the
-    // normal dependency).
-    p.cargo("build -Zchecksum-freshness -v")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(
-            str![[r#"
-[LOCKING] 2 packages to latest compatible versions
-[COMPILING] bar v0.0.1 ([ROOT]/foo/bar)
-[RUNNING] `rustc --crate-name bar [..] -C panic=abort [..]
-[RUNNING] `rustc --crate-name bar [..]
-[COMPILING] somepm v0.0.1 ([ROOT]/foo/somepm)
-[RUNNING] `rustc --crate-name somepm [..]
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `rustc --crate-name foo [..] -C panic=abort [..]
+    if is_coarse_mtime() {
+        sleep_ms(1000);
+    }
+    let timestamp = filetime::FileTime::from_system_time(SystemTime::now());
+    if is_coarse_mtime() {
+        sleep_ms(1000);
+    }
+    // This does not make new files, but it does update the mtime.
+    p.cargo("build --features a")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zmtime-on-use")
+        .arg("-Zchecksum-freshness")
+        .masquerade_as_nightly_cargo(&["mtime-on-use", "checksum-freshness"])
+        .with_stderr_data(str![[r#"
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
-"#]]
-            .unordered(),
-        )
+"#]])
+        .run();
+    fingerprint_cleaner(p.target_debug_dir(), timestamp);
+    // This should not recompile!
+    p.cargo("build --features a")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zmtime-on-use")
+        .arg("-Zchecksum-freshness")
+        .masquerade_as_nightly_cargo(&["mtime-on-use", "checksum-freshness"])
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    // But this should be cleaned and so need a rebuild
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zmtime-on-use")
+        .arg("-Zchecksum-freshness")
+        .masquerade_as_nightly_cargo(&["mtime-on-use", "checksum-freshness"])
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -1706,6 +787,9 @@ fn bust_patched_dep() {
 
                 [patch.crates-io]
                 registry1 = { path = "reg1new" }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -1713,13 +797,17 @@ fn bust_patched_dep() {
         .file("reg1new/src/lib.rs", "")
         .build();
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .run();
 
     p.change_file("reg1new/src/lib.rs", "// modified");
 
-    p.cargo("build -Zchecksum-freshness -v")
+    p.cargo("build -v")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
 [DIRTY] registry1 v0.1.0 ([ROOT]/foo/reg1new): file size changed (0 != 11) for `reg1new/src/lib.rs`
@@ -1736,7 +824,9 @@ fn bust_patched_dep() {
 "#]])
         .run();
 
-    p.cargo("build -Zchecksum-freshness -v")
+    p.cargo("build -v")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
 [FRESH] registry1 v0.1.0 ([ROOT]/foo/reg1new)
@@ -1834,7 +924,9 @@ fn rebuild_on_mid_build_file_modification() {
         drop(server.accept().unwrap());
     });
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
 [COMPILING] proc_macro_dep v0.1.0 ([ROOT]/foo/proc_macro_dep)
@@ -1844,7 +936,9 @@ fn rebuild_on_mid_build_file_modification() {
 "#]])
         .run();
 
-    p.cargo("build -Zchecksum-freshness -v")
+    p.cargo("build -v")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
 [FRESH] proc_macro_dep v0.1.0 ([ROOT]/foo/proc_macro_dep)
@@ -1931,12 +1025,16 @@ fn dirty_both_lib_and_test() {
         .file("slib.rs", &slib(2))
         .build();
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .run();
 
     // 2 != 1
-    p.cargo("test -Zchecksum-freshness --lib")
+    p.cargo("test --lib")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_status(101)
         .with_stdout_data("...\n[..]doit assert failure[..]\n...")
@@ -1945,11 +1043,15 @@ fn dirty_both_lib_and_test() {
     // Fix the mistake.
     p.change_file("slib.rs", &slib(1));
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .run();
     // This should recompile with the new static lib, and the test should pass.
-    p.cargo("test -Zchecksum-freshness --lib")
+    p.cargo("test --lib")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .run();
 }
@@ -1977,17 +1079,23 @@ fn script_fails_stay_dirty() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .run();
     p.change_file("helper.rs", r#"pub fn doit() {panic!("Crash!");}"#);
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data("...\n[..]Crash![..]\n...")
         .with_status(101)
         .run();
     // There was a bug where this second call would be "fresh".
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data("...\n[..]Crash![..]\n...")
         .with_status(101)
@@ -1995,59 +1103,165 @@ fn script_fails_stay_dirty() {
 }
 
 #[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn edition_change_invalidates() {
-    const MANIFEST: &str = r#"
-        [package]
-        name = "foo"
-        version = "0.1.0"
-    "#;
-    let p = project()
-        .file("Cargo.toml", MANIFEST)
+fn simulated_docker_deps_stay_cached() {
+    // Test what happens in docker where the nanoseconds are zeroed out.
+    Package::new("regdep", "1.0.0").publish();
+    Package::new("regdep_old_style", "1.0.0")
+        .file("build.rs", "fn main() {}")
         .file("src/lib.rs", "")
-        .build();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-    p.change_file("Cargo.toml", &format!("{}edition = \"2018\"", MANIFEST));
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[COMPILING] foo v0.1.0 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.change_file(
-        "Cargo.toml",
-        &format!(
-            r#"{}edition = "2018"
-            [lib]
-            edition = "2015"
+        .publish();
+    Package::new("regdep_env", "1.0.0")
+        .file(
+            "build.rs",
+            r#"
+            fn main() {
+                println!("cargo::rerun-if-env-changed=SOMEVAR");
+            }
             "#,
-            MANIFEST
-        ),
-    );
-    p.cargo("build -Zchecksum-freshness")
+        )
+        .file("src/lib.rs", "")
+        .publish();
+    Package::new("regdep_rerun", "1.0.0")
+        .file(
+            "build.rs",
+            r#"
+            fn main() {
+                println!("cargo::rerun-if-changed=build.rs");
+            }
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .publish();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [package]
+            name = "foo"
+            version = "0.1.0"
+            edition = "2015"
+
+            [dependencies]
+            pathdep = { path = "pathdep" }
+            regdep = "1.0"
+            regdep_old_style = "1.0"
+            regdep_env = "1.0"
+            regdep_rerun = "1.0"
+            "#,
+        )
+        .file(
+            "src/lib.rs",
+            "
+            extern crate pathdep;
+            extern crate regdep;
+            extern crate regdep_old_style;
+            extern crate regdep_env;
+            extern crate regdep_rerun;
+            ",
+        )
+        .file("build.rs", "fn main() {}")
+        .file("pathdep/Cargo.toml", &basic_manifest("pathdep", "1.0.0"))
+        .file("pathdep/src/lib.rs", "")
+        .build();
+
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[WARNING] Cargo.toml: `edition` is set on library `foo` which is deprecated
-[WARNING] `foo` (manifest) generated 1 warning
+        .run();
+
+    let already_zero = {
+        // This happens on HFS with 1-second timestamp resolution,
+        // or other filesystems where it just so happens to write exactly on a
+        // 1-second boundary.
+        let metadata = fs::metadata(p.root().join("src/lib.rs")).unwrap();
+        let mtime = FileTime::from_last_modification_time(&metadata);
+        mtime.nanoseconds() == 0
+    };
+
+    // Recursively remove `nanoseconds` from every path.
+    fn zeropath(path: &Path) {
+        for entry in walkdir::WalkDir::new(path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let metadata = fs::metadata(entry.path()).unwrap();
+            let mtime = metadata.modified().unwrap();
+            let mtime_duration = mtime.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+            let trunc_mtime = FileTime::from_unix_time(mtime_duration.as_secs() as i64, 0);
+            let atime = metadata.accessed().unwrap();
+            let atime_duration = atime.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+            let trunc_atime = FileTime::from_unix_time(atime_duration.as_secs() as i64, 0);
+            if let Err(e) = filetime::set_file_times(entry.path(), trunc_atime, trunc_mtime) {
+                // Windows doesn't allow changing filetimes on some things
+                // (directories, other random things I'm not sure why). Just
+                // ignore them.
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    println!("PermissionDenied filetime on {:?}", entry.path());
+                } else {
+                    panic!("FileTime error on {:?}: {:?}", entry.path(), e);
+                }
+            }
+        }
+    }
+    zeropath(&p.root());
+    zeropath(&paths::home());
+
+    if already_zero {
+        println!("already zero");
+        // If it was already truncated, then everything stays fresh.
+        p.cargo("build -v")
+            .env("CARGO_BUILD_FINGERPRINT", "content")
+            .arg("-Zchecksum-freshness")
+            .masquerade_as_nightly_cargo(&["checksum-freshness"])
+            .with_stderr_data(
+                str![[r#"
+[FRESH] pathdep [..]
+[FRESH] regdep [..]
+[FRESH] regdep_env [..]
+[FRESH] regdep_old_style [..]
+[FRESH] regdep_rerun [..]
+[FRESH] foo [..]
+[FINISHED] [..]
+
+"#]]
+                .unordered(),
+            )
+            .run();
+    } else {
+        println!("not already zero");
+        // It is not ideal that `foo` gets recompiled, but that is the current
+        // behavior. Currently mtimes are ignored for registry deps.
+        //
+        // Note that this behavior is due to the fact that `foo` has a build
+        // script in "old" mode where it doesn't print `rerun-if-*`. In this
+        // mode we use `Precalculated` to fingerprint a path dependency, where
+        // `Precalculated` is an opaque string which has the most recent mtime
+        // in it. It differs between builds because one has nsec=0 and the other
+        // likely has a nonzero nsec. Hence, the rebuild.
+        p.cargo("build -v")
+            .env("CARGO_BUILD_FINGERPRINT", "content")
+            .arg("-Zchecksum-freshness")
+            .masquerade_as_nightly_cargo(&["checksum-freshness"])
+            .with_stderr_data(
+                str![[r#"
+[FRESH] regdep [..]
+[FRESH] pathdep [..]
+[FRESH] regdep_env [..]
+[DIRTY] foo v0.1.0 ([ROOT]/foo): the precalculated components changed
 [COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FRESH] regdep_rerun [..]
+[FRESH] regdep_old_style [..]
+[RUNNING] `[ROOT]/foo/target/debug/build/foo/[HASH]/out/build_script_build`
+[RUNNING] `rustc --crate-name foo [..]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
-"#]])
-        .run();
-    p.cargo("build -Zchecksum-freshness -v")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[WARNING] Cargo.toml: `edition` is set on library `foo` which is deprecated
-[WARNING] `foo` (manifest) generated 1 warning
-[FRESH] foo v0.1.0 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    assert_eq!(p.glob("target/debug/deps/libfoo-*.rlib").count(), 1);
+"#]]
+                .unordered(),
+            )
+            .run();
+    }
 }
 
 #[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
@@ -2094,7 +1308,9 @@ fn rename_with_path_deps() {
         .file("a/b/src/lib.rs", "pub fn foo() { }");
     let p = p.build();
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .run();
 
@@ -2106,7 +1322,9 @@ fn rename_with_path_deps() {
 
     fs::rename(p.root(), &new).unwrap();
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .cwd(&new)
         .with_stderr_data(str![[r#"
@@ -2174,649 +1392,23 @@ fn move_target_directory_with_path_deps() {
     let mut parent = p.root();
     parent.pop();
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .run();
 
     let new_target = p.root().join("target2");
     fs::rename(p.root().join("target"), &new_target).unwrap();
 
-    p.cargo("build -Zchecksum-freshness")
+    p.cargo("build")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .env("CARGO_TARGET_DIR", &new_target)
         .with_stderr_data(str![[r#"
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn rerun_if_changes() {
-    let p = project()
-        .file(
-            "build.rs",
-            r#"
-                fn main() {
-                    println!("cargo::rerun-if-env-changed=FOO");
-                    if std::env::var("FOO").is_ok() {
-                        println!("cargo::rerun-if-env-changed=BAR");
-                    }
-                }
-            "#,
-        )
-        .file("src/lib.rs", "")
-        .build();
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-
-    p.cargo("build -Zchecksum-freshness -v")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env("FOO", "1")
-        .with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the env variable FOO changed
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `[ROOT]/foo/target/debug/build/foo-[HASH]/build-script-build`
-[RUNNING] `rustc [..]
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env("FOO", "1")
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-
-    p.cargo("build -Zchecksum-freshness -v")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env("FOO", "1")
-        .env("BAR", "1")
-        .with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the env variable BAR changed
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `[ROOT]/foo/target/debug/build/foo-[HASH]/build-script-build`
-[RUNNING] `rustc [..]
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env("FOO", "1")
-        .env("BAR", "1")
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-
-    p.cargo("build -Zchecksum-freshness -v")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env("BAR", "2")
-        .with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the env variable FOO changed
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `[ROOT]/foo/target/debug/build/foo-[HASH]/build-script-build`
-[RUNNING] `rustc [..]
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env("BAR", "2")
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn channel_shares_filenames() {
-    // Test that different "nightly" releases use the same output filename.
-
-    // Create separate rustc binaries to emulate running different toolchains.
-    let nightly1 = format!(
-        "\
-rustc 1.44.0-nightly (38114ff16 2020-03-21)
-binary: rustc
-commit-hash: 38114ff16e7856f98b2b4be7ab4cd29b38bed59a
-commit-date: 2020-03-21
-host: {}
-release: 1.44.0-nightly
-LLVM version: 9.0
-",
-        rustc_host()
-    );
-
-    let nightly2 = format!(
-        "\
-rustc 1.44.0-nightly (a5b09d354 2020-03-31)
-binary: rustc
-commit-hash: a5b09d35473615e7142f5570f5c5fad0caf68bd2
-commit-date: 2020-03-31
-host: {}
-release: 1.44.0-nightly
-LLVM version: 9.0
-",
-        rustc_host()
-    );
-
-    let beta1 = format!(
-        "\
-rustc 1.43.0-beta.3 (4c587bbda 2020-03-25)
-binary: rustc
-commit-hash: 4c587bbda04ab55aaf56feab11dfdfe387a85d7a
-commit-date: 2020-03-25
-host: {}
-release: 1.43.0-beta.3
-LLVM version: 9.0
-",
-        rustc_host()
-    );
-
-    let beta2 = format!(
-        "\
-rustc 1.42.0-beta.5 (4e1c5f0e9 2020-02-28)
-binary: rustc
-commit-hash: 4e1c5f0e9769a588b91c977e3d81e140209ef3a2
-commit-date: 2020-02-28
-host: {}
-release: 1.42.0-beta.5
-LLVM version: 9.0
-",
-        rustc_host()
-    );
-
-    let stable1 = format!(
-        "\
-rustc 1.42.0 (b8cedc004 2020-03-09)
-binary: rustc
-commit-hash: b8cedc00407a4c56a3bda1ed605c6fc166655447
-commit-date: 2020-03-09
-host: {}
-release: 1.42.0
-LLVM version: 9.0
-",
-        rustc_host()
-    );
-
-    let stable2 = format!(
-        "\
-rustc 1.41.1 (f3e1a954d 2020-02-24)
-binary: rustc
-commit-hash: f3e1a954d2ead4e2fc197c7da7d71e6c61bad196
-commit-date: 2020-02-24
-host: {}
-release: 1.41.1
-LLVM version: 9.0
-",
-        rustc_host()
-    );
-
-    let compiler = project()
-        .at("compiler")
-        .file("Cargo.toml", &basic_manifest("compiler", "0.1.0"))
-        .file(
-            "src/main.rs",
-            r#"
-            fn main() {
-                if std::env::args_os().any(|a| a == "-vV") {
-                    print!("{}", env!("FUNKY_VERSION_TEST"));
-                    return;
-                }
-                let mut cmd = std::process::Command::new("rustc");
-                cmd.args(std::env::args_os().skip(1));
-                assert!(cmd.status().unwrap().success());
-            }
-            "#,
-        )
-        .build();
-
-    let makeit = |version, vv| {
-        // Force a rebuild.
-        compiler.target_debug_dir().join("deps").rm_rf();
-        compiler
-            .cargo("build -Zchecksum-freshness")
-            .masquerade_as_nightly_cargo(&["checksum-freshness"])
-            .env("FUNKY_VERSION_TEST", vv)
-            .run();
-        fs::rename(compiler.bin("compiler"), compiler.bin(version)).unwrap();
-    };
-    makeit("nightly1", nightly1);
-    makeit("nightly2", nightly2);
-    makeit("beta1", beta1);
-    makeit("beta2", beta2);
-    makeit("stable1", stable1);
-    makeit("stable2", stable2);
-
-    // Run `cargo check` with different rustc versions to observe its behavior.
-    let p = project().file("src/lib.rs", "").build();
-
-    // Runs `cargo check` and returns the rmeta filename created.
-    // Checks that the freshness matches the given value.
-    let check = |version, fresh| -> String {
-        let output = p
-            .cargo("check -Zchecksum-freshness --message-format=json")
-            .masquerade_as_nightly_cargo(&["checksum-freshness"])
-            .env("RUSTC", compiler.bin(version))
-            .run();
-        // Collect the filenames generated.
-        let mut artifacts: Vec<_> = std::str::from_utf8(&output.stdout)
-            .unwrap()
-            .lines()
-            .filter_map(|line| {
-                let value: serde_json::Value = serde_json::from_str(line).unwrap();
-                if value["reason"].as_str().unwrap() == "compiler-artifact" {
-                    assert_eq!(value["fresh"].as_bool().unwrap(), fresh);
-                    let filenames = value["filenames"].as_array().unwrap();
-                    assert_eq!(filenames.len(), 1);
-                    Some(filenames[0].to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        // Should only generate one rmeta file.
-        assert_eq!(artifacts.len(), 1);
-        artifacts.pop().unwrap()
-    };
-
-    let nightly1_name = check("nightly1", false);
-    assert_eq!(check("nightly1", true), nightly1_name);
-    assert_eq!(check("nightly2", false), nightly1_name); // same as before
-    assert_eq!(check("nightly2", true), nightly1_name);
-    // Should rebuild going back to nightly1.
-    assert_eq!(check("nightly1", false), nightly1_name);
-
-    let beta1_name = check("beta1", false);
-    assert_ne!(beta1_name, nightly1_name);
-    assert_eq!(check("beta1", true), beta1_name);
-    assert_eq!(check("beta2", false), beta1_name); // same as before
-    assert_eq!(check("beta2", true), beta1_name);
-    // Should rebuild going back to beta1.
-    assert_eq!(check("beta1", false), beta1_name);
-
-    let stable1_name = check("stable1", false);
-    assert_ne!(stable1_name, nightly1_name);
-    assert_ne!(stable1_name, beta1_name);
-    let stable2_name = check("stable2", false);
-    assert_ne!(stable1_name, stable2_name);
-    // Check everything is fresh.
-    assert_eq!(check("stable1", true), stable1_name);
-    assert_eq!(check("stable2", true), stable2_name);
-    assert_eq!(check("beta1", true), beta1_name);
-    assert_eq!(check("nightly1", true), nightly1_name);
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn linking_interrupted() {
-    // Interrupt during the linking phase shouldn't leave test executable as "fresh".
-
-    // This is used to detect when linking starts, then to pause the linker so
-    // that the test can kill cargo.
-    let link_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let link_addr = link_listener.local_addr().unwrap();
-
-    // This is used to detect when rustc exits.
-    let rustc_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let rustc_addr = rustc_listener.local_addr().unwrap();
-
-    // Create a linker that we can interrupt.
-    let linker = project()
-        .at("linker")
-        .file("Cargo.toml", &basic_manifest("linker", "1.0.0"))
-        .file(
-            "src/main.rs",
-            &r#"
-            fn main() {
-                // Figure out the output filename.
-                let output = match std::env::args().find(|a| a.starts_with("/OUT:")) {
-                    Some(s) => s[5..].to_string(),
-                    None => {
-                        let mut args = std::env::args();
-                        loop {
-                            if args.next().unwrap() == "-o" {
-                                break;
-                            }
-                        }
-                        args.next().unwrap()
-                    }
-                };
-                std::fs::remove_file(&output).unwrap();
-                std::fs::write(&output, "").unwrap();
-                // Tell the test that we are ready to be interrupted.
-                let mut socket = std::net::TcpStream::connect("__ADDR__").unwrap();
-                // Wait for the test to kill us.
-                std::thread::sleep(std::time::Duration::new(60, 0));
-            }
-            "#
-            .replace("__ADDR__", &link_addr.to_string()),
-        )
-        .build();
-    linker
-        .cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-
-    // Create a wrapper around rustc that will tell us when rustc is finished.
-    let rustc = project()
-        .at("rustc-waiter")
-        .file("Cargo.toml", &basic_manifest("rustc-waiter", "1.0.0"))
-        .file(
-            "src/main.rs",
-            &r#"
-            fn main() {
-                let mut conn = None;
-                // Check for a normal build (not -vV or --print).
-                if std::env::args().any(|arg| arg == "t1") {
-                    // Tell the test that rustc has started.
-                    conn = Some(std::net::TcpStream::connect("__ADDR__").unwrap());
-                }
-                let status = std::process::Command::new("rustc")
-                    .args(std::env::args().skip(1))
-                    .status()
-                    .expect("rustc to run");
-                std::process::exit(status.code().unwrap_or(1));
-            }
-            "#
-            .replace("__ADDR__", &rustc_addr.to_string()),
-        )
-        .build();
-    rustc
-        .cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-
-    // Build it once so that the fingerprint gets saved to disk.
-    let p = project()
-        .file("src/lib.rs", "")
-        .file("tests/t1.rs", "")
-        .build();
-    p.cargo("test -Zchecksum-freshness --test t1 --no-run")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-
-    // Make a change, start a build, then interrupt it.
-    p.change_file("src/lib.rs", "// modified");
-    let linker_env = format!("CARGO_TARGET_{}_LINKER", rustc_host_env());
-    // NOTE: This assumes that the paths to the linker or rustc are not in the
-    // fingerprint. But maybe they should be?
-    let mut cmd = p
-        .cargo("test -Zchecksum-freshness --test t1 --no-run")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env(&linker_env, linker.bin("linker"))
-        .env("RUSTC", rustc.bin("rustc-waiter"))
-        .build_command();
-    let mut child = cmd
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .env("__CARGO_TEST_SETSID_PLEASE_DONT_USE_ELSEWHERE", "1")
-        .spawn()
-        .unwrap();
-    // Wait for rustc to start.
-    let mut rustc_conn = rustc_listener.accept().unwrap().0;
-    // Wait for linking to start.
-    drop(link_listener.accept().unwrap());
-
-    // Interrupt the child.
-    death::ctrl_c(&mut child);
-    assert!(!child.wait().unwrap().success());
-    // Wait for rustc to exit. If we don't wait, then the command below could
-    // start while rustc is still being torn down.
-    let mut buf = [0];
-    drop(rustc_conn.read_exact(&mut buf));
-
-    // Build again, shouldn't be fresh.
-    p.cargo("test -Zchecksum-freshness --test t1 -v")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the config settings changed
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `rustc --crate-name foo [..]
-[RUNNING] `rustc --crate-name t1 [..]
-[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-[RUNNING] `[ROOT]/foo/target/debug/deps/t1-[HASH][EXE]`
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-#[cfg(all(target_arch = "x86_64", target_os = "windows", target_env = "msvc"))]
-fn lld_is_fresh() {
-    // Check for bug when using lld linker that it remains fresh with dylib.
-    let p = project()
-        .file(
-            ".cargo/config.toml",
-            r#"
-                [target.x86_64-pc-windows-msvc]
-                linker = "rust-lld"
-            "#,
-        )
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-                name = "foo"
-                version = "0.1.0"
-                edition = "2015"
-
-                [lib]
-                crate-type = ["dylib"]
-            "#,
-        )
-        .file("src/lib.rs", "")
-        .build();
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-    p.cargo("build -Zchecksum-freshness -v")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FRESH] foo v0.1.0 ([ROOT]/foo)
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn env_in_code_causes_rebuild() {
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-                name = "foo"
-                version = "0.1.0"
-                edition = "2015"
-            "#,
-        )
-        .file(
-            "src/main.rs",
-            r#"
-                fn main() {
-                    println!("{:?}", option_env!("FOO"));
-                    println!("{:?}", option_env!("FOO\nBAR"));
-                }
-            "#,
-        )
-        .build();
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env_remove("FOO")
-        .run();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env_remove("FOO")
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.cargo("build -Zchecksum-freshness -v")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env("FOO", "bar")
-        .with_stderr_data(str![[r#"
-[DIRTY] foo v0.1.0 ([ROOT]/foo): the environment variable FOO changed
-[COMPILING] foo v0.1.0 ([ROOT]/foo)
-[RUNNING] `rustc [..]
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env("FOO", "bar")
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.cargo("build -Zchecksum-freshness -v")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env("FOO", "baz")
-        .with_stderr_data(str![[r#"
-[DIRTY] foo v0.1.0 ([ROOT]/foo): the environment variable FOO changed
-[COMPILING] foo v0.1.0 ([ROOT]/foo)
-[RUNNING] `rustc [..]
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env("FOO", "baz")
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.cargo("build -Zchecksum-freshness -v")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env_remove("FOO")
-        .with_stderr_data(str![[r#"
-[DIRTY] foo v0.1.0 ([ROOT]/foo): the environment variable FOO changed
-[COMPILING] foo v0.1.0 ([ROOT]/foo)
-[RUNNING] `rustc [..]
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env_remove("FOO")
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-
-    let interesting = " #!$\nabc\r\\\t\u{8}\r\n";
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env("FOO", interesting)
-        .run();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env("FOO", interesting)
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env("FOO\nBAR", interesting)
-        .run();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env("FOO\nBAR", interesting)
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn env_build_script_no_rebuild() {
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-                name = "foo"
-                version = "0.1.0"
-                edition = "2015"
-            "#,
-        )
-        .file(
-            "build.rs",
-            r#"
-                fn main() {
-                    println!("cargo::rustc-env=FOO=bar");
-                }
-            "#,
-        )
-        .file(
-            "src/main.rs",
-            r#"
-                fn main() {
-                    println!("{:?}", env!("FOO"));
-                }
-            "#,
-        )
-        .build();
-
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .with_stderr_data(str![[r#"
-[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
-
-"#]])
-        .run();
-}
-
-#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
-fn changing_linker() {
-    // Changing linker should rebuild.
-    let p = project().file("src/main.rs", "fn main() {}").build();
-    p.cargo("build -Zchecksum-freshness")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .run();
-    let linker_env = format!("CARGO_TARGET_{}_LINKER", rustc_host_env());
-    p.cargo("build -Zchecksum-freshness --verbose")
-        .masquerade_as_nightly_cargo(&["checksum-freshness"])
-        .env(&linker_env, "nonexistent-linker")
-        .with_status(101)
-        .with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the config settings changed
-[COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `rustc --crate-name foo [..] -C linker=nonexistent-linker [..]`
-[ERROR] linker `nonexistent-linker` not found
-...
 "#]])
         .run();
 }
@@ -2837,6 +1429,9 @@ fn verify_source_before_recompile() {
 
                 [dependencies]
                 bar = "0.1.0"
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -2854,7 +1449,9 @@ fn verify_source_before_recompile() {
         "#,
     );
     // Sanity check: vendoring works correctly.
-    p.cargo("check -Zchecksum-freshness --verbose")
+    p.cargo("check --verbose")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
 [CHECKING] bar v0.1.0
@@ -2871,7 +1468,9 @@ fn verify_source_before_recompile() {
         r#"compile_error!("You shall not pass!");"#,
     );
     // Should ignore modified sources without any recompile.
-    p.cargo("check -Zchecksum-freshness --verbose")
+    p.cargo("check --verbose")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .with_stderr_data(str![[r#"
 [FRESH] bar v0.1.0
@@ -2885,7 +1484,9 @@ fn verify_source_before_recompile() {
     //
     // Cargo should refuse to build because of checksum verification failure.
     // Cargo shouldn't recompile dependency `bar`.
-    p.cargo("check -Zchecksum-freshness --verbose")
+    p.cargo("check --verbose")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .env("RUSTFLAGS", "-W warnings")
         .with_status(101)
@@ -2909,7 +1510,9 @@ fn skip_checksum_check_in_selected_cargo_home_subdirs() {
         .build();
     let project_root = p.root();
     let cargo_home = project_root.parent().unwrap().parent().unwrap();
-    p.cargo("check -Zchecksum-freshness -v")
+    p.cargo("check -v")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .env("CARGO_HOME", &cargo_home)
         .with_stderr_data(str![[r#"
@@ -2920,7 +1523,9 @@ fn skip_checksum_check_in_selected_cargo_home_subdirs() {
 "#]])
         .run();
     p.change_file("src/lib.rs", "illegal syntax");
-    p.cargo("check -Zchecksum-freshness -v")
+    p.cargo("check -v")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .env("CARGO_HOME", &cargo_home)
         .with_stderr_data(str![[r#"
@@ -2940,7 +1545,9 @@ fn use_checksum_cache_in_cargo_home() {
         .build();
     let project_root = p.root();
     let cargo_home = project_root.parent().unwrap();
-    p.cargo("check -Zchecksum-freshness -v")
+    p.cargo("check -v")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .env("CARGO_HOME", &cargo_home)
         .with_stderr_data(str![[r#"
@@ -2951,7 +1558,9 @@ fn use_checksum_cache_in_cargo_home() {
 "#]])
         .run();
     p.change_file("src/lib.rs", "illegal syntax");
-    p.cargo("check -Zchecksum-freshness -v")
+    p.cargo("check -v")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .env("CARGO_HOME", &cargo_home)
         .with_status(101)
@@ -2978,7 +1587,9 @@ fn incremental_build_script_execution_got_new_mtime_and_cargo_check() {
         )
         .build();
 
-    p.cargo("check -Zchecksum-freshness")
+    p.cargo("check")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .env("CARGO_INCREMENTAL", "1")
         .with_stderr_data(str![[r#"
@@ -2991,13 +1602,15 @@ fn incremental_build_script_execution_got_new_mtime_and_cargo_check() {
     p.change_file("touch-me", "oops");
 
     // The first one is expected to rerun build script
-    p.cargo("check -Zchecksum-freshness -v")
+    p.cargo("check -v")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .env("CARGO_INCREMENTAL", "1")
         .with_stderr_data(str![[r#"
 [DIRTY] foo v0.0.1 ([ROOT]/foo): the file `touch-me` has changed ([TIME_DIFF_AFTER_LAST_BUILD])
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
-[RUNNING] `[ROOT]/foo/target/debug/build/foo-[HASH]/build-script-build`
+[RUNNING] `[ROOT]/foo/target/debug/build/foo/[HASH]/out/build_script_build`
 [RUNNING] `rustc --crate-name foo [..]`
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
@@ -3005,7 +1618,9 @@ fn incremental_build_script_execution_got_new_mtime_and_cargo_check() {
         .run();
 
     // subsequent cargo check gets stuck...
-    p.cargo("check -Zchecksum-freshness -v")
+    p.cargo("check -v")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .env("CARGO_INCREMENTAL", "1")
         .with_stderr_data(str![[r#"
@@ -3015,11 +1630,89 @@ fn incremental_build_script_execution_got_new_mtime_and_cargo_check() {
 "#]])
         .run();
 
-    p.cargo("check -Zchecksum-freshness -v")
+    p.cargo("check -v")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
         .masquerade_as_nightly_cargo(&["checksum-freshness"])
         .env("CARGO_INCREMENTAL", "1")
         .with_stderr_data(str![[r#"
 [FRESH] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test(nightly, reason = "requires -Zchecksum-hash-algorithm")]
+fn symlink_to_package() {
+    // Illustrates what happens when the path is a symlink, and the symlink
+    // target changes.
+    if !cargo_test_support::symlink_supported() {
+        return;
+    }
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                edition = "2015"
+
+                [dependencies]
+                bar = { path = "bar" }
+            "#,
+        )
+        .file(
+            "src/main.rs",
+            r#"
+                fn main() {
+                    bar::bar();
+                }
+            "#,
+        )
+        .file("bar1/Cargo.toml", &basic_manifest("bar", "1.0.0"))
+        .file(
+            "bar1/src/lib.rs",
+            r#"
+                pub fn bar() {
+                    println!("one");
+                }
+            "#,
+        )
+        .file("bar2/Cargo.toml", &basic_manifest("bar", "1.0.0"))
+        .file(
+            "bar2/src/lib.rs",
+            r#"
+                pub fn bar() {
+                    println!("two");
+                }
+            "#,
+        )
+        .symlink_dir("bar1", "bar")
+        .build();
+    p.cargo("check")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
+        .masquerade_as_nightly_cargo(&["checksum-freshness"])
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to highest compatible version
+[CHECKING] bar v1.0.0 ([ROOT]/foo/bar)
+[CHECKING] foo v0.0.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    let bar_path = p.root().join("bar");
+    cargo_util::paths::remove_file(&bar_path).unwrap();
+    p.symlink("bar2", "bar");
+    // Checksums detect the changed source behind the symlink.
+    p.cargo("check")
+        .env("CARGO_BUILD_FINGERPRINT", "content")
+        .arg("-Zchecksum-freshness")
+        .masquerade_as_nightly_cargo(&["checksum-freshness"])
+        .with_stderr_data(str![[r#"
+[CHECKING] bar v1.0.0 ([ROOT]/foo/bar)
+[CHECKING] foo v0.0.0 ([ROOT]/foo)
 [FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
 "#]])

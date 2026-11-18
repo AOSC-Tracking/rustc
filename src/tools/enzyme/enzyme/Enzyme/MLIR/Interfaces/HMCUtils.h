@@ -64,6 +64,8 @@ struct MCMCKernelResult {
   Value grad;        // Gradient at new position
   Value U;           // Potential energy at new position
   Value accepted;    // Whether proposal was accepted
+  Value divergent;   // Whether step was divergent (NUTS only; currently always
+                     // false for HMC)
   Value accept_prob; // Mean acceptance probability
   Value rng;         // Updated RNG state
 };
@@ -386,7 +388,7 @@ struct DualAveragingConfig {
 
 /// Initialize dual averaging state from initial step size.
 DualAveragingState initDualAveraging(OpBuilder &builder, Location loc,
-                                     Value stepSize);
+                                     Value stepSize, bool logOfProduct = false);
 
 /// Update dual averaging state with observed acceptance probability.
 DualAveragingState updateDualAveraging(OpBuilder &builder, Location loc,

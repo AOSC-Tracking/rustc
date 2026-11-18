@@ -13,7 +13,7 @@ trait FooTrait {
 struct Foo;
 
 impl FooTrait for Foo {
-    // Currently, splat attributes on impls must match traits. This provides better UX.
+    // Currently, `rustc_splat` attributes on impls must match traits. This provides better UX.
     fn tuple_1_trait(#[rustc_splat] _: (u32,)) {}
 
     fn tuple_2_trait(&self, #[rustc_splat] _: (u32, f32)) {}
@@ -30,12 +30,6 @@ impl FooTrait for TupleStruct {
 
 fn main() {
     let foo = Foo;
-
-    // FIXME(splat): should splatted functions be callable with tupled and un-tupled arguments?
-    // Add a tupled test for each call if they are.
-    //Foo::tuple_1_trait((1u32,));
-    //foo.tuple_2_trait((1, 3.5));
-
     Foo::tuple_1_trait(1u32);
     foo.tuple_2_trait(1, 3.5);
 

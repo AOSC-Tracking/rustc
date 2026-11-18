@@ -324,7 +324,7 @@ bool DifferentialUseAnalysis::is_use_directly_needed_in_reverse(
   }
 
   if (!shadow)
-    if (isa<CmpInst>(user) || isa<BranchInst>(user) || isa<ReturnInst>(user) ||
+    if (isa<CmpInst>(user) || isAnyBranch(user) || isa<ReturnInst>(user) ||
         isa<FPExtInst>(user) || isa<FPTruncInst>(user)
         // isa<ExtractElement>(use) ||
         // isa<InsertElementInst>(use) || isa<ShuffleVectorInst>(use) ||
@@ -1215,3 +1215,150 @@ bool DifferentialUseAnalysis::callShouldNotUseDerivative(
   }
   return useConstantFallback;
 }
+
+namespace DifferentialUseAnalysis {
+
+bool checkLoopyReductionPHI(const GradientUtils *gutils,
+                            const llvm::PHINode *P0,
+                            const llvm::Value *incomingVal) {
+  using namespace llvm;
+  if (!gutils->OrigLI)
+    return false;
+  auto L = gutils->OrigLI->getLoopFor(P0->getParent());
+  if (!L || L->getHeader() != P0->getParent())
+    return false;
+  BasicBlock *preheader = L->getLoopPreheader();
+  if (!preheader)
+    return false;
+  Value *Pstart = P0->getIncomingValueForBlock(preheader);
+  while (auto phi = dyn_cast_or_null<PHINode>(Pstart)) {
+    if (phi->getNumIncomingValues() == 1)
+      Pstart = phi->getIncomingValue(0);
+    else
+      break;
+  }
+  if (Pstart != incomingVal &&
+      P0->getIncomingValueForBlock(preheader) != incomingVal)
+    return false;
+
+  SmallVector<const Instruction *, 4> activeUses;
+  for (auto u : P0->users()) {
+    if (auto I = dyn_cast<Instruction>(u)) {
+      if (!gutils->isConstantInstruction(const_cast<Instruction *>(I))) {
+        activeUses.push_back(I);
+      }
+    }
+  }
+  if (activeUses.size() != 1)
+    return false;
+  const Instruction *userInst = activeUses[0];
+  bool isLoopyReduction = false;
+  if (auto BO = dyn_cast<BinaryOperator>(userInst)) {
+    if (BO->getOpcode() == Instruction::FDiv && BO->getOperand(0) == P0 &&
+        !gutils->isConstantValue(const_cast<BinaryOperator *>(BO))) {
+      isLoopyReduction = true;
+    }
+  } else if (auto SI = dyn_cast<SelectInst>(userInst)) {
+    for (int i = 0; i < 2; i++) {
+      if (SI->getOperand(i + 1) == P0 &&
+          !gutils->isConstantValue(const_cast<SelectInst *>(SI))) {
+        isLoopyReduction = true;
+        break;
+      }
+    }
+  }
+  if (!isLoopyReduction)
+    return false;
+
+  SmallVector<BasicBlock *, 1> Latches;
+  L->getLoopLatches(Latches);
+  for (auto Latch : Latches) {
+    if (userInst != P0->getIncomingValueForBlock(Latch)) {
+      return false;
+    }
+  }
+  SmallVector<BasicBlock *, 2> exitBlocks;
+  L->getExitBlocks(exitBlocks);
+  if (exitBlocks.size() != 1)
+    return false;
+
+  return true;
+}
+
+void pushLoopyPHIPreheader(const GradientUtils *gutils, llvm::Value *V,
+                           llvm::SetVector<llvm::Value *> &Intermediates,
+                           std::deque<llvm::Value *> &todo) {
+  using namespace llvm;
+  if (auto P0 = dyn_cast<PHINode>(V)) {
+    if (!gutils->OrigLI)
+      return;
+    auto L = gutils->OrigLI->getLoopFor(P0->getParent());
+    if (!L || L->getHeader() != P0->getParent())
+      return;
+    BasicBlock *preheader = L->getLoopPreheader();
+    if (!preheader)
+      return;
+    Value *Pstart = P0->getIncomingValueForBlock(preheader);
+    if (!Pstart)
+      return;
+    SmallVector<const Instruction *, 4> activeUses;
+    for (auto u : P0->users()) {
+      if (auto I = dyn_cast<Instruction>(u)) {
+        if (!gutils->isConstantInstruction(const_cast<Instruction *>(I))) {
+          activeUses.push_back(I);
+        }
+      }
+    }
+    if (activeUses.size() != 1)
+      return;
+    const Instruction *userInst = activeUses[0];
+    bool isLoopyReduction = false;
+    if (auto BO = dyn_cast<BinaryOperator>(userInst)) {
+      if (BO->getOpcode() == Instruction::FDiv && BO->getOperand(0) == P0 &&
+          !gutils->isConstantValue(const_cast<BinaryOperator *>(BO))) {
+        isLoopyReduction = true;
+      }
+    } else if (auto SI = dyn_cast<SelectInst>(userInst)) {
+      for (int i = 0; i < 2; i++) {
+        if (SI->getOperand(i + 1) == P0 &&
+            !gutils->isConstantValue(const_cast<SelectInst *>(SI))) {
+          isLoopyReduction = true;
+          break;
+        }
+      }
+    }
+    if (!isLoopyReduction)
+      return;
+
+    SmallVector<BasicBlock *, 1> Latches;
+    L->getLoopLatches(Latches);
+    for (auto Latch : Latches) {
+      if (userInst != P0->getIncomingValueForBlock(Latch)) {
+        return;
+      }
+    }
+    SmallVector<BasicBlock *, 2> exitBlocks;
+    L->getExitBlocks(exitBlocks);
+    if (exitBlocks.size() != 1)
+      return;
+
+    while (Pstart) {
+      // Constants and arguments are always available in the reverse pass, and
+      // thus need not be added to the recompute graph (which only contains
+      // instructions).
+      if (!isa<Instruction>(Pstart))
+        break;
+      Intermediates.insert(Pstart);
+      todo.push_back(Pstart);
+      if (auto phi = dyn_cast<PHINode>(Pstart)) {
+        if (phi->getNumIncomingValues() == 1)
+          Pstart = phi->getIncomingValue(0);
+        else
+          break;
+      } else
+        break;
+    }
+  }
+}
+
+} // namespace DifferentialUseAnalysis

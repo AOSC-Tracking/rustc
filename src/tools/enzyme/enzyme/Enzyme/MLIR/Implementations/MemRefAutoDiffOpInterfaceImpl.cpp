@@ -21,15 +21,23 @@
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/Support/LogicalResult.h"
 
-// TODO: We need a way to zero out a memref (which linalg.fill does), but
-// ideally we wouldn't depend on the linalg dialect.
-#include "mlir/Dialect/Linalg/IR/Linalg.h"
-
 using namespace mlir;
 using namespace mlir::enzyme;
 
 namespace {
 #include "Implementations/MemRefDerivatives.inc"
+
+// Lets activity analysis treat memref.store generically via StoreLikeInterface.
+struct MemRefStoreLike
+    : public StoreLikeInterface::ExternalModel<MemRefStoreLike,
+                                               memref::StoreOp> {
+  Value getStoredValue(Operation *op) const {
+    return cast<memref::StoreOp>(op).getValueToStore();
+  }
+  Value getStoredPointer(Operation *op) const {
+    return cast<memref::StoreOp>(op).getMemRef();
+  }
+};
 
 struct LoadOpInterfaceReverse
     : public ReverseAutoDiffOpInterface::ExternalModel<LoadOpInterfaceReverse,
@@ -41,8 +49,11 @@ struct LoadOpInterfaceReverse
     Value memref = loadOp.getMemref();
 
     if (auto iface = dyn_cast<AutoDiffTypeInterface>(loadOp.getType())) {
+      // A mutable type's derivative is a shadow, not a value to add into: there
+      // is nothing to accumulate here, the same way the store adjoint below has
+      // nothing to take back out. Loading a pointer is the case in hand.
       if (!gutils->isConstantValue(loadOp) &&
-          !gutils->isConstantValue(memref)) {
+          !gutils->isConstantValue(memref) && !iface.isMutable()) {
         Value gradient = gutils->diffe(loadOp, builder);
         Value memrefGradient = gutils->popCache(caches.front(), builder);
 
@@ -53,18 +64,21 @@ struct LoadOpInterfaceReverse
         }
 
         if (!gutils->AtomicAdd) {
-          Value loadedGradient =
+          auto loadedGradientOp =
               memref::LoadOp::create(builder, loadOp.getLoc(), memrefGradient,
                                      ArrayRef<Value>(retrievedArguments));
+          loadedGradientOp.setAlignmentAttr(loadOp.getAlignmentAttr());
           Value addedGradient = iface.createAddOp(builder, loadOp.getLoc(),
-                                                  loadedGradient, gradient);
-          memref::StoreOp::create(builder, loadOp.getLoc(), addedGradient,
-                                  memrefGradient,
-                                  ArrayRef<Value>(retrievedArguments));
+                                                  loadedGradientOp, gradient);
+          auto storeGradientOp = memref::StoreOp::create(
+              builder, loadOp.getLoc(), addedGradient, memrefGradient,
+              ArrayRef<Value>(retrievedArguments));
+          storeGradientOp.setAlignmentAttr(loadOp.getAlignmentAttr());
         } else {
-          memref::AtomicRMWOp::create(
-              builder, loadOp.getLoc(), arith::AtomicRMWKind::addf, gradient,
-              memrefGradient, ArrayRef<Value>(retrievedArguments));
+          setDerivativeFastMath(enzyme::AtomicRMWOp::create(
+              builder, loadOp.getLoc(), gradient.getType(),
+              arith::AtomicRMWKind::addf, Ordering::monotonic, gradient,
+              memrefGradient, retrievedArguments, loadOp.getAlignmentAttr()));
         }
       }
     }
@@ -95,10 +109,22 @@ struct LoadOpInterfaceReverse
 
   void createShadowValues(Operation *op, OpBuilder &builder,
                           MGradientUtilsReverse *gutils) const {
-    // auto loadOp = cast<memref::LoadOp>(op);
-    // Value memref = loadOp.getMemref();
-    // Value shadow = gutils->getShadowValue(memref);
-    // Do nothing yet. In the future support memref<memref<...>>
+    auto loadOp = cast<memref::LoadOp>(op);
+    Value memref = loadOp.getMemref();
+    auto iface = dyn_cast<AutoDiffTypeInterface>(loadOp.getType());
+    // What a load of a mutable type reads is itself a handle on active memory,
+    // so what stands for it is the handle held at the same place in the shadow:
+    // the same load, off the shadow memref. Reading it out is the whole of the
+    // derivative -- see the adjoint above, which leaves it alone.
+    if (!iface || !iface.isMutable())
+      return;
+    if (gutils->isConstantValue(loadOp) || gutils->isConstantValue(memref))
+      return;
+    Value memrefShadow = gutils->invertPointerM(memref, builder);
+    auto newLoad = cast<memref::LoadOp>(gutils->getNewFromOriginal(op));
+    auto shadowLoad = cast<memref::LoadOp>(builder.clone(*newLoad));
+    shadowLoad.getMemrefMutable().assign(memrefShadow);
+    gutils->setInvertedPointer(loadOp.getResult(), shadowLoad.getResult());
   }
 };
 
@@ -126,20 +152,29 @@ struct StoreOpInterfaceReverse
 
       if (!iface.isMutable()) {
         if (!gutils->isConstantValue(val)) {
-          Value loadedGradient =
+          auto loadedGradientOp =
               memref::LoadOp::create(builder, storeOp.getLoc(), memrefGradient,
                                      ArrayRef<Value>(retrievedArguments));
-          gutils->addToDiffe(val, loadedGradient, builder);
+          loadedGradientOp.setAlignmentAttr(storeOp.getAlignmentAttr());
+          gutils->addToDiffe(val, loadedGradientOp, builder);
         }
 
         auto zero =
             cast<AutoDiffTypeInterface>(gutils->getShadowType(val.getType()))
                 .createNullValue(builder, op->getLoc());
 
-        memref::StoreOp::create(builder, storeOp.getLoc(), zero, memrefGradient,
-                                ArrayRef<Value>(retrievedArguments));
+        auto zeroStoreOp = memref::StoreOp::create(
+            builder, storeOp.getLoc(), zero, memrefGradient,
+            ArrayRef<Value>(retrievedArguments));
+        zeroStoreOp.setAlignmentAttr(storeOp.getAlignmentAttr());
       }
     }
+
+    // A store into memory whose primal contents the caller declared
+    // unneeded (enzyme_dupnoneed) need not happen in the augmented
+    // forward pass either.
+    if (gutils->primalStoreElidable(storeOp.getMemref()))
+      gutils->erase(gutils->getNewFromOriginal(op));
     return success();
   }
 
@@ -221,11 +256,22 @@ public:
       }
     }
 
+    // Pass the MemRefType, not `self`: with a plain Type the generic
+    // (TypeRange, ValueRange) builder is selected, which appends the dynamic
+    // sizes as operands without setting operandSegmentSizes -- producing an
+    // invalid memref.alloc as soon as the type has a dynamic dimension.
     auto clone =
-        memref::AllocOp::create(builder, value.getLoc(), self, dynamicSizes);
+        memref::AllocOp::create(builder, value.getLoc(), MT, dynamicSizes);
     memref::CopyOp::create(builder, value.getLoc(), value, clone);
 
     return clone;
+  }
+
+  void copyValue(mlir::Type self, OpBuilder &builder, Value dst,
+                 Value src) const {
+    // memref.copy carries the extents in its operand types, so there is no
+    // extent to recover here and dynamic shapes work unchanged.
+    memref::CopyOp::create(builder, src.getLoc(), src, dst);
   }
 
   void freeClonedValue(mlir::Type self, OpBuilder &builder, Value value) const {
@@ -275,8 +321,7 @@ public:
     auto MT = cast<MemRefType>(self);
     if (auto iface = dyn_cast<AutoDiffTypeInterface>(MT.getElementType())) {
       if (!iface.isMutable()) {
-        Value zero = iface.createNullValue(builder, loc);
-        linalg::FillOp::create(builder, loc, zero, val);
+        enzyme::FillZeroOp::create(builder, loc, val);
       }
     } else {
       return failure();
@@ -287,6 +332,26 @@ public:
   bool isZero(Type self, Value val) const { return false; }
   bool isZeroAttr(Type self, Attribute val) const { return false; }
 };
+
+struct MemRefAllocOpInterface
+    : public MultidimensionalAllocInterface::ExternalModel<
+          MemRefAllocOpInterface, memref::AllocOp> {
+  Value allocate(Operation *op, OpBuilder &rewriter, Location loc, Type newType,
+                 ValueRange dynamicDims) const {
+    return memref::AllocOp::create(rewriter, loc, cast<MemRefType>(newType),
+                                   dynamicDims);
+  }
+
+  void deallocate(Operation *op, OpBuilder &rewriter, Location loc,
+                  Value val) const {
+    memref::DeallocOp::create(rewriter, loc, val);
+  }
+
+  bool isDeallocation(Operation *op, Operation *user) const {
+    return isa<memref::DeallocOp>(user);
+  }
+};
+
 } // namespace
 
 void mlir::enzyme::registerMemRefDialectAutoDiffInterface(
@@ -296,8 +361,10 @@ void mlir::enzyme::registerMemRefDialectAutoDiffInterface(
     MemRefType::attachInterface<MemRefAutoDiffTypeInterface>(*context);
     MemRefType::attachInterface<MemRefClonableTypeInterface>(*context);
 
+    memref::StoreOp::attachInterface<MemRefStoreLike>(*context);
     memref::LoadOp::attachInterface<LoadOpInterfaceReverse>(*context);
     memref::StoreOp::attachInterface<StoreOpInterfaceReverse>(*context);
     memref::SubViewOp::attachInterface<SubViewOpInterfaceReverse>(*context);
+    memref::AllocOp::attachInterface<MemRefAllocOpInterface>(*context);
   });
 }

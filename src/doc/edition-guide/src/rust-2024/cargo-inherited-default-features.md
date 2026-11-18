@@ -1,15 +1,15 @@
-# Cargo: Reject unused inherited default-features
+# Cargo: Override inherited default-features
 
 ## Summary
 
-- `default-features = false` is no longer allowed in an inherited workspace dependency if the workspace dependency specifies `default-features = true` (or does not specify `default-features`).
+- Starting with Rust 1.99, `default-features` on an inherited dependency in a 2024 Edition package overrides the value from `[workspace.dependencies]`.
 
 ## Details
 
 [Workspace inheritance] allows you to specify dependencies in one place (the workspace), and then to refer to those workspace dependencies from within a package.
-There was an inadvertent interaction with how `default-features` is specified that is no longer allowed in the 2024 Edition.
 
-Unless the workspace specifies `default-features = false`, it is no longer allowed to specify `default-features = false` in an inherited package dependency.
+In editions earlier than 2024, `default-features = false` is ignored when the workspace dependency specifies `default-features = true` (or does not specify `default-features`). The original 2024 Edition behavior in Rust 1.85 through 1.98 rejected this combination. Starting with Rust 1.99, a 2024 Edition package's `default-features` setting overrides the workspace setting.
+
 For example, with a workspace that specifies:
 
 ```toml
@@ -17,7 +17,7 @@ For example, with a workspace that specifies:
 regex = "1.10.4"
 ```
 
-The following is now an error:
+The following disables the default features for `regex`:
 
 ```toml
 [package]
@@ -26,25 +26,22 @@ version = "1.0.0"
 edition = "2024"
 
 [dependencies]
-regex = { workspace = true, default-features = false }  # ERROR
+regex = { workspace = true, default-features = false }
 ```
 
-The reason for this change is to avoid confusion when specifying `default-features = false` when the default feature is already enabled, since it has no effect.
-
-If you want the flexibility of deciding whether or not a dependency enables the default-features of a dependency, be sure to set `default-features = false` in the workspace definition.
 Just beware that if you build multiple workspace members at the same time, the features will be unified so that if one member sets `default-features = true` (which is the default if not explicitly set), the default-features will be enabled for all members using that dependency.
 
 ## Migration
 
-When using `cargo fix --edition`, Cargo will automatically update your `Cargo.toml` file to remove `default-features = false` in this situation.
+When using `cargo fix --edition`, Cargo will automatically remove `default-features = false` in this situation. Without this fix, changing to the 2024 Edition would produce an error with Rust 1.85 through 1.98 and would disable default features with Rust 1.99 or newer.
 
-If you prefer to update your `Cargo.toml` manually, check for any warnings when running a build and remove the corresponding entries.
-Previous editions should display something like:
+If you want to use the new behavior, add the setting back after changing to the 2024 Edition. If you prefer to migrate manually while preserving the previous behavior, remove the corresponding entries. Previous editions should display something like:
 
 ```text
 warning: /home/project/Cargo.toml: `default-features` is ignored for regex,
-since `default-features` was not specified for `workspace.dependencies.regex`,
-this could become a hard error in the future
+since `default-features` was not specified for `workspace.dependencies.regex`;
+overriding workspace `default-features` to false requires Rust 1.99+
+and the 2024 edition
 ```
 
 [workspace inheritance]: ../../cargo/reference/specifying-dependencies.html#inheriting-a-dependency-from-a-workspace

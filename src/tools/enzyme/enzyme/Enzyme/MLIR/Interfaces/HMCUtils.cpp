@@ -984,6 +984,11 @@ MCMCKernelResult impulse::SampleHMC(OpBuilder &builder, Location loc, Value q,
   auto acceptedTensor = arith::CmpFOp::create(
       builder, loc, arith::CmpFPredicate::OLT, randUniform, accProb);
 
+  // HMC doesn't collect divergence information so set to false
+  auto falseConst = arith::ConstantOp::create(
+      builder, loc, i1TensorType,
+      DenseElementsAttr::get(i1TensorType, builder.getBoolAttr(false)));
+
   // 8. Select between original and proposal
   auto qFinal = impulse::SelectOp::create(builder, loc, positionType,
                                           acceptedTensor, qProposal, q);
@@ -992,7 +997,8 @@ MCMCKernelResult impulse::SampleHMC(OpBuilder &builder, Location loc, Value q,
   auto UFinal = impulse::SelectOp::create(builder, loc, scalarType,
                                           acceptedTensor, UProposal, U);
 
-  return {qFinal, gradFinal, UFinal, acceptedTensor, accProb, rngNext};
+  return {qFinal,     gradFinal, UFinal, acceptedTensor,
+          falseConst, accProb,   rngNext};
 }
 
 MCMCKernelResult impulse::SampleNUTS(OpBuilder &builder, Location loc, Value q,
@@ -1080,9 +1086,13 @@ MCMCKernelResult impulse::SampleNUTS(OpBuilder &builder, Location loc, Value q,
   auto meanAcceptProb = arith::DivFOp::create(
       builder, loc, finalTree.sum_accept_probs, numProposalsFloat);
 
-  return {finalTree.q_proposal, finalTree.grad_proposal,
-          finalTree.U_proposal, trueConst,
-          meanAcceptProb,       rngNext};
+  return {finalTree.q_proposal,
+          finalTree.grad_proposal,
+          finalTree.U_proposal,
+          trueConst,
+          finalTree.diverging,
+          meanAcceptProb,
+          rngNext};
 }
 
 NUTSTreeState impulse::buildBaseTree(OpBuilder &builder, Location loc,
@@ -1622,20 +1632,31 @@ impulse::updateCheckpoints(OpBuilder &builder, Location loc, Value leafIdx,
 }
 
 DualAveragingState impulse::initDualAveraging(OpBuilder &builder, Location loc,
-                                              Value stepSize) {
+                                              Value stepSize,
+                                              bool logOfProduct) {
   auto stepSizeType = cast<RankedTensorType>(stepSize.getType());
   auto elemType = stepSizeType.getElementType();
   auto scalarType = RankedTensorType::get({}, elemType);
   auto i64TensorType = RankedTensorType::get({}, builder.getI64Type());
 
-  // prox_center = log(10) + log(step_size)
-  auto log10Const = arith::ConstantOp::create(
-      builder, loc, scalarType,
-      DenseElementsAttr::get(scalarType,
-                             builder.getFloatAttr(elemType, std::log(10.0))));
-  Value logStepSize = math::LogOp::create(builder, loc, stepSize);
-  Value proxCenter =
-      arith::AddFOp::create(builder, loc, log10Const, logStepSize);
+  // prox_center: log(10 * step_size) at warmup start, or log(10) +
+  // log(step_size) at window-end re-inits
+  Value proxCenter;
+  if (logOfProduct) {
+    auto tenConst = arith::ConstantOp::create(
+        builder, loc, scalarType,
+        DenseElementsAttr::get(scalarType,
+                               builder.getFloatAttr(elemType, 10.0)));
+    Value scaled = arith::MulFOp::create(builder, loc, tenConst, stepSize);
+    proxCenter = math::LogOp::create(builder, loc, scaled);
+  } else {
+    auto log10Const = arith::ConstantOp::create(
+        builder, loc, scalarType,
+        DenseElementsAttr::get(scalarType,
+                               builder.getFloatAttr(elemType, std::log(10.0))));
+    Value logStepSize = math::LogOp::create(builder, loc, stepSize);
+    proxCenter = arith::AddFOp::create(builder, loc, log10Const, logStepSize);
+  }
 
   auto zeroConst = arith::ConstantOp::create(
       builder, loc, scalarType,

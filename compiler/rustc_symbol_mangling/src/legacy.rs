@@ -5,12 +5,13 @@ use rustc_data_structures::stable_hash::{StableHash, StableHasher};
 use rustc_hashes::Hash64;
 use rustc_hir::def_id::{CrateNum, DefId};
 use rustc_hir::definitions::{DefPathData, DisambiguatedDefPathData};
-use rustc_middle::bug;
+use rustc_middle::ty::consts::ConstExt;
 use rustc_middle::ty::print::{PrettyPrinter, Print, PrintError, Printer};
 use rustc_middle::ty::{
     self, GenericArg, GenericArgKind, Instance, ReifyReason, Ty, TyCtxt, TypeVisitableExt,
     Unnormalized,
 };
+use rustc_span::bug;
 use tracing::debug;
 
 pub(super) fn mangle<'tcx>(
@@ -35,6 +36,11 @@ pub(super) fn mangle<'tcx>(
             | DefPathData::SyntheticCoroutineBody => {
                 instance_ty = tcx.type_of(ty_def_id).instantiate_identity().skip_norm_wip();
                 debug!(?instance_ty);
+                break;
+            }
+            DefPathData::GlobalAsm => {
+                // `global_asm!` doesn't have a type.
+                instance_ty = tcx.types.unit;
                 break;
             }
             _ => {
@@ -245,8 +251,7 @@ impl<'tcx> Printer<'tcx> for LegacySymbolMangler<'tcx> {
     fn print_type(&mut self, ty: Ty<'tcx>) -> Result<(), PrintError> {
         match *ty.kind() {
             // Print all nominal types as paths (unlike `pretty_print_type`).
-            ty::FnDef(def_id, args)
-            | ty::Alias(
+            ty::Alias(
                 _,
                 ty::AliasTy {
                     kind: ty::Projection { def_id } | ty::Opaque { def_id }, args, ..
@@ -255,6 +260,8 @@ impl<'tcx> Printer<'tcx> for LegacySymbolMangler<'tcx> {
             | ty::Closure(def_id, args)
             | ty::CoroutineClosure(def_id, args)
             | ty::Coroutine(def_id, args) => self.print_def_path(def_id, args),
+
+            ty::FnDef(def_id, args) => self.print_def_path(def_id, args.no_bound_vars().unwrap()),
 
             // The `pretty_print_type` formatting of array size depends on
             // -Zverbose-internals flag, so we cannot reuse it here.

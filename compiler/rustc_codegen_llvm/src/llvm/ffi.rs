@@ -25,8 +25,9 @@ use super::debuginfo::{
     DIArray, DIBuilder, DIDerivedType, DIDescriptor, DIFile, DIFlags, DILocation, DISPFlags,
     DIScope, DISubprogram, DITemplateTypeParameter, DIType, DebugEmissionKind, DebugNameTableKind,
 };
+use crate::llvm;
 use crate::llvm::MetadataKindId;
-use crate::{TryFromU32, llvm};
+use crate::macros::TryFromU32;
 
 /// In the LLVM-C API, boolean values are passed as `typedef int LLVMBool`,
 /// which has a different ABI from Rust or C++ `bool`.
@@ -720,6 +721,7 @@ unsafe extern "C" {
     pub type TargetMachine;
 }
 unsafe extern "C" {
+    pub(crate) type MCSubtargetInfo;
     pub(crate) type Twine;
     pub(crate) type DiagnosticInfo;
     pub(crate) type SMDiagnostic;
@@ -894,6 +896,12 @@ unsafe extern "C" {
         SLen: c_uint,
     ) -> MetadataKindId;
 
+    /// Gets the actual version of LLVM that we are linked to at runtime.
+    ///
+    /// # Safety
+    /// Can be called without initializing LLVM.
+    pub(crate) safe fn LLVMGetVersion(major: &mut c_uint, minor: &mut c_uint, patch: &mut c_uint);
+
     pub(crate) fn LLVMDisposeTargetMachine(T: ptr::NonNull<TargetMachine>);
 
     // Create modules.
@@ -906,13 +914,6 @@ unsafe extern "C" {
     /// Data layout. See Module::getDataLayout.
     pub(crate) fn LLVMGetDataLayoutStr(M: &Module) -> *const c_char;
     pub(crate) fn LLVMSetDataLayout(M: &Module, Triple: *const c_char);
-
-    /// Append inline assembly to a module. See `Module::appendModuleInlineAsm`.
-    pub(crate) fn LLVMAppendModuleInlineAsm(
-        M: &Module,
-        Asm: *const c_uchar, // See "PTR_LEN_STR".
-        Len: size_t,
-    );
 
     /// Create the specified uniqued inline asm string. See `InlineAsm::get()`.
     pub(crate) fn LLVMGetInlineAsm<'ll>(
@@ -1097,6 +1098,17 @@ unsafe extern "C" {
     pub(crate) safe fn LLVMSetTailCall(CallInst: &Value, IsTailCall: Bool);
     pub(crate) safe fn LLVMSetTailCallKind(CallInst: &Value, kind: TailCallKind);
     pub(crate) safe fn LLVMSetExternallyInitialized(GlobalVar: &Value, IsExtInit: Bool);
+
+    // Operations on global aliases
+    pub(crate) fn LLVMAddAlias2<'ll>(
+        M: &'ll Module,
+        ValueTy: &Type,
+        AddressSpace: c_uint,
+        Aliasee: &Value,
+        Name: *const c_char,
+    ) -> &'ll Value;
+    pub(crate) fn LLVMGetFirstGlobalAlias(M: &Module) -> Option<&Value>;
+    pub(crate) fn LLVMGetNextGlobalAlias(GlobalAlias: &Value) -> Option<&Value>;
 
     // Operations on attributes
     pub(crate) fn LLVMCreateStringAttribute(
@@ -1702,63 +1714,6 @@ unsafe extern "C" {
     ) -> &'a Value;
 }
 
-#[cfg(feature = "llvm_offload")]
-pub(crate) use self::Offload::*;
-
-#[cfg(feature = "llvm_offload")]
-mod Offload {
-    use super::*;
-    unsafe extern "C" {
-        /// Processes the module and writes it in an offload compatible way into a "device.bin" file.
-        pub(crate) fn LLVMRustBundleImages<'a>(
-            M: &'a Module,
-            TM: &'a TargetMachine,
-            device_bin: *const c_char,
-        ) -> bool;
-        pub(crate) unsafe fn LLVMRustOffloadEmbedBufferInModule<'a>(
-            _M: &'a Module,
-            _device_bin: *const c_char,
-        ) -> bool;
-        pub(crate) fn LLVMRustOffloadMapper<'a>(
-            OldFn: &'a Value,
-            NewFn: &'a Value,
-            RebuiltArgs: *const &Value,
-        );
-    }
-}
-
-#[cfg(not(feature = "llvm_offload"))]
-pub(crate) use self::Offload_fallback::*;
-
-#[cfg(not(feature = "llvm_offload"))]
-mod Offload_fallback {
-    use super::*;
-    /// Processes the module and writes it in an offload compatible way into a "device.bin" file.
-    /// Marked as unsafe to match the real offload wrapper which is unsafe due to FFI.
-    #[allow(unused_unsafe)]
-    pub(crate) unsafe fn LLVMRustBundleImages<'a>(
-        _M: &'a Module,
-        _TM: &'a TargetMachine,
-        _device_bin: *const c_char,
-    ) -> bool {
-        unimplemented!("This rustc version was not built with LLVM Offload support!");
-    }
-    pub(crate) unsafe fn LLVMRustOffloadEmbedBufferInModule<'a>(
-        _M: &'a Module,
-        _device_bin: *const c_char,
-    ) -> bool {
-        unimplemented!("This rustc version was not built with LLVM Offload support!");
-    }
-    #[allow(unused_unsafe)]
-    pub(crate) unsafe fn LLVMRustOffloadMapper<'a>(
-        _OldFn: &'a Value,
-        _NewFn: &'a Value,
-        _RebuiltArgs: *const &Value,
-    ) {
-        unimplemented!("This rustc version was not built with LLVM Offload support!");
-    }
-}
-
 // FFI bindings for `DIBuilder` functions in the LLVM-C API.
 // Try to keep these in the same order as in `llvm/include/llvm-c/DebugInfo.h`.
 //
@@ -2061,6 +2016,7 @@ unsafe extern "C" {
     pub(crate) fn LLVMRustCreateDereferenceableAttr(C: &Context, bytes: u64) -> &Attribute;
     pub(crate) fn LLVMRustCreateDereferenceableOrNullAttr(C: &Context, bytes: u64) -> &Attribute;
     pub(crate) fn LLVMRustCreateByValAttr<'a>(C: &'a Context, ty: &'a Type) -> &'a Attribute;
+    pub(crate) fn LLVMRustCreateByRefAttr<'a>(C: &'a Context, ty: &'a Type) -> &'a Attribute;
     pub(crate) fn LLVMRustCreateStructRetAttr<'a>(C: &'a Context, ty: &'a Type) -> &'a Attribute;
     pub(crate) fn LLVMRustCreateElementTypeAttr<'a>(C: &'a Context, ty: &'a Type) -> &'a Attribute;
     pub(crate) fn LLVMRustCreateUWTableAttr(C: &Context, async_: bool) -> &Attribute;
@@ -2165,6 +2121,17 @@ unsafe extern "C" {
         ConstraintsLen: size_t,
     ) -> bool;
 
+    /// Append inline assembly to a module. See `Module::appendModuleInlineAsm`.
+    pub(crate) fn LLVMRustAppendModuleInlineAsm(
+        M: &Module,
+        Asm: *const c_uchar, // See "PTR_LEN_STR".
+        AsmLen: size_t,
+        TargetFeatures: *const c_uchar, // See "PTR_LEN_STR".
+        TargetFeaturesLen: size_t,
+        TargetCpu: *const c_uchar, // See "PTR_LEN_STR".
+        TargetCpuLen: size_t,
+    );
+
     /// A list of pointer-length strings is passed as two pointer-length slices,
     /// one slice containing pointers and one slice containing their corresponding
     /// lengths. The implementation will check that both slices have the same length.
@@ -2212,9 +2179,13 @@ unsafe extern "C" {
 
     pub(crate) safe fn LLVMRustCoverageMappingVersion() -> u32;
     pub(crate) fn LLVMRustDebugMetadataVersion() -> u32;
-    pub(crate) fn LLVMRustVersionMajor() -> u32;
-    pub(crate) fn LLVMRustVersionMinor() -> u32;
-    pub(crate) fn LLVMRustVersionPatch() -> u32;
+
+    /// Returns the LLVM major version that the compiler was built with.
+    ///
+    /// Note that this is hard-coded as `LLVM_VERSION_MAJOR` when `RustWrapper.cpp` is built. This
+    /// could be different than what the runtime LLVM library reports in [`LLVMGetVersion`], so we
+    /// assert their equality in `configure_llvm`.
+    pub(crate) safe fn LLVMRustVersionMajor() -> u32;
 
     /// Add LLVM module flags.
     ///
@@ -2404,7 +2375,6 @@ unsafe extern "C" {
     pub(crate) fn LLVMRustWriteTypeToString(Type: &Type, s: &RustString);
     pub(crate) fn LLVMRustWriteValueToString(value_ref: &Value, s: &RustString);
 
-    pub(crate) fn LLVMRustHasFeature(T: &TargetMachine, s: *const c_char) -> bool;
     pub(crate) fn LLVMRustTargetHasMnemonic(T: &TargetMachine, s: *const c_char) -> bool;
 
     pub(crate) fn LLVMRustPrintTargetCPUs(TM: &TargetMachine, OutStr: &RustString);
@@ -2445,6 +2415,20 @@ unsafe extern "C" {
         UseWasmEH: bool,
         LargeDataThreshold: u64,
     ) -> *mut TargetMachine;
+
+    pub(crate) fn LLVMRustCreateMCSubtargetInfo(
+        TripleStr: *const c_char,
+        CPU: *const c_char,
+        Features: *const c_char,
+    ) -> *mut MCSubtargetInfo;
+
+    pub(crate) fn LLVMRustMCSubtargetInfoCheckFeatures(
+        MCInfo: &MCSubtargetInfo,
+        Features: *const c_uchar, // See "PTR_LEN_STR".
+        FeaturesLen: usize,
+    ) -> bool;
+
+    pub(crate) fn LLVMRustDisposeMCSubtargetInfo(MCInfo: ptr::NonNull<MCSubtargetInfo>);
 
     pub(crate) fn LLVMRustAddLibraryInfo<'a>(
         T: &TargetMachine,
@@ -2492,6 +2476,8 @@ unsafe extern "C" {
         llvm_selfprofiler: *mut c_void,
         begin_callback: SelfProfileBeforePassCallback,
         end_callback: SelfProfileAfterPassCallback,
+        PostEnzymePasses: *const c_char,
+        PostEnzymePassesLen: size_t,
         ExtraPasses: *const c_char,
         ExtraPassesLen: size_t,
         LLVMPlugins: *const c_char,
@@ -2552,6 +2538,7 @@ unsafe extern "C" {
     pub(crate) fn LLVMRustSetModulePICLevel(M: &Module);
     pub(crate) fn LLVMRustSetModulePIELevel(M: &Module);
     pub(crate) fn LLVMRustSetModuleCodeModel(M: &Module, Model: CodeModel);
+    pub(crate) fn LLVMRustSetModuleLargeDataThreshold(M: &Module, Threshold: u64);
     pub(crate) fn LLVMRustBufferPtr(p: &Buffer) -> *const u8;
     pub(crate) fn LLVMRustBufferLen(p: &Buffer) -> usize;
     pub(crate) fn LLVMRustBufferFree(p: &'static mut Buffer);
@@ -2639,14 +2626,6 @@ unsafe extern "C" {
 
     pub(crate) fn LLVMRustSetNoSanitizeAddress(Global: &Value);
     pub(crate) fn LLVMRustSetNoSanitizeHWAddress(Global: &Value);
-
-    pub(crate) fn LLVMAddAlias2<'ll>(
-        M: &'ll Module,
-        ValueTy: &Type,
-        AddressSpace: c_uint,
-        Aliasee: &Value,
-        Name: *const c_char,
-    ) -> &'ll Value;
 
     pub(crate) fn LLVMRustConstPtrAuth(
         ptr: *const Value,
